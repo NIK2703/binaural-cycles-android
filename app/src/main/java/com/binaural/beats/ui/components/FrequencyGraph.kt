@@ -25,11 +25,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.InterpolationType
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlin.math.abs
+import kotlin.math.PI
+import kotlin.math.cos
 
 // Порог для определения направления перетаскивания
 private const val DRAG_DIRECTION_THRESHOLD = 10f
@@ -107,6 +110,7 @@ fun FrequencyGraph(
     currentBeatFrequency: Double,
     carrierRange: FrequencyRange,
     beatRange: FrequencyRange,
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
     isPlaying: Boolean,
     onPointSelected: (Int) -> Unit,
     onPointTimeChanged: (Int, LocalTime) -> Unit,
@@ -169,7 +173,8 @@ fun FrequencyGraph(
                             currentLocalTime = currentLocalTime,
                             currentCarrierFrequency = currentCarrierFrequency,
                             currentBeatFrequency = currentBeatFrequency,
-                            primaryColor = primaryColor
+                            primaryColor = primaryColor,
+                            interpolationType = interpolationType
                         )
                     }
                     .pointerInput(Unit) {
@@ -331,7 +336,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     currentLocalTime: LocalTime,
     currentCarrierFrequency: Double,
     currentBeatFrequency: Double,
-    primaryColor: Color
+    primaryColor: Color,
+    interpolationType: InterpolationType
 ) {
     val width = size.width
     val height = size.height
@@ -350,8 +356,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     }
     
     if (sortedPoints.size >= 2) {
-        drawBeatArea(sortedPoints, graphParams, primaryColor)
-        drawCarrierLine(sortedPoints, graphParams, primaryColor)
+        drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType)
+        drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType)
     }
     
     val currentX = graphParams.timeToX(currentLocalTime)
@@ -366,70 +372,59 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
-    primaryColor: Color
+    primaryColor: Color,
+    interpolationType: InterpolationType
 ) {
     val width = size.width
-    val numSamples = 100
-    
-    val first = sortedPoints.first()
-    val last = sortedPoints.last()
-    
-    val firstSeconds = first.time.toSecondOfDay()
-    val lastSeconds = last.time.toSecondOfDay()
-    
-    // Расстояние между last и проекцией first (через границу 24ч)
-    val wrapDuration = firstSeconds + 24 * 3600 - lastSeconds
-    val wrapRatio = if (wrapDuration > 0) (24.0 * 3600 - lastSeconds) / wrapDuration else 0.0
-    
-    // Интерполированные значения на границах
-    val lastCarrierY = params.carrierToY(last.carrierFrequency)
-    val firstCarrierY = params.carrierToY(first.carrierFrequency)
-    val lastBeatWidth = params.beatWidth(last.beatFrequency)
-    val firstBeatWidth = params.beatWidth(first.beatFrequency)
-    
-    // Интерполируем и несущую частоту, и ширину биений на границах
-    val carrierAtBoundary = lastCarrierY + wrapRatio.toFloat() * (firstCarrierY - lastCarrierY)
-    val beatAtBoundary = lastBeatWidth + wrapRatio.toFloat() * (firstBeatWidth - lastBeatWidth)
+    val numSamples = 200 // Больше сэмплов для более гладких кривых
     
     val upperPath = Path()
     val lowerPath = Path()
     
-    // Начинаем с левой границы с интерполированными значениями
-    upperPath.moveTo(0f, carrierAtBoundary - beatAtBoundary)
-    lowerPath.moveTo(0f, carrierAtBoundary + beatAtBoundary)
+    // Начинаем с левой границы
+    val startTime = LocalTime.fromSecondOfDay(0)
+    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
+    val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType)
+    val startCarrierY = params.carrierToY(startCarrier)
+    val startBeatWidth = params.beatWidth(startBeat)
     
-    // Проходим по всему графику
-    for (i in 0..numSamples) {
+    upperPath.moveTo(0f, startCarrierY - startBeatWidth)
+    lowerPath.moveTo(0f, startCarrierY + startBeatWidth)
+    
+    // Проходим по всему графику с интерполяцией
+    for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val beatWidth = params.beatWidth(interpolateBeatFrequency(sortedPoints, time))
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
+        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
+        val carrierY = params.carrierToY(carrier)
+        val beatWidth = params.beatWidth(beat)
         val x = (t * width).toFloat()
-        val carrierY = params.carrierToY(interpolateCarrierFrequency(sortedPoints, time))
         upperPath.lineTo(x, carrierY - beatWidth)
         lowerPath.lineTo(x, carrierY + beatWidth)
     }
     
-    // Заканчиваем на правой границе с интерполированными значениями
-    upperPath.lineTo(width, carrierAtBoundary - beatAtBoundary)
-    lowerPath.lineTo(width, carrierAtBoundary + beatAtBoundary)
-    
-    // Замыкаем путь
+    // Замыкаем путь для заливки
     val combinedPath = Path()
     combinedPath.addPath(upperPath)
     
+    // Обратный путь по нижней границе
     for (i in numSamples downTo 0) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val beatWidth = params.beatWidth(interpolateBeatFrequency(sortedPoints, time))
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
+        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
+        val carrierY = params.carrierToY(carrier)
+        val beatWidth = params.beatWidth(beat)
         val x = (t * width).toFloat()
-        val carrierY = params.carrierToY(interpolateCarrierFrequency(sortedPoints, time))
         combinedPath.lineTo(x, carrierY + beatWidth)
     }
     
-    combinedPath.lineTo(0f, carrierAtBoundary + beatAtBoundary)
     combinedPath.close()
     
+    // Заливка области биений
     drawPath(path = combinedPath, color = primaryColor.copy(alpha = 0.2f), style = Fill)
+    // Границы области
     drawPath(path = upperPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
     drawPath(path = lowerPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
 }
@@ -437,43 +432,29 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
-    primaryColor: Color
+    primaryColor: Color,
+    interpolationType: InterpolationType
 ) {
     val width = size.width
+    val numSamples = 200 // Больше сэмплов для более гладких кривых
     val carrierPath = Path()
     
-    val first = sortedPoints.first()
-    val last = sortedPoints.last()
+    // Начинаем с левой границы (время 0)
+    val startTime = LocalTime.fromSecondOfDay(0)
+    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
+    val startY = params.carrierToY(startCarrier)
+    carrierPath.moveTo(0f, startY)
     
-    val firstX = params.timeToX(first.time)
-    val firstY = params.carrierToY(first.carrierFrequency)
-    val lastX = params.timeToX(last.time)
-    val lastY = params.carrierToY(last.carrierFrequency)
-    
-    // Вычисляем интерполированное значение на границах графика
-    // Левая граница (время 0): интерполируем между проекцией last (время - 24ч) и first
-    // Правая граница (время 24ч): интерполируем между last и проекцией first (время + 24ч)
-    val firstSeconds = first.time.toSecondOfDay()
-    val lastSeconds = last.time.toSecondOfDay()
-    
-    // Расстояние между last и проекцией first (через границу 24ч)
-    val wrapDuration = firstSeconds + 24 * 3600 - lastSeconds
-    
-    // Интерполяция на границах (значения должны быть одинаковыми из-за периодичности)
-    val wrapRatio = if (wrapDuration > 0) (24.0 * 3600 - lastSeconds) / wrapDuration else 0.0
-    val yAtBoundary = lastY + wrapRatio.toFloat() * (firstY - lastY)
-    
-    // Начинаем с левой границы с интерполированным значением
-    carrierPath.moveTo(0f, yAtBoundary)
-    carrierPath.lineTo(firstX, firstY)
-    
-    // Проходим через все точки
-    for (point in sortedPoints) {
-        carrierPath.lineTo(params.timeToX(point.time), params.carrierToY(point.carrierFrequency))
+    // Рисуем кривую с интерполяцией по всем сэмплам
+    for (i in 1..numSamples) {
+        val t = i.toDouble() / numSamples
+        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
+        val y = params.carrierToY(carrier)
+        val x = (t * width).toFloat()
+        carrierPath.lineTo(x, y)
     }
     
-    // Заканчиваем на правой границе с интерполированным значением
-    carrierPath.lineTo(width, yAtBoundary)
     drawPath(path = carrierPath, color = primaryColor, style = Stroke(width = 3f))
 }
 
@@ -569,39 +550,140 @@ private fun calculateCarrierFromDrag(startCarrier: Double, dragY: Float, carrier
 }
 
 // Функции интерполяции
-fun interpolateCarrierFrequency(points: List<FrequencyPoint>, time: LocalTime): Double = interpolateFrequency(points, time) { it.carrierFrequency }
-fun interpolateBeatFrequency(points: List<FrequencyPoint>, time: LocalTime): Double = interpolateFrequency(points, time) { it.beatFrequency }
+fun interpolateCarrierFrequency(points: List<FrequencyPoint>, time: LocalTime, interpolationType: InterpolationType = InterpolationType.LINEAR): Double = 
+    interpolateFrequency(points, time, interpolationType) { it.carrierFrequency }
 
-fun interpolateFrequency(points: List<FrequencyPoint>, time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
+fun interpolateBeatFrequency(points: List<FrequencyPoint>, time: LocalTime, interpolationType: InterpolationType = InterpolationType.LINEAR): Double = 
+    interpolateFrequency(points, time, interpolationType) { it.beatFrequency }
+
+fun interpolateFrequency(
+    points: List<FrequencyPoint>, 
+    time: LocalTime, 
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
+    frequencySelector: (FrequencyPoint) -> Double
+): Double {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
     if (sortedPoints.isEmpty()) return 0.0
     if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
     
     val targetSeconds = time.toSecondOfDay()
     
+    // Находим интервал, в который попадает время
+    var intervalIndex = -1
     for (i in 0 until sortedPoints.size - 1) {
-        val current = sortedPoints[i]
-        val next = sortedPoints[i + 1]
-        if (targetSeconds in current.time.toSecondOfDay()..next.time.toSecondOfDay()) {
-            val t1 = current.time.toSecondOfDay()
-            val t2 = next.time.toSecondOfDay()
-            val ratio = if (t2 != t1) (targetSeconds - t1).toDouble() / (t2 - t1) else 0.0
-            return frequencySelector(current) + ratio * (frequencySelector(next) - frequencySelector(current))
+        val current = sortedPoints[i].time.toSecondOfDay()
+        val next = sortedPoints[i + 1].time.toSecondOfDay()
+        if (targetSeconds in current..next) {
+            intervalIndex = i
+            break
         }
     }
     
-    val first = sortedPoints.first()
-    val last = sortedPoints.last()
-    
-    return if (targetSeconds > last.time.toSecondOfDay()) {
-        val t1 = last.time.toSecondOfDay()
-        val t2 = first.time.toSecondOfDay() + 24 * 3600
-        val ratio = (targetSeconds - t1).toDouble() / (t2 - t1)
-        frequencySelector(last) + ratio * (frequencySelector(first) - frequencySelector(last))
-    } else {
-        val t1 = last.time.toSecondOfDay() - 24 * 3600
-        val t2 = first.time.toSecondOfDay()
-        val ratio = (targetSeconds - t1).toDouble() / (t2 - t1)
-        frequencySelector(last) + ratio * (frequencySelector(first) - frequencySelector(last))
+    // Если не нашли в обычных интервалах - это переход через полночь
+    if (intervalIndex == -1) {
+        return interpolateBetweenPoints(
+            sortedPoints,
+            sortedPoints.size - 1,
+            0,
+            time,
+            frequencySelector,
+            interpolationType,
+            isWrapping = true
+        )
     }
+    
+    return interpolateBetweenPoints(
+        sortedPoints,
+        intervalIndex,
+        intervalIndex + 1,
+        time,
+        frequencySelector,
+        interpolationType,
+        isWrapping = false
+    )
+}
+
+/**
+ * Интерполяция между двумя точками с учётом соседних для кубического сплайна
+ */
+private fun interpolateBetweenPoints(
+    sortedPoints: List<FrequencyPoint>,
+    leftIndex: Int,
+    rightIndex: Int,
+    time: LocalTime,
+    frequencySelector: (FrequencyPoint) -> Double,
+    interpolationType: InterpolationType,
+    isWrapping: Boolean
+): Double {
+    val leftPoint = sortedPoints[leftIndex]
+    val rightPoint = sortedPoints[rightIndex]
+    
+    // Вычисляем нормализованную позицию t в интервале [0, 1]
+    val t1 = leftPoint.time.toSecondOfDay()
+    val t2 = if (isWrapping) {
+        rightPoint.time.toSecondOfDay() + 24 * 3600
+    } else {
+        rightPoint.time.toSecondOfDay()
+    }
+    val t = if (time.toSecondOfDay() < t1 && isWrapping) {
+        time.toSecondOfDay() + 24 * 3600
+    } else {
+        time.toSecondOfDay()
+    }
+    
+    if (t2 == t1) return frequencySelector(leftPoint)
+    
+    val ratio = (t - t1).toDouble() / (t2 - t1)
+    
+    return when (interpolationType) {
+        InterpolationType.LINEAR -> {
+            frequencySelector(leftPoint) + ratio * (frequencySelector(rightPoint) - frequencySelector(leftPoint))
+        }
+        InterpolationType.CUBIC_SPLINE -> {
+            // Для Catmull-Rom нужны 4 точки
+            val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector)
+            val p1 = frequencySelector(leftPoint)
+            val p2 = frequencySelector(rightPoint)
+            val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector)
+            
+            catmullRomInterpolate(p0, p1, p2, p3, ratio)
+        }
+    }
+}
+
+/**
+ * Получить соседнюю точку с учётом цикличности графика
+ */
+private fun getNeighborPoint(
+    points: List<FrequencyPoint>,
+    currentIndex: Int,
+    offset: Int,
+    frequencySelector: (FrequencyPoint) -> Double
+): Double {
+    var neighborIndex = currentIndex + offset
+    
+    // Циклическая навигация
+    when {
+        neighborIndex < 0 -> neighborIndex = points.size + neighborIndex
+        neighborIndex >= points.size -> neighborIndex = neighborIndex - points.size
+    }
+    
+    return frequencySelector(points[neighborIndex])
+}
+
+/**
+ * Интерполяция Catmull-Rom
+ * Использует 4 точки для создания плавной кривой
+ */
+private fun catmullRomInterpolate(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
+    val t2 = t * t
+    val t3 = t2 * t
+    
+    // Формула Catmull-Rom сплайна
+    return 0.5 * (
+        (2.0 * p1) +
+        (-p0 + p2) * t +
+        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+    )
 }

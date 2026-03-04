@@ -24,6 +24,7 @@ fun ChannelSettingsCard(
     volumeNormalizationEnabled: Boolean,
     volumeNormalizationStrength: Float,
     sampleRate: SampleRate,
+    frequencyUpdateIntervalMs: Int,
     currentLeftFreq: Double,
     currentRightFreq: Double,
     onChannelSwapEnabledChange: (Boolean) -> Unit,
@@ -32,11 +33,13 @@ fun ChannelSettingsCard(
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
-    onSampleRateChange: (SampleRate) -> Unit
+    onSampleRateChange: (SampleRate) -> Unit,
+    onFrequencyUpdateIntervalChange: (Int) -> Unit
 ) {
     var showSwapIntervalDialog by remember { mutableStateOf(false) }
     var showFadeDurationDialog by remember { mutableStateOf(false) }
     var showSampleRateDialog by remember { mutableStateOf(false) }
+    var showUpdateIntervalDialog by remember { mutableStateOf(false) }
     
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -62,6 +65,20 @@ fun ChannelSettingsCard(
                     style = MaterialTheme.typography.titleSmall
                 )
                 Spacer(modifier = Modifier.weight(1f))
+                
+                // Интервал обновления - компактно
+                AssistChip(
+                    onClick = { showUpdateIntervalDialog = true },
+                    label = { 
+                        Text(
+                            formatUpdateInterval(frequencyUpdateIntervalMs),
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    },
+                    modifier = Modifier.height(24.dp)
+                )
+                
+                Spacer(modifier = Modifier.width(4.dp))
                 
                 // Качество аудио - всегда видно
                 AssistChip(
@@ -248,6 +265,17 @@ fun ChannelSettingsCard(
             }
         )
     }
+    
+    if (showUpdateIntervalDialog) {
+        FrequencyUpdateIntervalDialog(
+            currentInterval = frequencyUpdateIntervalMs,
+            onDismiss = { showUpdateIntervalDialog = false },
+            onConfirm = { interval -> 
+                onFrequencyUpdateIntervalChange(interval)
+                showUpdateIntervalDialog = false
+            }
+        )
+    }
 }
 
 /**
@@ -288,6 +316,16 @@ fun formatFadeDuration(ms: Long): String {
 fun formatFadeDurationLabel(ms: Long): String {
     val seconds = ms / 1000.0
     return "${seconds} сек"
+}
+
+/**
+ * Форматирование интервала обновления частот
+ */
+fun formatUpdateInterval(ms: Int): String {
+    return when {
+        ms < 1000 -> "$ms мс"
+        else -> "${ms / 1000.0} с"
+    }
 }
 
 @Composable
@@ -439,6 +477,60 @@ private fun FadeDurationDialog(
         },
         confirmButton = { 
             TextButton(onClick = { onConfirm(selectedDuration) }) { Text("OK") } 
+        },
+        dismissButton = { 
+            TextButton(onClick = onDismiss) { Text("Отмена") } 
+        }
+    )
+}
+
+@Composable
+private fun FrequencyUpdateIntervalDialog(
+    currentInterval: Int,
+    onDismiss: () -> Unit,
+    onConfirm: (Int) -> Unit
+) {
+    var selectedInterval by remember { mutableStateOf(currentInterval) }
+    val presetIntervals = listOf(
+        100 to "100 мс — макс. плавность",
+        250 to "250 мс — оптимально",
+        500 to "500 мс — экономия",
+        1000 to "1 сек — сильно экономит",
+        2000 to "2 сек — минимум",
+        5000 to "5 сек — максимум экономии"
+    )
+    
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Интервал обновления", style = MaterialTheme.typography.titleMedium) },
+        text = {
+            Column {
+                Text(
+                    "Как часто обновляются частоты. Меньше интервал = плавнее переходы, но больше расход батареи.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                presetIntervals.forEach { (interval, label) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { selectedInterval = interval }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedInterval == interval,
+                            onClick = { selectedInterval = interval }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        },
+        confirmButton = { 
+            TextButton(onClick = { onConfirm(selectedInterval) }) { Text("OK") } 
         },
         dismissButton = { 
             TextButton(onClick = onDismiss) { Text("Отмена") } 

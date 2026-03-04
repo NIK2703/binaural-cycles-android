@@ -10,6 +10,7 @@ import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.InterpolationType
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -46,7 +47,9 @@ data class BinauralUiState(
     val volumeNormalizationEnabled: Boolean = true,  // Включено по умолчанию
     val volumeNormalizationStrength: Float = 0.5f,
     // Частота дискретизации
-    val sampleRate: SampleRate = SampleRate.MEDIUM
+    val sampleRate: SampleRate = SampleRate.MEDIUM,
+    // Интервал обновления частот (мс)
+    val frequencyUpdateIntervalMs: Int = 100
 )
 
 @HiltViewModel
@@ -139,6 +142,13 @@ class BinauralViewModel @Inject constructor(
                 }
                 _uiState.update { it.copy(sampleRate = sampleRate) }
                 audioEngine.setSampleRate(sampleRate)
+            }
+        }
+        // Загружаем интервал обновления частот
+        viewModelScope.launch {
+            preferencesRepository.getFrequencyUpdateInterval().collect { interval ->
+                _uiState.update { it.copy(frequencyUpdateIntervalMs = interval) }
+                audioEngine.setFrequencyUpdateInterval(interval)
             }
         }
     }
@@ -341,7 +351,7 @@ class BinauralViewModel @Inject constructor(
                 carrierFrequency = newCarrier,
                 beatFrequency = clampedBeat
             )
-            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
     }
 
@@ -364,7 +374,7 @@ class BinauralViewModel @Inject constructor(
                 carrierFrequency = clampedCarrier,
                 beatFrequency = newBeat
             )
-            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
     }
     
@@ -380,7 +390,7 @@ class BinauralViewModel @Inject constructor(
                 beatFrequency = oldPoint.beatFrequency
             )
             val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-            updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange)
+            updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
     }
     
@@ -401,7 +411,7 @@ class BinauralViewModel @Inject constructor(
                 carrierFrequency = clampedCarrier,
                 beatFrequency = clampedBeat
             )
-            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
     }
 
@@ -415,7 +425,7 @@ class BinauralViewModel @Inject constructor(
             carrierFrequency = curve.carrierRange.clamp(carrierFrequency),
             beatFrequency = curve.beatRange.clamp(beatFrequency)
         ))
-        updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange)
+        updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange, curve.interpolationType)
     }
 
     fun removeEditingPoint(index: Int) {
@@ -425,7 +435,7 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (points.size > 2 && index in points.indices) {
             points.removeAt(index)
-            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
             _uiState.update { it.copy(selectedPointIndex = null) }
         }
     }
@@ -441,21 +451,39 @@ class BinauralViewModel @Inject constructor(
             point.copy(carrierFrequency = newRange.clamp(point.carrierFrequency))
         }
         
-        updateEditingCurve(updatedPoints, newRange, curve.beatRange)
+        updateEditingCurve(updatedPoints, newRange, curve.beatRange, curve.interpolationType)
     }
 
     private fun updateEditingCurve(
         points: List<FrequencyPoint>,
         carrierRange: FrequencyRange,
-        beatRange: FrequencyRange
+        beatRange: FrequencyRange,
+        interpolationType: InterpolationType = InterpolationType.LINEAR
     ) {
         try {
-            val newCurve = FrequencyCurve(points, carrierRange, beatRange)
+            val newCurve = FrequencyCurve(points, carrierRange, beatRange, interpolationType)
             _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
             audioEngine.updateFrequencyCurve(newCurve)
         } catch (e: IllegalArgumentException) {
             // Игнорируем ошибки валидации (например, меньше 2 точек)
         }
+    }
+    
+    /**
+     * Установить тип интерполяции для редактируемой кривой
+     */
+    fun setInterpolationType(type: InterpolationType) {
+        val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
+        
+        val newCurve = FrequencyCurve(
+            points = curve.points,
+            carrierRange = curve.carrierRange,
+            beatRange = curve.beatRange,
+            interpolationType = type
+        )
+        _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
+        audioEngine.updateFrequencyCurve(newCurve)
     }
 
     // ============= Методы для управления перестановкой каналов =============
@@ -520,6 +548,17 @@ class BinauralViewModel @Inject constructor(
         audioEngine.setSampleRate(rate)
         viewModelScope.launch {
             preferencesRepository.saveSampleRate(rate.value)
+        }
+    }
+    
+    // Методы для управления интервалом обновления частот
+    
+    fun setFrequencyUpdateInterval(intervalMs: Int) {
+        val clampedInterval = intervalMs.coerceIn(100, 5000)
+        _uiState.update { it.copy(frequencyUpdateIntervalMs = clampedInterval) }
+        audioEngine.setFrequencyUpdateInterval(clampedInterval)
+        viewModelScope.launch {
+            preferencesRepository.saveFrequencyUpdateInterval(clampedInterval)
         }
     }
 

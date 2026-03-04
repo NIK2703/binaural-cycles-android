@@ -12,7 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.binaural.beats.ui.components.*
 import com.binaural.beats.viewmodel.BinauralViewModel
-import java.util.UUID
+import com.binaural.core.audio.model.InterpolationType
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -126,8 +126,18 @@ fun PresetEditScreen(
             
             Spacer(modifier = Modifier.height(8.dp))
             
-            // График частот (используем редактируемую кривую)
+            // Выбор типа интерполяции
             val editingCurve = uiState.editingFrequencyCurve
+            if (editingCurve != null) {
+                InterpolationTypeSelector(
+                    selectedType = editingCurve.interpolationType,
+                    onTypeSelected = { viewModel.setInterpolationType(it) }
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // График частот (используем редактируемую кривую)
             if (editingCurve != null) {
                 FrequencyGraph(
                     points = editingCurve.points,
@@ -136,6 +146,7 @@ fun PresetEditScreen(
                     currentBeatFrequency = uiState.currentBeatFrequency,
                     carrierRange = editingCurve.carrierRange,
                     beatRange = editingCurve.beatRange,
+                    interpolationType = editingCurve.interpolationType,
                     isPlaying = uiState.isPlaying,
                     onPointSelected = { viewModel.selectPoint(it) },
                     onPointTimeChanged = { index, newTime ->
@@ -187,6 +198,7 @@ fun PresetEditScreen(
                 volumeNormalizationEnabled = uiState.volumeNormalizationEnabled,
                 volumeNormalizationStrength = uiState.volumeNormalizationStrength,
                 sampleRate = uiState.sampleRate,
+                frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
                 currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
                 currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
                 onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
@@ -195,7 +207,8 @@ fun PresetEditScreen(
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
                 onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
                 onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
-                onSampleRateChange = { viewModel.setSampleRate(it) }
+                onSampleRateChange = { viewModel.setSampleRate(it) },
+                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) }
             )
             
             Spacer(modifier = Modifier.height(8.dp))
@@ -246,5 +259,61 @@ fun PresetEditScreen(
                 }
             }
         )
+    }
+}
+
+/**
+ * Компонент для выбора типа интерполяции
+ */
+@Composable
+fun InterpolationTypeSelector(
+    selectedType: InterpolationType,
+    onTypeSelected: (InterpolationType) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp)
+        ) {
+            Text(
+                text = "Тип интерполяции",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                InterpolationType.entries.forEach { type ->
+                    FilterChip(
+                        selected = selectedType == type,
+                        onClick = { onTypeSelected(type) },
+                        label = { 
+                            Text(
+                                when (type) {
+                                    InterpolationType.LINEAR -> "Линейная"
+                                    InterpolationType.CUBIC_SPLINE -> "Кубическая"
+                                }
+                            ) 
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = when (selectedType) {
+                    InterpolationType.LINEAR -> "Прямые линии между точками"
+                    InterpolationType.CUBIC_SPLINE -> "Плавные кривые Catmull-Rom"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+        }
     }
 }

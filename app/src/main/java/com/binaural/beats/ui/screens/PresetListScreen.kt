@@ -13,9 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.binaural.beats.ui.components.MiniFrequencyGraph
 import com.binaural.beats.ui.components.PlayButton
 import com.binaural.beats.ui.components.VolumeSlider
 import com.binaural.beats.viewmodel.BinauralViewModel
+import com.binaural.core.audio.model.FrequencyCurve
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -142,6 +144,7 @@ fun PresetListScreen(
                     items(uiState.presets, key = { it.id }) { preset ->
                         PresetCard(
                             name = preset.name,
+                            frequencyCurve = preset.frequencyCurve,
                             isActive = uiState.activePreset?.id == preset.id,
                             isPlaying = uiState.activePreset?.id == preset.id && uiState.isPlaying,
                             pointsCount = preset.frequencyCurve.points.size,
@@ -161,6 +164,7 @@ fun PresetListScreen(
 @Composable
 private fun PresetCard(
     name: String,
+    frequencyCurve: FrequencyCurve,
     isActive: Boolean,
     isPlaying: Boolean,
     pointsCount: Int,
@@ -181,57 +185,71 @@ private fun PresetCard(
         ),
         onClick = onPlayClick
     ) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(12.dp)
         ) {
-            // Информация о пресете
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = name,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = "$pointsCount точек • ${formatDate(updatedAt)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            // Верхняя строка: название и кнопки
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Информация о пресете
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "$pointsCount точек • ${formatDate(updatedAt)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                
+                // Кнопки действий
+                Row {
+                    // Кнопка воспроизведения
+                    FilledIconButton(
+                        onClick = onPlayClick,
+                        colors = IconButtonDefaults.filledIconButtonColors(
+                            containerColor = if (isPlaying)
+                                MaterialTheme.colorScheme.error
+                            else
+                                MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = if (isPlaying) "Остановить" else "Воспроизвести"
+                        )
+                    }
+                    
+                    Spacer(modifier = Modifier.width(8.dp))
+                    
+                    // Кнопка редактирования
+                    IconButton(onClick = onEditClick) {
+                        Icon(Icons.Default.Edit, contentDescription = "Редактировать")
+                    }
+                    
+                    // Кнопка удаления
+                    IconButton(onClick = { showDeleteDialog = true }) {
+                        Icon(Icons.Default.Delete, contentDescription = "Удалить")
+                    }
+                }
             }
             
-            // Кнопки действий
-            Row {
-                // Кнопка воспроизведения
-                FilledIconButton(
-                    onClick = onPlayClick,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (isPlaying)
-                            MaterialTheme.colorScheme.error
-                        else
-                            MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Остановить" else "Воспроизвести"
-                    )
-                }
-                
-                Spacer(modifier = Modifier.width(8.dp))
-                
-                // Кнопка редактирования
-                IconButton(onClick = onEditClick) {
-                    Icon(Icons.Default.Edit, contentDescription = "Редактировать")
-                }
-                
-                // Кнопка удаления
-                IconButton(onClick = { showDeleteDialog = true }) {
-                    Icon(Icons.Default.Delete, contentDescription = "Удалить")
-                }
-            }
+            // Мини-график
+            Spacer(modifier = Modifier.height(8.dp))
+            MiniFrequencyGraph(
+                frequencyCurve = frequencyCurve,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp)
+            )
         }
     }
     

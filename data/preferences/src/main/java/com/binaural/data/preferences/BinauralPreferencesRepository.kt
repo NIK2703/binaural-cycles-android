@@ -11,6 +11,7 @@ import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.InterpolationType
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -48,7 +49,8 @@ data class SerializableFrequencyRange(
 data class SerializableFrequencyCurve(
     val points: List<SerializableFrequencyPoint>,
     val carrierRange: SerializableFrequencyRange? = null,
-    val beatRange: SerializableFrequencyRange? = null
+    val beatRange: SerializableFrequencyRange? = null,
+    val interpolationType: String? = null
 )
 
 /**
@@ -92,6 +94,8 @@ class BinauralPreferencesRepository @Inject constructor(
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
         // Частота дискретизации
         private val SAMPLE_RATE_KEY = intPreferencesKey("sample_rate")
+        // Интервал обновления частот (мс)
+        private val FREQUENCY_UPDATE_INTERVAL_KEY = intPreferencesKey("frequency_update_interval")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -130,7 +134,8 @@ class BinauralPreferencesRepository @Inject constructor(
                 )
             },
             carrierRange = SerializableFrequencyRange(curve.carrierRange.min, curve.carrierRange.max),
-            beatRange = SerializableFrequencyRange(curve.beatRange.min, curve.beatRange.max)
+            beatRange = SerializableFrequencyRange(curve.beatRange.min, curve.beatRange.max),
+            interpolationType = curve.interpolationType.name
         )
         return json.encodeToString(serializable)
     }
@@ -151,7 +156,10 @@ class BinauralPreferencesRepository @Inject constructor(
                 } ?: FrequencyRange.DEFAULT_CARRIER,
                 beatRange = serializable.beatRange?.let { 
                     FrequencyRange(it.min, it.max) 
-                } ?: FrequencyRange.DEFAULT_BEAT
+                } ?: FrequencyRange.DEFAULT_BEAT,
+                interpolationType = serializable.interpolationType?.let {
+                    try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
+                } ?: InterpolationType.LINEAR
             )
         } catch (e: Exception) {
             FrequencyCurve.defaultCurve()
@@ -245,6 +253,28 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveSampleRate(rate: Int) {
         dataStore.edit { preferences ->
             preferences[SAMPLE_RATE_KEY] = rate
+        }
+    }
+    
+    // Методы для интервала обновления частот
+    
+    /**
+     * Получить интервал обновления частот в миллисекундах
+     * По умолчанию 100мс (баланс между плавностью и энергосбережением)
+     */
+    fun getFrequencyUpdateInterval(): Flow<Int> {
+        return dataStore.data.map { preferences ->
+            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 100 // 100мс по умолчанию
+        }
+    }
+    
+    /**
+     * Сохранить интервал обновления частот
+     * @param intervalMs интервал в миллисекундах (100-5000)
+     */
+    suspend fun saveFrequencyUpdateInterval(intervalMs: Int) {
+        dataStore.edit { preferences ->
+            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] = intervalMs.coerceIn(100, 5000)
         }
     }
     
@@ -343,7 +373,8 @@ class BinauralPreferencesRepository @Inject constructor(
                     beatRange = SerializableFrequencyRange(
                         preset.frequencyCurve.beatRange.min,
                         preset.frequencyCurve.beatRange.max
-                    )
+                    ),
+                    interpolationType = preset.frequencyCurve.interpolationType.name
                 ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
@@ -372,7 +403,10 @@ class BinauralPreferencesRepository @Inject constructor(
                         } ?: FrequencyRange.DEFAULT_CARRIER,
                         beatRange = serializable.curve.beatRange?.let {
                             FrequencyRange(it.min, it.max)
-                        } ?: FrequencyRange.DEFAULT_BEAT
+                        } ?: FrequencyRange.DEFAULT_BEAT,
+                        interpolationType = serializable.curve.interpolationType?.let {
+                            try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
+                        } ?: InterpolationType.LINEAR
                     ),
                     createdAt = serializable.createdAt,
                     updatedAt = serializable.updatedAt

@@ -61,6 +61,9 @@ class BinauralAudioEngine @Inject constructor(
     
     // Текущая частота дискретизации - по умолчанию 44100, может быть изменено через setSampleRate()
     private var sampleRate: Int = SampleRate.MEDIUM.value
+    
+    // Интервал обновления частот в миллисекундах (100-5000мс)
+    private var frequencyUpdateIntervalMs: Int = 100
 
     private var audioTrack: AudioTrack? = null
     private var playbackJob: Job? = null
@@ -246,6 +249,19 @@ class BinauralAudioEngine @Inject constructor(
     fun getSampleRate(): SampleRate {
         return SampleRate.fromValue(sampleRate)
     }
+    
+    /**
+     * Установить интервал обновления частот
+     * @param intervalMs интервал в миллисекундах (100-5000)
+     */
+    fun setFrequencyUpdateInterval(intervalMs: Int) {
+        frequencyUpdateIntervalMs = intervalMs.coerceIn(100, 5000)
+    }
+    
+    /**
+     * Получить текущий интервал обновления частот
+     */
+    fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
 
     private fun createAudioTrack() {
         val minBufferSize = AudioTrack.getMinBufferSize(
@@ -279,11 +295,11 @@ class BinauralAudioEngine @Inject constructor(
     }
 
     private suspend fun generateAudio() {
-        // Используем меньший буфер для более частой генерации - 100мс
-        // Это обеспечивает более плавное воспроизведение
-        val samplesPerChannel = sampleRate / 10 // 100мс
+        // Используем настраиваемый интервал для генерации
+        // Меньше интервал = плавнее, больше интервал = энергосбережение
+        val samplesPerChannel = sampleRate * frequencyUpdateIntervalMs / 1000
         val buffer = ShortArray(samplesPerChannel * 2)
-        val bufferDurationMs = 100L
+        val bufferDurationMs = frequencyUpdateIntervalMs.toLong()
         
         // Счётчик для периодического обновления WakeLock (каждую минуту)
         var wakeLockRenewCounter = 0
@@ -356,19 +372,10 @@ class BinauralAudioEngine @Inject constructor(
             
             // Обновляем состояние после генерации буфера
             if (fadeResult.fadePhaseCompleted && isFading) {
-                if (isFadingOut) {
-                    // Fade out завершён - меняем каналы и начинаем fade in
-                    channelsSwapped = !channelsSwapped
-                    _isChannelsSwapped.value = channelsSwapped
-                    android.util.Log.d("BinauralAudioEngine", "Channels swapped after fade: $channelsSwapped")
-                    
-                    isFadingOut = false
-                    fadeStartSample = totalSamplesGenerated
-                } else {
-                    // Fade in завершён
-                    isFading = false
-                    android.util.Log.d("BinauralAudioEngine", "Fade completed")
-                }
+                // Fade (out + in) полностью завершён
+                isFading = false
+                isFadingOut = true // Готов к следующему циклу
+                android.util.Log.d("BinauralAudioEngine", "Fade completed (out + in)")
             }
             
             // Блокирующая запись в AudioTrack - write() блокирует пока данные не будут
@@ -443,11 +450,16 @@ class BinauralAudioEngine @Inject constructor(
         // Определяем, нужно ли поменять каналы местами в начале буфера
         val swapChannelsAtStart = config.channelSwapEnabled && channelsSwapped
         
-        // Флаг для отслеживания завершения фазы fade
+        // Флаг для отслеживания завершения всего процесса fade (out + in)
         var fadePhaseCompleted = false
         
         // Точка (в сэмплах) где происходит переключение каналов
         var swapAtSample = -1L
+        
+        // Локальное отслеживание состояния fade для мгновенного перехода
+        var localIsFadingOut = isFadingOut
+        var localFadeStartSample = fadeStartSample
+        var localChannelsSwapped = channelsSwapped
         
         for (i in 0 until samplesPerChannel) {
             // Номер текущего сэмпла в общем потоке
@@ -457,38 +469,36 @@ class BinauralAudioEngine @Inject constructor(
             var fadeMultiplier = 1.0
             
             if (isFading) {
-                val elapsedSamples = currentSample - fadeStartSample
+                val elapsedSamples = currentSample - localFadeStartSample
                 val progress = elapsedSamples.toDouble() / fadeDurationSamples
                 
-                if (progress >= 1.0) {
-                    // Fade завершён
-                    if (isFadingOut) {
-                        // Fade out завершён - находимся в тишине перед fade in
+                if (localIsFadingOut) {
+                    // Фаза fade out
+                    if (progress >= 1.0) {
+                        // Fade out завершён - мгновенно переключаем каналы и начинаем fade in
                         fadeMultiplier = 0.0
-                        // Запоминаем точку переключения каналов
                         if (swapAtSample < 0) {
                             swapAtSample = currentSample
-                            fadePhaseCompleted = true
+                            localChannelsSwapped = !localChannelsSwapped
+                            _isChannelsSwapped.value = localChannelsSwapped
+                            // Мгновенный переход к fade in
+                            localIsFadingOut = false
+                            localFadeStartSample = currentSample
                         }
-                    } else {
-                        // Fade in завершён
-                        fadeMultiplier = 1.0
-                        if (!fadePhaseCompleted) {
-                            fadePhaseCompleted = true
-                        }
-                    }
-                } else if (progress >= 0.0) {
-                    // Fade в процессе (0.0 <= progress < 1.0)
-                    if (isFadingOut) {
-                        // Fade out: 1.0 -> 0.0 (плавное затухание)
+                    } else if (progress >= 0.0) {
+                        // Fade out в процессе: 1.0 -> 0.0
                         fadeMultiplier = 1.0 - progress
-                    } else {
-                        // Fade in: 0.0 -> 1.0 (плавное нарастание)
-                        fadeMultiplier = progress
                     }
                 } else {
-                    // progress < 0 - ещё не началось (не должно происходить при корректной логике)
-                    fadeMultiplier = if (isFadingOut) 1.0 else 0.0
+                    // Фаза fade in
+                    if (progress >= 1.0) {
+                        // Fade in завершён
+                        fadeMultiplier = 1.0
+                        fadePhaseCompleted = true
+                    } else if (progress >= 0.0) {
+                        // Fade in в процессе: 0.0 -> 1.0
+                        fadeMultiplier = progress
+                    }
                 }
             }
             
@@ -511,8 +521,8 @@ class BinauralAudioEngine @Inject constructor(
             
             // Определяем, нужно ли поменять каналы для этого сэмпла
             // После точки переключения (swapAtSample) каналы меняются местами
-            val swapForSample = if (isFadingOut && swapAtSample >= 0 && currentSample >= swapAtSample) {
-                !swapChannelsAtStart
+            val swapForSample = if (swapAtSample >= 0 && currentSample >= swapAtSample) {
+                config.channelSwapEnabled && localChannelsSwapped
             } else {
                 swapChannelsAtStart
             }
@@ -527,6 +537,9 @@ class BinauralAudioEngine @Inject constructor(
                 buffer[i * 2 + 1] = (rightSample * rightAmp).toInt().toShort()
             }
         }
+        
+        // Сохраняем обновлённое состояние для следующего буфера
+        channelsSwapped = localChannelsSwapped
         
         return FadeResult(fadePhaseCompleted = fadePhaseCompleted)
     }

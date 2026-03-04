@@ -2,6 +2,9 @@ package com.binaural.core.audio.model
 
 import kotlinx.datetime.LocalTime
 import java.util.UUID
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.pow
 
 /**
  * Диапазон частот
@@ -22,6 +25,14 @@ data class FrequencyRange(
         val DEFAULT_CARRIER = FrequencyRange(20.0, 500.0)
         val DEFAULT_BEAT = FrequencyRange(0.125, 1000.0)
     }
+}
+
+/**
+ * Тип интерполяции между точками
+ */
+enum class InterpolationType {
+    LINEAR,         // Линейная интерполяция
+    CUBIC_SPLINE    // Кубический сплайн Catmull-Rom (плавная кривая)
 }
 
 /**
@@ -50,21 +61,22 @@ data class FrequencyPoint(
 data class FrequencyCurve(
     val points: List<FrequencyPoint>,
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
-    val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT
+    val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
+    val interpolationType: InterpolationType = InterpolationType.LINEAR
 ) {
     init {
         require(points.size >= 2) { "Кривая должна содержать минимум 2 точки" }
     }
 
     /**
-     * Получить несущую частоту для заданного времени путём линейной интерполяции
+     * Получить несущую частоту для заданного времени путём интерполяции
      */
     fun getCarrierFrequencyAt(time: LocalTime): Double {
         return carrierRange.clamp(interpolate(time) { it.carrierFrequency })
     }
 
     /**
-     * Получить частоту биений для заданного времени путём линейной интерполяции
+     * Получить частоту биений для заданного времени путём интерполяции
      */
     fun getBeatFrequencyAt(time: LocalTime): Double {
         return beatRange.clamp(interpolate(time) { it.beatFrequency })
@@ -72,62 +84,157 @@ data class FrequencyCurve(
 
     private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
         val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val targetSeconds = time.toSecondOfDay()
         
-        // Если время раньше первой точки - интерполируем от последней к первой
-        if (time.toSecondOfDay() <= sortedPoints.first().time.toSecondOfDay()) {
-            return interpolateValue(
-                sortedPoints.last(),
-                sortedPoints.first(),
-                time,
-                frequencySelector
-            )
-        }
-        
-        // Если время позже последней точки - интерполируем от последней к первой
-        if (time.toSecondOfDay() >= sortedPoints.last().time.toSecondOfDay()) {
-            return interpolateValue(
-                sortedPoints.last(),
-                sortedPoints.first(),
-                time,
-                frequencySelector
-            )
-        }
-        
-        // Находим две соседние точки
+        // Находим интервал, в который попадает время
+        var intervalIndex = -1
         for (i in 0 until sortedPoints.size - 1) {
-            val current = sortedPoints[i]
-            val next = sortedPoints[i + 1]
-            
-            if (time.toSecondOfDay() in current.time.toSecondOfDay()..next.time.toSecondOfDay()) {
-                return interpolateValue(current, next, time, frequencySelector)
+            val current = sortedPoints[i].time.toSecondOfDay()
+            val next = sortedPoints[i + 1].time.toSecondOfDay()
+            if (targetSeconds in current..next) {
+                intervalIndex = i
+                break
             }
         }
         
-        return frequencySelector(sortedPoints.first())
-    }
-
-    private fun interpolateValue(
-        p1: FrequencyPoint,
-        p2: FrequencyPoint,
-        time: LocalTime,
-        frequencySelector: (FrequencyPoint) -> Double
-    ): Double {
-        val t1 = p1.time.toSecondOfDay()
-        val t2 = if (p2.time.toSecondOfDay() < t1) {
-            p2.time.toSecondOfDay() + 24 * 3600 // Следующий день
-        } else {
-            p2.time.toSecondOfDay()
+        // Если не нашли в обычных интервалах - это переход через полночь
+        if (intervalIndex == -1) {
+            // Время между последней точкой и первой (переход через полночь)
+            val lastPoint = sortedPoints.last()
+            val firstPoint = sortedPoints.first()
+            return interpolateBetweenPoints(
+                sortedPoints, 
+                sortedPoints.size - 1, 
+                0, // первая точка (с переходом через полночь)
+                time, 
+                frequencySelector,
+                isWrapping = true
+            )
         }
-        val t = if (time.toSecondOfDay() < t1) {
+        
+        return interpolateBetweenPoints(
+            sortedPoints,
+            intervalIndex,
+            intervalIndex + 1,
+            time,
+            frequencySelector,
+            isWrapping = false
+        )
+    }
+    
+    /**
+     * Интерполяция между двумя точками с учётом соседних для кубического сплайна
+     */
+    private fun interpolateBetweenPoints(
+        sortedPoints: List<FrequencyPoint>,
+        leftIndex: Int,
+        rightIndex: Int,
+        time: LocalTime,
+        frequencySelector: (FrequencyPoint) -> Double,
+        isWrapping: Boolean
+    ): Double {
+        val leftPoint = sortedPoints[leftIndex]
+        val rightPoint = sortedPoints[rightIndex]
+        
+        // Вычисляем нормализованную позицию t в интервале [0, 1]
+        val t1 = leftPoint.time.toSecondOfDay()
+        val t2 = if (isWrapping) {
+            rightPoint.time.toSecondOfDay() + 24 * 3600 // переход через полночь
+        } else {
+            rightPoint.time.toSecondOfDay()
+        }
+        val t = if (time.toSecondOfDay() < t1 && isWrapping) {
             time.toSecondOfDay() + 24 * 3600
         } else {
             time.toSecondOfDay()
         }
         
-        if (t2 == t1) return frequencySelector(p1)
+        if (t2 == t1) return frequencySelector(leftPoint)
         
         val ratio = (t - t1).toDouble() / (t2 - t1)
-        return frequencySelector(p1) + ratio * (frequencySelector(p2) - frequencySelector(p1))
+        
+        return when (interpolationType) {
+            InterpolationType.LINEAR -> {
+                linearInterpolate(frequencySelector(leftPoint), frequencySelector(rightPoint), ratio)
+            }
+            InterpolationType.CUBIC_SPLINE -> {
+                // Для Catmull-Rom нужны 4 точки: P0 (до левой), P1 (левая), P2 (правая), P3 (после правой)
+                val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector)
+                val p1 = frequencySelector(leftPoint)
+                val p2 = frequencySelector(rightPoint)
+                val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector)
+                
+                catmullRomInterpolate(p0, p1, p2, p3, ratio)
+            }
+        }
+    }
+    
+    /**
+     * Получить соседнюю точку с учётом цикличности графика
+     * @param points отсортированный список точек
+     * @param currentIndex текущий индекс
+     * @param offset смещение (-1 для предыдущей, +1 для следующей)
+     * @param frequencySelector селектор частоты
+     */
+    private fun getNeighborPoint(
+        points: List<FrequencyPoint>,
+        currentIndex: Int,
+        offset: Int,
+        frequencySelector: (FrequencyPoint) -> Double
+    ): Double {
+        var neighborIndex = currentIndex + offset
+        
+        // Циклическая навигация
+        when {
+            neighborIndex < 0 -> neighborIndex = points.size + neighborIndex // переход к концу
+            neighborIndex >= points.size -> neighborIndex = neighborIndex - points.size // переход к началу
+        }
+        
+        return frequencySelector(points[neighborIndex])
+    }
+    
+    /**
+     * Линейная интерполяция
+     */
+    private fun linearInterpolate(y1: Double, y2: Double, t: Double): Double {
+        return y1 + t * (y2 - y1)
+    }
+    
+    /**
+     * Интерполяция Catmull-Rom
+     * Использует 4 точки для создания плавной кривой
+     * P0 - точка до левой границы
+     * P1 - левая граница
+     * P2 - правая граница  
+     * P3 - точка после правой границы
+     */
+    private fun catmullRomInterpolate(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
+        val t2 = t * t
+        val t3 = t2 * t
+        
+        // Формула Catmull-Rom сплайна
+        return 0.5 * (
+            (2.0 * p1) +
+            (-p0 + p2) * t +
+            (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
+            (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
+        )
+    }
+
+    
+    /**
+     * Получить все интерполированные значения для отображения на графике
+     * Возвращает список пар (время в секундах, значение) для указанного селектора частоты
+     */
+    fun getInterpolatedValues(
+        numSamples: Int = 100,
+        frequencySelector: (FrequencyPoint) -> Double
+    ): List<Pair<Int, Double>> {
+        return (0..numSamples).map { i ->
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            time.toSecondOfDay() to interpolate(time, frequencySelector)
+        }
     }
 
     companion object {
