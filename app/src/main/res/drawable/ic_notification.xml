@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <!-- Волна звука -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M3,9v6h4l5,5V4L7,9H3z"/>
+    <!-- Волны бинаурального ритма -->
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M16.5,8.5c1.5,1.5 1.5,5.5 0,7"/>
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M19,6c2.5,2.5 2.5,10.5 0,12"/>
+</vector>

@@ -1,0 +1,80 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Background circle -->
+    <path
+        android:fillColor="#1A1A2E"
+        android:pathData="M54,54m-50,0a50,50 0,1 1,100 0a50,50 0,1 1,-100 0"/>
+    
+    <!-- Left ear symbol -->
+    <path
+        android:fillColor="#3D5AFE"
+        android:pathData="M28,35C22,35 18,42 18,54C18,66 22,73 28,73C30,73 32,72 33,70L33,38C32,36 30,35 28,35Z"/>
+    
+    <!-- Right ear symbol -->
+    <path
+        android:fillColor="#4CAF50"
+        android:pathData="M80,35C86,35 90,42 90,54C90,66 86,73 80,73C78,73 76,72 75,70L75,38C76,36 78,35 80,35Z"/>
+    
+    <!-- Left wave (lower frequency) - 2 cycles -->
+    <path
+        android:strokeColor="#3D5AFE"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M33,54
+                         Q38,42 43,54
+                         Q48,66 53,54
+                         Q58,42 63,54
+                         Q68,66 73,54"/>
+    
+    <!-- Right wave (higher frequency) - 3 cycles -->
+    <path
+        android:strokeColor="#4CAF50"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M33,54
+                         Q36,42 39,54
+                         Q42,66 45,54
+                         Q48,42 51,54
+                         Q54,66 57,54
+                         Q60,42 63,54
+                         Q66,66 69,54
+                         Q72,42 75,54"/>
+    
+    <!-- Brain/head outline in center -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M54,30
+                         C44,30 38,38 38,48
+                         C38,52 40,56 43,59
+                         L43,70
+                         C43,74 47,78 54,78
+                         C61,78 65,74 65,70
+                         L65,59
+                         C68,56 70,52 70,48
+                         C70,38 64,30 54,30Z"/>
+    
+    <!-- Brain waves inside -->
+    <path
+        android:strokeColor="#FFC107"
+        android:strokeWidth="2"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M45,50
+                         Q48,45 51,50
+                         Q54,55 57,50
+                         Q60,45 63,50"/>
+    
+    <!-- Binaural beat indicator - pulsing center -->
+    <path
+        android:fillColor="#FFC107"
+        android:pathData="M54,54m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0"/>
+    
+</vector>
