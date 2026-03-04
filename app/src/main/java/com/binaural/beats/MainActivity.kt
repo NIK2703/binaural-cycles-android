@@ -10,8 +10,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import androidx.navigation.compose.rememberNavController
 import com.binaural.beats.service.BinauralPlaybackService
-import com.binaural.beats.ui.BinauralBeatsApp
+import com.binaural.beats.ui.navigation.BinauralNavigation
 import com.binaural.core.ui.theme.BinauralTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -35,7 +36,8 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    BinauralBeatsApp()
+                    val navController = rememberNavController()
+                    BinauralNavigation(navController = navController)
                 }
             }
         }

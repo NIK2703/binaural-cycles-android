@@ -1,6 +1,7 @@
 package com.binaural.core.audio.model
 
 import kotlinx.datetime.LocalTime
+import java.util.UUID
 
 /**
  * Диапазон частот
@@ -132,19 +133,21 @@ data class FrequencyCurve(
     companion object {
         /**
          * Создаёт кривую по умолчанию
+         * Точки каждые 3 часа (последняя - 23:59)
          * Ночью - дельта/тета волны (сон), днём - бета/альфа (активность)
          */
         fun defaultCurve(): FrequencyCurve {
             return FrequencyCurve(
                 points = listOf(
                     FrequencyPoint.fromHours(0, 0, carrierFrequency = 150.0, beatFrequency = 2.0),    // Полночь - глубокий сон (дельта)
+                    FrequencyPoint.fromHours(3, 0, carrierFrequency = 150.0, beatFrequency = 2.0),    // Ночь - глубокий сон (дельта)
                     FrequencyPoint.fromHours(6, 0, carrierFrequency = 200.0, beatFrequency = 10.0),   // Утро - альфа (пробуждение)
                     FrequencyPoint.fromHours(9, 0, carrierFrequency = 220.0, beatFrequency = 15.0),   // Утро - бета (активность)
                     FrequencyPoint.fromHours(12, 0, carrierFrequency = 250.0, beatFrequency = 12.0),  // Обед - альфа/бета
                     FrequencyPoint.fromHours(15, 0, carrierFrequency = 250.0, beatFrequency = 18.0),  // День - бета (фокус)
                     FrequencyPoint.fromHours(18, 0, carrierFrequency = 200.0, beatFrequency = 10.0),  // Вечер - альфа (расслабление)
                     FrequencyPoint.fromHours(21, 0, carrierFrequency = 170.0, beatFrequency = 6.0),   // Поздний вечер - тета
-                    FrequencyPoint.fromHours(23, 0, carrierFrequency = 150.0, beatFrequency = 3.0),   // Ночь - дельта/тета
+                    FrequencyPoint(LocalTime(23, 59), carrierFrequency = 150.0, beatFrequency = 3.0), // Ночь - дельта/тета
                 )
             )
         }
@@ -160,6 +163,8 @@ data class BinauralConfig(
     // Настройки перестановки каналов
     val channelSwapEnabled: Boolean = false,
     val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию
+    val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
+    val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
     // Настройки нормализации громкости
     val volumeNormalizationEnabled: Boolean = false,
     val volumeNormalizationStrength: Float = 0.5f // от 0 до 1.0
@@ -183,3 +188,92 @@ data class PlaybackState(
     val elapsedSeconds: Int = 0,
     val volume: Float = 0.7f
 )
+
+/**
+ * Пресет бинаурального ритма - сохранённая конфигурация с названием
+ */
+data class BinauralPreset(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val frequencyCurve: FrequencyCurve,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+) {
+    companion object {
+        /**
+         * Создаёт пресет по умолчанию "Циркадный ритм"
+         */
+        fun defaultPreset(): BinauralPreset {
+            return BinauralPreset(
+                name = "Циркадный ритм",
+                frequencyCurve = FrequencyCurve.defaultCurve()
+            )
+        }
+        
+        /**
+         * Создаёт пресет для расслабления
+         */
+        fun relaxationPreset(): BinauralPreset {
+            return BinauralPreset(
+                name = "Расслабление",
+                frequencyCurve = FrequencyCurve(
+                    points = listOf(
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 6.0),
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 200.0, beatFrequency = 4.0),
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 200.0, beatFrequency = 8.0),
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 200.0, beatFrequency = 6.0),
+                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 200.0, beatFrequency = 4.0),
+                    )
+                )
+            )
+        }
+        
+        /**
+         * Создаёт пресет для фокуса
+         */
+        fun focusPreset(): BinauralPreset {
+            return BinauralPreset(
+                name = "Фокус",
+                frequencyCurve = FrequencyCurve(
+                    points = listOf(
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 250.0, beatFrequency = 14.0),
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 250.0, beatFrequency = 12.0),
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 250.0, beatFrequency = 18.0),
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0, beatFrequency = 15.0),
+                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 250.0, beatFrequency = 10.0),
+                    )
+                )
+            )
+        }
+        
+        /**
+         * Создаёт пресет для сна
+         */
+        fun sleepPreset(): BinauralPreset {
+            return BinauralPreset(
+                name = "Сон",
+                frequencyCurve = FrequencyCurve(
+                    points = listOf(
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 150.0, beatFrequency = 2.0),
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 150.0, beatFrequency = 1.0),
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 150.0, beatFrequency = 2.0),
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 150.0, beatFrequency = 1.5),
+                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 150.0, beatFrequency = 0.5),
+                    )
+                )
+            )
+        }
+        
+        /**
+         * Возвращает список предустановленных пресетов
+         */
+        fun defaultPresets(): List<BinauralPreset> {
+            return listOf(
+                defaultPreset(),
+                relaxationPreset(),
+                focusPreset(),
+                sleepPreset()
+            )
+        }
+    }
+}

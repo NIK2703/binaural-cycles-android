@@ -1,19 +1,17 @@
 package com.binaural.beats.viewmodel
 
-import android.content.Context
-import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.binaural.beats.service.BinauralPlaybackService
+import com.binaural.core.audio.AudioConstants
 import com.binaural.core.audio.engine.BinauralAudioEngine
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
+import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,22 +21,29 @@ import kotlinx.datetime.LocalTime
 import javax.inject.Inject
 
 data class BinauralUiState(
+    // Список пресетов
+    val presets: List<BinauralPreset> = emptyList(),
+    val activePreset: BinauralPreset? = null,
+    // Состояние воспроизведения
     val isPlaying: Boolean = false,
     val currentBeatFrequency: Double = 0.0,
     val currentCarrierFrequency: Double = 0.0,
-    val frequencyCurve: FrequencyCurve = FrequencyCurve.defaultCurve(),
     val volume: Float = 0.7f,
     val selectedPointIndex: Int? = null,
     val currentTime: LocalTime = LocalTime(12, 0),
+    // Редактируемая кривая (для экрана редактирования)
+    val editingFrequencyCurve: FrequencyCurve? = null,
     // Диапазоны частот для редактирования
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
     // Настройки перестановки каналов
     val channelSwapEnabled: Boolean = false,
     val channelSwapIntervalSeconds: Int = 300, // 5 минут
+    val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
+    val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в мс
     val isChannelsSwapped: Boolean = false,
     // Настройки нормализации громкости
-    val volumeNormalizationEnabled: Boolean = false,
+    val volumeNormalizationEnabled: Boolean = true,  // Включено по умолчанию
     val volumeNormalizationStrength: Float = 0.5f,
     // Частота дискретизации
     val sampleRate: SampleRate = SampleRate.MEDIUM
@@ -59,38 +64,69 @@ class BinauralViewModel @Inject constructor(
     }
 
     private fun loadPreferences() {
+        // Загружаем список пресетов
         viewModelScope.launch {
-            preferencesRepository.getFrequencyCurve().collect { curve ->
-                _uiState.update { 
-                    it.copy(
-                        frequencyCurve = curve,
-                        carrierRange = curve.carrierRange,
-                        beatRange = curve.beatRange
-                    ) 
-                }
-                audioEngine.updateFrequencyCurve(curve)
+            preferencesRepository.getPresets().collect { presets ->
+                _uiState.update { it.copy(presets = presets) }
             }
         }
+        
+        // Загружаем активный пресет
+        viewModelScope.launch {
+            preferencesRepository.getActivePresetId().collect { activeId ->
+                if (activeId != null) {
+                    val presets = _uiState.value.presets
+                    val activePreset = presets.find { it.id == activeId }
+                    if (activePreset != null) {
+                        _uiState.update { 
+                            it.copy(
+                                activePreset = activePreset,
+                                carrierRange = activePreset.frequencyCurve.carrierRange,
+                                beatRange = activePreset.frequencyCurve.beatRange
+                            )
+                        }
+                        audioEngine.updateFrequencyCurve(activePreset.frequencyCurve)
+                    }
+                }
+            }
+        }
+        
         // Загружаем настройки перестановки каналов
         viewModelScope.launch {
             preferencesRepository.getChannelSwapEnabled().collect { enabled ->
                 _uiState.update { it.copy(channelSwapEnabled = enabled) }
+                updateAudioConfig()
             }
         }
         viewModelScope.launch {
             preferencesRepository.getChannelSwapInterval().collect { interval ->
                 _uiState.update { it.copy(channelSwapIntervalSeconds = interval) }
+                updateAudioConfig()
+            }
+        }
+        viewModelScope.launch {
+            preferencesRepository.getChannelSwapFadeEnabled().collect { enabled ->
+                _uiState.update { it.copy(channelSwapFadeEnabled = enabled) }
+                updateAudioConfig()
+            }
+        }
+        viewModelScope.launch {
+            preferencesRepository.getChannelSwapFadeDuration().collect { duration ->
+                _uiState.update { it.copy(channelSwapFadeDurationMs = duration.toLong()) }
+                updateAudioConfig()
             }
         }
         // Загружаем настройки нормализации громкости
         viewModelScope.launch {
             preferencesRepository.getVolumeNormalizationEnabled().collect { enabled ->
                 _uiState.update { it.copy(volumeNormalizationEnabled = enabled) }
+                updateAudioConfig()
             }
         }
         viewModelScope.launch {
             preferencesRepository.getVolumeNormalizationStrength().collect { strength ->
                 _uiState.update { it.copy(volumeNormalizationStrength = strength) }
+                updateAudioConfig()
             }
         }
         // Загружаем частоту дискретизации
@@ -130,6 +166,125 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
+    // ============= Методы для работы с пресетами =============
+    
+    /**
+     * Воспроизвести пресет
+     */
+    fun playPreset(presetId: String) {
+        val preset = _uiState.value.presets.find { it.id == presetId } ?: return
+        
+        // Если уже воспроизводится этот пресет - останавливаем
+        if (_uiState.value.activePreset?.id == presetId && _uiState.value.isPlaying) {
+            audioEngine.stop()
+            return
+        }
+        
+        // Устанавливаем активный пресет
+        _uiState.update { 
+            it.copy(
+                activePreset = preset,
+                carrierRange = preset.frequencyCurve.carrierRange,
+                beatRange = preset.frequencyCurve.beatRange
+            )
+        }
+        
+        // Обновляем аудио движок
+        audioEngine.updateFrequencyCurve(preset.frequencyCurve)
+        audioEngine.play()
+        
+        // Сохраняем активный пресет
+        viewModelScope.launch {
+            preferencesRepository.saveActivePresetId(presetId)
+        }
+    }
+    
+    /**
+     * Начать редактирование существующего пресета
+     */
+    fun startEditingPreset(presetId: String) {
+        val preset = _uiState.value.presets.find { it.id == presetId } ?: return
+        _uiState.update { 
+            it.copy(
+                editingFrequencyCurve = preset.frequencyCurve,
+                carrierRange = preset.frequencyCurve.carrierRange,
+                beatRange = preset.frequencyCurve.beatRange
+            )
+        }
+        audioEngine.updateFrequencyCurve(preset.frequencyCurve)
+    }
+    
+    /**
+     * Начать создание нового пресета
+     */
+    fun startNewPreset() {
+        val defaultCurve = FrequencyCurve.defaultCurve()
+        _uiState.update { 
+            it.copy(
+                editingFrequencyCurve = defaultCurve,
+                carrierRange = defaultCurve.carrierRange,
+                beatRange = defaultCurve.beatRange,
+                selectedPointIndex = null
+            )
+        }
+        audioEngine.updateFrequencyCurve(defaultCurve)
+    }
+    
+    /**
+     * Создать новый пресет
+     */
+    fun createPreset(name: String, curve: FrequencyCurve) {
+        val preset = BinauralPreset(
+            name = name,
+            frequencyCurve = curve
+        )
+        viewModelScope.launch {
+            preferencesRepository.addPreset(preset)
+        }
+    }
+    
+    /**
+     * Сохранить редактируемый пресет
+     */
+    fun saveEditingPreset(presetId: String, name: String, curve: FrequencyCurve) {
+        val existingPreset = _uiState.value.presets.find { it.id == presetId } ?: return
+        val updatedPreset = existingPreset.copy(
+            name = name,
+            frequencyCurve = curve,
+            updatedAt = System.currentTimeMillis()
+        )
+        viewModelScope.launch {
+            preferencesRepository.updatePreset(updatedPreset)
+        }
+    }
+    
+    /**
+     * Обновить название пресета
+     */
+    fun updatePresetName(presetId: String, name: String) {
+        // Это будет сохранено в saveEditingPreset
+    }
+    
+    /**
+     * Удалить пресет
+     */
+    fun deletePreset(presetId: String) {
+        // Если удаляем активный пресет - останавливаем воспроизведение
+        if (_uiState.value.activePreset?.id == presetId) {
+            audioEngine.stop()
+            _uiState.update { it.copy(activePreset = null) }
+            viewModelScope.launch {
+                preferencesRepository.saveActivePresetId(null)
+            }
+        }
+        
+        viewModelScope.launch {
+            preferencesRepository.deletePreset(presetId)
+        }
+    }
+
+    // ============= Методы для редактирования кривой =============
+
     fun togglePlayback() {
         if (_uiState.value.isPlaying) {
             audioEngine.stop()
@@ -153,92 +308,70 @@ class BinauralViewModel @Inject constructor(
 
     /**
      * Вычисляет максимально допустимую частоту биений для данной несущей.
-     * При формуле carrier ± beat/2, левый канал = carrier - beat/2 должен быть >= MIN_FREQ (20 Гц)
-     * => beat <= 2 * (carrier - MIN_FREQ)
      */
     private fun maxBeatForCarrier(carrierFreq: Double): Double {
-        val MIN_FREQ = 20.0
-        return 2.0 * maxOf(0.0, carrierFreq - MIN_FREQ)
+        return 2.0 * maxOf(0.0, carrierFreq - AudioConstants.MIN_AUDIBLE_FREQUENCY)
     }
     
     /**
      * Вычисляет минимальную несущую частоту для данной частоты биений.
-     * При формуле carrier ± beat/2, левый канал = carrier - beat/2 должен быть >= MIN_FREQ (20 Гц)
-     * => carrier >= beat/2 + MIN_FREQ
      */
     private fun minCarrierForBeat(beatFreq: Double): Double {
-        val MIN_FREQ = 20.0
-        return beatFreq / 2.0 + MIN_FREQ
+        return beatFreq / 2.0 + AudioConstants.MIN_AUDIBLE_FREQUENCY
     }
 
-    fun updatePointCarrierFrequency(frequency: Double) {
+    // ============= Методы для редактирования точек (редактируемая кривая) =============
+    
+    fun updateEditingPointCarrierFrequency(frequency: Double) {
         val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
         val index = state.selectedPointIndex ?: return
         
-        val points = state.frequencyCurve.points.toMutableList()
+        val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            val newCarrier = state.carrierRange.clamp(frequency)
+            val newCarrier = curve.carrierRange.clamp(frequency)
             
-            // Автоматически корректируем частоту биений, если она слишком большая
             val maxBeat = maxBeatForCarrier(newCarrier)
-            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, state.beatRange.max)
-            val clampedBeat = state.beatRange.clamp(newBeat.coerceAtLeast(state.beatRange.min))
+            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, curve.beatRange.max)
+            val clampedBeat = curve.beatRange.clamp(newBeat.coerceAtLeast(curve.beatRange.min))
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = newCarrier,
                 beatFrequency = clampedBeat
             )
-            updateCurve(points)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
         }
     }
 
-    fun updatePointBeatFrequency(frequency: Double) {
+    fun updateEditingPointBeatFrequency(frequency: Double) {
         val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
         val index = state.selectedPointIndex ?: return
         
-        val points = state.frequencyCurve.points.toMutableList()
+        val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            val newBeat = state.beatRange.clamp(frequency)
+            val newBeat = curve.beatRange.clamp(frequency)
             
-            // Автоматически корректируем несущую частоту, если она слишком мала
             val minCarrier = minCarrierForBeat(newBeat)
-            val newCarrier = maxOf(oldPoint.carrierFrequency, minCarrier, state.carrierRange.min)
-            val clampedCarrier = state.carrierRange.clamp(newCarrier.coerceAtMost(state.carrierRange.max))
+            val newCarrier = maxOf(oldPoint.carrierFrequency, minCarrier, curve.carrierRange.min)
+            val clampedCarrier = curve.carrierRange.clamp(newCarrier.coerceAtMost(curve.carrierRange.max))
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = clampedCarrier,
                 beatFrequency = newBeat
             )
-            updateCurve(points)
-        }
-    }
-
-    fun updatePointTime(hour: Int, minute: Int) {
-        val state = _uiState.value
-        val index = state.selectedPointIndex ?: return
-        
-        val points = state.frequencyCurve.points.toMutableList()
-        if (index in points.indices) {
-            val oldPoint = points[index]
-            points[index] = FrequencyPoint(
-                time = LocalTime(hour, minute),
-                carrierFrequency = oldPoint.carrierFrequency,
-                beatFrequency = oldPoint.beatFrequency
-            )
-            updateCurve(points.sortedBy { it.time.toSecondOfDay() })
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
         }
     }
     
-    /**
-     * Прямое обновление времени точки по индексу (используется при перетаскивании)
-     */
-    fun updatePointTimeDirect(index: Int, newTime: LocalTime) {
+    fun updateEditingPointTimeDirect(index: Int, newTime: LocalTime) {
         val state = _uiState.value
-        val points = state.frequencyCurve.points.toMutableList()
+        val curve = state.editingFrequencyCurve ?: return
+        val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
             points[index] = FrequencyPoint(
@@ -246,120 +379,86 @@ class BinauralViewModel @Inject constructor(
                 carrierFrequency = oldPoint.carrierFrequency,
                 beatFrequency = oldPoint.beatFrequency
             )
-            // Сортируем точки после изменения времени
             val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-            updateCurve(sortedPoints)
+            updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange)
         }
     }
     
-    /**
-     * Прямое обновление несущей частоты точки по индексу (используется при перетаскивании)
-     */
-    fun updatePointCarrierFrequencyDirect(index: Int, newCarrier: Double) {
+    fun updateEditingPointCarrierFrequencyDirect(index: Int, newCarrier: Double) {
         val state = _uiState.value
-        val points = state.frequencyCurve.points.toMutableList()
+        val curve = state.editingFrequencyCurve ?: return
+        val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            val clampedCarrier = state.carrierRange.clamp(newCarrier)
+            val clampedCarrier = curve.carrierRange.clamp(newCarrier)
             
-            // Автоматически корректируем частоту биений, если она слишком большая
             val maxBeat = maxBeatForCarrier(clampedCarrier)
-            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, state.beatRange.max)
-            val clampedBeat = state.beatRange.clamp(newBeat.coerceAtLeast(state.beatRange.min))
+            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, curve.beatRange.max)
+            val clampedBeat = curve.beatRange.clamp(newBeat.coerceAtLeast(curve.beatRange.min))
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = clampedCarrier,
                 beatFrequency = clampedBeat
             )
-            updateCurve(points)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
         }
     }
 
-    fun addPoint(time: LocalTime, carrierFrequency: Double, beatFrequency: Double) {
+    fun addEditingPoint(time: LocalTime, carrierFrequency: Double, beatFrequency: Double) {
         val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
         
-        val points = state.frequencyCurve.points.toMutableList()
+        val points = curve.points.toMutableList()
         points.add(FrequencyPoint(
             time = time,
-            carrierFrequency = state.carrierRange.clamp(carrierFrequency),
-            beatFrequency = state.beatRange.clamp(beatFrequency)
+            carrierFrequency = curve.carrierRange.clamp(carrierFrequency),
+            beatFrequency = curve.beatRange.clamp(beatFrequency)
         ))
-        updateCurve(points.sortedBy { it.time.toSecondOfDay() })
+        updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange)
     }
 
-    fun removePoint(index: Int) {
+    fun removeEditingPoint(index: Int) {
         val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
         
-        val points = state.frequencyCurve.points.toMutableList()
+        val points = curve.points.toMutableList()
         if (points.size > 2 && index in points.indices) {
             points.removeAt(index)
-            updateCurve(points)
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange)
             _uiState.update { it.copy(selectedPointIndex = null) }
         }
     }
-
-    fun updateCarrierRange(min: Double, max: Double) {
-        // Проверяем, что max > min
+    
+    fun updateEditingCarrierRange(min: Double, max: Double) {
         if (max <= min) return
         
         val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
         val newRange = FrequencyRange(min, max)
         
-        // Обновляем все точки с новым диапазоном
-        val updatedPoints = state.frequencyCurve.points.map { point ->
+        val updatedPoints = curve.points.map { point ->
             point.copy(carrierFrequency = newRange.clamp(point.carrierFrequency))
         }
         
-        val newCurve = FrequencyCurve(updatedPoints, newRange, state.beatRange)
-        _uiState.update {
-            it.copy(
-                frequencyCurve = newCurve,
-                carrierRange = newRange
-            )
-        }
-        audioEngine.updateFrequencyCurve(newCurve)
-        viewModelScope.launch {
-            preferencesRepository.saveFrequencyCurve(newCurve)
+        updateEditingCurve(updatedPoints, newRange, curve.beatRange)
+    }
+
+    private fun updateEditingCurve(
+        points: List<FrequencyPoint>,
+        carrierRange: FrequencyRange,
+        beatRange: FrequencyRange
+    ) {
+        try {
+            val newCurve = FrequencyCurve(points, carrierRange, beatRange)
+            _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
+            audioEngine.updateFrequencyCurve(newCurve)
+        } catch (e: IllegalArgumentException) {
+            // Игнорируем ошибки валидации (например, меньше 2 точек)
         }
     }
 
-    fun updateBeatRange(min: Double, max: Double) {
-        // Проверяем, что max > min
-        if (max <= min) return
-        
-        val state = _uiState.value
-        val newRange = FrequencyRange(min, max)
-        
-        // Обновляем все точки с новым диапазоном
-        val updatedPoints = state.frequencyCurve.points.map { point ->
-            point.copy(beatFrequency = newRange.clamp(point.beatFrequency))
-        }
-        
-        val newCurve = FrequencyCurve(updatedPoints, state.carrierRange, newRange)
-        _uiState.update {
-            it.copy(
-                frequencyCurve = newCurve,
-                beatRange = newRange
-            )
-        }
-        audioEngine.updateFrequencyCurve(newCurve)
-        viewModelScope.launch {
-            preferencesRepository.saveFrequencyCurve(newCurve)
-        }
-    }
-
-    private fun updateCurve(points: List<FrequencyPoint>) {
-        val state = _uiState.value
-        val newCurve = FrequencyCurve(points, state.carrierRange, state.beatRange)
-        _uiState.update { it.copy(frequencyCurve = newCurve) }
-        audioEngine.updateFrequencyCurve(newCurve)
-        viewModelScope.launch {
-            preferencesRepository.saveFrequencyCurve(newCurve)
-        }
-    }
-
-    // Методы для управления перестановкой каналов
+    // ============= Методы для управления перестановкой каналов =============
     
     fun setChannelSwapEnabled(enabled: Boolean) {
         _uiState.update { it.copy(channelSwapEnabled = enabled) }
@@ -370,11 +469,28 @@ class BinauralViewModel @Inject constructor(
     }
 
     fun setChannelSwapInterval(seconds: Int) {
-        val clampedSeconds = seconds.coerceIn(30, 3600) // от 30 сек до 1 часа
+        val clampedSeconds = seconds.coerceIn(30, 3600)
         _uiState.update { it.copy(channelSwapIntervalSeconds = clampedSeconds) }
         updateAudioConfig()
         viewModelScope.launch {
             preferencesRepository.saveChannelSwapInterval(clampedSeconds)
+        }
+    }
+
+    fun setChannelSwapFadeEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(channelSwapFadeEnabled = enabled) }
+        updateAudioConfig()
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapFadeEnabled(enabled)
+        }
+    }
+
+    fun setChannelSwapFadeDuration(durationMs: Long) {
+        val clampedDuration = durationMs.coerceIn(100L, 10000L)
+        _uiState.update { it.copy(channelSwapFadeDurationMs = clampedDuration) }
+        updateAudioConfig()
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapFadeDuration(clampedDuration.toInt())
         }
     }
 
@@ -409,11 +525,13 @@ class BinauralViewModel @Inject constructor(
 
     private fun updateAudioConfig() {
         val state = _uiState.value
-        val config = com.binaural.core.audio.model.BinauralConfig(
-            frequencyCurve = state.frequencyCurve,
+        val config = BinauralConfig(
+            frequencyCurve = state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
             volume = state.volume,
             channelSwapEnabled = state.channelSwapEnabled,
             channelSwapIntervalSeconds = state.channelSwapIntervalSeconds,
+            channelSwapFadeEnabled = state.channelSwapFadeEnabled,
+            channelSwapFadeDurationMs = state.channelSwapFadeDurationMs,
             volumeNormalizationEnabled = state.volumeNormalizationEnabled,
             volumeNormalizationStrength = state.volumeNormalizationStrength
         )

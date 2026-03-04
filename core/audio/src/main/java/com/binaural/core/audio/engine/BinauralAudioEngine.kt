@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.PowerManager
+import com.binaural.core.audio.AudioConstants
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +56,7 @@ class BinauralAudioEngine @Inject constructor(
         private const val SAMPLE_RATE = 44100
         private const val WAKE_LOCK_TAG = "BinauralBeats:PlaybackWakeLock"
         private const val GENERATION_BUFFER_MS = 250 // 250мс буфер генерации
+        private const val DEFAULT_FADE_DURATION_MS = 1000L // 1 секунда затухания/нарастания по умолчанию
     }
     
     // Текущая частота дискретизации - по умолчанию 44100, может быть изменено через setSampleRate()
@@ -77,6 +79,14 @@ class BinauralAudioEngine @Inject constructor(
     // Переменная для отслеживания перестановки каналов
     private var channelsSwapped = false
     private var lastSwapElapsedMs = 0L
+    
+    // Состояние fade при смене каналов
+    private var fadeStartSample = 0L // номер сэмпла начала fade
+    private var isFadingOut = true // true = fade out, false = fade in
+    private var isFading = false
+    
+    // Общий счётчик сэмплов для плавного fade
+    private var totalSamplesGenerated = 0L
     
     // Блокировка для синхронизации доступа к AudioTrack
     private val audioLock = Any()
@@ -183,6 +193,11 @@ class BinauralAudioEngine @Inject constructor(
             channelsSwapped = false
             lastSwapElapsedMs = 0L
             _isChannelsSwapped.value = false
+            // Сбрасываем fade состояние
+            isFading = false
+            fadeStartSample = 0L
+            isFadingOut = true
+            totalSamplesGenerated = 0L
         }
     }
 
@@ -302,19 +317,59 @@ class BinauralAudioEngine @Inject constructor(
             _currentCarrierFrequency.value = carrierFreq
             
             // Проверяем необходимость перестановки каналов
-            if (config.channelSwapEnabled) {
+            if (config.channelSwapEnabled && !isFading) {
                 val currentElapsedMs = _elapsedSeconds.value * 100L
                 val swapIntervalMs = config.channelSwapIntervalSeconds * 1000L
                 
                 if (currentElapsedMs - lastSwapElapsedMs >= swapIntervalMs) {
-                    channelsSwapped = !channelsSwapped
-                    _isChannelsSwapped.value = channelsSwapped
-                    lastSwapElapsedMs = currentElapsedMs
-                    android.util.Log.d("BinauralAudioEngine", "Channels swapped: $channelsSwapped")
+                    if (config.channelSwapFadeEnabled) {
+                        // Начинаем fade out перед сменой канала
+                        isFading = true
+                        isFadingOut = true
+                        fadeStartSample = totalSamplesGenerated
+                        lastSwapElapsedMs = currentElapsedMs
+                        android.util.Log.d("BinauralAudioEngine", "Starting fade out before channel swap at sample $fadeStartSample")
+                    } else {
+                        // Мгновенная смена без fade
+                        channelsSwapped = !channelsSwapped
+                        _isChannelsSwapped.value = channelsSwapped
+                        lastSwapElapsedMs = currentElapsedMs
+                        android.util.Log.d("BinauralAudioEngine", "Channels swapped instantly: $channelsSwapped")
+                    }
                 }
             }
             
-            generateBuffer(buffer, carrierFreq, beatFreq, samplesPerChannel)
+            // Вычисляем параметры fade для передачи в generateBuffer
+            val fadeDurationSamples = (config.channelSwapFadeDurationMs.coerceAtLeast(100L) * sampleRate / 1000).toInt()
+            
+            val fadeResult = generateBuffer(
+                buffer = buffer,
+                carrierFreq = carrierFreq,
+                beatFreq = beatFreq,
+                samplesPerChannel = samplesPerChannel,
+                fadeDurationSamples = fadeDurationSamples,
+                config = config
+            )
+            
+            // Обновляем счётчик сэмплов после генерации буфера
+            totalSamplesGenerated += samplesPerChannel
+            
+            // Обновляем состояние после генерации буфера
+            if (fadeResult.fadePhaseCompleted && isFading) {
+                if (isFadingOut) {
+                    // Fade out завершён - меняем каналы и начинаем fade in
+                    channelsSwapped = !channelsSwapped
+                    _isChannelsSwapped.value = channelsSwapped
+                    android.util.Log.d("BinauralAudioEngine", "Channels swapped after fade: $channelsSwapped")
+                    
+                    isFadingOut = false
+                    fadeStartSample = totalSamplesGenerated
+                } else {
+                    // Fade in завершён
+                    isFading = false
+                    android.util.Log.d("BinauralAudioEngine", "Fade completed")
+                }
+            }
             
             // Блокирующая запись в AudioTrack - write() блокирует пока данные не будут
             // записаны в буфер, поэтому НЕ нужен delay() - это и вызывало спайки!
@@ -357,14 +412,21 @@ class BinauralAudioEngine @Inject constructor(
         android.util.Log.d("BinauralAudioEngine", "generateAudio() loop ended")
     }
 
+    /**
+     * Результат генерации буфера
+     */
+    private data class FadeResult(
+        val fadePhaseCompleted: Boolean // true если fade out/in фаза завершена
+    )
+    
     private fun generateBuffer(
         buffer: ShortArray,
         carrierFreq: Double,
         beatFreq: Double,
-        samplesPerChannel: Int
-    ) {
-        val config = _currentConfig.value
-        
+        samplesPerChannel: Int,
+        fadeDurationSamples: Int,
+        config: BinauralConfig
+    ): FadeResult {
         // Симметричное распределение частот вокруг несущей: carrier ± beat/2
         val leftFreq = carrierFreq - beatFreq / 2.0
         val rightFreq = carrierFreq + beatFreq / 2.0
@@ -378,10 +440,58 @@ class BinauralAudioEngine @Inject constructor(
         val leftOmega = 2.0 * PI * leftFreq / sampleRate
         val rightOmega = 2.0 * PI * rightFreq / sampleRate
         
-        // Определяем, нужно ли поменять каналы местами
-        val swapChannels = config.channelSwapEnabled && channelsSwapped
+        // Определяем, нужно ли поменять каналы местами в начале буфера
+        val swapChannelsAtStart = config.channelSwapEnabled && channelsSwapped
+        
+        // Флаг для отслеживания завершения фазы fade
+        var fadePhaseCompleted = false
+        
+        // Точка (в сэмплах) где происходит переключение каналов
+        var swapAtSample = -1L
         
         for (i in 0 until samplesPerChannel) {
+            // Номер текущего сэмпла в общем потоке
+            val currentSample = totalSamplesGenerated + i
+            
+            // Вычисляем fade multiplier для каждого сэмпла
+            var fadeMultiplier = 1.0
+            
+            if (isFading) {
+                val elapsedSamples = currentSample - fadeStartSample
+                val progress = elapsedSamples.toDouble() / fadeDurationSamples
+                
+                if (progress >= 1.0) {
+                    // Fade завершён
+                    if (isFadingOut) {
+                        // Fade out завершён - находимся в тишине перед fade in
+                        fadeMultiplier = 0.0
+                        // Запоминаем точку переключения каналов
+                        if (swapAtSample < 0) {
+                            swapAtSample = currentSample
+                            fadePhaseCompleted = true
+                        }
+                    } else {
+                        // Fade in завершён
+                        fadeMultiplier = 1.0
+                        if (!fadePhaseCompleted) {
+                            fadePhaseCompleted = true
+                        }
+                    }
+                } else if (progress >= 0.0) {
+                    // Fade в процессе (0.0 <= progress < 1.0)
+                    if (isFadingOut) {
+                        // Fade out: 1.0 -> 0.0 (плавное затухание)
+                        fadeMultiplier = 1.0 - progress
+                    } else {
+                        // Fade in: 0.0 -> 1.0 (плавное нарастание)
+                        fadeMultiplier = progress
+                    }
+                } else {
+                    // progress < 0 - ещё не началось (не должно происходить при корректной логике)
+                    fadeMultiplier = if (isFadingOut) 1.0 else 0.0
+                }
+            }
+            
             // Левый канал - непрерывная фаза
             val leftSample = sin(leftPhase)
             leftPhase += leftOmega
@@ -392,15 +502,23 @@ class BinauralAudioEngine @Inject constructor(
             rightPhase += rightOmega
             if (rightPhase > 2.0 * PI) rightPhase -= 2.0 * PI
             
-            // Базовая амплитуда
-            val baseAmplitude = 0.5 * Short.MAX_VALUE
+            // Базовая амплитуда с учетом fade
+            val baseAmplitude = 0.5 * Short.MAX_VALUE * fadeMultiplier
             
             // Применяем нормализацию громкости
             val leftAmp = baseAmplitude * leftAmplitude
             val rightAmp = baseAmplitude * rightAmplitude
             
+            // Определяем, нужно ли поменять каналы для этого сэмпла
+            // После точки переключения (swapAtSample) каналы меняются местами
+            val swapForSample = if (isFadingOut && swapAtSample >= 0 && currentSample >= swapAtSample) {
+                !swapChannelsAtStart
+            } else {
+                swapChannelsAtStart
+            }
+            
             // Генерируем сэмплы с учетом перестановки каналов
-            if (swapChannels) {
+            if (swapForSample) {
                 // При перестановке левый и правый каналы меняются местами
                 buffer[i * 2] = (rightSample * rightAmp).toInt().toShort()
                 buffer[i * 2 + 1] = (leftSample * leftAmp).toInt().toShort()
@@ -409,6 +527,8 @@ class BinauralAudioEngine @Inject constructor(
                 buffer[i * 2 + 1] = (rightSample * rightAmp).toInt().toShort()
             }
         }
+        
+        return FadeResult(fadePhaseCompleted = fadePhaseCompleted)
     }
     
     /**

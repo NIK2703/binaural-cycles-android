@@ -7,10 +7,12 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.Serializable
@@ -50,6 +52,27 @@ data class SerializableFrequencyCurve(
 )
 
 /**
+ * Сериализуемый пресет для хранения
+ */
+@Serializable
+data class SerializablePreset(
+    val id: String,
+    val name: String,
+    val curve: SerializableFrequencyCurve,
+    val createdAt: Long,
+    val updatedAt: Long
+)
+
+/**
+ * Сериализуемый список пресетов
+ */
+@Serializable
+data class SerializablePresetList(
+    val presets: List<SerializablePreset>,
+    val activePresetId: String? = null
+)
+
+/**
  * Репозиторий для хранения настроек бинауральных ритмов
  */
 @Singleton
@@ -62,11 +85,16 @@ class BinauralPreferencesRepository @Inject constructor(
         // Настройки перестановки каналов
         private val CHANNEL_SWAP_ENABLED_KEY = booleanPreferencesKey("channel_swap_enabled")
         private val CHANNEL_SWAP_INTERVAL_KEY = intPreferencesKey("channel_swap_interval")
+        private val CHANNEL_SWAP_FADE_ENABLED_KEY = booleanPreferencesKey("channel_swap_fade_enabled")
+        private val CHANNEL_SWAP_FADE_DURATION_KEY = intPreferencesKey("channel_swap_fade_duration")
         // Настройки нормализации громкости
         private val VOLUME_NORMALIZATION_ENABLED_KEY = booleanPreferencesKey("volume_normalization_enabled")
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
         // Частота дискретизации
         private val SAMPLE_RATE_KEY = intPreferencesKey("sample_rate")
+        // Пресеты
+        private val PRESETS_KEY = stringPreferencesKey("presets")
+        private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
     }
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -156,11 +184,35 @@ class BinauralPreferencesRepository @Inject constructor(
         }
     }
     
+    fun getChannelSwapFadeEnabled(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true // включено по умолчанию
+        }
+    }
+    
+    suspend fun saveChannelSwapFadeEnabled(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] = enabled
+        }
+    }
+    
+    fun getChannelSwapFadeDuration(): Flow<Int> {
+        return dataStore.data.map { preferences ->
+            preferences[CHANNEL_SWAP_FADE_DURATION_KEY] ?: 1000 // 1 секунда по умолчанию
+        }
+    }
+    
+    suspend fun saveChannelSwapFadeDuration(durationMs: Int) {
+        dataStore.edit { preferences ->
+            preferences[CHANNEL_SWAP_FADE_DURATION_KEY] = durationMs
+        }
+    }
+    
     // Методы для нормализации громкости
     
     fun getVolumeNormalizationEnabled(): Flow<Boolean> {
         return dataStore.data.map { preferences ->
-            preferences[VOLUME_NORMALIZATION_ENABLED_KEY] ?: false
+            preferences[VOLUME_NORMALIZATION_ENABLED_KEY] ?: true  // Включено по умолчанию
         }
     }
     
@@ -193,6 +245,141 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveSampleRate(rate: Int) {
         dataStore.edit { preferences ->
             preferences[SAMPLE_RATE_KEY] = rate
+        }
+    }
+    
+    // Методы для работы с пресетами
+    
+    /**
+     * Получить список всех пресетов
+     */
+    fun getPresets(): Flow<List<BinauralPreset>> {
+        return dataStore.data.map { preferences ->
+            preferences[PRESETS_KEY]?.let { jsonString ->
+                deserializePresets(jsonString)
+            } ?: BinauralPreset.defaultPresets()
+        }
+    }
+    
+    /**
+     * Сохранить список пресетов
+     */
+    suspend fun savePresets(presets: List<BinauralPreset>) {
+        dataStore.edit { preferences ->
+            preferences[PRESETS_KEY] = serializePresets(presets)
+        }
+    }
+    
+    /**
+     * Получить ID активного пресета
+     */
+    fun getActivePresetId(): Flow<String?> {
+        return dataStore.data.map { preferences ->
+            preferences[ACTIVE_PRESET_ID_KEY]
+        }
+    }
+    
+    /**
+     * Сохранить ID активного пресета
+     */
+    suspend fun saveActivePresetId(id: String?) {
+        dataStore.edit { preferences ->
+            if (id != null) {
+                preferences[ACTIVE_PRESET_ID_KEY] = id
+            } else {
+                preferences.remove(ACTIVE_PRESET_ID_KEY)
+            }
+        }
+    }
+    
+    /**
+     * Добавить новый пресет
+     */
+    suspend fun addPreset(preset: BinauralPreset) {
+        val currentPresets = getPresets().map { it.toMutableList() }.first()
+        currentPresets.add(preset)
+        savePresets(currentPresets)
+    }
+    
+    /**
+     * Обновить пресет
+     */
+    suspend fun updatePreset(preset: BinauralPreset) {
+        val currentPresets = getPresets().map { it.toMutableList() }.first()
+        val index = currentPresets.indexOfFirst { it.id == preset.id }
+        if (index >= 0) {
+            currentPresets[index] = preset
+            savePresets(currentPresets)
+        }
+    }
+    
+    /**
+     * Удалить пресет
+     */
+    suspend fun deletePreset(presetId: String) {
+        val currentPresets = getPresets().map { it.toMutableList() }.first()
+        currentPresets.removeAll { it.id == presetId }
+        savePresets(currentPresets)
+    }
+    
+    private fun serializePresets(presets: List<BinauralPreset>): String {
+        val serializable = presets.map { preset ->
+            SerializablePreset(
+                id = preset.id,
+                name = preset.name,
+                curve = SerializableFrequencyCurve(
+                    points = preset.frequencyCurve.points.map { point ->
+                        SerializableFrequencyPoint(
+                            hour = point.time.hour,
+                            minute = point.time.minute,
+                            carrierFrequency = point.carrierFrequency,
+                            beatFrequency = point.beatFrequency
+                        )
+                    },
+                    carrierRange = SerializableFrequencyRange(
+                        preset.frequencyCurve.carrierRange.min,
+                        preset.frequencyCurve.carrierRange.max
+                    ),
+                    beatRange = SerializableFrequencyRange(
+                        preset.frequencyCurve.beatRange.min,
+                        preset.frequencyCurve.beatRange.max
+                    )
+                ),
+                createdAt = preset.createdAt,
+                updatedAt = preset.updatedAt
+            )
+        }
+        return json.encodeToString(serializable)
+    }
+    
+    private fun deserializePresets(jsonString: String): List<BinauralPreset> {
+        return try {
+            val serializableList = json.decodeFromString<List<SerializablePreset>>(jsonString)
+            serializableList.map { serializable ->
+                BinauralPreset(
+                    id = serializable.id,
+                    name = serializable.name,
+                    frequencyCurve = FrequencyCurve(
+                        points = serializable.curve.points.map { point ->
+                            FrequencyPoint(
+                                time = LocalTime(point.hour, point.minute),
+                                carrierFrequency = point.carrierFrequency,
+                                beatFrequency = point.beatFrequency
+                            )
+                        },
+                        carrierRange = serializable.curve.carrierRange?.let {
+                            FrequencyRange(it.min, it.max)
+                        } ?: FrequencyRange.DEFAULT_CARRIER,
+                        beatRange = serializable.curve.beatRange?.let {
+                            FrequencyRange(it.min, it.max)
+                        } ?: FrequencyRange.DEFAULT_BEAT
+                    ),
+                    createdAt = serializable.createdAt,
+                    updatedAt = serializable.updatedAt
+                )
+            }
+        } catch (e: Exception) {
+            BinauralPreset.defaultPresets()
         }
     }
 }
