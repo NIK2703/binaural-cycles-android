@@ -13,23 +13,27 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
-import android.support.v4.media.session.MediaSessionCompat
+import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import com.binaural.beats.MainActivity
 import com.binaural.beats.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
+import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
-import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import javax.inject.Inject
+import kotlinx.coroutines.flow.collectLatest
 
-@AndroidEntryPoint
+/**
+ * Сервис для воспроизведения бинауральных ритмов в фоновом режиме.
+ * Создаёт и управляет BinauralAudioEngine, который работает в отдельном потоке.
+ */
 class BinauralPlaybackService : Service() {
 
     companion object {
@@ -40,6 +44,7 @@ class BinauralPlaybackService : Service() {
         const val ACTION_STOP = "com.binaural.beats.action.STOP"
         const val ACTION_TOGGLE = "com.binaural.beats.action.TOGGLE"
         
+        // Статические StateFlows для доступа из ViewModel без привязки к сервису
         private val _isPlaying = MutableStateFlow(false)
         val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
         
@@ -51,13 +56,23 @@ class BinauralPlaybackService : Service() {
         
         private val _isChannelsSwapped = MutableStateFlow(false)
         val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
+        
+        private val _elapsedSeconds = MutableStateFlow(0)
+        val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
     }
 
-    @Inject
-    lateinit var audioEngine: BinauralAudioEngine
+    // Аудио-движок создаётся только в сервисе
+    private var audioEngine: BinauralAudioEngine? = null
     
     private val binder = LocalBinder()
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    
+    // Handler для асинхронного выполнения команд из UI потока
+    private val serviceHandler by lazy { Handler(Looper.getMainLooper()) }
+    
+    // Debounce для обновления notification
+    private var notificationUpdateJob: Job? = null
+    private val notificationUpdateDelay = 1000L // 1 секунда debounce
     
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -67,12 +82,14 @@ class BinauralPlaybackService : Service() {
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasAudioFocus = true
-                audioEngine.setVolume(audioEngine.currentConfig.value.volume)
+                audioEngine?.setVolume(audioEngine?.currentConfig?.value?.volume ?: 0.7f)
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 hasAudioFocus = false
-                audioEngine.stop()
-                updateNotification()
+                audioEngine?.stop()
+                // Обновляем notification только при изменении состояния
+                _isPlaying.value = false
+                updateNotificationImmediately()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 // Временная потеря - можно приостановить
@@ -89,12 +106,17 @@ class BinauralPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        android.util.Log.d("BinauralPlaybackService", "onCreate()")
+        
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         createNotificationChannel()
-        audioEngine.initialize(serviceScope)
+        
+        // Создаём аудио-движок в сервисе
+        audioEngine = BinauralAudioEngine(applicationContext).apply {
+            initialize()
+        }
         
         // Сразу запускаем foreground с начальным уведомлением
-        // Это обязательно для Android 8+ при использовании startForegroundService()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -105,34 +127,37 @@ class BinauralPlaybackService : Service() {
             startForeground(NOTIFICATION_ID, createNotification())
         }
         
-        // Наблюдаем за состоянием воспроизведения
+        // Наблюдаем за состоянием воспроизведения - обновляем notification только при изменении isPlaying
         serviceScope.launch {
-            audioEngine.isPlaying.collect { playing ->
+            audioEngine?.isPlaying?.collectLatest { playing ->
                 _isPlaying.value = playing
-                if (playing) {
-                    updateNotification()
-                } else {
-                    updateNotification()
-                }
+                // Обновляем notification только при изменении состояния воспроизведения
+                updateNotificationImmediately()
             }
         }
         
+        // Частоты обновляем без notification (debounce для UI)
         serviceScope.launch {
-            audioEngine.currentBeatFrequency.collect { freq ->
+            audioEngine?.currentBeatFrequency?.collectLatest { freq ->
                 _currentBeatFrequency.value = freq
-                updateNotification()
             }
         }
         
         serviceScope.launch {
-            audioEngine.currentCarrierFrequency.collect { freq ->
+            audioEngine?.currentCarrierFrequency?.collectLatest { freq ->
                 _currentCarrierFrequency.value = freq
             }
         }
         
         serviceScope.launch {
-            audioEngine.isChannelsSwapped.collect { swapped ->
+            audioEngine?.isChannelsSwapped?.collectLatest { swapped ->
                 _isChannelsSwapped.value = swapped
+            }
+        }
+        
+        serviceScope.launch {
+            audioEngine?.elapsedSeconds?.collectLatest { elapsed ->
+                _elapsedSeconds.value = elapsed
             }
         }
     }
@@ -140,6 +165,8 @@ class BinauralPlaybackService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        android.util.Log.d("BinauralPlaybackService", "onStartCommand: ${intent?.action}")
+        
         when (intent?.action) {
             ACTION_START -> {
                 startPlayback()
@@ -218,9 +245,16 @@ class BinauralPlaybackService : Service() {
             .build()
     }
 
-    private fun updateNotification() {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, createNotification())
+    /**
+     * Немедленное обновление notification (только для изменения состояния воспроизведения)
+     */
+    private fun updateNotificationImmediately() {
+        try {
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.notify(NOTIFICATION_ID, createNotification())
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralPlaybackService", "Failed to update notification", e)
+        }
     }
 
     fun startPlayback() {
@@ -243,11 +277,11 @@ class BinauralPlaybackService : Service() {
             startForeground(NOTIFICATION_ID, createNotification())
         }
         
-        audioEngine.play()
+        audioEngine?.play()
     }
 
     fun stopPlayback() {
-        audioEngine.stop()
+        audioEngine?.stop()
         abandonAudioFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -290,24 +324,69 @@ class BinauralPlaybackService : Service() {
         hasAudioFocus = false
     }
 
-    // Методы для управления аудио
+    // ============= Методы для управления аудио (асинхронные, вызываются из ViewModel) =============
+    
     fun updateConfig(config: BinauralConfig) {
-        audioEngine.updateConfig(config)
+        audioEngine?.updateConfig(config)
     }
 
     fun updateFrequencyCurve(curve: FrequencyCurve) {
-        audioEngine.updateFrequencyCurve(curve)
+        audioEngine?.updateFrequencyCurve(curve)
     }
 
     fun setVolume(volume: Float) {
-        audioEngine.setVolume(volume)
+        audioEngine?.setVolume(volume)
+    }
+    
+    fun setSampleRate(rate: SampleRate) {
+        audioEngine?.setSampleRate(rate)
+    }
+    
+    fun getSampleRate(): SampleRate {
+        return audioEngine?.getSampleRate() ?: SampleRate.MEDIUM
+    }
+    
+    fun setFrequencyUpdateInterval(intervalMs: Int) {
+        audioEngine?.setFrequencyUpdateInterval(intervalMs)
+    }
+    
+    fun getFrequencyUpdateInterval(): Int {
+        return audioEngine?.getFrequencyUpdateInterval() ?: 100
+    }
+    
+    fun togglePlayback() {
+        if (_isPlaying.value) {
+            audioEngine?.stop()
+        } else {
+            audioEngine?.play()
+        }
+    }
+    
+    fun play() {
+        audioEngine?.play()
+    }
+    
+    fun stop() {
+        audioEngine?.stop()
     }
 
     override fun onDestroy() {
-        audioEngine.release()
+        android.util.Log.d("BinauralPlaybackService", "onDestroy()")
+        
+        notificationUpdateJob?.cancel()
+        
+        audioEngine?.release()
+        audioEngine = null
+        
         abandonAudioFocus()
         serviceScope.cancel()
+        
         _isPlaying.value = false
+        _currentBeatFrequency.value = 0.0
+        _currentCarrierFrequency.value = 0.0
+        _isChannelsSwapped.value = false
+        _elapsedSeconds.value = 0
+        
         super.onDestroy()
     }
 }

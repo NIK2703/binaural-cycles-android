@@ -5,7 +5,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -14,7 +16,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -61,13 +65,8 @@ fun MiniFrequencyGraph(
         frequencyCurve.points.sortedBy { it.time.toSecondOfDay() }
     }
     
-    // Вычисляем диапазон несущей частоты на основе точек
-    val carrierRange = remember(frequencyCurve.points) {
-        val carriers = frequencyCurve.points.map { it.carrierFrequency }
-        val minCarrier = (carriers.minOrNull() ?: 100.0) - 20.0
-        val maxCarrier = (carriers.maxOrNull() ?: 300.0) + 20.0
-        FrequencyRange(minCarrier.coerceAtLeast(20.0), maxCarrier)
-    }
+    // Используем диапазон из настроек графика
+    val carrierRange = frequencyCurve.carrierRange
     
     // Вычисляем максимальную частоту биений
     val maxBeat = remember(frequencyCurve.points) {
@@ -76,16 +75,6 @@ fun MiniFrequencyGraph(
     
     Box(
         modifier = modifier
-            .background(
-                MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
-                RoundedCornerShape(4.dp)
-            )
-            .border(
-                0.5.dp,
-                primaryColor.copy(alpha = 0.2f),
-                RoundedCornerShape(4.dp)
-            )
-            .padding(4.dp)
     ) {
         BoxWithConstraints(
             modifier = Modifier.fillMaxSize()
@@ -97,6 +86,7 @@ fun MiniFrequencyGraph(
                 MiniGraphParams(widthPx, heightPx, carrierRange, maxBeat)
             }
             
+            // График на весь размер
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -109,6 +99,30 @@ fun MiniFrequencyGraph(
                         )
                     }
             )
+            
+            // Ось Y - мин/макс частоты (справа поверх графика)
+            Column(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .padding(top = 4.dp, bottom = 4.dp, end = 6.dp),
+                verticalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "%.0f".format(carrierRange.max),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    color = primaryColor
+                )
+                Text(
+                    text = "%.0f".format(carrierRange.min),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp,
+                    color = primaryColor
+                )
+            }
         }
     }
 }

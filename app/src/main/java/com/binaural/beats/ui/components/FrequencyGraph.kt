@@ -61,9 +61,10 @@ private data class PointDragState(
 
 /**
  * Вычисляет максимальную частоту биений для заданной несущей частоты
+ * Формула: carrierFrequency * 2 - 20 (гарантирует, что обе боковые частоты останутся в слышимом диапазоне >= 20 Гц)
  */
 fun maxBeatForCarrier(carrierFrequency: Double): Double {
-    return 2.0 * (carrierFrequency - MIN_AUDIBLE_FREQUENCY).coerceAtLeast(0.0)
+    return (carrierFrequency * 2 - MIN_AUDIBLE_FREQUENCY).coerceAtLeast(0.0)
 }
 
 /**
@@ -640,40 +641,65 @@ private fun interpolateBetweenPoints(
             frequencySelector(leftPoint) + ratio * (frequencySelector(rightPoint) - frequencySelector(leftPoint))
         }
         InterpolationType.CUBIC_SPLINE -> {
-            // Для Catmull-Rom нужны 4 точки
-            val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector)
+            // Для Catmull-Rom нужны 4 точки с учётом перехода через полночь
+            val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
             val p1 = frequencySelector(leftPoint)
             val p2 = frequencySelector(rightPoint)
-            val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector)
+            val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
             
-            catmullRomInterpolate(p0, p1, p2, p3, ratio)
+            val result = catmullRomInterpolate(p0, p1, p2, p3, ratio)
+            
+            // Ограничиваем результат минимальным значением 0 для частоты биений
+            result.coerceAtLeast(0.0)
         }
     }
 }
 
 /**
- * Получить соседнюю точку с учётом цикличности графика
+ * Получить соседнюю точку с учётом цикличности графика и перехода через полночь
+ * @param isWrapping true, если текущий интервал переходит через полночь
  */
 private fun getNeighborPoint(
     points: List<FrequencyPoint>,
     currentIndex: Int,
     offset: Int,
-    frequencySelector: (FrequencyPoint) -> Double
+    frequencySelector: (FrequencyPoint) -> Double,
+    isWrapping: Boolean = false
 ): Double {
-    var neighborIndex = currentIndex + offset
+    val neighborIndex = currentIndex + offset
     
-    // Циклическая навигация
-    when {
-        neighborIndex < 0 -> neighborIndex = points.size + neighborIndex
-        neighborIndex >= points.size -> neighborIndex = neighborIndex - points.size
+    // Обработка границ массива
+    return when {
+        neighborIndex < 0 -> {
+            // Если идём влево от первой точки
+            if (isWrapping) {
+                // При переходе через полночь берём последнюю точку
+                frequencySelector(points.last())
+            } else {
+                // Иначе берём первую точку (clamp)
+                frequencySelector(points.first())
+            }
+        }
+        neighborIndex >= points.size -> {
+            // Если идём вправо от последней точки
+            if (isWrapping) {
+                // При переходе через полночь берём первую точку
+                frequencySelector(points.first())
+            } else {
+                // Иначе берём последнюю точку (clamp)
+                frequencySelector(points.last())
+            }
+        }
+        else -> {
+            frequencySelector(points[neighborIndex])
+        }
     }
-    
-    return frequencySelector(points[neighborIndex])
 }
 
 /**
  * Интерполяция Catmull-Rom
  * Использует 4 точки для создания плавной кривой
+ * Важно: может давать значения за пределами [p1, p2], поэтому требуется clamp
  */
 private fun catmullRomInterpolate(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
     val t2 = t * t

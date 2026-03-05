@@ -1,9 +1,13 @@
 package com.binaural.beats.viewmodel
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.binaural.core.audio.AudioConstants
-import com.binaural.core.audio.engine.BinauralAudioEngine
+import com.binaural.beats.service.BinauralPlaybackService
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.BinauralPreset
@@ -13,6 +17,7 @@ import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,21 +54,57 @@ data class BinauralUiState(
     // Частота дискретизации
     val sampleRate: SampleRate = SampleRate.MEDIUM,
     // Интервал обновления частот (мс)
-    val frequencyUpdateIntervalMs: Int = 100
+    val frequencyUpdateIntervalMs: Int = 100,
+    // Флаг подключения к сервису
+    val isServiceConnected: Boolean = false
 )
 
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
-    private val audioEngine: BinauralAudioEngine,
+    @ApplicationContext private val context: Context,
     private val preferencesRepository: BinauralPreferencesRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
+    
+    // Ссылка на сервис (может быть null если сервис не привязан)
+    private var playbackService: BinauralPlaybackService? = null
+    
+    // ServiceConnection для привязки к сервису
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? BinauralPlaybackService.LocalBinder
+            playbackService = binder?.getService()
+            _uiState.update { it.copy(isServiceConnected = true) }
+            android.util.Log.d("BinauralViewModel", "Service connected")
+            
+            // Наблюдаем за состоянием воспроизведения из сервиса
+            observeServiceState()
+        }
+        
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playbackService = null
+            _uiState.update { it.copy(isServiceConnected = false) }
+            android.util.Log.d("BinauralViewModel", "Service disconnected")
+        }
+    }
 
     init {
+        bindToService()
         loadPreferences()
-        observeAudioState()
+        observePlaybackState()
+    }
+    
+    private fun bindToService() {
+        val intent = Intent(context, BinauralPlaybackService::class.java)
+        context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+    
+    // Наблюдение за состоянием сервиса перенесено в observePlaybackState()
+    // для избежания дублирования
+    private fun observeServiceState() {
+        // Наблюдение уже настроено в observePlaybackState()
     }
 
     private fun loadPreferences() {
@@ -88,7 +129,7 @@ class BinauralViewModel @Inject constructor(
                                 beatRange = activePreset.frequencyCurve.beatRange
                             )
                         }
-                        audioEngine.updateFrequencyCurve(activePreset.frequencyCurve)
+                        playbackService?.updateFrequencyCurve(activePreset.frequencyCurve)
                     }
                 }
             }
@@ -141,36 +182,37 @@ class BinauralViewModel @Inject constructor(
                     else -> SampleRate.MEDIUM
                 }
                 _uiState.update { it.copy(sampleRate = sampleRate) }
-                audioEngine.setSampleRate(sampleRate)
+                playbackService?.setSampleRate(sampleRate)
             }
         }
         // Загружаем интервал обновления частот
         viewModelScope.launch {
             preferencesRepository.getFrequencyUpdateInterval().collect { interval ->
                 _uiState.update { it.copy(frequencyUpdateIntervalMs = interval) }
-                audioEngine.setFrequencyUpdateInterval(interval)
+                playbackService?.setFrequencyUpdateInterval(interval)
             }
         }
     }
 
-    private fun observeAudioState() {
+    private fun observePlaybackState() {
+        // Наблюдаем за статическими StateFlows сервиса
         viewModelScope.launch {
-            audioEngine.isPlaying.collect { isPlaying ->
+            BinauralPlaybackService.isPlaying.collect { isPlaying ->
                 _uiState.update { it.copy(isPlaying = isPlaying) }
             }
         }
         viewModelScope.launch {
-            audioEngine.currentBeatFrequency.collect { freq ->
+            BinauralPlaybackService.currentBeatFrequency.collect { freq ->
                 _uiState.update { it.copy(currentBeatFrequency = freq) }
             }
         }
         viewModelScope.launch {
-            audioEngine.currentCarrierFrequency.collect { freq ->
+            BinauralPlaybackService.currentCarrierFrequency.collect { freq ->
                 _uiState.update { it.copy(currentCarrierFrequency = freq) }
             }
         }
         viewModelScope.launch {
-            audioEngine.isChannelsSwapped.collect { swapped ->
+            BinauralPlaybackService.isChannelsSwapped.collect { swapped ->
                 _uiState.update { it.copy(isChannelsSwapped = swapped) }
             }
         }
@@ -186,7 +228,7 @@ class BinauralViewModel @Inject constructor(
         
         // Если уже воспроизводится этот пресет - останавливаем
         if (_uiState.value.activePreset?.id == presetId && _uiState.value.isPlaying) {
-            audioEngine.stop()
+            playbackService?.stop()
             return
         }
         
@@ -199,14 +241,32 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
-        // Обновляем аудио движок
-        audioEngine.updateFrequencyCurve(preset.frequencyCurve)
-        audioEngine.play()
+        // Обновляем конфиг аудио движка (включая нормализацию и другие настройки)
+        updateAudioConfigWithPreset(preset)
+        playbackService?.play()
         
         // Сохраняем активный пресет
         viewModelScope.launch {
             preferencesRepository.saveActivePresetId(presetId)
         }
+    }
+    
+    /**
+     * Обновить конфиг аудио с учётом активного пресета
+     */
+    private fun updateAudioConfigWithPreset(preset: BinauralPreset) {
+        val state = _uiState.value
+        val config = BinauralConfig(
+            frequencyCurve = preset.frequencyCurve,
+            volume = state.volume,
+            channelSwapEnabled = state.channelSwapEnabled,
+            channelSwapIntervalSeconds = state.channelSwapIntervalSeconds,
+            channelSwapFadeEnabled = state.channelSwapFadeEnabled,
+            channelSwapFadeDurationMs = state.channelSwapFadeDurationMs,
+            volumeNormalizationEnabled = state.volumeNormalizationEnabled,
+            volumeNormalizationStrength = state.volumeNormalizationStrength
+        )
+        playbackService?.updateConfig(config)
     }
     
     /**
@@ -221,7 +281,7 @@ class BinauralViewModel @Inject constructor(
                 beatRange = preset.frequencyCurve.beatRange
             )
         }
-        audioEngine.updateFrequencyCurve(preset.frequencyCurve)
+        playbackService?.updateFrequencyCurve(preset.frequencyCurve)
     }
     
     /**
@@ -237,7 +297,7 @@ class BinauralViewModel @Inject constructor(
                 selectedPointIndex = null
             )
         }
-        audioEngine.updateFrequencyCurve(defaultCurve)
+        playbackService?.updateFrequencyCurve(defaultCurve)
     }
     
     /**
@@ -281,7 +341,7 @@ class BinauralViewModel @Inject constructor(
     fun deletePreset(presetId: String) {
         // Если удаляем активный пресет - останавливаем воспроизведение
         if (_uiState.value.activePreset?.id == presetId) {
-            audioEngine.stop()
+            playbackService?.stop()
             _uiState.update { it.copy(activePreset = null) }
             viewModelScope.launch {
                 preferencesRepository.saveActivePresetId(null)
@@ -297,15 +357,16 @@ class BinauralViewModel @Inject constructor(
 
     fun togglePlayback() {
         if (_uiState.value.isPlaying) {
-            audioEngine.stop()
+            playbackService?.stop()
         } else {
-            audioEngine.play()
+            playbackService?.play()
         }
     }
 
     fun setVolume(volume: Float) {
         _uiState.update { it.copy(volume = volume) }
-        audioEngine.setVolume(volume)
+        playbackService?.setVolume(volume)
+        // Сохранение в preferences не требуется - громкость не сохраняется
     }
 
     fun selectPoint(index: Int) {
@@ -316,19 +377,9 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(selectedPointIndex = null) }
     }
 
-    /**
-     * Вычисляет максимально допустимую частоту биений для данной несущей.
-     */
-    private fun maxBeatForCarrier(carrierFreq: Double): Double {
-        return 2.0 * maxOf(0.0, carrierFreq - AudioConstants.MIN_AUDIBLE_FREQUENCY)
-    }
-    
-    /**
-     * Вычисляет минимальную несущую частоту для данной частоты биений.
-     */
-    private fun minCarrierForBeat(beatFreq: Double): Double {
-        return beatFreq / 2.0 + AudioConstants.MIN_AUDIBLE_FREQUENCY
-    }
+    // Методы maxBeatForCarrier и minCarrierForBeat удалены.
+    // Ограничение частоты биений по несущей частоте не требуется -
+    // кубическая интерполяция может давать значения превышающие точки.
 
     // ============= Методы для редактирования точек (редактируемая кривая) =============
     
@@ -340,16 +391,14 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
+            // Ограничиваем только по диапазону несущей частоты
+            // Частота биений не зависит от несущей - кубическая интерполяция может превышать значения точек
             val newCarrier = curve.carrierRange.clamp(frequency)
-            
-            val maxBeat = maxBeatForCarrier(newCarrier)
-            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, curve.beatRange.max)
-            val clampedBeat = curve.beatRange.clamp(newBeat.coerceAtLeast(curve.beatRange.min))
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = newCarrier,
-                beatFrequency = clampedBeat
+                beatFrequency = oldPoint.beatFrequency
             )
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
@@ -363,15 +412,14 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            val newBeat = curve.beatRange.clamp(frequency)
-            
-            val minCarrier = minCarrierForBeat(newBeat)
-            val newCarrier = maxOf(oldPoint.carrierFrequency, minCarrier, curve.carrierRange.min)
-            val clampedCarrier = curve.carrierRange.clamp(newCarrier.coerceAtMost(curve.carrierRange.max))
+            // Ограничиваем по формуле: несущая * 2 - 20
+            // и минимуму beatRange.min
+            val maxBeat = (oldPoint.carrierFrequency * 2 - 20).coerceAtLeast(1.0)
+            val newBeat = frequency.coerceIn(curve.beatRange.min, maxBeat)
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
-                carrierFrequency = clampedCarrier,
+                carrierFrequency = oldPoint.carrierFrequency,
                 beatFrequency = newBeat
             )
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
@@ -400,16 +448,14 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
+            // Ограничиваем только по диапазону несущей частоты
+            // Частота биений не зависит от несущей - кубическая интерполяция может превышать значения точек
             val clampedCarrier = curve.carrierRange.clamp(newCarrier)
-            
-            val maxBeat = maxBeatForCarrier(clampedCarrier)
-            val newBeat = minOf(oldPoint.beatFrequency, maxBeat, curve.beatRange.max)
-            val clampedBeat = curve.beatRange.clamp(newBeat.coerceAtLeast(curve.beatRange.min))
             
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = clampedCarrier,
-                beatFrequency = clampedBeat
+                beatFrequency = oldPoint.beatFrequency
             )
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
         }
@@ -419,11 +465,16 @@ class BinauralViewModel @Inject constructor(
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         
+        val clampedCarrier = curve.carrierRange.clamp(carrierFrequency)
+        // Ограничиваем частоту биений по формуле: несущая * 2 - 20
+        val maxBeat = (clampedCarrier * 2 - 20).coerceAtLeast(1.0)
+        val clampedBeat = beatFrequency.coerceIn(curve.beatRange.min, maxBeat)
+        
         val points = curve.points.toMutableList()
         points.add(FrequencyPoint(
             time = time,
-            carrierFrequency = curve.carrierRange.clamp(carrierFrequency),
-            beatFrequency = curve.beatRange.clamp(beatFrequency)
+            carrierFrequency = clampedCarrier,
+            beatFrequency = clampedBeat
         ))
         updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange, curve.interpolationType)
     }
@@ -463,7 +514,7 @@ class BinauralViewModel @Inject constructor(
         try {
             val newCurve = FrequencyCurve(points, carrierRange, beatRange, interpolationType)
             _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
-            audioEngine.updateFrequencyCurve(newCurve)
+            playbackService?.updateFrequencyCurve(newCurve)
         } catch (e: IllegalArgumentException) {
             // Игнорируем ошибки валидации (например, меньше 2 точек)
         }
@@ -483,7 +534,7 @@ class BinauralViewModel @Inject constructor(
             interpolationType = type
         )
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
-        audioEngine.updateFrequencyCurve(newCurve)
+        playbackService?.updateFrequencyCurve(newCurve)
     }
 
     // ============= Методы для управления перестановкой каналов =============
@@ -545,7 +596,7 @@ class BinauralViewModel @Inject constructor(
     
     fun setSampleRate(rate: SampleRate) {
         _uiState.update { it.copy(sampleRate = rate) }
-        audioEngine.setSampleRate(rate)
+        playbackService?.setSampleRate(rate)
         viewModelScope.launch {
             preferencesRepository.saveSampleRate(rate.value)
         }
@@ -556,7 +607,7 @@ class BinauralViewModel @Inject constructor(
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         val clampedInterval = intervalMs.coerceIn(100, 5000)
         _uiState.update { it.copy(frequencyUpdateIntervalMs = clampedInterval) }
-        audioEngine.setFrequencyUpdateInterval(clampedInterval)
+        playbackService?.setFrequencyUpdateInterval(clampedInterval)
         viewModelScope.launch {
             preferencesRepository.saveFrequencyUpdateInterval(clampedInterval)
         }
@@ -574,11 +625,15 @@ class BinauralViewModel @Inject constructor(
             volumeNormalizationEnabled = state.volumeNormalizationEnabled,
             volumeNormalizationStrength = state.volumeNormalizationStrength
         )
-        audioEngine.updateConfig(config)
+        playbackService?.updateConfig(config)
     }
 
     override fun onCleared() {
         super.onCleared()
-        audioEngine.release()
+        try {
+            context.unbindService(serviceConnection)
+        } catch (e: Exception) {
+            // Сервис уже отвязан
+        }
     }
 }
