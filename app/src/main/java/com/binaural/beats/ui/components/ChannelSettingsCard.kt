@@ -1,6 +1,5 @@
 package com.binaural.beats.ui.components
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -10,9 +9,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.InterpolationType
 
 /**
- * Компактная карточка настроек каналов
+ * Блок настроек с дискретными слайдерами
  */
 @Composable
 fun ChannelSettingsCard(
@@ -27,6 +27,7 @@ fun ChannelSettingsCard(
     frequencyUpdateIntervalMs: Int,
     currentLeftFreq: Double,
     currentRightFreq: Double,
+    interpolationType: InterpolationType,
     onChannelSwapEnabledChange: (Boolean) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeEnabledChange: (Boolean) -> Unit,
@@ -34,216 +35,182 @@ fun ChannelSettingsCard(
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
     onSampleRateChange: (SampleRate) -> Unit,
-    onFrequencyUpdateIntervalChange: (Int) -> Unit
+    onFrequencyUpdateIntervalChange: (Int) -> Unit,
+    onInterpolationTypeChange: (InterpolationType) -> Unit
 ) {
-    var showSwapIntervalDialog by remember { mutableStateOf(false) }
-    var showFadeDurationDialog by remember { mutableStateOf(false) }
     var showSampleRateDialog by remember { mutableStateOf(false) }
-    var showUpdateIntervalDialog by remember { mutableStateOf(false) }
     
-    Card(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        )
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
-            // Заголовок
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    Icons.Default.Settings,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    "Настройки",
-                    style = MaterialTheme.typography.titleSmall
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                
-                // Интервал обновления - компактно
-                AssistChip(
-                    onClick = { showUpdateIntervalDialog = true },
-                    label = { 
-                        Text(
-                            formatUpdateInterval(frequencyUpdateIntervalMs),
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    },
-                    modifier = Modifier.height(24.dp)
-                )
-                
-                Spacer(modifier = Modifier.width(4.dp))
-                
-                // Качество аудио - всегда видно
-                AssistChip(
+        // Интерполяция по точкам
+        ListItem(
+            headlineContent = { Text("Интерполяция по точкам") },
+            supportingContent = { 
+                Text(when (interpolationType) {
+                    InterpolationType.LINEAR -> "Прямые линии между точками"
+                    InterpolationType.CUBIC_SPLINE -> "Плавные кривые Catmull-Rom"
+                })
+            },
+            trailingContent = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.LINEAR,
+                        onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
+                        label = { Text("Линейная") }
+                    )
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.CUBIC_SPLINE,
+                        onClick = { onInterpolationTypeChange(InterpolationType.CUBIC_SPLINE) },
+                        label = { Text("Кубическая") }
+                    )
+                }
+            }
+        )
+        
+        HorizontalDivider()
+        
+        // Интервал обновления частот - слайдер
+        DiscreteSlider(
+            label = "Интервал обновления",
+            value = frequencyUpdateIntervalMs,
+            values = listOf(100, 250, 500, 1000, 2000, 5000),
+            valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
+            onValueChange = onFrequencyUpdateIntervalChange,
+            modifier = Modifier.padding(horizontal = 16.dp)
+        )
+        
+        // Качество аудио
+        ListItem(
+            headlineContent = { Text("Качество аудио") },
+            supportingContent = { 
+                Text(when (sampleRate) {
+                    SampleRate.LOW -> "Низкое (22 kHz) — экономия батареи"
+                    SampleRate.MEDIUM -> "Стандарт (44 kHz)"
+                    SampleRate.HIGH -> "Высокое (48 kHz)"
+                })
+            },
+            trailingContent = {
+                FilledTonalButton(
                     onClick = { showSampleRateDialog = true },
-                    label = { 
-                        Text(
-                            when (sampleRate) {
-                                SampleRate.LOW -> "22kHz"
-                                SampleRate.MEDIUM -> "44kHz"
-                                SampleRate.HIGH -> "48kHz"
-                            },
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    },
-                    modifier = Modifier.height(24.dp)
+                    contentPadding = PaddingValues(horizontal = 12.dp)
+                ) {
+                    Text(when (sampleRate) {
+                        SampleRate.LOW -> "22kHz"
+                        SampleRate.MEDIUM -> "44kHz"
+                        SampleRate.HIGH -> "48kHz"
+                    })
+                }
+            }
+        )
+        
+        HorizontalDivider()
+        
+        // Авто-перестановка каналов
+        ListItem(
+            headlineContent = { Text("Авто-перестановка каналов") },
+            supportingContent = { 
+                Text(if (channelSwapEnabled) "Каналы меняются местами для равномерной нагрузки" else "Выключено")
+            },
+            trailingContent = {
+                Switch(
+                    checked = channelSwapEnabled,
+                    onCheckedChange = onChannelSwapEnabledChange
                 )
             }
+        )
+        
+        // Слайдер интервала перестановки (показываем только когда включено)
+        if (channelSwapEnabled) {
+            DiscreteSlider(
+                label = "Интервал перестановки",
+                value = channelSwapIntervalSeconds,
+                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
+                valueLabel = formatInterval(channelSwapIntervalSeconds),
+                onValueChange = onChannelSwapIntervalChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
             
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            // Перестановка каналов
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.SwapHoriz,
-                        contentDescription = null,
-                        tint = if (channelSwapEnabled) 
-                            MaterialTheme.colorScheme.primary 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Column {
-                        Text(
-                            "Авто-перестановка",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        if (channelSwapEnabled) {
-                            Text(
-                                text = "%s • %s".format(
-                                    formatInterval(channelSwapIntervalSeconds),
-                                    if (isChannelsSwapped) "Л↔П" else "Л-П"
-                                ),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-                
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (channelSwapEnabled) {
-                        TextButton(
-                            onClick = { showSwapIntervalDialog = true },
-                            contentPadding = PaddingValues(horizontal = 4.dp)
-                        ) {
-                            Text(
-                                formatInterval(channelSwapIntervalSeconds),
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
-                    Switch(
-                        checked = channelSwapEnabled,
-                        onCheckedChange = onChannelSwapEnabledChange,
-                        modifier = Modifier.height(24.dp)
-                    )
-                }
-            }
-            
-            // Затухание при смене каналов (показываем только когда включена авто-перестановка)
-            if (channelSwapEnabled) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 22.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "Затухание",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        if (channelSwapFadeEnabled) {
-                            TextButton(
-                                onClick = { showFadeDurationDialog = true },
-                                contentPadding = PaddingValues(horizontal = 4.dp)
-                            ) {
-                                Text(
-                                    formatFadeDuration(channelSwapFadeDurationMs),
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                        }
-                    }
+            // Затухание при смене каналов
+            ListItem(
+                headlineContent = { Text("Плавное затухание") },
+                supportingContent = { 
+                    Text(if (channelSwapFadeEnabled) "Плавный переход при смене каналов" else "Мгновенное переключение")
+                },
+                trailingContent = {
                     Switch(
                         checked = channelSwapFadeEnabled,
-                        onCheckedChange = onChannelSwapFadeEnabledChange,
-                        modifier = Modifier.height(20.dp)
+                        onCheckedChange = onChannelSwapFadeEnabledChange
                     )
                 }
-            }
+            )
             
-            Spacer(modifier = Modifier.height(4.dp))
-            
-            // Нормализация громкости
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Equalizer,
-                        contentDescription = null,
-                        tint = if (volumeNormalizationEnabled) 
-                            MaterialTheme.colorScheme.primary 
-                        else 
-                            MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "Нормализация",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-                Switch(
-                    checked = volumeNormalizationEnabled,
-                    onCheckedChange = onVolumeNormalizationEnabledChange,
-                    modifier = Modifier.height(24.dp)
+            // Слайдер длительности затухания
+            if (channelSwapFadeEnabled) {
+                DiscreteSliderLong(
+                    label = "Время затухания",
+                    value = channelSwapFadeDurationMs,
+                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
+                    valueLabel = formatFadeDurationLabel(channelSwapFadeDurationMs),
+                    onValueChange = onChannelSwapFadeDurationChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
                 )
             }
+        }
+        
+        HorizontalDivider()
+        
+        // Нормализация громкости
+        ListItem(
+            headlineContent = { Text("Нормализация громкости") },
+            supportingContent = { 
+                Text("Компенсация изменений громкости при изменении частоты")
+            },
+            trailingContent = {
+                Switch(
+                    checked = volumeNormalizationEnabled,
+                    onCheckedChange = onVolumeNormalizationEnabledChange
+                )
+            }
+        )
+        
+        // Слайдер силы нормализации
+        if (volumeNormalizationEnabled) {
+            // Локальное состояние для мгновенного отклика UI
+            var localStrength by remember(volumeNormalizationStrength) { 
+                mutableFloatStateOf(volumeNormalizationStrength) 
+            }
             
-            if (volumeNormalizationEnabled) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Сила нормализации",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "${(localStrength * 100).toInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 Slider(
-                    value = volumeNormalizationStrength,
-                    onValueChange = onVolumeNormalizationStrengthChange,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 22.dp),
+                    value = localStrength,
+                    onValueChange = { localStrength = it },
+                    onValueChangeFinished = { 
+                        onVolumeNormalizationStrengthChange(localStrength) 
+                    },
+                    modifier = Modifier.fillMaxWidth(),
                     valueRange = 0f..1f
                 )
             }
         }
     }
     
-    if (showSwapIntervalDialog) {
-        SwapIntervalDialog(
-            currentInterval = channelSwapIntervalSeconds,
-            onDismiss = { showSwapIntervalDialog = false },
-            onConfirm = { seconds -> 
-                onChannelSwapIntervalChange(seconds)
-                showSwapIntervalDialog = false
-            }
-        )
-    }
-    
+    // Диалог выбора частоты дискретизации
     if (showSampleRateDialog) {
         SampleRateDialog(
             currentSampleRate = sampleRate,
@@ -254,26 +221,84 @@ fun ChannelSettingsCard(
             }
         )
     }
-    
-    if (showFadeDurationDialog) {
-        FadeDurationDialog(
-            currentDuration = channelSwapFadeDurationMs,
-            onDismiss = { showFadeDurationDialog = false },
-            onConfirm = { duration -> 
-                onChannelSwapFadeDurationChange(duration)
-                showFadeDurationDialog = false
-            }
+}
+
+/**
+ * Дискретный слайдер для Int значений
+ */
+@Composable
+fun DiscreteSlider(
+    label: String,
+    value: Int,
+    values: List<Int>,
+    valueLabel: String,
+    onValueChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                valueLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Slider(
+            value = values.indexOf(value).toFloat(),
+            onValueChange = { index ->
+                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
+                onValueChange(values[newIndex])
+            },
+            modifier = Modifier.fillMaxWidth(),
+            valueRange = 0f..(values.size - 1).toFloat(),
+            steps = values.size - 2
         )
     }
-    
-    if (showUpdateIntervalDialog) {
-        FrequencyUpdateIntervalDialog(
-            currentInterval = frequencyUpdateIntervalMs,
-            onDismiss = { showUpdateIntervalDialog = false },
-            onConfirm = { interval -> 
-                onFrequencyUpdateIntervalChange(interval)
-                showUpdateIntervalDialog = false
-            }
+}
+
+/**
+ * Дискретный слайдер для Long значений
+ */
+@Composable
+fun DiscreteSliderLong(
+    label: String,
+    value: Long,
+    values: List<Long>,
+    valueLabel: String,
+    onValueChange: (Long) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                valueLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Slider(
+            value = values.indexOf(value).toFloat(),
+            onValueChange = { index ->
+                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
+                onValueChange(values[newIndex])
+            },
+            modifier = Modifier.fillMaxWidth(),
+            valueRange = 0f..(values.size - 1).toFloat(),
+            steps = values.size - 2
         )
     }
 }
@@ -329,56 +354,6 @@ fun formatUpdateInterval(ms: Int): String {
 }
 
 @Composable
-private fun SwapIntervalDialog(
-    currentInterval: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (Int) -> Unit
-) {
-    var selectedInterval by remember { mutableStateOf(currentInterval) }
-    val presetIntervals = listOf(
-        30 to "30 сек", 
-        60 to "1 мин", 
-        120 to "2 мин", 
-        300 to "5 мин", 
-        600 to "10 мин", 
-        900 to "15 мин", 
-        1800 to "30 мин", 
-        3600 to "1 час"
-    )
-    
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Интервал перестановки", style = MaterialTheme.typography.titleMedium) },
-        text = {
-            Column {
-                presetIntervals.forEach { (seconds, label) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedInterval = seconds }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = selectedInterval == seconds,
-                            onClick = { selectedInterval = seconds }
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            }
-        },
-        confirmButton = { 
-            TextButton(onClick = { onConfirm(selectedInterval) }) { Text("OK") } 
-        },
-        dismissButton = { 
-            TextButton(onClick = onDismiss) { Text("Отмена") } 
-        }
-    )
-}
-
-@Composable
 private fun SampleRateDialog(
     currentSampleRate: SampleRate,
     onDismiss: () -> Unit,
@@ -393,144 +368,34 @@ private fun SampleRateDialog(
     
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Качество аудио", style = MaterialTheme.typography.titleMedium) },
+        title = { Text("Качество аудио") },
         text = {
             Column {
                 Text(
                     "Более низкая частота снижает расход батареи.",
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 sampleRateOptions.forEach { (rate, label) ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { selectedRate = rate }
-                            .padding(vertical = 6.dp),
+                            .padding(vertical = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         RadioButton(
                             selected = selectedRate == rate,
                             onClick = { selectedRate = rate }
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(label, style = MaterialTheme.typography.bodyMedium)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(label, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
             }
         },
         confirmButton = { 
             TextButton(onClick = { onConfirm(selectedRate) }) { Text("OK") } 
-        },
-        dismissButton = { 
-            TextButton(onClick = onDismiss) { Text("Отмена") } 
-        }
-    )
-}
-
-@Composable
-private fun FadeDurationDialog(
-    currentDuration: Long,
-    onDismiss: () -> Unit,
-    onConfirm: (Long) -> Unit
-) {
-    var selectedDuration by remember { mutableStateOf(currentDuration) }
-    val presetDurations = listOf(
-        250L to "0.25 сек",
-        500L to "0.5 сек",
-        1000L to "1 сек",
-        1500L to "1.5 сек",
-        2000L to "2 сек",
-        3000L to "3 сек",
-        5000L to "5 сек"
-    )
-    
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Длительность затухания", style = MaterialTheme.typography.titleMedium) },
-        text = {
-            Column {
-                Text(
-                    "Время плавного затухания и нарастания звука при смене каналов.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                presetDurations.forEach { (duration, label) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedDuration = duration }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = selectedDuration == duration,
-                            onClick = { selectedDuration = duration }
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            }
-        },
-        confirmButton = { 
-            TextButton(onClick = { onConfirm(selectedDuration) }) { Text("OK") } 
-        },
-        dismissButton = { 
-            TextButton(onClick = onDismiss) { Text("Отмена") } 
-        }
-    )
-}
-
-@Composable
-private fun FrequencyUpdateIntervalDialog(
-    currentInterval: Int,
-    onDismiss: () -> Unit,
-    onConfirm: (Int) -> Unit
-) {
-    var selectedInterval by remember { mutableStateOf(currentInterval) }
-    val presetIntervals = listOf(
-        100 to "100 мс — макс. плавность",
-        250 to "250 мс — оптимально",
-        500 to "500 мс — экономия",
-        1000 to "1 сек — сильно экономит",
-        2000 to "2 сек — минимум",
-        5000 to "5 сек — максимум экономии"
-    )
-    
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Интервал обновления", style = MaterialTheme.typography.titleMedium) },
-        text = {
-            Column {
-                Text(
-                    "Как часто обновляются частоты. Меньше интервал = плавнее переходы, но больше расход батареи.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                presetIntervals.forEach { (interval, label) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { selectedInterval = interval }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = selectedInterval == interval,
-                            onClick = { selectedInterval = interval }
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(label, style = MaterialTheme.typography.bodyMedium)
-                    }
-                }
-            }
-        },
-        confirmButton = { 
-            TextButton(onClick = { onConfirm(selectedInterval) }) { Text("OK") } 
         },
         dismissButton = { 
             TextButton(onClick = onDismiss) { Text("Отмена") } 

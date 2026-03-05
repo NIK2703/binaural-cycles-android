@@ -12,7 +12,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.binaural.beats.ui.components.*
 import com.binaural.beats.viewmodel.BinauralViewModel
-import com.binaural.core.audio.model.InterpolationType
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,27 +116,10 @@ fun PresetEditScreen(
                 singleLine = true
             )
             
-            // Компактный индикатор текущих частот
-            CurrentFrequenciesCard(
-                beatFrequency = uiState.currentBeatFrequency,
-                carrierFrequency = uiState.currentCarrierFrequency,
-                isPlaying = uiState.isPlaying
-            )
-            
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            // Выбор типа интерполяции
-            val editingCurve = uiState.editingFrequencyCurve
-            if (editingCurve != null) {
-                InterpolationTypeSelector(
-                    selectedType = editingCurve.interpolationType,
-                    onTypeSelected = { viewModel.setInterpolationType(it) }
-                )
-            }
-            
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             
             // График частот (используем редактируемую кривую)
+            val editingCurve = uiState.editingFrequencyCurve
             if (editingCurve != null) {
                 FrequencyGraph(
                     points = editingCurve.points,
@@ -178,6 +160,7 @@ fun PresetEditScreen(
                     PointEditor(
                         point = selectedPoint,
                         carrierRange = editingCurve.carrierRange,
+                        beatRange = editingCurve.beatRange,
                         onCarrierFrequencyChange = { viewModel.updateEditingPointCarrierFrequency(it) },
                         onBeatFrequencyChange = { viewModel.updateEditingPointBeatFrequency(it) },
                         onRemove = { viewModel.removeEditingPoint(uiState.selectedPointIndex!!) },
@@ -188,7 +171,7 @@ fun PresetEditScreen(
                 Spacer(modifier = Modifier.height(8.dp))
             }
             
-            // Настройки каналов (компактные)
+            // Настройки
             ChannelSettingsCard(
                 channelSwapEnabled = uiState.channelSwapEnabled,
                 channelSwapIntervalSeconds = uiState.channelSwapIntervalSeconds,
@@ -201,6 +184,7 @@ fun PresetEditScreen(
                 frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
                 currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
                 currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
+                interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
                 onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
                 onChannelSwapFadeEnabledChange = { viewModel.setChannelSwapFadeEnabled(it) },
@@ -208,29 +192,9 @@ fun PresetEditScreen(
                 onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
                 onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
                 onSampleRateChange = { viewModel.setSampleRate(it) },
-                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) }
+                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) },
+                onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
             )
-            
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            // Громкость и воспроизведение в одну строку
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                VolumeSlider(
-                    volume = uiState.volume,
-                    onVolumeChange = { viewModel.setVolume(it) },
-                    modifier = Modifier.weight(1f)
-                )
-                
-                Spacer(modifier = Modifier.width(16.dp))
-                
-                PlayButton(
-                    isPlaying = uiState.isPlaying,
-                    onClick = { viewModel.togglePlayback() }
-                )
-            }
             
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -259,61 +223,5 @@ fun PresetEditScreen(
                 }
             }
         )
-    }
-}
-
-/**
- * Компонент для выбора типа интерполяции
- */
-@Composable
-fun InterpolationTypeSelector(
-    selectedType: InterpolationType,
-    onTypeSelected: (InterpolationType) -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp)
-        ) {
-            Text(
-                text = "Тип интерполяции",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                InterpolationType.entries.forEach { type ->
-                    FilterChip(
-                        selected = selectedType == type,
-                        onClick = { onTypeSelected(type) },
-                        label = { 
-                            Text(
-                                when (type) {
-                                    InterpolationType.LINEAR -> "Линейная"
-                                    InterpolationType.CUBIC_SPLINE -> "Кубическая"
-                                }
-                            ) 
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = when (selectedType) {
-                    InterpolationType.LINEAR -> "Прямые линии между точками"
-                    InterpolationType.CUBIC_SPLINE -> "Плавные кривые Catmull-Rom"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-            )
-        }
     }
 }

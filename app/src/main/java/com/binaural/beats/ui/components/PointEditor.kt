@@ -22,13 +22,18 @@ private const val MIN_AUDIBLE_FREQUENCY = 20.0
 fun PointEditor(
     point: FrequencyPoint,
     carrierRange: FrequencyRange,
+    beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
     onCarrierFrequencyChange: (Double) -> Unit,
     onBeatFrequencyChange: (Double) -> Unit,
     onRemove: () -> Unit,
     onDeselect: () -> Unit
 ) {
-    val maxBeatForCurrentCarrier = maxBeatForCarrier(point.carrierFrequency)
+    // Максимальная частота биений для слайдера: несущая * 2 - 20
+    // Это гарантирует, что обе боковые частоты останутся в слышимом диапазоне (>= 20 Гц)
     var sliderCarrier by remember(point.carrierFrequency) { mutableStateOf(point.carrierFrequency.toFloat()) }
+    // Максимальная частота биений вычисляется от текущей несущей частоты точки
+    // Формула: несущая * 2 - 20 (без дополнительного ограничения)
+    val maxBeatFrequency = (point.carrierFrequency * 2 - 20).coerceAtLeast(1.0)
     var sliderBeat by remember(point.beatFrequency) { mutableStateOf(point.beatFrequency.toFloat()) }
     var tempCarrierFrequency by remember(point.carrierFrequency) { mutableStateOf(point.carrierFrequency.toString()) }
     var tempBeatFrequency by remember(point.beatFrequency) { mutableStateOf(point.beatFrequency.toString()) }
@@ -37,7 +42,8 @@ fun PointEditor(
     val beatValue = tempBeatFrequency.toDoubleOrNull()
     
     val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0
-    val isBeatValid = beatValue != null && beatValue >= 0.125 && beatValue <= maxBeatForCurrentCarrier
+    // Валидация частоты биений: ограничена формулой несущая * 2 - 20
+    val isBeatValid = beatValue != null && beatValue >= beatRange.min && beatValue <= maxBeatFrequency
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -45,7 +51,7 @@ fun PointEditor(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
         )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(16.dp)) {
             // Заголовок с временем и кнопками
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -159,7 +165,8 @@ fun PointEditor(
                     onValueChange = {
                         tempBeatFrequency = it
                         val value = it.toDoubleOrNull()
-                        if (value != null && value >= 0.125 && value <= maxBeatForCurrentCarrier) {
+                        // Ограничиваем ввод формулой несущая * 2 - 20
+                        if (value != null && value >= beatRange.min && value <= maxBeatFrequency) {
                             sliderBeat = value.toFloat()
                         }
                     },
@@ -191,14 +198,14 @@ fun PointEditor(
                 Spacer(modifier = Modifier.weight(1f))
                 
                 Text(
-                    "макс %.1f".format(maxBeatForCurrentCarrier),
+                    "макс %.1f".format(maxBeatFrequency),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             
-            val minBeatForSlider = 1f
-            val maxBeatForSlider = maxBeatForCurrentCarrier.toFloat().coerceAtLeast(minBeatForSlider)
+            val minBeatForSlider = beatRange.min.toFloat().coerceAtLeast(0.1f)
+            val maxBeatForSlider = maxBeatFrequency.toFloat().coerceAtLeast(minBeatForSlider)
             Slider(
                 value = sliderBeat.coerceIn(minBeatForSlider, maxBeatForSlider),
                 onValueChange = {
