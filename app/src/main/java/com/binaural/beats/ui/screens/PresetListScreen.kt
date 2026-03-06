@@ -1,5 +1,9 @@
 package com.binaural.beats.ui.screens
 
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -11,19 +15,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binaural.beats.ui.components.MiniFrequencyGraph
 import com.binaural.beats.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
-import java.text.SimpleDateFormat
-import java.util.*
+import kotlinx.datetime.Clock
+import kotlinx.datetime.LocalTime
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toLocalDateTime
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun PresetListScreen(
     viewModel: BinauralViewModel,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
     onPresetClick: (String) -> Unit,
     onEditPreset: (String) -> Unit,
     onCreatePreset: () -> Unit
@@ -83,12 +93,15 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         PresetCard(
+                            presetId = preset.id,
                             name = preset.name,
                             frequencyCurve = preset.frequencyCurve,
                             isActive = uiState.activePreset?.id == preset.id,
                             isPlaying = uiState.activePreset?.id == preset.id && uiState.isPlaying,
-                            pointsCount = preset.frequencyCurve.points.size,
-                            updatedAt = preset.updatedAt,
+                            currentCarrierFrequency = uiState.currentCarrierFrequency,
+                            currentBeatFrequency = uiState.currentBeatFrequency,
+                            sharedTransitionScope = sharedTransitionScope,
+                            animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
                             onEditClick = { onEditPreset(preset.id) },
                             onDeleteClick = { viewModel.deletePreset(preset.id) }
@@ -100,15 +113,18 @@ fun PresetListScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PresetCard(
+    presetId: String,
     name: String,
     frequencyCurve: FrequencyCurve,
     isActive: Boolean,
     isPlaying: Boolean,
-    pointsCount: Int,
-    updatedAt: Long,
+    currentCarrierFrequency: Double,
+    currentBeatFrequency: Double,
+    sharedTransitionScope: SharedTransitionScope,
+    animatedVisibilityScope: AnimatedVisibilityScope,
     onPlayClick: () -> Unit,
     onEditClick: () -> Unit,
     onDeleteClick: () -> Unit
@@ -116,79 +132,79 @@ private fun PresetCard(
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDropdownMenu by remember { mutableStateOf(false) }
     
+    // Текущее время для отображения позиции воспроизведения
+    val currentTime = remember { mutableStateOf(LocalTime(12, 0)) }
+    
+    // Обновляем текущее время при воспроизведении
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (true) {
+                val now = Clock.System.now()
+                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+                kotlinx.coroutines.delay(5000)
+            }
+        }
+    }
+    
+    // Устанавливаем начальное время
+    LaunchedEffect(Unit) {
+        val now = Clock.System.now()
+        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+    }
+    
     Box(
         modifier = Modifier.fillMaxWidth()
     ) {
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(140.dp)
-                .combinedClickable(
-                    onClick = onPlayClick,
-                    onLongClick = { showDropdownMenu = true }
-                ),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isActive)
-                    MaterialTheme.colorScheme.secondaryContainer
-                else
-                    MaterialTheme.colorScheme.surfaceVariant
-            )
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                // График на весь размер карточки
-                MiniFrequencyGraph(
-                    frequencyCurve = frequencyCurve,
-                    modifier = Modifier.fillMaxSize()
+        with(sharedTransitionScope) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(140.dp)
+                    .sharedBounds(
+                        sharedContentState = rememberSharedContentState(
+                            key = "preset-$presetId"
+                        ),
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.large)
+                    )
+                    .combinedClickable(
+                        onClick = onPlayClick,
+                        onLongClick = { showDropdownMenu = true }
+                    ),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isActive)
+                        MaterialTheme.colorScheme.secondaryContainer
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant
                 )
-                
-                // Название пресета поверх графика (сверху слева)
-                Surface(
-                    modifier = Modifier.align(Alignment.TopStart),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                    shape = MaterialTheme.shapes.small
-                ) {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = name,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = "$pointsCount точек • ${formatDate(updatedAt)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                
-                // Индикатор воспроизведения (сверху справа)
-                if (isPlaying) {
-                    Surface(
-                        modifier = Modifier.align(Alignment.TopEnd),
-                        color = MaterialTheme.colorScheme.error,
-                        shape = MaterialTheme.shapes.small
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Stop,
-                                contentDescription = "Воспроизводится",
-                                modifier = Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onError
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    // График на весь размер карточки
+                    MiniFrequencyGraph(
+                        frequencyCurve = frequencyCurve,
+                        modifier = Modifier.fillMaxSize(),
+                        isPlaying = isPlaying,
+                        currentTime = currentTime.value,
+                        currentCarrierFrequency = currentCarrierFrequency,
+                        currentBeatFrequency = currentBeatFrequency
+                    )
+                    
+                    // Название пресета поверх графика (сверху слева)
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .sharedBounds(
+                                sharedContentState = rememberSharedContentState(
+                                    key = "preset-name-$presetId"
+                                ),
+                                animatedVisibilityScope = animatedVisibilityScope
                             )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Воспроизведение",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onError
-                            )
-                        }
-                    }
+                            .align(Alignment.TopStart)
+                            .padding(8.dp)
+                    )
                 }
             }
         }
@@ -247,9 +263,4 @@ private fun PresetCard(
             }
         )
     }
-}
-
-private fun formatDate(timestamp: Long): String {
-    val sdf = SimpleDateFormat("dd.MM.yyyy", Locale.getDefault())
-    return sdf.format(Date(timestamp))
 }

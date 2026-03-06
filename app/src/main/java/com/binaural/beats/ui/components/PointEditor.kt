@@ -204,7 +204,7 @@ fun PointEditor(
                 )
             }
             
-            val minBeatForSlider = beatRange.min.toFloat().coerceAtLeast(0.1f)
+            val minBeatForSlider = beatRange.min.toFloat().coerceAtLeast(0.0f)
             val maxBeatForSlider = maxBeatFrequency.toFloat().coerceAtLeast(minBeatForSlider)
             Slider(
                 value = sliderBeat.coerceIn(minBeatForSlider, maxBeatForSlider),

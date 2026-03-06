@@ -260,21 +260,43 @@ class BinauralPreferencesRepository @Inject constructor(
     
     /**
      * Получить интервал обновления частот в миллисекундах
-     * По умолчанию 100мс (баланс между плавностью и энергосбережением)
+     * По умолчанию 1000мс (1 секунда)
      */
     fun getFrequencyUpdateInterval(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 100 // 100мс по умолчанию
+            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 1000 // 1 секунда по умолчанию
         }
     }
     
     /**
      * Сохранить интервал обновления частот
-     * @param intervalMs интервал в миллисекундах (100-5000)
+     * @param intervalMs интервал в миллисекундах (1000-60000)
      */
     suspend fun saveFrequencyUpdateInterval(intervalMs: Int) {
         dataStore.edit { preferences ->
-            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] = intervalMs.coerceIn(100, 5000)
+            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] = intervalMs.coerceIn(1000, 60000)
+        }
+    }
+    
+    // Методы для громкости
+    
+    /**
+     * Получить громкость воспроизведения
+     * По умолчанию 0.7 (70%)
+     */
+    fun getVolume(): Flow<Float> {
+        return dataStore.data.map { preferences ->
+            preferences[VOLUME_KEY]?.toFloatOrNull() ?: 0.7f
+        }
+    }
+    
+    /**
+     * Сохранить громкость воспроизведения
+     * @param volume уровень громкости (0.0 - 1.0)
+     */
+    suspend fun saveVolume(volume: Float) {
+        dataStore.edit { preferences ->
+            preferences[VOLUME_KEY] = volume.toString()
         }
     }
     

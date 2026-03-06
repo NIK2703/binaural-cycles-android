@@ -22,7 +22,7 @@ object AudioConstants {
     /**
      * Минимальная частота биений по умолчанию (Гц)
      */
-    const val DEFAULT_MIN_BEAT_FREQUENCY = 0.125
+    const val DEFAULT_MIN_BEAT_FREQUENCY = 0.0
     
     /**
      * Максимальная частота биений по умолчанию (Гц)

@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binaural.core.audio.model.FrequencyCurve
@@ -45,8 +46,22 @@ private data class MiniGraphParams(
         return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx).toFloat()
     }
     
-    fun beatWidth(beat: Double): Float {
-        return (beat / maxBeat * heightPx * 0.25).toFloat()
+    /**
+     * Вычисляет Y-координату верхней границы области биений
+     * Верхняя граница соответствует частоте канала: carrier + beat/2
+     */
+    fun beatUpperY(carrier: Double, beat: Double): Float {
+        val upperFrequency = carrier + beat / 2
+        return carrierToY(upperFrequency)
+    }
+    
+    /**
+     * Вычисляет Y-координату нижней границы области биений
+     * Нижняя граница соответствует частоте канала: carrier - beat/2
+     */
+    fun beatLowerY(carrier: Double, beat: Double): Float {
+        val lowerFrequency = carrier - beat / 2
+        return carrierToY(lowerFrequency)
     }
 }
 
@@ -58,7 +73,11 @@ private data class MiniGraphParams(
 fun MiniFrequencyGraph(
     frequencyCurve: FrequencyCurve,
     modifier: Modifier = Modifier,
-    primaryColor: Color = MaterialTheme.colorScheme.primary
+    primaryColor: Color = MaterialTheme.colorScheme.primary,
+    isPlaying: Boolean = false,
+    currentTime: LocalTime = LocalTime(12, 0),
+    currentCarrierFrequency: Double = 0.0,
+    currentBeatFrequency: Double = 0.0
 ) {
     val density = LocalDensity.current
     val sortedPoints = remember(frequencyCurve.points) {
@@ -95,10 +114,47 @@ fun MiniFrequencyGraph(
                             sortedPoints = sortedPoints,
                             graphParams = graphParams,
                             primaryColor = primaryColor,
-                            interpolationType = frequencyCurve.interpolationType
+                            interpolationType = frequencyCurve.interpolationType,
+                            isPlaying = isPlaying,
+                            currentTime = currentTime,
+                            currentCarrierFrequency = currentCarrierFrequency,
+                            currentBeatFrequency = currentBeatFrequency,
+                            maxBeat = maxBeat
                         )
                     }
-            )
+            ) {
+                // Метки частот для каждой точки
+                sortedPoints.forEach { point ->
+                    val xPx = graphParams.timeToX(point.time)
+                    val yPx = graphParams.carrierToY(point.carrierFrequency)
+                    // Форматируем частоту биения без лишних нулей
+                    val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toDouble()) {
+                        point.beatFrequency.toLong().toString()
+                    } else {
+                        point.beatFrequency.toString()
+                    }
+                    val label = "%.0f(%s)".format(point.carrierFrequency, beatStr)
+                    
+                    // Позиционируем метку над точкой
+                    Box(
+                        modifier = Modifier
+                            .offset { 
+                                IntOffset(
+                                    (xPx - 25f).toInt().coerceAtLeast(0), 
+                                    (yPx - 20f).toInt().coerceAtLeast(0)
+                                ) 
+                            }
+                    ) {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 7.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = primaryColor.copy(alpha = 0.8f)
+                        )
+                    }
+                }
+            }
             
             // Ось Y - мин/макс частоты (справа поверх графика)
             Column(
@@ -131,7 +187,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniGraphConten
     sortedPoints: List<FrequencyPoint>,
     graphParams: MiniGraphParams,
     primaryColor: Color,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    isPlaying: Boolean,
+    currentTime: LocalTime,
+    currentCarrierFrequency: Double,
+    currentBeatFrequency: Double,
+    maxBeat: Double
 ) {
     val width = size.width
     val height = size.height
@@ -148,8 +209,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniGraphConten
         )
     }
     
-    // Вертикальные линии каждые 6 часов
-    for (hour in 6 until 24 step 6) {
+    // Вертикальные линии каждые 3 часа
+    for (hour in 3 until 24 step 3) {
         val x = width * hour / 24
         drawLine(
             color = gridColor,
@@ -162,6 +223,40 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniGraphConten
     if (sortedPoints.size >= 2) {
         drawMiniBeatArea(sortedPoints, graphParams, primaryColor, width, height, interpolationType)
         drawMiniCarrierLine(sortedPoints, graphParams, primaryColor, width, height, interpolationType)
+    }
+    
+    // Рисуем точки с метками частот
+    drawMiniPoints(sortedPoints, graphParams, primaryColor, maxBeat)
+    
+    // Вертикальная полоса текущего воспроизведения
+    if (isPlaying) {
+        val currentX = graphParams.timeToX(currentTime)
+        val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
+        val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
+        val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
+        
+        // Вертикальная линия
+        drawLine(
+            color = Color.Red.copy(alpha = 0.7f),
+            start = Offset(currentX, 0f),
+            end = Offset(currentX, height),
+            strokeWidth = 2f
+        )
+        
+        // Точка на несущей частоте
+        drawCircle(
+            color = Color.Red,
+            radius = 6f,
+            center = Offset(currentX, currentCarrierY)
+        )
+        
+        // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
+        drawLine(
+            color = Color.Red.copy(alpha = 0.5f),
+            start = Offset(currentX, currentUpperY),
+            end = Offset(currentX, currentLowerY),
+            strokeWidth = 2f
+        )
     }
 }
 
@@ -182,22 +277,22 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     val startTime = LocalTime.fromSecondOfDay(0)
     val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
     val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType)
-    val startCarrierY = params.carrierToY(startCarrier)
-    val startBeatWidth = params.beatWidth(startBeat)
+    val startUpperY = params.beatUpperY(startCarrier, startBeat)
+    val startLowerY = params.beatLowerY(startCarrier, startBeat)
     
-    upperPath.moveTo(0f, startCarrierY - startBeatWidth)
-    lowerPath.moveTo(0f, startCarrierY + startBeatWidth)
+    upperPath.moveTo(0f, startUpperY)
+    lowerPath.moveTo(0f, startLowerY)
     
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
         val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val carrierY = params.carrierToY(carrier)
-        val beatWidth = params.beatWidth(beat)
+        val upperY = params.beatUpperY(carrier, beat)
+        val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
-        upperPath.lineTo(x, carrierY - beatWidth)
-        lowerPath.lineTo(x, carrierY + beatWidth)
+        upperPath.lineTo(x, upperY)
+        lowerPath.lineTo(x, lowerY)
     }
     
     // Замыкаем путь
@@ -209,10 +304,9 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
         val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val carrierY = params.carrierToY(carrier)
-        val beatWidth = params.beatWidth(beat)
+        val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
-        combinedPath.lineTo(x, carrierY + beatWidth)
+        combinedPath.lineTo(x, lowerY)
     }
     
     combinedPath.close()
@@ -266,4 +360,37 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
         color = primaryColor,
         style = Stroke(width = 1.5f)
     )
+}
+
+/**
+ * Рисует точки на графике с метками частот
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniPoints(
+    sortedPoints: List<FrequencyPoint>,
+    params: MiniGraphParams,
+    primaryColor: Color,
+    maxBeat: Double
+) {
+    for (point in sortedPoints) {
+        val x = params.timeToX(point.time)
+        val y = params.carrierToY(point.carrierFrequency)
+        
+        // Внешний круг точки
+        drawCircle(
+            color = primaryColor,
+            radius = 5f,
+            center = Offset(x, y),
+            style = Fill
+        )
+        
+        // Внутренний белый круг (индикатор биения)
+        val beatRatio = (point.beatFrequency / maxBeat).coerceIn(0.0, 1.0)
+        val innerRadius = (2f + beatRatio * 2f).toFloat()
+        drawCircle(
+            color = Color.White,
+            radius = innerRadius,
+            center = Offset(x, y),
+            style = Fill
+        )
+    }
 }

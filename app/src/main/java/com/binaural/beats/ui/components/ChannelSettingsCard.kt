@@ -14,6 +14,7 @@ import com.binaural.core.audio.model.InterpolationType
 /**
  * Блок настроек с дискретными слайдерами
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChannelSettingsCard(
     channelSwapEnabled: Boolean,
@@ -38,8 +39,6 @@ fun ChannelSettingsCard(
     onFrequencyUpdateIntervalChange: (Int) -> Unit,
     onInterpolationTypeChange: (InterpolationType) -> Unit
 ) {
-    var showSampleRateDialog by remember { mutableStateOf(false) }
-    
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -47,12 +46,6 @@ fun ChannelSettingsCard(
         // Интерполяция по точкам
         ListItem(
             headlineContent = { Text("Интерполяция по точкам") },
-            supportingContent = { 
-                Text(when (interpolationType) {
-                    InterpolationType.LINEAR -> "Прямые линии между точками"
-                    InterpolationType.CUBIC_SPLINE -> "Плавные кривые Catmull-Rom"
-                })
-            },
             trailingContent = {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     FilterChip(
@@ -71,36 +64,102 @@ fun ChannelSettingsCard(
         
         HorizontalDivider()
         
-        // Интервал обновления частот - слайдер
+        // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
         DiscreteSlider(
             label = "Интервал обновления",
             value = frequencyUpdateIntervalMs,
-            values = listOf(100, 250, 500, 1000, 2000, 5000),
+            values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
             valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
             onValueChange = onFrequencyUpdateIntervalChange,
             modifier = Modifier.padding(horizontal = 16.dp)
         )
         
-        // Качество аудио
+        // Качество аудио - раскрывающийся список
+        var sampleRateExpanded by remember { mutableStateOf(false) }
+        
         ListItem(
-            headlineContent = { Text("Качество аудио") },
-            supportingContent = { 
-                Text(when (sampleRate) {
-                    SampleRate.LOW -> "Низкое (22 kHz) — экономия батареи"
-                    SampleRate.MEDIUM -> "Стандарт (44 kHz)"
-                    SampleRate.HIGH -> "Высокое (48 kHz)"
-                })
-            },
-            trailingContent = {
-                FilledTonalButton(
-                    onClick = { showSampleRateDialog = true },
-                    contentPadding = PaddingValues(horizontal = 12.dp)
-                ) {
-                    Text(when (sampleRate) {
-                        SampleRate.LOW -> "22kHz"
-                        SampleRate.MEDIUM -> "44kHz"
-                        SampleRate.HIGH -> "48kHz"
-                    })
+            headlineContent = { Text("Качество звука") },
+            supportingContent = {
+                Column {
+                    Text(
+                        when (sampleRate) {
+                            SampleRate.ULTRA_LOW -> "Ультра-низкое (8 kHz) — максимальная экономия"
+                            SampleRate.VERY_LOW -> "Очень низкое (16 kHz)"
+                            SampleRate.LOW -> "Низкое (22 kHz) — экономия батареи"
+                            SampleRate.MEDIUM -> "Стандарт (44 kHz)"
+                            SampleRate.HIGH -> "Высокое (48 kHz)"
+                        }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    ExposedDropdownMenuBox(
+                        expanded = sampleRateExpanded,
+                        onExpandedChange = { sampleRateExpanded = it },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        OutlinedTextField(
+                            value = when (sampleRate) {
+                                SampleRate.ULTRA_LOW -> "8 kHz"
+                                SampleRate.VERY_LOW -> "16 kHz"
+                                SampleRate.LOW -> "22 kHz"
+                                SampleRate.MEDIUM -> "44 kHz"
+                                SampleRate.HIGH -> "48 kHz"
+                            },
+                            onValueChange = {},
+                            readOnly = true,
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = sampleRateExpanded)
+                            },
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth()
+                        )
+                        
+                        ExposedDropdownMenu(
+                            expanded = sampleRateExpanded,
+                            onDismissRequest = { sampleRateExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("8 kHz — Ультра-низкое") },
+                                onClick = {
+                                    onSampleRateChange(SampleRate.ULTRA_LOW)
+                                    sampleRateExpanded = false
+                                },
+                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                            )
+                            DropdownMenuItem(
+                                text = { Text("16 kHz — Очень низкое") },
+                                onClick = {
+                                    onSampleRateChange(SampleRate.VERY_LOW)
+                                    sampleRateExpanded = false
+                                },
+                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                            )
+                            DropdownMenuItem(
+                                text = { Text("22 kHz — Низкое") },
+                                onClick = {
+                                    onSampleRateChange(SampleRate.LOW)
+                                    sampleRateExpanded = false
+                                },
+                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                            )
+                            DropdownMenuItem(
+                                text = { Text("44 kHz — Стандарт") },
+                                onClick = {
+                                    onSampleRateChange(SampleRate.MEDIUM)
+                                    sampleRateExpanded = false
+                                },
+                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                            )
+                            DropdownMenuItem(
+                                text = { Text("48 kHz — Высокое") },
+                                onClick = {
+                                    onSampleRateChange(SampleRate.HIGH)
+                                    sampleRateExpanded = false
+                                },
+                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                            )
+                        }
+                    }
                 }
             }
         )
@@ -165,7 +224,7 @@ fun ChannelSettingsCard(
         ListItem(
             headlineContent = { Text("Нормализация громкости") },
             supportingContent = { 
-                Text("Компенсация изменений громкости при изменении частоты")
+                Text("Выравнивание громкости между каналами по соотношению частот их тонов")
             },
             trailingContent = {
                 Switch(
@@ -208,18 +267,6 @@ fun ChannelSettingsCard(
                 )
             }
         }
-    }
-    
-    // Диалог выбора частоты дискретизации
-    if (showSampleRateDialog) {
-        SampleRateDialog(
-            currentSampleRate = sampleRate,
-            onDismiss = { showSampleRateDialog = false },
-            onConfirm = { rate -> 
-                onSampleRateChange(rate)
-                showSampleRateDialog = false
-            }
-        )
     }
 }
 
@@ -351,54 +398,4 @@ fun formatUpdateInterval(ms: Int): String {
         ms < 1000 -> "$ms мс"
         else -> "${ms / 1000.0} с"
     }
-}
-
-@Composable
-private fun SampleRateDialog(
-    currentSampleRate: SampleRate,
-    onDismiss: () -> Unit,
-    onConfirm: (SampleRate) -> Unit
-) {
-    var selectedRate by remember { mutableStateOf(currentSampleRate) }
-    val sampleRateOptions = listOf(
-        SampleRate.LOW to "Низкое (22050 Гц) — экономия батареи",
-        SampleRate.MEDIUM to "Стандарт (44100 Гц)",
-        SampleRate.HIGH to "Высокое (48000 Гц)"
-    )
-    
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Качество аудио") },
-        text = {
-            Column {
-                Text(
-                    "Более низкая частота снижает расход батареи.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                sampleRateOptions.forEach { (rate, label) ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = selectedRate == rate,
-                            onClick = { selectedRate = rate }
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Text(label, style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
-            }
-        },
-        confirmButton = { 
-            TextButton(onClick = { onConfirm(selectedRate) }) { Text("OK") } 
-        },
-        dismissButton = { 
-            TextButton(onClick = onDismiss) { Text("Отмена") } 
-        }
-    )
 }

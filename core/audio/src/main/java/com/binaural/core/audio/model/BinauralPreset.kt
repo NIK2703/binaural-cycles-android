@@ -23,7 +23,7 @@ data class FrequencyRange(
     
     companion object {
         val DEFAULT_CARRIER = FrequencyRange(20.0, 500.0)
-        val DEFAULT_BEAT = FrequencyRange(0.125, 1000.0)
+        val DEFAULT_BEAT = FrequencyRange(0.0, 1000.0)
     }
 }
 

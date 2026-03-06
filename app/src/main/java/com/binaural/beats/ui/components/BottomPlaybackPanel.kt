@@ -116,15 +116,36 @@ fun BottomPlaybackPanel(
                 )
                 Slider(
                     value = localVolume,
-                    onValueChange = { localVolume = it },
-                    onValueChangeFinished = { onVolumeChange(localVolume) },
+                    onValueChange = { 
+                        localVolume = it
+                        onVolumeChange(it) // Мгновенное применение громкости
+                    },
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 4.dp),
+                        .padding(horizontal = 4.dp)
+                        .height(16.dp),
                     thumb = {
-                        SliderDefaults.Thumb(
-                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                            modifier = Modifier.size(12.dp)
+                        Box(
+                            modifier = Modifier
+                                .size(14.dp)
+                                .padding(1.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(2.dp)
+                            )
+                            SliderDefaults.Thumb(
+                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    },
+                    track = { sliderState ->
+                        SliderDefaults.Track(
+                            sliderState = sliderState,
+                            modifier = Modifier.height(3.dp),
+                            thumbTrackGapSize = 2.dp
                         )
                     }
                 )
