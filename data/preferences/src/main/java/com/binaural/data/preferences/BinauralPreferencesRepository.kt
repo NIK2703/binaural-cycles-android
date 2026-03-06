@@ -1,5 +1,6 @@
 package com.binaural.data.preferences
 
+import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -8,6 +9,7 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.binaural.core.audio.model.BinauralPreset
+import com.binauralcycles.preferences.R
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
@@ -103,7 +105,8 @@ data class SerializablePresetList(
  */
 @Singleton
 class BinauralPreferencesRepository @Inject constructor(
-    private val dataStore: DataStore<Preferences>
+    private val dataStore: DataStore<Preferences>,
+    private val context: Context
 ) {
     companion object {
         private val FREQUENCY_CURVE_KEY = stringPreferencesKey("frequency_curve")
@@ -333,8 +336,53 @@ class BinauralPreferencesRepository @Inject constructor(
         return dataStore.data.map { preferences ->
             preferences[PRESETS_KEY]?.let { jsonString ->
                 deserializePresets(jsonString)
-            } ?: BinauralPreset.defaultPresets()
+            } ?: getLocalizedDefaultPresets()
         }
+    }
+    
+    /**
+     * Получить локализованные пресеты по умолчанию
+     */
+    private fun getLocalizedDefaultPresets(): List<BinauralPreset> {
+        return listOf(
+            BinauralPreset(
+                id = BinauralPreset.DEFAULT_PRESET_ID,
+                name = context.getString(R.string.preset_circadian_rhythm),
+                frequencyCurve = FrequencyCurve.defaultCurve()
+            ),
+            BinauralPreset(
+                id = BinauralPreset.GAMMA_PRESET_ID,
+                name = context.getString(R.string.preset_gamma_productivity),
+                frequencyCurve = FrequencyCurve(
+                    points = listOf(
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0, beatFrequency = 1.5),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0, beatFrequency = 5.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0, beatFrequency = 9.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0, beatFrequency = 14.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 40.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 7.5),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 4.0),
+                    )
+                )
+            ),
+            BinauralPreset(
+                id = BinauralPreset.DAILY_CYCLE_PRESET_ID,
+                name = context.getString(R.string.preset_daily_cycle),
+                frequencyCurve = FrequencyCurve(
+                    points = listOf(
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 2.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0, beatFrequency = 3.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0, beatFrequency = 10.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0, beatFrequency = 6.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0, beatFrequency = 25.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 9.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0, beatFrequency = 5.0),
+                    )
+                )
+            )
+        )
     }
     
     /**

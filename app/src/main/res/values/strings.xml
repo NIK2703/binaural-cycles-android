@@ -2,6 +2,84 @@
 <resources>
     <string name="app_name">Бинауральные циклы</string>
     
+    <!-- Navigation -->
+    <string name="back">Назад</string>
+    <string name="settings">Настройки</string>
+    
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Бинауральные циклы</string>
+    <string name="add_preset">Добавить пресет</string>
+    <string name="no_presets_message">Нет сохранённых пресетов.\nНажмите + для создания нового.</string>
+    
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Новый пресет</string>
+    
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Циркадный ритм</string>
+    <string name="preset_gamma_productivity">Гамма-продуктивность</string>
+    <string name="preset_daily_cycle">Суточный цикл</string>
+    <string name="edit_preset">Редактирование</string>
+    <string name="preset_name">Название пресета</string>
+    <string name="import_preset">Импортировать</string>
+    <string name="save">Сохранить</string>
+    <string name="do_not_save">Не сохранять</string>
+    
+    <!-- Context Menu -->
+    <string name="edit">Редактировать</string>
+    <string name="duplicate">Дублировать</string>
+    <string name="export">Экспортировать</string>
+    <string name="delete">Удалить</string>
+    
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Удалить пресет?</string>
+    <string name="delete_preset_message">Пресет \"%s\" будет удалён безвозвратно.</string>
+    <string name="cancel">Отмена</string>
+    <string name="unsaved_changes_title">Несохранённые изменения</string>
+    <string name="unsaved_changes_message">У вас есть несохранённые изменения. Сохранить перед выходом?</string>
+    
+    <!-- Interpolation -->
+    <string name="point_interpolation">Интерполяция по точкам</string>
+    <string name="linear">Линейная</string>
+    <string name="cubic">Кубическая</string>
+    
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Авто-перестановка каналов</string>
+    <string name="channel_swap_description">Каналы меняются местами для равномерной нагрузки</string>
+    <string name="channel_swap_disabled">Выключено</string>
+    <string name="swap_interval">Интервал перестановки</string>
+    <string name="smooth_fade">Плавное затухание</string>
+    <string name="smooth_fade_description">Плавный переход при смене каналов</string>
+    <string name="instant_switch">Мгновенное переключение</string>
+    <string name="fade_duration">Время затухания</string>
+    
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Нормализация громкости</string>
+    <string name="volume_normalization_description">Выравнивание громкости между каналами по соотношению частот их тонов</string>
+    <string name="normalization_strength">Сила нормализации</string>
+    
+    <!-- App Settings -->
+    <string name="update_interval">Интервал обновления</string>
+    <string name="audio_quality">Качество звука</string>
+    <string name="quality_ultra_low">Ультра-низкое (8 kHz) — максимальная экономия</string>
+    <string name="quality_very_low">Очень низкое (16 kHz)</string>
+    <string name="quality_low">Низкое (22 kHz) — экономия батареи</string>
+    <string name="quality_standard">Стандарт (44 kHz)</string>
+    <string name="quality_high">Высокое (48 kHz)</string>
+    
+    <!-- Time units -->
+    <string name="seconds_short">сек</string>
+    <string name="hz">Гц</string>
+    
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Частота (Гц)</string>
+    <string name="min_carrier_frequency">Мин. несущая частота</string>
+    <string name="max_carrier_frequency">Макс. несущая частота</string>
+    <string name="ok">OK</string>
+    <string name="minutes_short">мин</string>
+    <string name="hours_short">ч</string>
+    <string name="milliseconds_short">мс</string>
+    <string name="seconds_full">с</string>
+    
     <!-- Notification -->
     <string name="notification_channel_name">Воспроизведение</string>
     <string name="notification_channel_description">Управление воспроизведением бинауральных ритмов</string>

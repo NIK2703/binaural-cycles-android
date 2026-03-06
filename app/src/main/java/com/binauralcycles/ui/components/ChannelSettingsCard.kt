@@ -7,11 +7,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.VolumeNormalizationSettings
+import com.binauralcycles.R
 
 /**
  * Блок настроек пресета (перестановка каналов, нормализация, интерполяция)
@@ -39,18 +41,18 @@ fun PresetSettingsCard(
     ) {
         // Интерполяция по точкам
         ListItem(
-            headlineContent = { Text("Интерполяция по точкам") },
+            headlineContent = { Text(stringResource(R.string.point_interpolation)) },
             trailingContent = {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     FilterChip(
                         selected = interpolationType == InterpolationType.LINEAR,
                         onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
-                        label = { Text("Линейная") }
+                        label = { Text(stringResource(R.string.linear)) }
                     )
                     FilterChip(
                         selected = interpolationType == InterpolationType.CUBIC_SPLINE,
                         onClick = { onInterpolationTypeChange(InterpolationType.CUBIC_SPLINE) },
-                        label = { Text("Кубическая") }
+                        label = { Text(stringResource(R.string.cubic)) }
                     )
                 }
             }
@@ -60,9 +62,9 @@ fun PresetSettingsCard(
         
         // Авто-перестановка каналов
         ListItem(
-            headlineContent = { Text("Авто-перестановка каналов") },
+            headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
             supportingContent = { 
-                Text(if (channelSwapSettings.enabled) "Каналы меняются местами для равномерной нагрузки" else "Выключено")
+                Text(if (channelSwapSettings.enabled) stringResource(R.string.channel_swap_description) else stringResource(R.string.channel_swap_disabled))
             },
             trailingContent = {
                 Switch(
@@ -75,7 +77,7 @@ fun PresetSettingsCard(
         // Слайдер интервала перестановки (показываем только когда включено)
         if (channelSwapSettings.enabled) {
             DiscreteSlider(
-                label = "Интервал перестановки",
+                label = stringResource(R.string.swap_interval),
                 value = channelSwapSettings.intervalSeconds,
                 values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
                 valueLabel = formatInterval(channelSwapSettings.intervalSeconds),
@@ -85,9 +87,9 @@ fun PresetSettingsCard(
             
             // Затухание при смене каналов
             ListItem(
-                headlineContent = { Text("Плавное затухание") },
+                headlineContent = { Text(stringResource(R.string.smooth_fade)) },
                 supportingContent = { 
-                    Text(if (channelSwapSettings.fadeEnabled) "Плавный переход при смене каналов" else "Мгновенное переключение")
+                    Text(if (channelSwapSettings.fadeEnabled) stringResource(R.string.smooth_fade_description) else stringResource(R.string.instant_switch))
                 },
                 trailingContent = {
                     Switch(
@@ -100,7 +102,7 @@ fun PresetSettingsCard(
             // Слайдер длительности затухания
             if (channelSwapSettings.fadeEnabled) {
                 DiscreteSliderLong(
-                    label = "Время затухания",
+                    label = stringResource(R.string.fade_duration),
                     value = channelSwapSettings.fadeDurationMs,
                     values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
                     valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
@@ -114,9 +116,9 @@ fun PresetSettingsCard(
         
         // Нормализация громкости
         ListItem(
-            headlineContent = { Text("Нормализация громкости") },
+            headlineContent = { Text(stringResource(R.string.volume_normalization)) },
             supportingContent = { 
-                Text("Выравнивание громкости между каналами по соотношению частот их тонов")
+                Text(stringResource(R.string.volume_normalization_description))
             },
             trailingContent = {
                 Switch(
@@ -139,7 +141,7 @@ fun PresetSettingsCard(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        "Сила нормализации",
+                        stringResource(R.string.normalization_strength),
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
@@ -179,7 +181,7 @@ fun AppSettingsCard(
     ) {
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
         DiscreteSlider(
-            label = "Интервал обновления",
+            label = stringResource(R.string.update_interval),
             value = frequencyUpdateIntervalMs,
             values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
             valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
@@ -191,16 +193,16 @@ fun AppSettingsCard(
         var sampleRateExpanded by remember { mutableStateOf(false) }
         
         ListItem(
-            headlineContent = { Text("Качество звука") },
+            headlineContent = { Text(stringResource(R.string.audio_quality)) },
             supportingContent = {
                 Column {
                     Text(
                         when (sampleRate) {
-                            SampleRate.ULTRA_LOW -> "Ультра-низкое (8 kHz) — максимальная экономия"
-                            SampleRate.VERY_LOW -> "Очень низкое (16 kHz)"
-                            SampleRate.LOW -> "Низкое (22 kHz) — экономия батареи"
-                            SampleRate.MEDIUM -> "Стандарт (44 kHz)"
-                            SampleRate.HIGH -> "Высокое (48 kHz)"
+                            SampleRate.ULTRA_LOW -> stringResource(R.string.quality_ultra_low)
+                            SampleRate.VERY_LOW -> stringResource(R.string.quality_very_low)
+                            SampleRate.LOW -> stringResource(R.string.quality_low)
+                            SampleRate.MEDIUM -> stringResource(R.string.quality_standard)
+                            SampleRate.HIGH -> stringResource(R.string.quality_high)
                         }
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -232,7 +234,7 @@ fun AppSettingsCard(
                             onDismissRequest = { sampleRateExpanded = false }
                         ) {
                             DropdownMenuItem(
-                                text = { Text("8 kHz — Ультра-низкое") },
+                                text = { Text("8 kHz") },
                                 onClick = {
                                     onSampleRateChange(SampleRate.ULTRA_LOW)
                                     sampleRateExpanded = false
@@ -240,7 +242,7 @@ fun AppSettingsCard(
                                 contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
                             )
                             DropdownMenuItem(
-                                text = { Text("16 kHz — Очень низкое") },
+                                text = { Text("16 kHz") },
                                 onClick = {
                                     onSampleRateChange(SampleRate.VERY_LOW)
                                     sampleRateExpanded = false
@@ -248,7 +250,7 @@ fun AppSettingsCard(
                                 contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
                             )
                             DropdownMenuItem(
-                                text = { Text("22 kHz — Низкое") },
+                                text = { Text("22 kHz") },
                                 onClick = {
                                     onSampleRateChange(SampleRate.LOW)
                                     sampleRateExpanded = false
@@ -256,7 +258,7 @@ fun AppSettingsCard(
                                 contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
                             )
                             DropdownMenuItem(
-                                text = { Text("44 kHz — Стандарт") },
+                                text = { Text("44 kHz") },
                                 onClick = {
                                     onSampleRateChange(SampleRate.MEDIUM)
                                     sampleRateExpanded = false
@@ -264,7 +266,7 @@ fun AppSettingsCard(
                                 contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
                             )
                             DropdownMenuItem(
-                                text = { Text("48 kHz — Высокое") },
+                                text = { Text("48 kHz") },
                                 onClick = {
                                     onSampleRateChange(SampleRate.HIGH)
                                     sampleRateExpanded = false
@@ -362,18 +364,23 @@ fun DiscreteSliderLong(
 /**
  * Форматирование интервала
  */
+@Composable
 fun formatInterval(seconds: Int): String {
+    val secShort = stringResource(R.string.seconds_short)
+    val minShort = stringResource(R.string.minutes_short)
+    val hourShort = stringResource(R.string.hours_short)
+    
     return when {
-        seconds < 60 -> "$seconds сек"
+        seconds < 60 -> "$seconds $secShort"
         seconds < 3600 -> {
             val minutes = seconds / 60
             val secs = seconds % 60
-            if (secs == 0) "$minutes мин" else "$minutes мин $secs сек"
+            if (secs == 0) "$minutes $minShort" else "$minutes $minShort $secs $secShort"
         }
         else -> {
             val hours = seconds / 3600
             val minutes = (seconds % 3600) / 60
-            if (minutes == 0) "$hours ч" else "$hours ч $minutes мин"
+            if (minutes == 0) "$hours $hourShort" else "$hours $hourShort $minutes $minShort"
         }
     }
 }
@@ -381,30 +388,40 @@ fun formatInterval(seconds: Int): String {
 /**
  * Форматирование длительности затухания
  */
+@Composable
 fun formatFadeDuration(ms: Long): String {
     val seconds = ms / 1000
     val millis = ms % 1000
+    val msShort = stringResource(R.string.milliseconds_short)
+    val secFull = stringResource(R.string.seconds_full)
+    
     return when {
-        ms < 1000 -> "$millis мс"
-        millis == 0L -> "$seconds сек"
-        else -> "$seconds.${millis / 100} сек"
+        ms < 1000 -> "$millis $msShort"
+        millis == 0L -> "$seconds $secFull"
+        else -> "$seconds.${millis / 100} $secFull"
     }
 }
 
 /**
  * Форматирование длительности затухания для отображения в UI
  */
+@Composable
 fun formatFadeDurationLabel(ms: Long): String {
     val seconds = ms / 1000.0
-    return "${seconds} сек"
+    val secFull = stringResource(R.string.seconds_full)
+    return "${seconds} $secFull"
 }
 
 /**
  * Форматирование интервала обновления частот
  */
+@Composable
 fun formatUpdateInterval(ms: Int): String {
+    val msShort = stringResource(R.string.milliseconds_short)
+    val secFull = stringResource(R.string.seconds_full)
+    
     return when {
-        ms < 1000 -> "$ms мс"
-        else -> "${ms / 1000.0} с"
+        ms < 1000 -> "$ms $msShort"
+        else -> "${ms / 1000.0} $secFull"
     }
 }

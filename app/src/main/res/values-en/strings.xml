@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Binaural Cycles</string>
+    
+    <!-- Navigation -->
+    <string name="back">Back</string>
+    <string name="settings">Settings</string>
+    
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Binaural Cycles</string>
+    <string name="add_preset">Add preset</string>
+    <string name="no_presets_message">No saved presets.\nPress + to create a new one.</string>
+    
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">New preset</string>
+    
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Circadian Rhythm</string>
+    <string name="preset_gamma_productivity">Gamma Productivity</string>
+    <string name="preset_daily_cycle">Daily Cycle</string>
+    <string name="edit_preset">Editing</string>
+    <string name="preset_name">Preset name</string>
+    <string name="import_preset">Import</string>
+    <string name="save">Save</string>
+    <string name="do_not_save">Don\'t save</string>
+    
+    <!-- Context Menu -->
+    <string name="edit">Edit</string>
+    <string name="duplicate">Duplicate</string>
+    <string name="export">Export</string>
+    <string name="delete">Delete</string>
+    
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Delete preset?</string>
+    <string name="delete_preset_message">Preset \"%s\" will be permanently deleted.</string>
+    <string name="cancel">Cancel</string>
+    <string name="unsaved_changes_title">Unsaved changes</string>
+    <string name="unsaved_changes_message">You have unsaved changes. Save before exiting?</string>
+    
+    <!-- Interpolation -->
+    <string name="point_interpolation">Point interpolation</string>
+    <string name="linear">Linear</string>
+    <string name="cubic">Cubic</string>
+    
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Auto channel swap</string>
+    <string name="channel_swap_description">Channels swap for balanced stimulation</string>
+    <string name="channel_swap_disabled">Disabled</string>
+    <string name="swap_interval">Swap interval</string>
+    <string name="smooth_fade">Smooth fade</string>
+    <string name="smooth_fade_description">Smooth transition when swapping channels</string>
+    <string name="instant_switch">Instant switch</string>
+    <string name="fade_duration">Fade duration</string>
+    
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Volume normalization</string>
+    <string name="volume_normalization_description">Balance volume between channels based on frequency ratio</string>
+    <string name="normalization_strength">Normalization strength</string>
+    
+    <!-- App Settings -->
+    <string name="update_interval">Update interval</string>
+    <string name="audio_quality">Audio quality</string>
+    <string name="quality_ultra_low">Ultra-low (8 kHz) — maximum battery saving</string>
+    <string name="quality_very_low">Very low (16 kHz)</string>
+    <string name="quality_low">Low (22 kHz) — battery saving</string>
+    <string name="quality_standard">Standard (44 kHz)</string>
+    <string name="quality_high">High (48 kHz)</string>
+    
+    <!-- Time units -->
+    <string name="seconds_short">sec</string>
+    <string name="hz">Hz</string>
+    
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Frequency (Hz)</string>
+    <string name="min_carrier_frequency">Min carrier frequency</string>
+    <string name="max_carrier_frequency">Max carrier frequency</string>
+    <string name="ok">OK</string>
+    <string name="minutes_short">min</string>
+    <string name="hours_short">h</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">s</string>
+    
+    <!-- Notification -->
+    <string name="notification_channel_name">Playback</string>
+    <string name="notification_channel_description">Binaural beats playback control</string>
+    <string name="notification_playing">Playing</string>
+    <string name="notification_paused">Paused</string>
+    <string name="notification_content">Beat: %.1f Hz | Carrier: %.0f Hz</string>
+    <string name="action_play">Play</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_stop">Stop</string>
+</resources>

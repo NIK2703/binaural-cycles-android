@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -30,6 +31,7 @@ import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import com.binauralcycles.R
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -48,14 +50,14 @@ fun PresetListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Бинауральные циклы") },
+                title = { Text(stringResource(R.string.preset_list_title)) },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ),
                 actions = {
                     IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Default.Settings, contentDescription = "Настройки")
+                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings))
                     }
                 }
             )
@@ -65,7 +67,7 @@ fun PresetListScreen(
                 onClick = onCreatePreset,
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             ) {
-                Icon(Icons.Default.Add, contentDescription = "Добавить пресет")
+                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.add_preset))
             }
         }
     ) { paddingValues ->
@@ -83,7 +85,7 @@ fun PresetListScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "Нет сохранённых пресетов.\nНажмите + для создания нового.",
+                        text = stringResource(R.string.no_presets_message),
                         style = MaterialTheme.typography.bodyLarge,
                         textAlign = TextAlign.Center,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
@@ -224,7 +226,7 @@ private fun PresetCard(
             modifier = Modifier.align(Alignment.TopEnd)
         ) {
             DropdownMenuItem(
-                text = { Text("Редактировать") },
+                text = { Text(stringResource(R.string.edit)) },
                 leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
                 onClick = {
                     showDropdownMenu = false
@@ -232,7 +234,7 @@ private fun PresetCard(
                 }
             )
             DropdownMenuItem(
-                text = { Text("Дублировать") },
+                text = { Text(stringResource(R.string.duplicate)) },
                 leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
                 onClick = {
                     showDropdownMenu = false
@@ -240,7 +242,7 @@ private fun PresetCard(
                 }
             )
             DropdownMenuItem(
-                text = { Text("Экспортировать") },
+                text = { Text(stringResource(R.string.export)) },
                 leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
                 onClick = {
                     showDropdownMenu = false
@@ -249,7 +251,7 @@ private fun PresetCard(
             )
             HorizontalDivider()
             DropdownMenuItem(
-                text = { Text("Удалить") },
+                text = { Text(stringResource(R.string.delete)) },
                 leadingIcon = { 
                     Icon(
                         Icons.Default.Delete, 
@@ -269,8 +271,8 @@ private fun PresetCard(
     if (showDeleteDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Удалить пресет?") },
-            text = { Text("Пресет \"$name\" будет удалён безвозвратно.") },
+            title = { Text(stringResource(R.string.delete_preset_title)) },
+            text = { Text(stringResource(R.string.delete_preset_message, name)) },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -278,12 +280,12 @@ private fun PresetCard(
                         onDeleteClick()
                     }
                 ) {
-                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                    Text(stringResource(R.string.delete), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteDialog = false }) {
-                    Text("Отмена")
+                    Text(stringResource(R.string.cancel))
                 }
             }
         )
