@@ -1,7 +1,7 @@
-package com.binaural.beats
+package com.binauralcycles
 
 import android.app.Application
 import dagger.hilt.android.HiltAndroidApp
 
 @HiltAndroidApp
-class BinauralBeatsApp : Application()
+class BinauralCyclesApp : Application()

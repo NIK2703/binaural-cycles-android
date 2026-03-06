@@ -20,8 +20,8 @@ set -e
 # === КОНФИГУРАЦИЯ ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REMOTE_CODE_DIR="$(dirname "$SCRIPT_DIR")/RemoteCode3"
-APP_PACKAGE_BASE="com.binaural.beats"
-APP_ACTIVITY="com.binaural.beats.MainActivity"
+APP_PACKAGE_BASE="com.binauralcycles"
+APP_ACTIVITY="com.binauralcycles.MainActivity"
 APK_PATH="./app/build/outputs/apk/debug/app-debug.apk"
 LOG_DIR="./logs"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")

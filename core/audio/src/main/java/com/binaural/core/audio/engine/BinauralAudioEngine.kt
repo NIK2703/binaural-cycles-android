@@ -485,10 +485,29 @@ class BinauralAudioEngine(private val context: Context) {
         var localFadeStartSample = fadeStartSample
         var localChannelsSwapped = channelsSwapped
         var localFadeOperation = currentFadeOperation
+        var localPendingPresetConfig: BinauralConfig? = pendingPresetConfig
+        
+        // Интервал проверки запросов на переключение пресета (каждые ~10мс)
+        val presetCheckInterval = sampleRate / 100
+        var lastPresetCheck = 0
         
         for (i in 0 until samplesPerChannel) {
             val currentSample = totalSamplesGenerated + i
             var fadeMultiplier = 1.0
+            
+            // Проверяем запрос на переключение пресета каждые ~10мс
+            // Это позволяет мгновенно реагировать на переключение без ожидания конца буфера
+            if (i - lastPresetCheck >= presetCheckInterval) {
+                lastPresetCheck = i
+                presetSwitchRequested.getAndSet(null)?.let { newConfig ->
+                    if (localFadeOperation == FadeOperation.NONE && !isFadingIn) {
+                        localPendingPresetConfig = newConfig
+                        localFadeOperation = FadeOperation.PRESET_SWITCH
+                        localIsFadingOut = true
+                        localFadeStartSample = currentSample
+                    }
+                }
+            }
             
             // Fade-in при старте воспроизведения
             if (isFadingIn) {
@@ -529,11 +548,12 @@ class BinauralAudioEngine(private val context: Context) {
                             Log.d(TAG, "Channel swap executed at sample $currentSample, now swapped=$localChannelsSwapped")
                         } else if (localFadeOperation == FadeOperation.PRESET_SWITCH && configSwitchAtSample < 0) {
                             configSwitchAtSample = currentSample
-                            pendingPresetConfig?.let { newConfig ->
+                            localPendingPresetConfig?.let { newConfig ->
                                 configRef.set(newConfig)
                                 _currentConfig.value = newConfig
+                                Log.d(TAG, "Preset config applied at sample $currentSample")
                             }
-                            pendingPresetConfig = null
+                            localPendingPresetConfig = null
                             localIsFadingOut = false
                             localFadeStartSample = currentSample
                         }
@@ -589,6 +609,7 @@ class BinauralAudioEngine(private val context: Context) {
         isFadingOut = localIsFadingOut
         fadeStartSample = localFadeStartSample
         currentFadeOperation = localFadeOperation
+        pendingPresetConfig = localPendingPresetConfig
         
         return FadeResult(fadePhaseCompleted, fadeOutCompleted)
     }

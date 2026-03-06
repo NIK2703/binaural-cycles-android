@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 android {
@@ -48,6 +49,9 @@ dependencies {
 
     // DateTime
     implementation(libs.kotlinx.datetime)
+
+    // Serialization
+    implementation(libs.kotlinx.serialization.json)
 
     // Testing
     testImplementation(libs.bundles.testing)

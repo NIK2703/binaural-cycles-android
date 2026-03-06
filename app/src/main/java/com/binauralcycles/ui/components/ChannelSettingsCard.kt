@@ -1,4 +1,4 @@
-package com.binaural.beats.ui.components
+package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -9,34 +9,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.VolumeNormalizationSettings
 
 /**
- * Блок настроек с дискретными слайдерами
+ * Блок настроек пресета (перестановка каналов, нормализация, интерполяция)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChannelSettingsCard(
-    channelSwapEnabled: Boolean,
-    channelSwapIntervalSeconds: Int,
-    channelSwapFadeEnabled: Boolean,
-    channelSwapFadeDurationMs: Long,
+fun PresetSettingsCard(
+    channelSwapSettings: ChannelSwapSettings,
+    volumeNormalizationSettings: VolumeNormalizationSettings,
+    interpolationType: InterpolationType,
     isChannelsSwapped: Boolean,
-    volumeNormalizationEnabled: Boolean,
-    volumeNormalizationStrength: Float,
-    sampleRate: SampleRate,
-    frequencyUpdateIntervalMs: Int,
     currentLeftFreq: Double,
     currentRightFreq: Double,
-    interpolationType: InterpolationType,
     onChannelSwapEnabledChange: (Boolean) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeEnabledChange: (Boolean) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
-    onSampleRateChange: (SampleRate) -> Unit,
-    onFrequencyUpdateIntervalChange: (Int) -> Unit,
     onInterpolationTypeChange: (InterpolationType) -> Unit
 ) {
     Column(
@@ -64,6 +58,125 @@ fun ChannelSettingsCard(
         
         HorizontalDivider()
         
+        // Авто-перестановка каналов
+        ListItem(
+            headlineContent = { Text("Авто-перестановка каналов") },
+            supportingContent = { 
+                Text(if (channelSwapSettings.enabled) "Каналы меняются местами для равномерной нагрузки" else "Выключено")
+            },
+            trailingContent = {
+                Switch(
+                    checked = channelSwapSettings.enabled,
+                    onCheckedChange = onChannelSwapEnabledChange
+                )
+            }
+        )
+        
+        // Слайдер интервала перестановки (показываем только когда включено)
+        if (channelSwapSettings.enabled) {
+            DiscreteSlider(
+                label = "Интервал перестановки",
+                value = channelSwapSettings.intervalSeconds,
+                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
+                valueLabel = formatInterval(channelSwapSettings.intervalSeconds),
+                onValueChange = onChannelSwapIntervalChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            
+            // Затухание при смене каналов
+            ListItem(
+                headlineContent = { Text("Плавное затухание") },
+                supportingContent = { 
+                    Text(if (channelSwapSettings.fadeEnabled) "Плавный переход при смене каналов" else "Мгновенное переключение")
+                },
+                trailingContent = {
+                    Switch(
+                        checked = channelSwapSettings.fadeEnabled,
+                        onCheckedChange = onChannelSwapFadeEnabledChange
+                    )
+                }
+            )
+            
+            // Слайдер длительности затухания
+            if (channelSwapSettings.fadeEnabled) {
+                DiscreteSliderLong(
+                    label = "Время затухания",
+                    value = channelSwapSettings.fadeDurationMs,
+                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
+                    valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
+                    onValueChange = onChannelSwapFadeDurationChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+        }
+        
+        HorizontalDivider()
+        
+        // Нормализация громкости
+        ListItem(
+            headlineContent = { Text("Нормализация громкости") },
+            supportingContent = { 
+                Text("Выравнивание громкости между каналами по соотношению частот их тонов")
+            },
+            trailingContent = {
+                Switch(
+                    checked = volumeNormalizationSettings.enabled,
+                    onCheckedChange = onVolumeNormalizationEnabledChange
+                )
+            }
+        )
+        
+        // Слайдер силы нормализации
+        if (volumeNormalizationSettings.enabled) {
+            // Локальное состояние для мгновенного отклика UI
+            var localStrength by remember(volumeNormalizationSettings.strength) { 
+                mutableFloatStateOf(volumeNormalizationSettings.strength) 
+            }
+            
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "Сила нормализации",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        "${(localStrength * 100).toInt()}%",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = localStrength,
+                    onValueChange = { localStrength = it },
+                    onValueChangeFinished = { 
+                        onVolumeNormalizationStrengthChange(localStrength) 
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    valueRange = 0f..1f
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Блок общих настроек приложения (качество звука, интервал обновления)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AppSettingsCard(
+    sampleRate: SampleRate,
+    frequencyUpdateIntervalMs: Int,
+    onSampleRateChange: (SampleRate) -> Unit,
+    onFrequencyUpdateIntervalChange: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
         DiscreteSlider(
             label = "Интервал обновления",
@@ -163,110 +276,6 @@ fun ChannelSettingsCard(
                 }
             }
         )
-        
-        HorizontalDivider()
-        
-        // Авто-перестановка каналов
-        ListItem(
-            headlineContent = { Text("Авто-перестановка каналов") },
-            supportingContent = { 
-                Text(if (channelSwapEnabled) "Каналы меняются местами для равномерной нагрузки" else "Выключено")
-            },
-            trailingContent = {
-                Switch(
-                    checked = channelSwapEnabled,
-                    onCheckedChange = onChannelSwapEnabledChange
-                )
-            }
-        )
-        
-        // Слайдер интервала перестановки (показываем только когда включено)
-        if (channelSwapEnabled) {
-            DiscreteSlider(
-                label = "Интервал перестановки",
-                value = channelSwapIntervalSeconds,
-                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
-                valueLabel = formatInterval(channelSwapIntervalSeconds),
-                onValueChange = onChannelSwapIntervalChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            
-            // Затухание при смене каналов
-            ListItem(
-                headlineContent = { Text("Плавное затухание") },
-                supportingContent = { 
-                    Text(if (channelSwapFadeEnabled) "Плавный переход при смене каналов" else "Мгновенное переключение")
-                },
-                trailingContent = {
-                    Switch(
-                        checked = channelSwapFadeEnabled,
-                        onCheckedChange = onChannelSwapFadeEnabledChange
-                    )
-                }
-            )
-            
-            // Слайдер длительности затухания
-            if (channelSwapFadeEnabled) {
-                DiscreteSliderLong(
-                    label = "Время затухания",
-                    value = channelSwapFadeDurationMs,
-                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
-                    valueLabel = formatFadeDurationLabel(channelSwapFadeDurationMs),
-                    onValueChange = onChannelSwapFadeDurationChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
-        }
-        
-        HorizontalDivider()
-        
-        // Нормализация громкости
-        ListItem(
-            headlineContent = { Text("Нормализация громкости") },
-            supportingContent = { 
-                Text("Выравнивание громкости между каналами по соотношению частот их тонов")
-            },
-            trailingContent = {
-                Switch(
-                    checked = volumeNormalizationEnabled,
-                    onCheckedChange = onVolumeNormalizationEnabledChange
-                )
-            }
-        )
-        
-        // Слайдер силы нормализации
-        if (volumeNormalizationEnabled) {
-            // Локальное состояние для мгновенного отклика UI
-            var localStrength by remember(volumeNormalizationStrength) { 
-                mutableFloatStateOf(volumeNormalizationStrength) 
-            }
-            
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        "Сила нормализации",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        "${(localStrength * 100).toInt()}%",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Slider(
-                    value = localStrength,
-                    onValueChange = { localStrength = it },
-                    onValueChangeFinished = { 
-                        onVolumeNormalizationStrengthChange(localStrength) 
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..1f
-                )
-            }
-        }
     }
 }
 

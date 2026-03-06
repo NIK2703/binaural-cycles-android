@@ -1,5 +1,7 @@
-package com.binaural.beats.ui.screens
+package com.binauralcycles.ui.screens
 
+import android.app.Activity
+import android.content.Intent
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
@@ -17,11 +19,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.binaural.beats.ui.components.MiniFrequencyGraph
-import com.binaural.beats.viewmodel.BinauralViewModel
+import com.binauralcycles.ui.components.MiniFrequencyGraph
+import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
@@ -36,18 +39,25 @@ fun PresetListScreen(
     animatedVisibilityScope: AnimatedVisibilityScope,
     onPresetClick: (String) -> Unit,
     onEditPreset: (String) -> Unit,
-    onCreatePreset: () -> Unit
+    onCreatePreset: () -> Unit,
+    onExportPreset: (String) -> Unit = {},
+    onOpenSettings: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Бинауральные ритмы") },
+                title = { Text("Бинауральные циклы") },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
+                ),
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Default.Settings, contentDescription = "Настройки")
+                    }
+                }
             )
         },
         floatingActionButton = {
@@ -65,13 +75,6 @@ fun PresetListScreen(
                 .padding(paddingValues)
                 .padding(horizontal = 16.dp)
         ) {
-            // Заголовок списка
-            Text(
-                text = "Пресеты",
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-            
             if (uiState.presets.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -89,7 +92,8 @@ fun PresetListScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(top = 8.dp)
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         PresetCard(
@@ -104,6 +108,8 @@ fun PresetListScreen(
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
                             onEditClick = { onEditPreset(preset.id) },
+                            onExportClick = { onExportPreset(preset.id) },
+                            onDuplicateClick = { viewModel.duplicatePreset(preset.id) },
                             onDeleteClick = { viewModel.deletePreset(preset.id) }
                         )
                     }
@@ -127,6 +133,8 @@ private fun PresetCard(
     animatedVisibilityScope: AnimatedVisibilityScope,
     onPlayClick: () -> Unit,
     onEditClick: () -> Unit,
+    onExportClick: () -> Unit = {},
+    onDuplicateClick: () -> Unit = {},
     onDeleteClick: () -> Unit
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
@@ -223,6 +231,23 @@ private fun PresetCard(
                     onEditClick()
                 }
             )
+            DropdownMenuItem(
+                text = { Text("Дублировать") },
+                leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                onClick = {
+                    showDropdownMenu = false
+                    onDuplicateClick()
+                }
+            )
+            DropdownMenuItem(
+                text = { Text("Экспортировать") },
+                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                onClick = {
+                    showDropdownMenu = false
+                    onExportClick()
+                }
+            )
+            HorizontalDivider()
             DropdownMenuItem(
                 text = { Text("Удалить") },
                 leadingIcon = { 
