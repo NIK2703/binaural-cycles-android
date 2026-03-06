@@ -98,8 +98,22 @@ private data class GraphParams(
         return carrierRange.clamp(kotlin.math.round(carrier))
     }
     
-    fun beatWidth(beat: Double): Float {
-        return (beat / maxBeat * heightPx * 0.2).toFloat()
+    /**
+     * Вычисляет Y-координату верхней границы области биений
+     * Верхняя граница соответствует частоте канала: carrier + beat/2
+     */
+    fun beatUpperY(carrier: Double, beat: Double): Float {
+        val upperFrequency = carrier + beat / 2
+        return carrierToY(upperFrequency)
+    }
+    
+    /**
+     * Вычисляет Y-координату нижней границы области биений
+     * Нижняя граница соответствует частоте канала: carrier - beat/2
+     */
+    fun beatLowerY(carrier: Double, beat: Double): Float {
+        val lowerFrequency = carrier - beat / 2
+        return carrierToY(lowerFrequency)
     }
 }
 
@@ -257,16 +271,16 @@ fun FrequencyGraph(
                     val previewXPx = graphParams.timeToX(dragState.currentTime!!)
                     val previewYPx = graphParams.carrierToY(dragState.currentCarrier)
                     
-                    Box(modifier = Modifier.offset { IntOffset(previewXPx.toInt() - 30, previewYPx.toInt() - 75) }) {
-                        Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(4.dp)) {
-                            Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(modifier = Modifier.offset { IntOffset(previewXPx.toInt() - 50, previewYPx.toInt() - 160) }) {
+                        Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(8.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
                                     text = when (dragState.direction) {
                                         DragDirection.HORIZONTAL -> "%02d:%02d".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute)
                                         DragDirection.VERTICAL -> "%.0f Гц".format(dragState.currentCarrier)
                                         DragDirection.NONE -> "%02d:%02d / %.0f Гц".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute, dragState.currentCarrier)
                                     },
-                                    style = MaterialTheme.typography.labelMedium,
+                                    style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.inverseOnSurface
                                 )
@@ -363,11 +377,13 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     
     val currentX = graphParams.timeToX(currentLocalTime)
     val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
-    val currentBeatWidth = graphParams.beatWidth(currentBeatFrequency)
+    val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
+    val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
     
     drawLine(color = Color.Red.copy(alpha = 0.7f), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = 2f)
     drawCircle(color = Color.Red, radius = 8f, center = Offset(currentX, currentCarrierY))
-    drawLine(color = Color.Red.copy(alpha = 0.5f), start = Offset(currentX - currentBeatWidth, currentCarrierY), end = Offset(currentX + currentBeatWidth, currentCarrierY), strokeWidth = 3f)
+    // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
+    drawLine(color = Color.Red.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
@@ -386,11 +402,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     val startTime = LocalTime.fromSecondOfDay(0)
     val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
     val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType)
-    val startCarrierY = params.carrierToY(startCarrier)
-    val startBeatWidth = params.beatWidth(startBeat)
+    val startUpperY = params.beatUpperY(startCarrier, startBeat)
+    val startLowerY = params.beatLowerY(startCarrier, startBeat)
     
-    upperPath.moveTo(0f, startCarrierY - startBeatWidth)
-    lowerPath.moveTo(0f, startCarrierY + startBeatWidth)
+    upperPath.moveTo(0f, startUpperY)
+    lowerPath.moveTo(0f, startLowerY)
     
     // Проходим по всему графику с интерполяцией
     for (i in 1..numSamples) {
@@ -398,11 +414,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
         val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val carrierY = params.carrierToY(carrier)
-        val beatWidth = params.beatWidth(beat)
+        val upperY = params.beatUpperY(carrier, beat)
+        val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
-        upperPath.lineTo(x, carrierY - beatWidth)
-        lowerPath.lineTo(x, carrierY + beatWidth)
+        upperPath.lineTo(x, upperY)
+        lowerPath.lineTo(x, lowerY)
     }
     
     // Замыкаем путь для заливки
@@ -415,10 +431,9 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
         val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val carrierY = params.carrierToY(carrier)
-        val beatWidth = params.beatWidth(beat)
+        val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
-        combinedPath.lineTo(x, carrierY + beatWidth)
+        combinedPath.lineTo(x, lowerY)
     }
     
     combinedPath.close()

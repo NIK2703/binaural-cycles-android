@@ -369,6 +369,22 @@ class BinauralPlaybackService : Service() {
     fun stop() {
         audioEngine?.stop()
     }
+    
+    fun stopWithFade() {
+        audioEngine?.stopWithFade()
+    }
+    
+    fun pauseWithFade() {
+        audioEngine?.pauseWithFade()
+    }
+    
+    fun resumeWithFade() {
+        audioEngine?.resumeWithFade()
+    }
+    
+    fun switchPresetWithFade(config: BinauralConfig) {
+        audioEngine?.switchPresetWithFade(config)
+    }
 
     override fun onDestroy() {
         android.util.Log.d("BinauralPlaybackService", "onDestroy()")

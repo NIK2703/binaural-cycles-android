@@ -27,15 +27,28 @@ import kotlin.math.sin
  * Частота дискретизации аудио
  */
 enum class SampleRate(val value: Int) {
-    LOW(22050),    // Низкое качество, меньше расход батареи
-    MEDIUM(44100), // Стандартное качество
-    HIGH(48000);   // Высокое качество
+    ULTRA_LOW(8000),   // Ультра-низкое (8 kHz) — максимальная экономия батареи
+    VERY_LOW(16000),   // Очень низкое (16 kHz)
+    LOW(22050),        // Низкое качество, меньше расход батареи
+    MEDIUM(44100),     // Стандартное качество
+    HIGH(48000);       // Высокое качество
     
     companion object {
         fun fromValue(value: Int): SampleRate {
             return entries.find { it.value == value } ?: MEDIUM
         }
     }
+}
+
+/**
+ * Тип операции fade
+ */
+private enum class FadeOperation {
+    NONE,           // Нет активного fade
+    CHANNEL_SWAP,   // Перестановка каналов
+    PRESET_SWITCH,  // Переключение пресета
+    PAUSE,          // Пауза
+    STOP            // Остановка
 }
 
 /**
@@ -58,6 +71,11 @@ class BinauralAudioEngine(private val context: Context) {
     private val isActive = AtomicBoolean(false)
     private val pendingSampleRate = AtomicReference<SampleRate?>(null)
     private val pendingFrequencyUpdateIntervalMs = AtomicReference<Int?>(null)
+    
+    // Запросы на операции с fade (потокобезопасные)
+    private val stopWithFadeRequested = AtomicBoolean(false)
+    private val pauseWithFadeRequested = AtomicBoolean(false)
+    private val presetSwitchRequested = AtomicReference<BinauralConfig?>(null)
     
     // Текущие настройки (доступны только из audioThread)
     private var sampleRate: Int = SampleRate.MEDIUM.value
@@ -82,10 +100,16 @@ class BinauralAudioEngine(private val context: Context) {
     private var channelsSwapped = false
     private var lastSwapElapsedMs = 0L
     
-    // Состояние fade при смене каналов
+    // Состояние fade (доступны только из audioThread)
     private var fadeStartSample = 0L
     private var isFadingOut = true
-    private var isFading = false
+    private var currentFadeOperation = FadeOperation.NONE
+    
+    // Состояние fade-in при старте
+    private var isFadingIn = false
+    
+    // Отложенный конфиг для переключения пресета
+    private var pendingPresetConfig: BinauralConfig? = null
     
     // Общий счётчик сэмплов для плавного fade
     private var totalSamplesGenerated = 0L
@@ -161,6 +185,11 @@ class BinauralAudioEngine(private val context: Context) {
         _isPlaying.value = true
         playbackStartTime = System.currentTimeMillis()
         
+        // Запускаем fade-in при старте
+        isFadingIn = true
+        fadeStartSample = 0L
+        totalSamplesGenerated = 0L
+        
         acquireWakeLock()
         
         // Запускаем генерацию в отдельном потоке
@@ -210,7 +239,9 @@ class BinauralAudioEngine(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        audioTrack?.setVolume(configRef.get().volume)
+        // Устанавливаем максимальную громкость AudioTrack, 
+        // реальная громкость применяется в generateBuffer() через config.volume
+        audioTrack?.setVolume(1.0f)
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
     }
     
@@ -220,7 +251,7 @@ class BinauralAudioEngine(private val context: Context) {
         val wakeLockRenewInterval = 600 // каждую минуту
         
         var currentIntervalMs = frequencyUpdateIntervalMs
-        var samplesPerChannel = sampleRate * currentIntervalMs / 1000
+        var samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
         var buffer = ShortArray(samplesPerChannel * 2)
         
         isGenerating = true
@@ -232,9 +263,12 @@ class BinauralAudioEngine(private val context: Context) {
             // Пересоздаём буфер если изменился интервал
             if (frequencyUpdateIntervalMs != currentIntervalMs) {
                 currentIntervalMs = frequencyUpdateIntervalMs
-                samplesPerChannel = sampleRate * currentIntervalMs / 1000
+                samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
                 buffer = ShortArray(samplesPerChannel * 2)
             }
+            
+            // Проверяем запросы на операции с fade
+            checkFadeRequests()
             
             // Получаем текущие частоты
             val now = Clock.System.now()
@@ -249,8 +283,10 @@ class BinauralAudioEngine(private val context: Context) {
             _currentBeatFrequency.value = beatFreq
             _currentCarrierFrequency.value = carrierFreq
             
-            // Проверяем перестановку каналов
-            checkChannelSwap(config)
+            // Проверяем перестановку каналов (только если нет активного fade)
+            if (currentFadeOperation == FadeOperation.NONE) {
+                checkChannelSwap(config)
+            }
             
             // Генерируем буфер
             val fadeDurationSamples = (config.channelSwapFadeDurationMs.coerceAtLeast(100L) * sampleRate / 1000).toInt()
@@ -258,10 +294,27 @@ class BinauralAudioEngine(private val context: Context) {
             
             totalSamplesGenerated += samplesPerChannel
             
-            if (fadeResult.fadePhaseCompleted && isFading) {
-                isFading = false
-                isFadingOut = true
-                Log.d(TAG, "Fade completed")
+            // Обрабатываем завершение fade-in
+            if (fadeResult.fadePhaseCompleted && isFadingIn) {
+                isFadingIn = false
+                Log.d(TAG, "Fade-in completed")
+            }
+            
+            // Обрабатываем завершение fade для различных операций
+            if (fadeResult.fadePhaseCompleted && currentFadeOperation != FadeOperation.NONE) {
+                handleFadeOperationCompleted()
+            }
+            
+            // Обрабатываем завершение fade-out для остановки или паузы
+            if (fadeResult.fadeOutCompleted) {
+                if (currentFadeOperation == FadeOperation.STOP) {
+                    Log.d(TAG, "Fade-out completed, stopping playback")
+                    break
+                } else if (currentFadeOperation == FadeOperation.PAUSE) {
+                    Log.d(TAG, "Fade-out completed, pausing playback")
+                    executePause()
+                    break
+                }
             }
             
             // Проверяем активность перед записью
@@ -304,14 +357,75 @@ class BinauralAudioEngine(private val context: Context) {
         Log.d(TAG, "generateAudioLoop() ended")
     }
     
+    private fun checkFadeRequests() {
+        // Сначала проверяем, есть ли уже активная fade операция
+        if (currentFadeOperation != FadeOperation.NONE) {
+            return // Уже выполняется fade, ждём завершения
+        }
+        
+        // Проверяем запрос на остановку с fade-out
+        if (stopWithFadeRequested.get()) {
+            currentFadeOperation = FadeOperation.STOP
+            isFadingOut = true
+            fadeStartSample = totalSamplesGenerated
+            Log.d(TAG, "Starting fade-out for stop")
+            return
+        }
+        
+        // Проверяем запрос на паузу с fade-out
+        if (pauseWithFadeRequested.get()) {
+            currentFadeOperation = FadeOperation.PAUSE
+            isFadingOut = true
+            fadeStartSample = totalSamplesGenerated
+            Log.d(TAG, "Starting fade-out for pause")
+            return
+        }
+        
+        // Проверяем запрос на переключение пресета с fade
+        presetSwitchRequested.getAndSet(null)?.let { newConfig ->
+            pendingPresetConfig = newConfig
+            currentFadeOperation = FadeOperation.PRESET_SWITCH
+            isFadingOut = true
+            fadeStartSample = totalSamplesGenerated
+            Log.d(TAG, "Starting fade-out for preset switch, config volume=${newConfig.volume}")
+        }
+    }
+    
+    private fun handleFadeOperationCompleted() {
+        when (currentFadeOperation) {
+            FadeOperation.CHANNEL_SWAP -> {
+                // Каналы уже переключены в generateBuffer(), просто логируем
+                Log.d(TAG, "Channel swap fade completed, swapped=$channelsSwapped")
+            }
+            FadeOperation.PRESET_SWITCH -> {
+                // Конфиг уже применён в generateBuffer(), просто логируем
+                Log.d(TAG, "Preset switch fade completed")
+                pendingPresetConfig = null
+            }
+            else -> {}
+        }
+        currentFadeOperation = FadeOperation.NONE
+        isFadingOut = true
+    }
+    
+    private fun executePause() {
+        _isPlaying.value = false
+        currentFadeOperation = FadeOperation.NONE
+        pauseWithFadeRequested.set(false)
+        
+        audioHandler?.post {
+            audioTrack?.pause()
+        }
+    }
+    
     private fun checkChannelSwap(config: BinauralConfig) {
-        if (config.channelSwapEnabled && !isFading) {
+        if (config.channelSwapEnabled) {
             val currentElapsedMs = _elapsedSeconds.value * 100L
             val swapIntervalMs = config.channelSwapIntervalSeconds * 1000L
             
             if (currentElapsedMs - lastSwapElapsedMs >= swapIntervalMs) {
                 if (config.channelSwapFadeEnabled) {
-                    isFading = true
+                    currentFadeOperation = FadeOperation.CHANNEL_SWAP
                     isFadingOut = true
                     fadeStartSample = totalSamplesGenerated
                     lastSwapElapsedMs = currentElapsedMs
@@ -342,7 +456,7 @@ class BinauralAudioEngine(private val context: Context) {
         }
     }
 
-    private data class FadeResult(val fadePhaseCompleted: Boolean)
+    private data class FadeResult(val fadePhaseCompleted: Boolean, val fadeOutCompleted: Boolean = false)
     
     private fun generateBuffer(
         buffer: ShortArray,
@@ -360,29 +474,66 @@ class BinauralAudioEngine(private val context: Context) {
         val leftOmega = 2.0 * PI * leftFreq / sampleRate
         val rightOmega = 2.0 * PI * rightFreq / sampleRate
         
-        val swapChannelsAtStart = config.channelSwapEnabled && channelsSwapped
+        // Запоминаем начальное состояние каналов
+        val channelsSwappedAtStart = channelsSwapped
         var fadePhaseCompleted = false
-        var swapAtSample = -1L
+        var fadeOutCompleted = false
+        var swapExecutedAtSample = -1L  // Сэмпл, на котором выполнен swap
+        var configSwitchAtSample = -1L
         
         var localIsFadingOut = isFadingOut
         var localFadeStartSample = fadeStartSample
         var localChannelsSwapped = channelsSwapped
+        var localFadeOperation = currentFadeOperation
         
         for (i in 0 until samplesPerChannel) {
             val currentSample = totalSamplesGenerated + i
             var fadeMultiplier = 1.0
             
-            if (isFading) {
+            // Fade-in при старте воспроизведения
+            if (isFadingIn) {
+                val progress = currentSample.toDouble() / fadeDurationSamples
+                if (progress >= 1.0) {
+                    fadeMultiplier = 1.0
+                    fadePhaseCompleted = true
+                } else if (progress >= 0.0) {
+                    fadeMultiplier = progress
+                }
+            }
+            // Fade-out для остановки или паузы
+            else if (localFadeOperation == FadeOperation.STOP || localFadeOperation == FadeOperation.PAUSE) {
+                val elapsedSamples = currentSample - localFadeStartSample
+                val progress = elapsedSamples.toDouble() / fadeDurationSamples
+                if (progress >= 1.0) {
+                    fadeMultiplier = 0.0
+                    fadeOutCompleted = true
+                } else if (progress >= 0.0) {
+                    fadeMultiplier = 1.0 - progress
+                }
+            }
+            // Fade для смены каналов или переключения пресета
+            else if (localFadeOperation == FadeOperation.CHANNEL_SWAP || localFadeOperation == FadeOperation.PRESET_SWITCH) {
                 val elapsedSamples = currentSample - localFadeStartSample
                 val progress = elapsedSamples.toDouble() / fadeDurationSamples
                 
                 if (localIsFadingOut) {
                     if (progress >= 1.0) {
                         fadeMultiplier = 0.0
-                        if (swapAtSample < 0) {
-                            swapAtSample = currentSample
+                        // Выполняем операцию в точке полной тишины
+                        if (localFadeOperation == FadeOperation.CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                            swapExecutedAtSample = currentSample
                             localChannelsSwapped = !localChannelsSwapped
                             _isChannelsSwapped.value = localChannelsSwapped
+                            localIsFadingOut = false
+                            localFadeStartSample = currentSample
+                            Log.d(TAG, "Channel swap executed at sample $currentSample, now swapped=$localChannelsSwapped")
+                        } else if (localFadeOperation == FadeOperation.PRESET_SWITCH && configSwitchAtSample < 0) {
+                            configSwitchAtSample = currentSample
+                            pendingPresetConfig?.let { newConfig ->
+                                configRef.set(newConfig)
+                                _currentConfig.value = newConfig
+                            }
+                            pendingPresetConfig = null
                             localIsFadingOut = false
                             localFadeStartSample = currentSample
                         }
@@ -407,14 +558,22 @@ class BinauralAudioEngine(private val context: Context) {
             rightPhase += rightOmega
             if (rightPhase > 2.0 * PI) rightPhase -= 2.0 * PI
             
-            val baseAmplitude = 0.5 * Short.MAX_VALUE * fadeMultiplier
+            // Применяем громкость из конфига и fadeMultiplier
+            val baseAmplitude = 0.5 * Short.MAX_VALUE * fadeMultiplier * config.volume
             val leftAmp = baseAmplitude * leftAmplitude
             val rightAmp = baseAmplitude * rightAmplitude
             
-            val swapForSample = if (swapAtSample >= 0 && currentSample >= swapAtSample) {
-                config.channelSwapEnabled && localChannelsSwapped
+            // Определяем, нужно ли менять каналы для этого сэмпла
+            // Используем localChannelsSwapped которое обновляется в процессе генерации буфера
+            val swapForSample = if (config.channelSwapEnabled) {
+                // Если swap был выполнен в этом буфере, используем актуальное состояние
+                if (swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) {
+                    localChannelsSwapped
+                } else {
+                    channelsSwappedAtStart
+                }
             } else {
-                swapChannelsAtStart
+                false
             }
             
             if (swapForSample) {
@@ -429,8 +588,9 @@ class BinauralAudioEngine(private val context: Context) {
         channelsSwapped = localChannelsSwapped
         isFadingOut = localIsFadingOut
         fadeStartSample = localFadeStartSample
+        currentFadeOperation = localFadeOperation
         
-        return FadeResult(fadePhaseCompleted)
+        return FadeResult(fadePhaseCompleted, fadeOutCompleted)
     }
     
     private fun calculateNormalizedAmplitudes(
@@ -455,13 +615,15 @@ class BinauralAudioEngine(private val context: Context) {
     }
 
     /**
-     * Остановить воспроизведение (потокобезопасно)
+     * Остановить воспроизведение немедленно (потокобезопасно)
      */
     fun stop() {
         Log.d(TAG, "stop() called")
         
         isActive.set(false)
         _isPlaying.value = false
+        stopWithFadeRequested.set(false)
+        pauseWithFadeRequested.set(false)
         
         // Немедленно останавливаем AudioTrack, чтобы разблокировать write()
         // AudioTrack.stop() потокобезопасен и заставит write() немедленно вернуться
@@ -474,6 +636,23 @@ class BinauralAudioEngine(private val context: Context) {
         // Отменяем все pending сообщения и запланированную остановку
         audioHandler?.removeCallbacksAndMessages(null)
         audioHandler?.post(::stopPlayback)
+    }
+    
+    /**
+     * Остановить воспроизведение с плавным затуханием (потокобезопасно)
+     * Использует ту же длительность fade, что и при смене каналов
+     */
+    fun stopWithFade() {
+        Log.d(TAG, "stopWithFade() called")
+        
+        // Если воспроизведение не активно, просто выходим
+        if (!_isPlaying.value) {
+            Log.d(TAG, "Not playing, nothing to stop")
+            return
+        }
+        
+        // Устанавливаем флаг для запуска fade-out
+        stopWithFadeRequested.set(true)
     }
     
     private fun stopPlayback() {
@@ -497,6 +676,10 @@ class BinauralAudioEngine(private val context: Context) {
         _isPlaying.value = false
         isActive.set(false)
         isGenerating = false
+        stopWithFadeRequested.set(false)
+        pauseWithFadeRequested.set(false)
+        isFadingIn = false
+        currentFadeOperation = FadeOperation.NONE
         
         Log.d(TAG, "cleanupPlayback() completed")
     }
@@ -508,52 +691,124 @@ class BinauralAudioEngine(private val context: Context) {
         channelsSwapped = false
         lastSwapElapsedMs = 0L
         _isChannelsSwapped.value = false
-        isFading = false
+        currentFadeOperation = FadeOperation.NONE
         fadeStartSample = 0L
         isFadingOut = true
         totalSamplesGenerated = 0L
+        isFadingIn = false
+        stopWithFadeRequested.set(false)
+        pauseWithFadeRequested.set(false)
+        pendingPresetConfig = null
     }
 
     /**
-     * Приостановить воспроизведение
+     * Приостановить воспроизведение с плавным затуханием (потокобезопасно)
      */
-    fun pause() {
-        if (!_isPlaying.value) return
+    fun pauseWithFade() {
+        Log.d(TAG, "pauseWithFade() called")
         
-        _isPlaying.value = false
-        isActive.set(false)
-        
-        audioHandler?.post {
-            audioTrack?.pause()
+        if (!_isPlaying.value) {
+            Log.d(TAG, "Not playing, nothing to pause")
+            return
         }
+        
+        pauseWithFadeRequested.set(true)
+    }
+
+    /**
+     * Возобновить воспроизведение с плавным нарастанием (потокобезопасно)
+     */
+    fun resumeWithFade() {
+        Log.d(TAG, "resumeWithFade() called")
+        
+        if (_isPlaying.value) {
+            Log.d(TAG, "Already playing, returning")
+            return
+        }
+        
+        play()
+    }
+
+    /**
+     * Переключить пресет с плавным затуханием/нарастанием (потокобезопасно)
+     */
+    fun switchPresetWithFade(config: BinauralConfig) {
+        Log.d(TAG, "switchPresetWithFade() called, isPlaying=${_isPlaying.value}, isActive=${isActive.get()}")
+        
+        // Проверяем реальное состояние воспроизведения
+        if (!isActive.get()) {
+            // Если не воспроизводится, просто применяем конфиг
+            updateConfig(config)
+            Log.d(TAG, "Not active, applying config directly")
+            return
+        }
+        
+        // Устанавливаем запрос - он будет обработан в generateAudioLoop
+        presetSwitchRequested.set(config)
+        Log.d(TAG, "Preset switch request queued")
     }
 
     /**
      * Установить громкость (потокобезопасно)
+     * Громкость применяется напрямую в генерируемых сэмплах
      */
     fun setVolume(volume: Float) {
+        val clampedVolume = volume.coerceIn(0f, 1f)
         val currentConfig = configRef.get()
-        configRef.set(currentConfig.copy(volume = volume.coerceIn(0f, 1f)))
+        configRef.set(currentConfig.copy(volume = clampedVolume))
         _currentConfig.value = configRef.get()
-        
-        audioHandler?.post {
-            audioTrack?.setVolume(volume.coerceIn(0f, 1f))
-        }
+        // Громкость применяется в generateBuffer() через config.volume
+        // Не используем AudioTrack.setVolume() чтобы избежать двойного применения
+        Log.d(TAG, "Volume set to $clampedVolume")
     }
     
     /**
      * Установить частоту дискретизации (потокобезопасно)
      */
     fun setSampleRate(rate: SampleRate) {
-        val wasPlaying = _isPlaying.value
-        if (wasPlaying) {
-            stop()
+        Log.d(TAG, "setSampleRate() called: ${rate.value} Hz, current=${sampleRate} Hz")
+        
+        if (sampleRate == rate.value) {
+            Log.d(TAG, "Sample rate already set to ${rate.value} Hz, skipping")
+            return
         }
-        sampleRate = rate.value
-        // Перезапуск если нужно
+        
+        val wasPlaying = _isPlaying.value
+        Log.d(TAG, "wasPlaying=$wasPlaying")
+        
         if (wasPlaying) {
-            // Небольшая задержка для корректного освобождения ресурсов
-            audioHandler?.postDelayed({ play() }, 100)
+            // Останавливаем воспроизведение и планируем перезапуск с новым sample rate
+            isActive.set(false)
+            _isPlaying.value = false
+            
+            // Немедленно останавливаем AudioTrack
+            try {
+                audioTrack?.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping AudioTrack: ${e.message}")
+            }
+            
+            // Устанавливаем новый sample rate
+            sampleRate = rate.value
+            Log.d(TAG, "Sample rate changed to ${sampleRate} Hz")
+            
+            // Планируем перезапуск в audioThread
+            audioHandler?.post {
+                // Освобождаем старый AudioTrack
+                audioTrack?.release()
+                audioTrack = null
+                
+                // Небольшая пауза для освобождения ресурсов
+                Thread.sleep(50)
+                
+                // Перезапускаем воспроизведение
+                Log.d(TAG, "Restarting playback with new sample rate: ${sampleRate} Hz")
+                play()
+            }
+        } else {
+            // Просто меняем sample rate для следующего воспроизведения
+            sampleRate = rate.value
+            Log.d(TAG, "Sample rate set to ${sampleRate} Hz (not playing)")
         }
     }
     
@@ -568,7 +823,7 @@ class BinauralAudioEngine(private val context: Context) {
      * Установить интервал обновления частот (потокобезопасно)
      */
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        pendingFrequencyUpdateIntervalMs.set(intervalMs.coerceIn(100, 5000))
+        pendingFrequencyUpdateIntervalMs.set(intervalMs.coerceIn(1000, 60000))
     }
     
     /**
