@@ -1,4 +1,4 @@
-package com.binaural.beats.ui.screens
+package com.binauralcycles.ui.screens
 
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
@@ -13,8 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.binaural.beats.ui.components.*
-import com.binaural.beats.viewmodel.BinauralViewModel
+import com.binauralcycles.ui.components.*
+import com.binauralcycles.viewmodel.BinauralViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -23,7 +23,8 @@ fun PresetEditScreen(
     presetId: String?,  // null для нового пресета
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onImportPreset: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
     
@@ -52,21 +53,33 @@ fun PresetEditScreen(
     // Проверяем наличие изменений
     hasChanges = editingPreset?.let { preset ->
         preset.name != presetName || 
-        uiState.editingFrequencyCurve != preset.frequencyCurve
+        uiState.editingFrequencyCurve != preset.frequencyCurve ||
+        uiState.editingChannelSwapSettings != preset.channelSwapSettings ||
+        uiState.editingVolumeNormalizationSettings != preset.volumeNormalizationSettings
     } ?: (presetName != "Новый пресет" || uiState.editingFrequencyCurve != null)
     
     fun saveAndNavigateBack() {
         val curve = uiState.editingFrequencyCurve ?: return
         if (presetId == null) {
             // Создаём новый пресет
-            viewModel.createPreset(presetName, curve)
+            viewModel.createPreset(
+                name = presetName,
+                curve = curve,
+                channelSwapSettings = uiState.editingChannelSwapSettings,
+                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
+            )
         } else {
             // Обновляем существующий
-            viewModel.updatePresetName(presetId, presetName)
-            viewModel.saveEditingPreset(presetId, presetName, curve)
+            viewModel.saveEditingPreset(
+                presetId = presetId,
+                name = presetName,
+                curve = curve,
+                channelSwapSettings = uiState.editingChannelSwapSettings,
+                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
+            )
         }
-        // Очищаем состояние редактирования
-        viewModel.cancelEditing()
+        // Очищаем состояние редактирования без восстановления кривой в сервисе
+        viewModel.finishEditing()
         onNavigateBack()
     }
     
@@ -93,6 +106,12 @@ fun PresetEditScreen(
                         }
                     },
                     actions = {
+                        // Кнопка импорта показывается только для нового пресета
+                        if (presetId == null) {
+                            IconButton(onClick = onImportPreset) {
+                                Icon(Icons.Default.FileDownload, contentDescription = "Импортировать")
+                            }
+                        }
                         IconButton(
                             onClick = { saveAndNavigateBack() },
                             enabled = presetName.isNotBlank()
@@ -187,28 +206,20 @@ fun PresetEditScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 
-                // Настройки
-                ChannelSettingsCard(
-                    channelSwapEnabled = uiState.channelSwapEnabled,
-                    channelSwapIntervalSeconds = uiState.channelSwapIntervalSeconds,
-                    channelSwapFadeEnabled = uiState.channelSwapFadeEnabled,
-                    channelSwapFadeDurationMs = uiState.channelSwapFadeDurationMs,
+                // Настройки пресета
+                PresetSettingsCard(
+                    channelSwapSettings = uiState.editingChannelSwapSettings,
+                    volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
+                    interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
                     isChannelsSwapped = uiState.isChannelsSwapped,
-                    volumeNormalizationEnabled = uiState.volumeNormalizationEnabled,
-                    volumeNormalizationStrength = uiState.volumeNormalizationStrength,
-                    sampleRate = uiState.sampleRate,
-                    frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
                     currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
                     currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
-                    interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
-                    onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
-                    onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
-                    onChannelSwapFadeEnabledChange = { viewModel.setChannelSwapFadeEnabled(it) },
-                    onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
-                    onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
-                    onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
-                    onSampleRateChange = { viewModel.setSampleRate(it) },
-                    onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) },
+                    onChannelSwapEnabledChange = { viewModel.setEditingChannelSwapEnabled(it) },
+                    onChannelSwapIntervalChange = { viewModel.setEditingChannelSwapInterval(it) },
+                    onChannelSwapFadeEnabledChange = { viewModel.setEditingChannelSwapFadeEnabled(it) },
+                    onChannelSwapFadeDurationChange = { viewModel.setEditingChannelSwapFadeDuration(it) },
+                    onVolumeNormalizationEnabledChange = { viewModel.setEditingVolumeNormalizationEnabled(it) },
+                    onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
                 )
                 

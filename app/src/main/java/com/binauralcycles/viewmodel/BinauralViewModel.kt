@@ -1,20 +1,23 @@
-package com.binaural.beats.viewmodel
+package com.binauralcycles.viewmodel
 
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.binaural.beats.service.BinauralPlaybackService
+import com.binauralcycles.service.BinauralPlaybackService
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.BinauralPreset
+import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -25,6 +28,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalTime
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import javax.inject.Inject
 
 data class BinauralUiState(
@@ -45,19 +50,14 @@ data class BinauralUiState(
     // Диапазоны частот для редактирования
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
-    // Настройки перестановки каналов
-    val channelSwapEnabled: Boolean = false,
-    val channelSwapIntervalSeconds: Int = 300, // 5 минут
-    val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
-    val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в мс
+    // Редактируемые настройки пресета (для экрана редактирования)
+    val editingChannelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
+    val editingVolumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
+    // Состояние перестановки каналов (из сервиса)
     val isChannelsSwapped: Boolean = false,
-    // Настройки нормализации громкости
-    val volumeNormalizationEnabled: Boolean = true,  // Включено по умолчанию
-    val volumeNormalizationStrength: Float = 0.5f,
-    // Частота дискретизации
+    // Общие настройки приложения
     val sampleRate: SampleRate = SampleRate.MEDIUM,
-    // Интервал обновления частот (мс)
-    val frequencyUpdateIntervalMs: Int = 1000,
+    val frequencyUpdateIntervalMs: Int = 10000,
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false
 )
@@ -148,45 +148,8 @@ class BinauralViewModel @Inject constructor(
             }
         }
         
-        // Загружаем настройки перестановки каналов
-        viewModelScope.launch {
-            preferencesRepository.getChannelSwapEnabled().collect { enabled ->
-                _uiState.update { it.copy(channelSwapEnabled = enabled) }
-                updateAudioConfig()
-            }
-        }
-        viewModelScope.launch {
-            preferencesRepository.getChannelSwapInterval().collect { interval ->
-                _uiState.update { it.copy(channelSwapIntervalSeconds = interval) }
-                updateAudioConfig()
-            }
-        }
-        viewModelScope.launch {
-            preferencesRepository.getChannelSwapFadeEnabled().collect { enabled ->
-                _uiState.update { it.copy(channelSwapFadeEnabled = enabled) }
-                updateAudioConfig()
-            }
-        }
-        viewModelScope.launch {
-            preferencesRepository.getChannelSwapFadeDuration().collect { duration ->
-                _uiState.update { it.copy(channelSwapFadeDurationMs = duration.toLong()) }
-                updateAudioConfig()
-            }
-        }
-        // Загружаем настройки нормализации громкости
-        viewModelScope.launch {
-            preferencesRepository.getVolumeNormalizationEnabled().collect { enabled ->
-                _uiState.update { it.copy(volumeNormalizationEnabled = enabled) }
-                updateAudioConfig()
-            }
-        }
-        viewModelScope.launch {
-            preferencesRepository.getVolumeNormalizationStrength().collect { strength ->
-                _uiState.update { it.copy(volumeNormalizationStrength = strength) }
-                updateAudioConfig()
-            }
-        }
-        // Загружаем частоту дискретизации
+        // Загружаем общие настройки приложения
+        // Частота дискретизации
         viewModelScope.launch {
             preferencesRepository.getSampleRate().collect { rate ->
                 val sampleRate = when (rate) {
@@ -200,14 +163,14 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.setSampleRate(sampleRate)
             }
         }
-        // Загружаем интервал обновления частот
+        // Интервал обновления частот
         viewModelScope.launch {
             preferencesRepository.getFrequencyUpdateInterval().collect { interval ->
                 _uiState.update { it.copy(frequencyUpdateIntervalMs = interval) }
                 playbackService?.setFrequencyUpdateInterval(interval)
             }
         }
-        // Загружаем громкость
+        // Громкость
         viewModelScope.launch {
             preferencesRepository.getVolume().collect { volume ->
                 _uiState.update { it.copy(volume = volume) }
@@ -264,24 +227,21 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
-        // Формируем конфиг для нового пресета
+        // Формируем конфиг из настроек пресета
         val config = BinauralConfig(
             frequencyCurve = preset.frequencyCurve,
             volume = state.volume,
-            channelSwapEnabled = state.channelSwapEnabled,
-            channelSwapIntervalSeconds = state.channelSwapIntervalSeconds,
-            channelSwapFadeEnabled = state.channelSwapFadeEnabled,
-            channelSwapFadeDurationMs = state.channelSwapFadeDurationMs,
-            volumeNormalizationEnabled = state.volumeNormalizationEnabled,
-            volumeNormalizationStrength = state.volumeNormalizationStrength
+            channelSwapEnabled = preset.channelSwapSettings.enabled,
+            channelSwapIntervalSeconds = preset.channelSwapSettings.intervalSeconds,
+            channelSwapFadeEnabled = preset.channelSwapSettings.fadeEnabled,
+            channelSwapFadeDurationMs = preset.channelSwapSettings.fadeDurationMs,
+            volumeNormalizationEnabled = preset.volumeNormalizationSettings.enabled,
+            volumeNormalizationStrength = preset.volumeNormalizationSettings.strength
         )
         
-        // Если воспроизведение активно - переключаем с fade
-        if (state.isPlaying) {
-            playbackService?.switchPresetWithFade(config)
-        } else {
-            // Иначе просто обновляем конфиг и запускаем
-            playbackService?.updateConfig(config)
+        // Обновляем конфиг мгновенно (без fade при переключении пресетов)
+        playbackService?.updateConfig(config)
+        if (!state.isPlaying) {
             playbackService?.play()
         }
         
@@ -290,24 +250,6 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.saveActivePresetId(presetId)
         }
-    }
-    
-    /**
-     * Обновить конфиг аудио с учётом активного пресета
-     */
-    private fun updateAudioConfigWithPreset(preset: BinauralPreset) {
-        val state = _uiState.value
-        val config = BinauralConfig(
-            frequencyCurve = preset.frequencyCurve,
-            volume = state.volume,
-            channelSwapEnabled = state.channelSwapEnabled,
-            channelSwapIntervalSeconds = state.channelSwapIntervalSeconds,
-            channelSwapFadeEnabled = state.channelSwapFadeEnabled,
-            channelSwapFadeDurationMs = state.channelSwapFadeDurationMs,
-            volumeNormalizationEnabled = state.volumeNormalizationEnabled,
-            volumeNormalizationStrength = state.volumeNormalizationStrength
-        )
-        playbackService?.updateConfig(config)
     }
     
     /**
@@ -322,7 +264,9 @@ class BinauralViewModel @Inject constructor(
                 editingFrequencyCurve = preset.frequencyCurve,
                 editingPresetId = presetId,
                 carrierRange = preset.frequencyCurve.carrierRange,
-                beatRange = preset.frequencyCurve.beatRange
+                beatRange = preset.frequencyCurve.beatRange,
+                editingChannelSwapSettings = preset.channelSwapSettings,
+                editingVolumeNormalizationSettings = preset.volumeNormalizationSettings
             )
         }
         
@@ -344,7 +288,9 @@ class BinauralViewModel @Inject constructor(
                 editingPresetId = null,
                 carrierRange = defaultCurve.carrierRange,
                 beatRange = defaultCurve.beatRange,
-                selectedPointIndex = null
+                selectedPointIndex = null,
+                editingChannelSwapSettings = ChannelSwapSettings(),
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
             )
         }
         // Не обновляем кривую в сервисе при создании нового пресета
@@ -360,7 +306,9 @@ class BinauralViewModel @Inject constructor(
             it.copy(
                 editingFrequencyCurve = null,
                 editingPresetId = null,
-                selectedPointIndex = null
+                selectedPointIndex = null,
+                editingChannelSwapSettings = ChannelSwapSettings(),
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
             )
         }
         
@@ -371,12 +319,31 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
+     * Завершить редактирование после успешного сохранения
+     * Очищает состояние редактирования БЕЗ восстановления кривой в сервисе
+     */
+    fun finishEditing() {
+        _uiState.update { 
+            it.copy(
+                editingFrequencyCurve = null,
+                editingPresetId = null,
+                selectedPointIndex = null,
+                editingChannelSwapSettings = ChannelSwapSettings(),
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
+            )
+        }
+        // Не восстанавливаем кривую в сервисе - новые данные загрузятся через Flow
+    }
+    
+    /**
      * Создать новый пресет
      */
-    fun createPreset(name: String, curve: FrequencyCurve) {
+    fun createPreset(name: String, curve: FrequencyCurve, channelSwapSettings: ChannelSwapSettings, volumeNormalizationSettings: VolumeNormalizationSettings) {
         val preset = BinauralPreset(
             name = name,
-            frequencyCurve = curve
+            frequencyCurve = curve,
+            channelSwapSettings = channelSwapSettings,
+            volumeNormalizationSettings = volumeNormalizationSettings
         )
         viewModelScope.launch {
             preferencesRepository.addPreset(preset)
@@ -386,23 +353,18 @@ class BinauralViewModel @Inject constructor(
     /**
      * Сохранить редактируемый пресет
      */
-    fun saveEditingPreset(presetId: String, name: String, curve: FrequencyCurve) {
+    fun saveEditingPreset(presetId: String, name: String, curve: FrequencyCurve, channelSwapSettings: ChannelSwapSettings, volumeNormalizationSettings: VolumeNormalizationSettings) {
         val existingPreset = _uiState.value.presets.find { it.id == presetId } ?: return
         val updatedPreset = existingPreset.copy(
             name = name,
             frequencyCurve = curve,
+            channelSwapSettings = channelSwapSettings,
+            volumeNormalizationSettings = volumeNormalizationSettings,
             updatedAt = System.currentTimeMillis()
         )
         viewModelScope.launch {
             preferencesRepository.updatePreset(updatedPreset)
         }
-    }
-    
-    /**
-     * Обновить название пресета
-     */
-    fun updatePresetName(presetId: String, name: String) {
-        // Это будет сохранено в saveEditingPreset
     }
     
     /**
@@ -471,10 +433,6 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(selectedPointIndex = null) }
     }
 
-    // Методы maxBeatForCarrier и minCarrierForBeat удалены.
-    // Ограничение частоты биений по несущей частоте не требуется -
-    // кубическая интерполяция может давать значения превышающие точки.
-
     // ============= Методы для редактирования точек (редактируемая кривая) =============
     
     fun updateEditingPointCarrierFrequency(frequency: Double) {
@@ -485,15 +443,11 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            // Ограничиваем только по диапазону несущей частоты
-            // Частота биений не зависит от несущей - кубическая интерполяция может превышать значения точек
             val newCarrier = curve.carrierRange.clamp(frequency)
             
             // Проверяем, нужно ли расширить диапазон несущей частоты
-            // Верхняя граница области биений = carrier + beat/2
             val upperFrequency = newCarrier + oldPoint.beatFrequency / 2
             val newCarrierRange = if (upperFrequency > curve.carrierRange.max) {
-                // Расширяем диапазон до верхней границы с небольшим запасом (10%)
                 FrequencyRange(curve.carrierRange.min, (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10))
             } else {
                 curve.carrierRange
@@ -516,16 +470,12 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            // Ограничиваем по формуле: несущая * 2 - 20
-            // и минимуму beatRange.min
             val maxBeat = (oldPoint.carrierFrequency * 2 - 20).coerceAtLeast(1.0)
             val newBeat = frequency.coerceIn(curve.beatRange.min, maxBeat)
             
             // Проверяем, нужно ли расширить диапазон несущей частоты
-            // Верхняя граница области биений = carrier + beat/2
             val upperFrequency = oldPoint.carrierFrequency + newBeat / 2
             val newCarrierRange = if (upperFrequency > curve.carrierRange.max) {
-                // Расширяем диапазон до верхней границы с небольшим запасом (10%)
                 FrequencyRange(curve.carrierRange.min, (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10))
             } else {
                 curve.carrierRange
@@ -562,15 +512,11 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
-            // Ограничиваем только по диапазону несущей частоты
-            // Частота биений не зависит от несущей - кубическая интерполяция может превышать значения точек
             val clampedCarrier = curve.carrierRange.clamp(newCarrier)
             
             // Проверяем, нужно ли расширить диапазон несущей частоты
-            // Верхняя граница области биений = carrier + beat/2
             val upperFrequency = clampedCarrier + oldPoint.beatFrequency / 2
             val newCarrierRange = if (upperFrequency > curve.carrierRange.max) {
-                // Расширяем диапазон до верхней границы с небольшим запасом (10%)
                 FrequencyRange(curve.carrierRange.min, (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10))
             } else {
                 curve.carrierRange
@@ -590,7 +536,6 @@ class BinauralViewModel @Inject constructor(
         val curve = state.editingFrequencyCurve ?: return
         
         val clampedCarrier = curve.carrierRange.clamp(carrierFrequency)
-        // Ограничиваем частоту биений по формуле: несущая * 2 - 20
         val maxBeat = (clampedCarrier * 2 - 20).coerceAtLeast(1.0)
         val clampedBeat = beatFrequency.coerceIn(curve.beatRange.min, maxBeat)
         
@@ -673,62 +618,84 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    // ============= Методы для управления перестановкой каналов =============
+    // ============= Методы для редактирования настроек пресета =============
     
-    fun setChannelSwapEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(channelSwapEnabled = enabled) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapEnabled(enabled)
+    fun setEditingChannelSwapEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        _uiState.update { 
+            it.copy(
+                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(enabled = enabled)
+            )
         }
+        updateAudioConfigIfActivePresetEditing()
     }
 
-    fun setChannelSwapInterval(seconds: Int) {
+    fun setEditingChannelSwapInterval(seconds: Int) {
+        val state = _uiState.value
         val clampedSeconds = seconds.coerceIn(30, 3600)
-        _uiState.update { it.copy(channelSwapIntervalSeconds = clampedSeconds) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapInterval(clampedSeconds)
+        _uiState.update { 
+            it.copy(
+                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(intervalSeconds = clampedSeconds)
+            )
         }
+        updateAudioConfigIfActivePresetEditing()
     }
 
-    fun setChannelSwapFadeEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(channelSwapFadeEnabled = enabled) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapFadeEnabled(enabled)
+    fun setEditingChannelSwapFadeEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        _uiState.update { 
+            it.copy(
+                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(fadeEnabled = enabled)
+            )
         }
+        updateAudioConfigIfActivePresetEditing()
     }
 
-    fun setChannelSwapFadeDuration(durationMs: Long) {
+    fun setEditingChannelSwapFadeDuration(durationMs: Long) {
+        val state = _uiState.value
         val clampedDuration = durationMs.coerceIn(100L, 10000L)
-        _uiState.update { it.copy(channelSwapFadeDurationMs = clampedDuration) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapFadeDuration(clampedDuration.toInt())
+        _uiState.update { 
+            it.copy(
+                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(fadeDurationMs = clampedDuration)
+            )
         }
+        updateAudioConfigIfActivePresetEditing()
     }
 
-    // Методы для управления нормализацией громкости
-    
-    fun setVolumeNormalizationEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(volumeNormalizationEnabled = enabled) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveVolumeNormalizationEnabled(enabled)
+    fun setEditingVolumeNormalizationEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        _uiState.update { 
+            it.copy(
+                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(enabled = enabled)
+            )
         }
+        updateAudioConfigIfActivePresetEditing()
     }
 
-    fun setVolumeNormalizationStrength(strength: Float) {
+    fun setEditingVolumeNormalizationStrength(strength: Float) {
+        val state = _uiState.value
         val clampedStrength = strength.coerceIn(0f, 1f)
-        _uiState.update { it.copy(volumeNormalizationStrength = clampedStrength) }
-        updateAudioConfig()
-        viewModelScope.launch {
-            preferencesRepository.saveVolumeNormalizationStrength(clampedStrength)
+        _uiState.update { 
+            it.copy(
+                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(strength = clampedStrength)
+            )
+        }
+        updateAudioConfigIfActivePresetEditing()
+    }
+    
+    /**
+     * Обновить конфиг аудио если редактируется активный пресет
+     */
+    private fun updateAudioConfigIfActivePresetEditing() {
+        val state = _uiState.value
+        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+        
+        if (isActivePreset) {
+            updateAudioConfig()
         }
     }
 
-    // Методы для управления частотой дискретизации
+    // ============= Методы для управления общими настройками приложения =============
     
     fun setSampleRate(rate: SampleRate) {
         _uiState.update { it.copy(sampleRate = rate) }
@@ -737,8 +704,6 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.saveSampleRate(rate.value)
         }
     }
-    
-    // Методы для управления интервалом обновления частот
     
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         val clampedInterval = intervalMs.coerceIn(1000, 60000)
@@ -751,25 +716,133 @@ class BinauralViewModel @Inject constructor(
 
     private fun updateAudioConfig() {
         val state = _uiState.value
-        // Всегда используем кривую активного пресета для обновления конфига
-        // Если редактируется активный пресет - используем редактируемую кривую
-        val frequencyCurve = if (state.editingPresetId != null && state.editingPresetId == state.activePreset?.id) {
-            state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve()
+        
+        // Используем настройки из редактируемого пресета если редактируется активный
+        val isActivePresetEditing = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+        
+        val (frequencyCurve, channelSwapSettings, volumeNormalizationSettings) = if (isActivePresetEditing) {
+            Triple(
+                state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
+                state.editingChannelSwapSettings,
+                state.editingVolumeNormalizationSettings
+            )
         } else {
-            state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve()
+            Triple(
+                state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
+                state.activePreset?.channelSwapSettings ?: ChannelSwapSettings(),
+                state.activePreset?.volumeNormalizationSettings ?: VolumeNormalizationSettings()
+            )
         }
         
         val config = BinauralConfig(
             frequencyCurve = frequencyCurve,
             volume = state.volume,
-            channelSwapEnabled = state.channelSwapEnabled,
-            channelSwapIntervalSeconds = state.channelSwapIntervalSeconds,
-            channelSwapFadeEnabled = state.channelSwapFadeEnabled,
-            channelSwapFadeDurationMs = state.channelSwapFadeDurationMs,
-            volumeNormalizationEnabled = state.volumeNormalizationEnabled,
-            volumeNormalizationStrength = state.volumeNormalizationStrength
+            channelSwapEnabled = channelSwapSettings.enabled,
+            channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
+            channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
+            channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
+            volumeNormalizationEnabled = volumeNormalizationSettings.enabled,
+            volumeNormalizationStrength = volumeNormalizationSettings.strength
         )
         playbackService?.updateConfig(config)
+    }
+
+    // ============= Методы для экспорта/импорта пресетов =============
+    
+    private val json = Json { 
+        ignoreUnknownKeys = true
+        prettyPrint = true
+    }
+    
+    /**
+     * Экспортировать пресет в JSON строку
+     */
+    fun exportPresetToJson(presetId: String): String? {
+        val preset = _uiState.value.presets.find { it.id == presetId } ?: return null
+        return try {
+            json.encodeToString(preset)
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralViewModel", "Failed to export preset", e)
+            null
+        }
+    }
+    
+    /**
+     * Получить пресет для экспорта
+     */
+    fun getPresetForExport(presetId: String): BinauralPreset? {
+        return _uiState.value.presets.find { it.id == presetId }
+    }
+    
+    /**
+     * Импортировать пресет из JSON
+     * @return ID импортированного пресета или null при ошибке
+     */
+    fun importPresetFromJson(jsonString: String): String? {
+        return try {
+            val preset = json.decodeFromString<BinauralPreset>(jsonString)
+            // Генерируем новый ID для импортированного пресета, чтобы избежать конфликтов
+            val importedPreset = preset.copy(
+                id = java.util.UUID.randomUUID().toString(),
+                name = generateUniqueName(preset.name),
+                createdAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis()
+            )
+            viewModelScope.launch {
+                preferencesRepository.addPreset(importedPreset)
+            }
+            importedPreset.id
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralViewModel", "Failed to import preset", e)
+            null
+        }
+    }
+    
+    /**
+     * Импортировать пресет из Uri файла
+     * @return ID импортированного пресета или null при ошибке
+     */
+    fun importPresetFromUri(uri: Uri): String? {
+        return try {
+            val jsonString = context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                inputStream.bufferedReader().readText()
+            } ?: return null
+            
+            importPresetFromJson(jsonString)
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralViewModel", "Failed to import preset from uri", e)
+            null
+        }
+    }
+    
+    /**
+     * Сгенерировать уникальное имя для импортированного пресета
+     */
+    private fun generateUniqueName(baseName: String): String {
+        val existingNames = _uiState.value.presets.map { it.name }.toSet()
+        if (baseName !in existingNames) return baseName
+        
+        var counter = 1
+        while ("$baseName ($counter)" in existingNames) {
+            counter++
+        }
+        return "$baseName ($counter)"
+    }
+    
+    /**
+     * Дублировать пресет
+     */
+    fun duplicatePreset(presetId: String) {
+        val preset = _uiState.value.presets.find { it.id == presetId } ?: return
+        val duplicatedPreset = preset.copy(
+            id = java.util.UUID.randomUUID().toString(),
+            name = generateUniqueName(preset.name),
+            createdAt = System.currentTimeMillis(),
+            updatedAt = System.currentTimeMillis()
+        )
+        viewModelScope.launch {
+            preferencesRepository.addPreset(duplicatedPreset)
+        }
     }
 
     override fun onCleared() {

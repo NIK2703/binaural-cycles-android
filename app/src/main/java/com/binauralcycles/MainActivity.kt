@@ -1,4 +1,4 @@
-package com.binaural.beats
+package com.binauralcycles
 
 import android.content.Intent
 import android.os.Build
@@ -11,8 +11,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.navigation.compose.rememberNavController
-import com.binaural.beats.service.BinauralPlaybackService
-import com.binaural.beats.ui.navigation.BinauralNavigation
+import com.binauralcycles.service.BinauralPlaybackService
+import com.binauralcycles.ui.navigation.BinauralNavigation
 import com.binaural.core.ui.theme.BinauralTheme
 import dagger.hilt.android.AndroidEntryPoint
 

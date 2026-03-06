@@ -8,10 +8,12 @@ import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.binaural.core.audio.model.BinauralPreset
+import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.VolumeNormalizationSettings
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -54,6 +56,26 @@ data class SerializableFrequencyCurve(
 )
 
 /**
+ * Сериализуемые настройки перестановки каналов
+ */
+@Serializable
+data class SerializableChannelSwapSettings(
+    val enabled: Boolean = false,
+    val intervalSeconds: Int = 300,
+    val fadeEnabled: Boolean = true,
+    val fadeDurationMs: Long = 1000L
+)
+
+/**
+ * Сериализуемые настройки нормализации громкости
+ */
+@Serializable
+data class SerializableVolumeNormalizationSettings(
+    val enabled: Boolean = true,
+    val strength: Float = 0.5f
+)
+
+/**
  * Сериализуемый пресет для хранения
  */
 @Serializable
@@ -61,6 +83,8 @@ data class SerializablePreset(
     val id: String,
     val name: String,
     val curve: SerializableFrequencyCurve,
+    val channelSwapSettings: SerializableChannelSwapSettings? = null,
+    val volumeNormalizationSettings: SerializableVolumeNormalizationSettings? = null,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -182,7 +206,7 @@ class BinauralPreferencesRepository @Inject constructor(
     
     fun getChannelSwapInterval(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 300 // 5 минут по умолчанию
+            preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60 // 1 минута по умолчанию
         }
     }
     
@@ -206,7 +230,7 @@ class BinauralPreferencesRepository @Inject constructor(
     
     fun getChannelSwapFadeDuration(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[CHANNEL_SWAP_FADE_DURATION_KEY] ?: 1000 // 1 секунда по умолчанию
+            preferences[CHANNEL_SWAP_FADE_DURATION_KEY] ?: 2000 // 2 секунды по умолчанию
         }
     }
     
@@ -232,7 +256,7 @@ class BinauralPreferencesRepository @Inject constructor(
     
     fun getVolumeNormalizationStrength(): Flow<Float> {
         return dataStore.data.map { preferences ->
-            preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] ?: 0.5f
+            preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] ?: 1.0f // 100% по умолчанию
         }
     }
     
@@ -264,7 +288,7 @@ class BinauralPreferencesRepository @Inject constructor(
      */
     fun getFrequencyUpdateInterval(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 1000 // 1 секунда по умолчанию
+            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 10000 // 10 секунд по умолчанию
         }
     }
     
@@ -398,6 +422,16 @@ class BinauralPreferencesRepository @Inject constructor(
                     ),
                     interpolationType = preset.frequencyCurve.interpolationType.name
                 ),
+                channelSwapSettings = SerializableChannelSwapSettings(
+                    enabled = preset.channelSwapSettings.enabled,
+                    intervalSeconds = preset.channelSwapSettings.intervalSeconds,
+                    fadeEnabled = preset.channelSwapSettings.fadeEnabled,
+                    fadeDurationMs = preset.channelSwapSettings.fadeDurationMs
+                ),
+                volumeNormalizationSettings = SerializableVolumeNormalizationSettings(
+                    enabled = preset.volumeNormalizationSettings.enabled,
+                    strength = preset.volumeNormalizationSettings.strength
+                ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
             )
@@ -430,6 +464,20 @@ class BinauralPreferencesRepository @Inject constructor(
                             try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
                         } ?: InterpolationType.LINEAR
                     ),
+                    channelSwapSettings = serializable.channelSwapSettings?.let {
+                        ChannelSwapSettings(
+                            enabled = it.enabled,
+                            intervalSeconds = it.intervalSeconds,
+                            fadeEnabled = it.fadeEnabled,
+                            fadeDurationMs = it.fadeDurationMs
+                        )
+                    } ?: ChannelSwapSettings(),
+                    volumeNormalizationSettings = serializable.volumeNormalizationSettings?.let {
+                        VolumeNormalizationSettings(
+                            enabled = it.enabled,
+                            strength = it.strength
+                        )
+                    } ?: VolumeNormalizationSettings(),
                     createdAt = serializable.createdAt,
                     updatedAt = serializable.updatedAt
                 )

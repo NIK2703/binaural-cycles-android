@@ -1,14 +1,37 @@
 package com.binaural.core.audio.model
 
 import kotlinx.datetime.LocalTime
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import java.util.UUID
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.pow
 
 /**
+ * Сериализатор для LocalTime
+ */
+object LocalTimeSerializer : KSerializer<LocalTime> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("LocalTime", PrimitiveKind.INT)
+    
+    override fun serialize(encoder: Encoder, value: LocalTime) {
+        encoder.encodeInt(value.toSecondOfDay())
+    }
+    
+    override fun deserialize(decoder: Decoder): LocalTime {
+        return LocalTime.fromSecondOfDay(decoder.decodeInt())
+    }
+}
+
+/**
  * Диапазон частот
  */
+@Serializable
 data class FrequencyRange(
     val min: Double,
     val max: Double
@@ -30,6 +53,7 @@ data class FrequencyRange(
 /**
  * Тип интерполяции между точками
  */
+@Serializable
 enum class InterpolationType {
     LINEAR,         // Линейная интерполяция
     CUBIC_SPLINE    // Кубический сплайн Catmull-Rom (плавная кривая)
@@ -39,7 +63,9 @@ enum class InterpolationType {
  * Точка на графике зависимости частот от времени суток
  * Содержит время, несущую частоту и частоту биений
  */
+@Serializable
 data class FrequencyPoint(
+    @Serializable(with = LocalTimeSerializer::class)
     val time: LocalTime,           // Время суток
     val carrierFrequency: Double,  // Несущая частота (Гц)
     val beatFrequency: Double      // Частота биений (Гц)
@@ -58,6 +84,7 @@ data class FrequencyPoint(
  * Кривая зависимости частот от времени суток
  * Содержит набор точек и интерполирует значения между ними
  */
+@Serializable
 data class FrequencyCurve(
     val points: List<FrequencyPoint>,
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
@@ -270,21 +297,20 @@ data class FrequencyCurve(
     companion object {
         /**
          * Создаёт кривую по умолчанию
-         * Точки каждые 3 часа (последняя - 23:59)
-         * Ночью - дельта/тета волны (сон), днём - бета/альфа (активность)
+         * Точки каждые 3 часа (0:00, 3:00, ..., 21:00)
+         * Основано на циркадных ритмах: ночь - дельта/тета (сон), день - бета (активность)
          */
         fun defaultCurve(): FrequencyCurve {
             return FrequencyCurve(
                 points = listOf(
-                    FrequencyPoint.fromHours(0, 0, carrierFrequency = 150.0, beatFrequency = 2.0),    // Полночь - глубокий сон (дельта)
-                    FrequencyPoint.fromHours(3, 0, carrierFrequency = 150.0, beatFrequency = 2.0),    // Ночь - глубокий сон (дельта)
-                    FrequencyPoint.fromHours(6, 0, carrierFrequency = 200.0, beatFrequency = 10.0),   // Утро - альфа (пробуждение)
-                    FrequencyPoint.fromHours(9, 0, carrierFrequency = 220.0, beatFrequency = 15.0),   // Утро - бета (активность)
-                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 250.0, beatFrequency = 12.0),  // Обед - альфа/бета
-                    FrequencyPoint.fromHours(15, 0, carrierFrequency = 250.0, beatFrequency = 18.0),  // День - бета (фокус)
-                    FrequencyPoint.fromHours(18, 0, carrierFrequency = 200.0, beatFrequency = 10.0),  // Вечер - альфа (расслабление)
-                    FrequencyPoint.fromHours(21, 0, carrierFrequency = 170.0, beatFrequency = 6.0),   // Поздний вечер - тета
-                    FrequencyPoint(LocalTime(23, 59), carrierFrequency = 150.0, beatFrequency = 3.0), // Ночь - дельта/тета
+                    FrequencyPoint.fromHours(0, 0, carrierFrequency = 174.0, beatFrequency = 3.0),    // Глубокий сон - дельта
+                    FrequencyPoint.fromHours(3, 0, carrierFrequency = 210.0, beatFrequency = 6.0),    // Лёгкий сон - тета
+                    FrequencyPoint.fromHours(6, 0, carrierFrequency = 220.0, beatFrequency = 8.0),    // Пробуждение - альфа/тета
+                    FrequencyPoint.fromHours(9, 0, carrierFrequency = 440.0, beatFrequency = 20.0),   // Пик активности - бета
+                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 440.0, beatFrequency = 25.0),  // Продуктивность - высокий бета
+                    FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 18.0),  // Вторая половина дня - бета
+                    FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0, beatFrequency = 12.0),  // Вечерний спад - альфа
+                    FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 10.0),  // Подготовка ко сну - альфа
                 )
             )
         }
@@ -327,75 +353,99 @@ data class PlaybackState(
 )
 
 /**
+ * Настройки перестановки каналов для пресета
+ */
+@Serializable
+data class ChannelSwapSettings(
+    val enabled: Boolean = false,
+    val intervalSeconds: Int = 300,        // 5 минут по умолчанию
+    val fadeEnabled: Boolean = true,       // затухание при смене каналов
+    val fadeDurationMs: Long = 1000L       // длительность затухания/нарастания в мс
+)
+
+/**
+ * Настройки нормализации громкости для пресета
+ */
+@Serializable
+data class VolumeNormalizationSettings(
+    val enabled: Boolean = true,           // включено по умолчанию
+    val strength: Float = 0.5f             // от 0 до 1.0
+)
+
+/**
  * Пресет бинаурального ритма - сохранённая конфигурация с названием
  */
+@Serializable
 data class BinauralPreset(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val frequencyCurve: FrequencyCurve,
+    // Настройки перестановки каналов (для каждого пресета отдельно)
+    val channelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
+    // Настройки нормализации громкости (для каждого пресета отдельно)
+    val volumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     companion object {
+        // Фиксированные ID для стандартных пресетов (важно для сохранения изменений)
+        const val DEFAULT_PRESET_ID = "preset-circadian-rhythm"
+        const val GAMMA_PRESET_ID = "preset-gamma-productivity"
+        const val DAILY_CYCLE_PRESET_ID = "preset-daily-cycle"
+        
         /**
          * Создаёт пресет по умолчанию "Циркадный ритм"
+         * Основано на циркадных ритмах человека
          */
         fun defaultPreset(): BinauralPreset {
             return BinauralPreset(
+                id = DEFAULT_PRESET_ID,
                 name = "Циркадный ритм",
                 frequencyCurve = FrequencyCurve.defaultCurve()
             )
         }
         
         /**
-         * Создаёт пресет для расслабления
+         * Создаёт пресет "Гамма-продуктивность"
+         * Включает гамма-ритм во второй половине дня для улучшения памяти и когнитивной гибкости
          */
-        fun relaxationPreset(): BinauralPreset {
+        fun gammaPreset(): BinauralPreset {
             return BinauralPreset(
-                name = "Расслабление",
+                id = GAMMA_PRESET_ID,
+                name = "Гамма-продуктивность",
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 6.0),
-                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 200.0, beatFrequency = 4.0),
-                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 200.0, beatFrequency = 8.0),
-                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 200.0, beatFrequency = 6.0),
-                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 200.0, beatFrequency = 4.0),
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0, beatFrequency = 1.5),   // Глубокий сон - дельта
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0, beatFrequency = 5.0),   // Лёгкий сон - тета
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0, beatFrequency = 9.0),   // Пробуждение - альфа
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),  // Пик активности - бета
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0, beatFrequency = 14.0), // Поддержание внимания - бета/альфа
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 40.0), // Второй пик - гамма
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 7.5),  // Расслабление - альфа/тета
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 4.0),  // Подготовка ко сну - тета
                     )
                 )
             )
         }
         
         /**
-         * Создаёт пресет для фокуса
+         * Создаёт пресет "Суточный цикл"
+         * Полный цикл с глубокой регенерацией ночью до максимальной продуктивности днём
          */
-        fun focusPreset(): BinauralPreset {
+        fun dailyCyclePreset(): BinauralPreset {
             return BinauralPreset(
-                name = "Фокус",
+                id = DAILY_CYCLE_PRESET_ID,
+                name = "Суточный цикл",
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 250.0, beatFrequency = 14.0),
-                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 250.0, beatFrequency = 12.0),
-                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 250.0, beatFrequency = 18.0),
-                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0, beatFrequency = 15.0),
-                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 250.0, beatFrequency = 10.0),
-                    )
-                )
-            )
-        }
-        
-        /**
-         * Создаёт пресет для сна
-         */
-        fun sleepPreset(): BinauralPreset {
-            return BinauralPreset(
-                name = "Сон",
-                frequencyCurve = FrequencyCurve(
-                    points = listOf(
-                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 150.0, beatFrequency = 2.0),
-                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 150.0, beatFrequency = 1.0),
-                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 150.0, beatFrequency = 2.0),
-                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 150.0, beatFrequency = 1.5),
-                        FrequencyPoint.fromHours(23, 0, carrierFrequency = 150.0, beatFrequency = 0.5),
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 2.0),   // Глубокий сон - дельта
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0, beatFrequency = 3.0),   // Подготовка к пробуждению - дельта-тета
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0, beatFrequency = 10.0),  // Спокойное пробуждение - альфа
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),  // Пик концентрации - бета
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0, beatFrequency = 6.0),  // Креативная перезагрузка - тета
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0, beatFrequency = 25.0), // Максимальная продуктивность - верхний бета
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 9.0),  // Вечернее расслабление - нижняя альфа
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0, beatFrequency = 5.0),  // Подготовка ко сну - тета
                     )
                 )
             )
@@ -405,12 +455,7 @@ data class BinauralPreset(
          * Возвращает список предустановленных пресетов
          */
         fun defaultPresets(): List<BinauralPreset> {
-            return listOf(
-                defaultPreset(),
-                relaxationPreset(),
-                focusPreset(),
-                sleepPreset()
-            )
+            return listOf(defaultPreset(), gammaPreset(), dailyCyclePreset())
         }
     }
 }

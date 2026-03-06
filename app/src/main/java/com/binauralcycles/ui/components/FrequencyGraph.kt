@@ -1,4 +1,4 @@
-package com.binaural.beats.ui.components
+package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border

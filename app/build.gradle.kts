@@ -2,16 +2,17 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
 
 android {
-    namespace = "com.binaural.beats"
+    namespace = "com.binauralcycles"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "com.binaural.beats"
+        applicationId = "com.binauralcycles"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
@@ -86,6 +87,9 @@ dependencies {
 
     // DateTime
     implementation(libs.kotlinx.datetime)
+
+    // Serialization
+    implementation(libs.kotlinx.serialization.json)
 
     // Testing
     testImplementation(libs.bundles.testing)

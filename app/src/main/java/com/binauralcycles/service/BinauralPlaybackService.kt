@@ -1,4 +1,4 @@
-package com.binaural.beats.service
+package com.binauralcycles.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -18,8 +18,8 @@ import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
-import com.binaural.beats.MainActivity
-import com.binaural.beats.R
+import com.binauralcycles.MainActivity
+import com.binauralcycles.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
@@ -40,9 +40,9 @@ class BinauralPlaybackService : Service() {
         const val CHANNEL_ID = "binaural_playback_channel"
         const val NOTIFICATION_ID = 1001
         
-        const val ACTION_START = "com.binaural.beats.action.START"
-        const val ACTION_STOP = "com.binaural.beats.action.STOP"
-        const val ACTION_TOGGLE = "com.binaural.beats.action.TOGGLE"
+        const val ACTION_START = "com.binauralcycles.action.START"
+        const val ACTION_STOP = "com.binauralcycles.action.STOP"
+        const val ACTION_TOGGLE = "com.binauralcycles.action.TOGGLE"
         
         // Статические StateFlows для доступа из ViewModel без привязки к сервису
         private val _isPlaying = MutableStateFlow(false)
@@ -175,11 +175,7 @@ class BinauralPlaybackService : Service() {
                 stopPlayback()
             }
             ACTION_TOGGLE -> {
-                if (_isPlaying.value) {
-                    stopPlayback()
-                } else {
-                    startPlayback()
-                }
+                togglePlayback()
             }
         }
         return START_STICKY
@@ -209,11 +205,21 @@ class BinauralPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         
+        // Toggle action (Play/Pause)
+        val toggleIntent = Intent(this, BinauralPlaybackService::class.java).apply {
+            action = ACTION_TOGGLE
+        }
+        val togglePendingIntent = PendingIntent.getService(
+            this, 1, toggleIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        // Stop action
         val stopIntent = Intent(this, BinauralPlaybackService::class.java).apply {
             action = ACTION_STOP
         }
         val stopPendingIntent = PendingIntent.getService(
-            this, 1, stopIntent,
+            this, 2, stopIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         
@@ -229,17 +235,17 @@ class BinauralPlaybackService : Service() {
             _currentCarrierFrequency.value
         )
         
+        val playPauseIcon = if (_isPlaying.value) R.drawable.ic_pause else R.drawable.ic_play
+        val playPauseText = if (_isPlaying.value) getString(R.string.action_pause) else getString(R.string.action_play)
+        
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(content)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
-            .addAction(
-                if (_isPlaying.value) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
-                if (_isPlaying.value) getString(R.string.action_stop) else getString(R.string.action_play),
-                stopPendingIntent
-            )
-            .setStyle(MediaStyle().setShowActionsInCompactView(0))
+            .addAction(playPauseIcon, playPauseText, togglePendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_stop), stopPendingIntent)
+            .setStyle(MediaStyle().setShowActionsInCompactView(0, 1))
             .setOngoing(_isPlaying.value)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
@@ -357,7 +363,9 @@ class BinauralPlaybackService : Service() {
     fun togglePlayback() {
         if (_isPlaying.value) {
             audioEngine?.stop()
+            abandonAudioFocus()
         } else {
+            requestAudioFocus()
             audioEngine?.play()
         }
     }

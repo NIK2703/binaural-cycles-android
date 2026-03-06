@@ -1,4 +1,4 @@
-package com.binaural.beats.ui.components
+package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -79,6 +79,15 @@ fun MiniFrequencyGraph(
     currentCarrierFrequency: Double = 0.0,
     currentBeatFrequency: Double = 0.0
 ) {
+    // Вычисляем частоты из кривой для текущего времени, если они не переданы или равны 0
+    val displayCarrierFrequency = remember(currentTime, frequencyCurve, currentCarrierFrequency) {
+        if (currentCarrierFrequency > 0) currentCarrierFrequency
+        else frequencyCurve.getCarrierFrequencyAt(currentTime)
+    }
+    val displayBeatFrequency = remember(currentTime, frequencyCurve, currentBeatFrequency) {
+        if (currentBeatFrequency > 0) currentBeatFrequency
+        else frequencyCurve.getBeatFrequencyAt(currentTime)
+    }
     val density = LocalDensity.current
     val sortedPoints = remember(frequencyCurve.points) {
         frequencyCurve.points.sortedBy { it.time.toSecondOfDay() }
@@ -117,8 +126,8 @@ fun MiniFrequencyGraph(
                             interpolationType = frequencyCurve.interpolationType,
                             isPlaying = isPlaying,
                             currentTime = currentTime,
-                            currentCarrierFrequency = currentCarrierFrequency,
-                            currentBeatFrequency = currentBeatFrequency,
+                            currentCarrierFrequency = displayCarrierFrequency,
+                            currentBeatFrequency = displayBeatFrequency,
                             maxBeat = maxBeat
                         )
                     }
