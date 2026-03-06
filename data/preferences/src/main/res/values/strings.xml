@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Циркадный ритм</string>
+    <string name="preset_gamma_productivity">Гамма-продуктивность</string>
+    <string name="preset_daily_cycle">Суточный цикл</string>
+</resources>

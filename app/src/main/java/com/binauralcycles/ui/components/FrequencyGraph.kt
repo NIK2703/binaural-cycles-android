@@ -21,9 +21,11 @@ import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.model.FrequencyPoint
+import com.binauralcycles.R
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import kotlinx.datetime.Clock
@@ -322,12 +324,19 @@ fun FrequencyGraph(
         }
     }
     
+    val hzLabel = stringResource(R.string.hz)
+    val minCarrierTitle = stringResource(R.string.min_carrier_frequency)
+    val maxCarrierTitle = stringResource(R.string.max_carrier_frequency)
+    val frequencyLabel = stringResource(R.string.frequency_hz)
+    val okLabel = stringResource(R.string.ok)
+    val cancelLabel = stringResource(R.string.cancel)
+    
     if (showRangeDialog) {
         AlertDialog(
             onDismissRequest = { showRangeDialog = false },
-            title = { Text(if (editingRangeType == RangeType.MIN) "Мин. несущая частота" else "Макс. несущая частота") },
+            title = { Text(if (editingRangeType == RangeType.MIN) minCarrierTitle else maxCarrierTitle) },
             text = {
-                OutlinedTextField(value = tempRangeValue, onValueChange = { tempRangeValue = it }, label = { Text("Частота (Гц)") }, singleLine = true)
+                OutlinedTextField(value = tempRangeValue, onValueChange = { tempRangeValue = it }, label = { Text(frequencyLabel) }, singleLine = true)
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -338,9 +347,9 @@ fun FrequencyGraph(
                         if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
                     }
                     showRangeDialog = false
-                }) { Text("OK") }
+                }) { Text(okLabel) }
             },
-            dismissButton = { TextButton(onClick = { showRangeDialog = false }) { Text("Отмена") } }
+            dismissButton = { TextButton(onClick = { showRangeDialog = false }) { Text(cancelLabel) } }
         )
     }
 }

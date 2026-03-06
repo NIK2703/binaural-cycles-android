@@ -12,9 +12,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.ui.components.*
 import com.binauralcycles.viewmodel.BinauralViewModel
+import com.binauralcycles.R
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
@@ -27,6 +29,7 @@ fun PresetEditScreen(
     onImportPreset: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val newPresetName = stringResource(R.string.new_preset)
     
     // Находим пресет для редактирования
     val editingPreset = remember(presetId, uiState.presets) {
@@ -36,7 +39,7 @@ fun PresetEditScreen(
     
     // Локальное состояние для редактирования
     var presetName by remember(editingPreset) { 
-        mutableStateOf(editingPreset?.name ?: "Новый пресет") 
+        mutableStateOf(editingPreset?.name ?: newPresetName) 
     }
     var showUnsavedDialog by remember { mutableStateOf(false) }
     var hasChanges by remember { mutableStateOf(false) }
@@ -56,7 +59,7 @@ fun PresetEditScreen(
         uiState.editingFrequencyCurve != preset.frequencyCurve ||
         uiState.editingChannelSwapSettings != preset.channelSwapSettings ||
         uiState.editingVolumeNormalizationSettings != preset.volumeNormalizationSettings
-    } ?: (presetName != "Новый пресет" || uiState.editingFrequencyCurve != null)
+    } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
     
     fun saveAndNavigateBack() {
         val curve = uiState.editingFrequencyCurve ?: return
@@ -78,7 +81,7 @@ fun PresetEditScreen(
                 volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
             )
         }
-        // Очищаем состояние редактирования без восстановления кривой в сервисе
+        // Порождаем состояние редактирования без восстановления кривой в сервисе
         viewModel.finishEditing()
         onNavigateBack()
     }
@@ -87,7 +90,7 @@ fun PresetEditScreen(
         if (hasChanges) {
             showUnsavedDialog = true
         } else {
-            // Очищаем состояние редактирования при выходе без изменений
+            // Порожаем состояние редактирования при выходе без изменений
             viewModel.cancelEditing()
             onNavigateBack()
         }
@@ -98,25 +101,25 @@ fun PresetEditScreen(
             topBar = {
                 TopAppBar(
                     title = { 
-                        Text(if (presetId == null) "Новый пресет" else "Редактирование") 
+                        Text(if (presetId == null) stringResource(R.string.new_preset) else stringResource(R.string.edit_preset)) 
                     },
                     navigationIcon = {
                         IconButton(onClick = { navigateBackWithCheck() }) {
-                            Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                            Icon(Icons.Default.ArrowBack, contentDescription = stringResource(R.string.back))
                         }
                     },
                     actions = {
                         // Кнопка импорта показывается только для нового пресета
                         if (presetId == null) {
                             IconButton(onClick = onImportPreset) {
-                                Icon(Icons.Default.FileDownload, contentDescription = "Импортировать")
+                                Icon(Icons.Default.FileDownload, contentDescription = stringResource(R.string.import_preset))
                             }
                         }
                         IconButton(
                             onClick = { saveAndNavigateBack() },
                             enabled = presetName.isNotBlank()
                         ) {
-                            Icon(Icons.Default.Save, contentDescription = "Сохранить")
+                            Icon(Icons.Default.Save, contentDescription = stringResource(R.string.save))
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -144,7 +147,7 @@ fun PresetEditScreen(
                 OutlinedTextField(
                     value = presetName,
                     onValueChange = { presetName = it },
-                    label = { Text("Название пресета") },
+                    label = { Text(stringResource(R.string.preset_name)) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(vertical = 8.dp),
@@ -232,14 +235,14 @@ fun PresetEditScreen(
     if (showUnsavedDialog) {
         AlertDialog(
             onDismissRequest = { showUnsavedDialog = false },
-            title = { Text("Несохранённые изменения") },
-            text = { Text("У вас есть несохранённые изменения. Сохранить перед выходом?") },
+            title = { Text(stringResource(R.string.unsaved_changes_title)) },
+            text = { Text(stringResource(R.string.unsaved_changes_message)) },
             confirmButton = {
                 TextButton(onClick = {
                     showUnsavedDialog = false
                     saveAndNavigateBack()
                 }) {
-                    Text("Сохранить")
+                    Text(stringResource(R.string.save))
                 }
             },
             dismissButton = {
@@ -249,7 +252,7 @@ fun PresetEditScreen(
                     viewModel.cancelEditing()
                     onNavigateBack()
                 }) {
-                    Text("Не сохранять")
+                    Text(stringResource(R.string.do_not_save))
                 }
             }
         )

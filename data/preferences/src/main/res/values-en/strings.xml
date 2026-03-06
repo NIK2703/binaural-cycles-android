@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Circadian Rhythm</string>
+    <string name="preset_gamma_productivity">Gamma Productivity</string>
+    <string name="preset_daily_cycle">Daily Cycle</string>
+</resources>
