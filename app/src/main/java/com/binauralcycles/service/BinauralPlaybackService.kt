@@ -42,6 +42,7 @@ class BinauralPlaybackService : Service() {
         const val ACTION_START = "com.binauralcycles.action.START"
         const val ACTION_STOP = "com.binauralcycles.action.STOP"
         const val ACTION_TOGGLE = "com.binauralcycles.action.TOGGLE"
+        const val ACTION_EXIT = "com.binauralcycles.action.EXIT"
         
         // Статические StateFlows для доступа из ViewModel без привязки к сервису
         private val _isPlaying = MutableStateFlow(false)
@@ -176,6 +177,9 @@ class BinauralPlaybackService : Service() {
             ACTION_TOGGLE -> {
                 togglePlayback()
             }
+            ACTION_EXIT -> {
+                exitApp()
+            }
         }
         return START_STICKY
     }
@@ -213,6 +217,15 @@ class BinauralPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        // Exit action
+        val exitIntent = Intent(this, BinauralPlaybackService::class.java).apply {
+            action = ACTION_EXIT
+        }
+        val exitPendingIntent = PendingIntent.getService(
+            this, 2, exitIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val title = if (_isPlaying.value) {
             getString(R.string.notification_playing)
         } else {
@@ -234,6 +247,7 @@ class BinauralPlaybackService : Service() {
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .addAction(playPauseIcon, playPauseText, togglePendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_exit), exitPendingIntent)
             .setOngoing(_isPlaying.value)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
@@ -279,6 +293,25 @@ class BinauralPlaybackService : Service() {
         abandonAudioFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun exitApp() {
+        // Останавливаем аудио
+        audioEngine?.stop()
+        abandonAudioFocus()
+        
+        // Останавливаем foreground service
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        
+        // Закрываем приложение
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(intent)
+        
+        // Завершаем процесс
+        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private fun requestAudioFocus(): Boolean {
