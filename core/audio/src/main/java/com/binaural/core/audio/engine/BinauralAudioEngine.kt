@@ -624,21 +624,25 @@ class BinauralAudioEngine(private val context: Context) {
         }
 
         // Strength from 0 to 2.0 (0% - 200%)
-        // At 100% (1.0): original normalization behavior
-        // At 200% (2.0): 2x stronger than original
         val strength = config.volumeNormalizationStrength.coerceIn(0f, 2f)
         val minFreq = minOf(leftFreq, rightFreq)
 
         val leftNormalized = minFreq / leftFreq
         val rightNormalized = minFreq / rightFreq
 
-        // Original formula: amplitude = 1.0 + strength * (normalized - 1.0)
-        // At strength=1.0, normalized=0.5: amplitude = 0.5 (50% reduction)
-        // At strength=2.0, normalized=0.5: amplitude = 0.0 (100% reduction) - clips!
+        // Exponential normalization formula:
+        // amplitude = normalized ^ strength
         // 
-        // Fixed formula: scale the effect so 200% = 2x original but never below 0.25
-        val leftAmplitude = (1.0 + strength * (leftNormalized - 1.0)).coerceAtLeast(0.25)
-        val rightAmplitude = (1.0 + strength * (rightNormalized - 1.0)).coerceAtLeast(0.25)
+        // Examples for normalized = 0.5 (freq ratio 2:1):
+        // - strength = 0.0 → amplitude = 1.0 (no normalization)
+        // - strength = 0.5 → amplitude = 0.71 (29% reduction)
+        // - strength = 1.0 → amplitude = 0.5 (50% reduction - original behavior)
+        // - strength = 1.5 → amplitude = 0.35 (65% reduction)
+        // - strength = 2.0 → amplitude = 0.25 (75% reduction - 2x stronger than 100%)
+        //
+        // This formula naturally scales without clipping and provides smooth control
+        val leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
+        val rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
 
         return Pair(leftAmplitude, rightAmplitude)
     }
