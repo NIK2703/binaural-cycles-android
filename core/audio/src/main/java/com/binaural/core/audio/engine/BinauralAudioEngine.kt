@@ -624,31 +624,21 @@ class BinauralAudioEngine(private val context: Context) {
         }
 
         // Strength from 0 to 2.0 (0% - 200%)
+        // At 100% (1.0): original normalization behavior
+        // At 200% (2.0): 2x stronger than original
         val strength = config.volumeNormalizationStrength.coerceIn(0f, 2f)
         val minFreq = minOf(leftFreq, rightFreq)
-        val maxFreq = maxOf(leftFreq, rightFreq)
 
-        // Calculate frequency ratio (always >= 1.0)
-        val freqRatio = maxFreq / minFreq
+        val leftNormalized = minFreq / leftFreq
+        val rightNormalized = minFreq / rightFreq
 
-        // Normalization factor: at 100% strength, reduce the louder channel
-        // At 200% strength, apply stronger reduction but never below 0.5
-        // This prevents complete silencing and maintains audio quality
-        val maxReduction = 0.5 // Never reduce below 50% amplitude
-        val baseReduction = 1.0 - (1.0 / freqRatio) // 0 to ~1.0 depending on freq ratio
-        val actualReduction = (strength * baseReduction * 0.5).coerceAtMost(maxReduction)
-
-        // Apply reduction to the higher frequency channel
-        val leftAmplitude = if (leftFreq == maxFreq) {
-            1.0 - actualReduction
-        } else {
-            1.0
-        }
-        val rightAmplitude = if (rightFreq == maxFreq) {
-            1.0 - actualReduction
-        } else {
-            1.0
-        }
+        // Original formula: amplitude = 1.0 + strength * (normalized - 1.0)
+        // At strength=1.0, normalized=0.5: amplitude = 0.5 (50% reduction)
+        // At strength=2.0, normalized=0.5: amplitude = 0.0 (100% reduction) - clips!
+        // 
+        // Fixed formula: scale the effect so 200% = 2x original but never below 0.25
+        val leftAmplitude = (1.0 + strength * (leftNormalized - 1.0)).coerceAtLeast(0.25)
+        val rightAmplitude = (1.0 + strength * (rightNormalized - 1.0)).coerceAtLeast(0.25)
 
         return Pair(leftAmplitude, rightAmplitude)
     }
