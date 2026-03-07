@@ -369,7 +369,7 @@ data class ChannelSwapSettings(
 @Serializable
 data class VolumeNormalizationSettings(
     val enabled: Boolean = true,           // включено по умолчанию
-    val strength: Float = 0.5f             // от 0 до 1.0
+    val strength: Float = 1.0f             // от 0 до 2.0 (0% - 200%)
 )
 
 /**

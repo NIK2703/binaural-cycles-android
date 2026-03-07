@@ -131,10 +131,10 @@ fun PresetSettingsCard(
         // Слайдер силы нормализации
         if (volumeNormalizationSettings.enabled) {
             // Локальное состояние для мгновенного отклика UI
-            var localStrength by remember(volumeNormalizationSettings.strength) { 
-                mutableFloatStateOf(volumeNormalizationSettings.strength) 
+            var localStrength by remember(volumeNormalizationSettings.strength) {
+                mutableFloatStateOf(volumeNormalizationSettings.strength)
             }
-            
+
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -153,11 +153,11 @@ fun PresetSettingsCard(
                 Slider(
                     value = localStrength,
                     onValueChange = { localStrength = it },
-                    onValueChangeFinished = { 
-                        onVolumeNormalizationStrengthChange(localStrength) 
+                    onValueChangeFinished = {
+                        onVolumeNormalizationStrengthChange(localStrength)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..1f
+                    valueRange = 0f..2f
                 )
             }
         }

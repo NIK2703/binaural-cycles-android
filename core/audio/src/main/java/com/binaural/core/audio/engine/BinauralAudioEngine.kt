@@ -622,16 +622,17 @@ class BinauralAudioEngine(private val context: Context) {
         if (!config.volumeNormalizationEnabled) {
             return Pair(1.0, 1.0)
         }
-        
-        val strength = config.volumeNormalizationStrength.coerceIn(0f, 1f)
+
+        // Strength can now be from 0 to 2.0 (0% - 200%)
+        val strength = config.volumeNormalizationStrength.coerceIn(0f, 2f)
         val minFreq = minOf(leftFreq, rightFreq)
-        
+
         val leftNormalized = minFreq / leftFreq
         val rightNormalized = minFreq / rightFreq
-        
+
         val leftAmplitude = 1.0 + strength * (leftNormalized - 1.0)
         val rightAmplitude = 1.0 + strength * (rightNormalized - 1.0)
-        
+
         return Pair(leftAmplitude, rightAmplitude)
     }
 

@@ -674,8 +674,8 @@ class BinauralViewModel @Inject constructor(
 
     fun setEditingVolumeNormalizationStrength(strength: Float) {
         val state = _uiState.value
-        val clampedStrength = strength.coerceIn(0f, 1f)
-        _uiState.update { 
+        val clampedStrength = strength.coerceIn(0f, 2f)
+        _uiState.update {
             it.copy(
                 editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(strength = clampedStrength)
             )
