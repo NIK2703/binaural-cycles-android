@@ -46,7 +46,10 @@ fun PresetListScreen(
     onOpenSettings: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    
+
+    // Поднимаем состояние времени на уровень экрана - ОДНА корутина на весь список
+    val currentTime = rememberCurrentTime(uiState.isPlaying)
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -106,6 +109,7 @@ fun PresetListScreen(
                             isPlaying = uiState.activePreset?.id == preset.id && uiState.isPlaying,
                             currentCarrierFrequency = uiState.currentCarrierFrequency,
                             currentBeatFrequency = uiState.currentBeatFrequency,
+                            currentTime = currentTime.value, // Передаём время из родителя
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
@@ -121,6 +125,34 @@ fun PresetListScreen(
     }
 }
 
+/**
+ * Возвращает StateFlow с текущим временем, обновляемым каждые 5 секунд при воспроизведении
+ * Оптимизация: одна корутина на весь экран вместо по одной на каждую карточку
+ */
+@Composable
+private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
+    val currentTime = remember { mutableStateOf(LocalTime.fromSecondOfDay(12 * 3600)) }
+    
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (true) {
+                val now = Clock.System.now()
+                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+                kotlinx.coroutines.delay(5000)
+            }
+        } else {
+            currentTime.value = LocalTime.fromSecondOfDay(12 * 3600)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        val now = Clock.System.now()
+        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+    }
+    
+    return currentTime
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PresetCard(
@@ -131,6 +163,7 @@ private fun PresetCard(
     isPlaying: Boolean,
     currentCarrierFrequency: Double,
     currentBeatFrequency: Double,
+    currentTime: LocalTime, // Получаем от родителя
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
     onPlayClick: () -> Unit,
@@ -141,26 +174,8 @@ private fun PresetCard(
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDropdownMenu by remember { mutableStateOf(false) }
-    
-    // Текущее время для отображения позиции воспроизведения
-    val currentTime = remember { mutableStateOf(LocalTime(12, 0)) }
-    
-    // Обновляем текущее время при воспроизведении
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            while (true) {
-                val now = Clock.System.now()
-                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-                kotlinx.coroutines.delay(5000)
-            }
-        }
-    }
-    
-    // Устанавливаем начальное время
-    LaunchedEffect(Unit) {
-        val now = Clock.System.now()
-        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-    }
+
+    // Удаляем внутреннюю корутину - время приходит от родителя (оптимизация)
     
     Box(
         modifier = Modifier.fillMaxWidth()
@@ -194,7 +209,7 @@ private fun PresetCard(
                         frequencyCurve = frequencyCurve,
                         modifier = Modifier.fillMaxSize(),
                         isPlaying = isPlaying,
-                        currentTime = currentTime.value,
+                        currentTime = currentTime,
                         currentCarrierFrequency = currentCarrierFrequency,
                         currentBeatFrequency = currentBeatFrequency
                     )

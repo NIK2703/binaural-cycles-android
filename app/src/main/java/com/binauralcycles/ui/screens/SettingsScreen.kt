@@ -50,8 +50,12 @@ fun SettingsScreen(
             AppSettingsCard(
                 sampleRate = uiState.sampleRate,
                 frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
+                wavetableOptimizationEnabled = uiState.wavetableOptimizationEnabled,
+                wavetableSize = uiState.wavetableSize,
                 onSampleRateChange = { viewModel.setSampleRate(it) },
-                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) }
+                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) },
+                onWavetableOptimizationChange = { viewModel.setWavetableOptimizationEnabled(it) },
+                onWavetableSizeChange = { viewModel.setWavetableSize(it) }
             )
             
             Spacer(modifier = Modifier.height(16.dp))

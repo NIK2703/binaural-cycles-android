@@ -123,6 +123,10 @@ class BinauralPreferencesRepository @Inject constructor(
         private val SAMPLE_RATE_KEY = intPreferencesKey("sample_rate")
         // Интервал обновления частот (мс)
         private val FREQUENCY_UPDATE_INTERVAL_KEY = intPreferencesKey("frequency_update_interval")
+        // Wavetable оптимизация (быстрая генерация синусоид)
+        private val WAVETABLE_OPTIMIZATION_KEY = booleanPreferencesKey("wavetable_optimization")
+        // Размер таблицы волн (качество)
+        private val WAVETABLE_SIZE_KEY = intPreferencesKey("wavetable_size")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -270,10 +274,10 @@ class BinauralPreferencesRepository @Inject constructor(
     }
     
     // Методы для частоты дискретизации
-    
+
     fun getSampleRate(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[SAMPLE_RATE_KEY] ?: 44100 // 44100 по умолчанию (MEDIUM)
+            preferences[SAMPLE_RATE_KEY] ?: 22050 // 22050 по умолчанию (оптимально для бинауральных ритмов)
         }
     }
     
@@ -302,6 +306,49 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveFrequencyUpdateInterval(intervalMs: Int) {
         dataStore.edit { preferences ->
             preferences[FREQUENCY_UPDATE_INTERVAL_KEY] = intervalMs.coerceIn(1000, 60000)
+        }
+    }
+
+    // Методы для wavetable оптимизации
+
+    /**
+     * Получить статус wavetable оптимизации
+     * @return true если оптимизация включена (быстрая генерация с интерполяцией)
+     */
+    fun getWavetableOptimizationEnabled(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[WAVETABLE_OPTIMIZATION_KEY] ?: true // true = wavetable по умолчанию
+        }
+    }
+
+    /**
+     * Сохранить статус wavetable оптимизации
+     * @param enabled true = использовать wavetable (быстрее, возможен фон)
+     *                false = использовать Math.sin (медленнее, чище)
+     */
+    suspend fun saveWavetableOptimizationEnabled(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[WAVETABLE_OPTIMIZATION_KEY] = enabled
+        }
+    }
+
+    /**
+     * Получить размер таблицы волн (качество)
+     * @return размер таблицы (1024, 2048, 4096, 8192)
+     */
+    fun getWavetableSize(): Flow<Int> {
+        return dataStore.data.map { preferences ->
+            preferences[WAVETABLE_SIZE_KEY] ?: 2048 // 2048 по умолчанию (с интерполяцией ≡ 65536)
+        }
+    }
+
+    /**
+     * Сохранить размер таблицы волн
+     * @param size размер таблицы (1024, 2048, 4096, 8192)
+     */
+    suspend fun saveWavetableSize(size: Int) {
+        dataStore.edit { preferences ->
+            preferences[WAVETABLE_SIZE_KEY] = size
         }
     }
     

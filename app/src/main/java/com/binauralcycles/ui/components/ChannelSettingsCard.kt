@@ -172,13 +172,48 @@ fun PresetSettingsCard(
 fun AppSettingsCard(
     sampleRate: SampleRate,
     frequencyUpdateIntervalMs: Int,
+    wavetableOptimizationEnabled: Boolean,
+    wavetableSize: Int,
     onSampleRateChange: (SampleRate) -> Unit,
-    onFrequencyUpdateIntervalChange: (Int) -> Unit
+    onFrequencyUpdateIntervalChange: (Int) -> Unit,
+    onWavetableOptimizationChange: (Boolean) -> Unit,
+    onWavetableSizeChange: (Int) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Wavetable оптимизация
+        ListItem(
+            headlineContent = { Text(stringResource(R.string.wavetable_optimization)) },
+            supportingContent = {
+                Text(
+                    if (wavetableOptimizationEnabled) stringResource(R.string.wavetable_optimization_enabled_desc)
+                    else stringResource(R.string.wavetable_optimization_disabled_desc)
+                )
+            },
+            trailingContent = {
+                Switch(
+                    checked = wavetableOptimizationEnabled,
+                    onCheckedChange = onWavetableOptimizationChange
+                )
+            }
+        )
+
+        // Размер таблицы волн (показываем только когда оптимизация включена)
+        if (wavetableOptimizationEnabled) {
+            DiscreteSliderWavetableSize(
+                label = stringResource(R.string.wavetable_size),
+                value = wavetableSize,
+                values = listOf(1024, 2048, 4096, 8192),
+                valueLabel = formatWavetableSize(wavetableSize),
+                onValueChange = onWavetableSizeChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+        }
+
+        HorizontalDivider()
+
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
         DiscreteSlider(
             label = stringResource(R.string.update_interval),
@@ -419,9 +454,57 @@ fun formatFadeDurationLabel(ms: Long): String {
 fun formatUpdateInterval(ms: Int): String {
     val msShort = stringResource(R.string.milliseconds_short)
     val secFull = stringResource(R.string.seconds_full)
-    
+
     return when {
         ms < 1000 -> "$ms $msShort"
         else -> "${ms / 1000.0} $secFull"
     }
+}
+
+/**
+ * Дискретный слайдер для размера таблицы волн
+ */
+@Composable
+fun DiscreteSliderWavetableSize(
+    label: String,
+    value: Int,
+    values: List<Int>,
+    valueLabel: String,
+    onValueChange: (Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                valueLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        Slider(
+            value = values.indexOf(value).toFloat(),
+            onValueChange = { index ->
+                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
+                onValueChange(values[newIndex])
+            },
+            modifier = Modifier.fillMaxWidth(),
+            valueRange = 0f..(values.size - 1).toFloat(),
+            steps = values.size - 2
+        )
+    }
+}
+
+/**
+ * Форматирование размера таблицы волн
+ */
+@Composable
+fun formatWavetableSize(size: Int): String {
+    return "$size samples"
 }

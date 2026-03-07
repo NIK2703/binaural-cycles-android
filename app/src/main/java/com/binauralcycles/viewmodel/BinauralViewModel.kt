@@ -56,8 +56,11 @@ data class BinauralUiState(
     // Состояние перестановки каналов (из сервиса)
     val isChannelsSwapped: Boolean = false,
     // Общие настройки приложения
-    val sampleRate: SampleRate = SampleRate.MEDIUM,
+    val sampleRate: SampleRate = SampleRate.LOW,
     val frequencyUpdateIntervalMs: Int = 10000,
+    // Wavetable оптимизация (быстрая генерация синусоид с линейной интерполяцией)
+    val wavetableOptimizationEnabled: Boolean = true,
+    val wavetableSize: Int = 2048,
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false
 )
@@ -168,6 +171,22 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.getFrequencyUpdateInterval().collect { interval ->
                 _uiState.update { it.copy(frequencyUpdateIntervalMs = interval) }
                 playbackService?.setFrequencyUpdateInterval(interval)
+            }
+        }
+        // Wavetable оптимизация
+        viewModelScope.launch {
+            preferencesRepository.getWavetableOptimizationEnabled().collect { enabled ->
+                _uiState.update { it.copy(wavetableOptimizationEnabled = enabled) }
+                // Передаём в сервис для применения в аудио-движке
+                playbackService?.setWavetableOptimizationEnabled(enabled)
+            }
+        }
+        // Размер таблицы волн
+        viewModelScope.launch {
+            preferencesRepository.getWavetableSize().collect { size ->
+                _uiState.update { it.copy(wavetableSize = size) }
+                // Передаём в сервис для применения в аудио-движке
+                playbackService?.setWavetableSize(size)
             }
         }
         // Громкость
@@ -711,6 +730,22 @@ class BinauralViewModel @Inject constructor(
         playbackService?.setFrequencyUpdateInterval(clampedInterval)
         viewModelScope.launch {
             preferencesRepository.saveFrequencyUpdateInterval(clampedInterval)
+        }
+    }
+
+    fun setWavetableOptimizationEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(wavetableOptimizationEnabled = enabled) }
+        playbackService?.setWavetableOptimizationEnabled(enabled)
+        viewModelScope.launch {
+            preferencesRepository.saveWavetableOptimizationEnabled(enabled)
+        }
+    }
+
+    fun setWavetableSize(size: Int) {
+        _uiState.update { it.copy(wavetableSize = size) }
+        playbackService?.setWavetableSize(size)
+        viewModelScope.launch {
+            preferencesRepository.saveWavetableSize(size)
         }
     }
 

@@ -66,6 +66,12 @@
     <string name="quality_standard">Стандарт (44 kHz)</string>
     <string name="quality_high">Высокое (48 kHz)</string>
     
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Использовать таблицу волн</string>
+    <string name="wavetable_optimization_enabled_desc">Табличный синтез с интерполяцией (рекомендуется)</string>
+    <string name="wavetable_optimization_disabled_desc">Классическая генерация (Math.sin)</string>
+    <string name="wavetable_size">Размер таблицы волн</string>
+    
     <!-- Time units -->
     <string name="seconds_short">сек</string>
     <string name="hz">Гц</string>

@@ -91,6 +91,12 @@ data class FrequencyCurve(
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
     val interpolationType: InterpolationType = InterpolationType.LINEAR
 ) {
+    // Предварительно отсортированные точки для оптимизации интерполяции
+    private val sortedPoints: List<FrequencyPoint> = points.sortedBy { it.time.toSecondOfDay() }
+    
+    // Массив секунд для быстрого бинарного поиска
+    private val pointSeconds: IntArray = sortedPoints.map { it.time.toSecondOfDay() }.toIntArray()
+    
     init {
         require(points.size >= 2) { "Кривая должна содержать минимум 2 точки" }
     }
@@ -112,35 +118,24 @@ data class FrequencyCurve(
     }
 
     private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
-        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
         val targetSeconds = time.toSecondOfDay()
         
-        // Находим интервал, в который попадает время
-        var intervalIndex = -1
-        for (i in 0 until sortedPoints.size - 1) {
-            val current = sortedPoints[i].time.toSecondOfDay()
-            val next = sortedPoints[i + 1].time.toSecondOfDay()
-            if (targetSeconds in current..next) {
-                intervalIndex = i
-                break
-            }
-        }
-        
+        // Бинарный поиск для быстрого нахождения интервала
+        val intervalIndex = findIntervalIndex(targetSeconds)
+
         // Если не нашли в обычных интервалах - это переход через полночь
         if (intervalIndex == -1) {
             // Время между последней точкой и первой (переход через полночь)
-            val lastPoint = sortedPoints.last()
-            val firstPoint = sortedPoints.first()
             return interpolateBetweenPoints(
-                sortedPoints, 
-                sortedPoints.size - 1, 
+                sortedPoints,
+                sortedPoints.size - 1,
                 0, // первая точка (с переходом через полночь)
-                time, 
+                time,
                 frequencySelector,
                 isWrapping = true
             )
         }
-        
+
         return interpolateBetweenPoints(
             sortedPoints,
             intervalIndex,
@@ -149,6 +144,32 @@ data class FrequencyCurve(
             frequencySelector,
             isWrapping = false
         )
+    }
+    
+    /**
+     * Бинарный поиск интервала для заданного времени
+     * @return индекс левой границы интервала или -1 если переход через полночь
+     */
+    private fun findIntervalIndex(targetSeconds: Int): Int {
+        // Быстрая проверка границ
+        if (targetSeconds < pointSeconds[0] || targetSeconds >= pointSeconds[pointSeconds.size - 1]) {
+            return -1 // Переход через полночь
+        }
+        
+        // Бинарный поиск
+        var left = 0
+        var right = pointSeconds.size - 1
+        
+        while (left < right - 1) {
+            val mid = (left + right) ushr 1
+            if (pointSeconds[mid] <= targetSeconds) {
+                left = mid
+            } else {
+                right = mid
+            }
+        }
+        
+        return left
     }
     
     /**
@@ -188,12 +209,11 @@ data class FrequencyCurve(
                 }
                 InterpolationType.CUBIC_SPLINE -> {
                     // Для Catmull-Rom нужны 4 точки: P0 (до левой), P1 (левая), P2 (правая), P3 (после правой)
-                    // Передаём isWrapping для корректной навигации при переходе через полночь
-                    val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
+                    val p0 = getNeighborPoint(leftIndex, -1, frequencySelector, isWrapping)
                     val p1 = frequencySelector(leftPoint)
                     val p2 = frequencySelector(rightPoint)
-                    val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
-                    
+                    val p3 = getNeighborPoint(rightIndex, +1, frequencySelector, isWrapping)
+
                     val result = catmullRomInterpolate(p0, p1, p2, p3, ratio)
                     
                     // ВАЖНО: Catmull-Rom сплайн может давать значения за пределами [p1, p2]
@@ -206,47 +226,27 @@ data class FrequencyCurve(
     /**
      * Получить соседнюю точку для сплайна Catmull-Rom
      * Использует циклический переход через границы для получения 4 соседних точек.
-     *
-     * @param points отсортированный список точек
-     * @param currentIndex текущий индекс
-     * @param offset смещение (-1 для предыдущей, +1 для следующей)
-     * @param frequencySelector селектор частоты
-     * @param isWrapping true, если текущий интервал переходит через полночь
      */
     private fun getNeighborPoint(
-        points: List<FrequencyPoint>,
         currentIndex: Int,
         offset: Int,
         frequencySelector: (FrequencyPoint) -> Double,
         isWrapping: Boolean = false
     ): Double {
         val neighborIndex = currentIndex + offset
-        
+        val size = sortedPoints.size
+
         // Обработка границ массива
         return when {
             neighborIndex < 0 -> {
-                // Если идём влево от первой точки
-                if (isWrapping) {
-                    // При переходе через полночь берём последнюю точку
-                    frequencySelector(points.last())
-                } else {
-                    // Иначе берём первую точку (clamp)
-                    frequencySelector(points.first())
-                }
+                if (isWrapping) frequencySelector(sortedPoints.last())
+                else frequencySelector(sortedPoints.first())
             }
-            neighborIndex >= points.size -> {
-                // Если идём вправо от последней точки
-                if (isWrapping) {
-                    // При переходе через полночь берём первую точку
-                    frequencySelector(points.first())
-                } else {
-                    // Иначе берём последнюю точку (clamp)
-                    frequencySelector(points.last())
-                }
+            neighborIndex >= size -> {
+                if (isWrapping) frequencySelector(sortedPoints.first())
+                else frequencySelector(sortedPoints.last())
             }
-            else -> {
-                frequencySelector(points[neighborIndex])
-            }
+            else -> frequencySelector(sortedPoints[neighborIndex])
         }
     }
     

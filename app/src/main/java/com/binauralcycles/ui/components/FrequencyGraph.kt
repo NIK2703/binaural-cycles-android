@@ -162,6 +162,9 @@ fun FrequencyGraph(
     val currentLocalTime = currentTime.value
     val density = LocalDensity.current
 
+    // Используем кэшированные sortedPoints если доступны (оптимизация)
+    val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -174,18 +177,18 @@ fun FrequencyGraph(
         ) {
             val widthPx = with(density) { maxWidth.roundToPx() }
             val heightPx = with(density) { maxHeight.roundToPx() }
-            val graphParams = remember(widthPx, heightPx, carrierRange, beatRange) {
+            val graphParams = remember(widthPx, heightPx, carrierRange.min, carrierRange.max, beatRange.min, beatRange.max) {
                 GraphParams(widthPx, heightPx, carrierRange, beatRange)
             }
 
             val primaryColor = MaterialTheme.colorScheme.primary
-            
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .drawBehind {
                         drawGraphContent(
-                            sortedPoints = sortedPoints,
+                            sortedPoints = displayPoints,
                             graphParams = graphParams,
                             currentLocalTime = currentLocalTime,
                             currentCarrierFrequency = currentCarrierFrequency,
@@ -205,12 +208,12 @@ fun FrequencyGraph(
                         )
                     }
             ) {
-                sortedPoints.forEachIndexed { sortedIndex, point ->
+                displayPoints.forEachIndexed { sortedIndex, point ->
                     val originalIndex = points.indexOf(point)
                     val isSelected = selectedPointIndex == originalIndex
                     
-                    val prevPoint = sortedPoints.getOrNull(sortedIndex - 1)
-                    val nextPoint = sortedPoints.getOrNull(sortedIndex + 1)
+                    val prevPoint = displayPoints.getOrNull(sortedIndex - 1)
+                    val nextPoint = displayPoints.getOrNull(sortedIndex + 1)
                     
                     val minTimeSeconds = prevPoint?.time?.toSecondOfDay()?.plus(60) ?: 0
                     val maxTimeSeconds = nextPoint?.time?.toSecondOfDay()?.minus(60) ?: (24 * 3600 - 60)
@@ -523,7 +526,7 @@ fun DraggablePoint(
             .background(if (isSelected) primaryColor else primaryColor.copy(alpha = 0.7f), CircleShape)
             .border(2.dp, Color.White, CircleShape)
             .clickable { onPointSelected(originalIndex) }
-            .pointerInput(originalIndex, point.time, point.carrierFrequency, minTimeSeconds, maxTimeSeconds, graphWidthPx, graphHeightPx, carrierRange) {
+            .pointerInput(originalIndex) {
                 detectDragGestures(
                     onDragStart = { _ ->
                         totalDragX = 0f; totalDragY = 0f
@@ -545,16 +548,18 @@ fun DraggablePoint(
                         change.consume()
                         totalDragX += dragAmount.x
                         totalDragY += dragAmount.y
-                        
+
                         if (!hasDirectionDetermined && (abs(totalDragX) > DRAG_DIRECTION_THRESHOLD || abs(totalDragY) > DRAG_DIRECTION_THRESHOLD)) {
                             currentDragDirection = if (abs(totalDragX) > abs(totalDragY)) DragDirection.HORIZONTAL else DragDirection.VERTICAL
                             hasDirectionDetermined = true
                         }
-                        
+
+                        val newTime = calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat())
+                        val newCarrier = calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat())
                         when (currentDragDirection) {
-                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat()), startCarrier, DragDirection.HORIZONTAL)
-                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat()), DragDirection.VERTICAL)
-                            DragDirection.NONE -> onDragUpdate(originalIndex, calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat()), calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat()), DragDirection.NONE)
+                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, newTime, startCarrier, DragDirection.HORIZONTAL)
+                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, newCarrier, DragDirection.VERTICAL)
+                            DragDirection.NONE -> onDragUpdate(originalIndex, newTime, newCarrier, DragDirection.NONE)
                         }
                     }
                 )

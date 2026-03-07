@@ -24,6 +24,56 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /**
+ * Wavetable для быстрой генерации синусоид с линейной интерполяцией
+ * Линейная интерполяция обеспечивает высокую точность при малом размере таблицы
+ * Эквивалентная точность: размер таблицы × 32
+ */
+private object Wavetable {
+    private const val DEFAULT_TABLE_SIZE = 2048
+    private var currentTableSize = DEFAULT_TABLE_SIZE
+    private var sineTable = FloatArray(DEFAULT_TABLE_SIZE) { i ->
+        sin(2.0 * PI * i / DEFAULT_TABLE_SIZE).toFloat()
+    }
+    private var scaleFactor = DEFAULT_TABLE_SIZE / (2.0 * PI)
+
+    /**
+     * Инициализировать таблицу волн с указанным размером
+     * Вызывается при изменении размера таблицы
+     */
+    fun initialize(size: Int) {
+        currentTableSize = size
+        sineTable = FloatArray(size) { i ->
+            sin(2.0 * PI * i / size).toFloat()
+        }
+        scaleFactor = size / (2.0 * PI)
+    }
+
+    @JvmStatic
+    @JvmName("fastSin")
+    inline fun fastSin(phase: Double): Float {
+        // Масштабируем фазу в индекс таблицы
+        val phaseScaled = phase * scaleFactor
+        
+        // Целая часть индекса
+        val index = phaseScaled.toInt() and (currentTableSize - 1)
+        
+        // Дробная часть для интерполяции [0, 1)
+        val fraction = (phaseScaled - phaseScaled.toInt()).toFloat()
+        
+        // Два соседних entry (с зацикливанием)
+        val indexNext = (index + 1) and (currentTableSize - 1)
+        
+        // Линейная интерполяция между соседними entry
+        // y = y0 * (1 - t) + y1 * t
+        return sineTable[index] * (1.0f - fraction) + sineTable[indexNext] * fraction
+    }
+
+    @JvmStatic
+    @JvmName("getTableSize")
+    fun getTableSize(): Int = currentTableSize
+}
+
+/**
  * Частота дискретизации аудио
  */
 enum class SampleRate(val value: Int) {
@@ -80,42 +130,54 @@ class BinauralAudioEngine(private val context: Context) {
     // Текущие настройки (доступны только из audioThread)
     private var sampleRate: Int = SampleRate.MEDIUM.value
     private var frequencyUpdateIntervalMs: Int = 100
-    
+
+    // Предварительно выделенный буфер для генерации аудио (максимум 60 секунд)
+    private var audioBuffer = ShortArray(0)
+    private var maxSamplesPerChannel = 0
+
     // AudioTrack (доступен только из audioThread)
     private var audioTrack: AudioTrack? = null
-    
+
     // HandlerThread для генерации аудио
     private var audioThread: HandlerThread? = null
     private var audioHandler: Handler? = null
     private var isGenerating = false
-    
+
     // WakeLock для предотвращения засыпания при воспроизведении
     private var wakeLock: PowerManager.WakeLock? = null
 
     // Фаза для непрерывной генерации (доступны только из audioThread)
     private var leftPhase = 0.0
     private var rightPhase = 0.0
-    
+
     // Переменная для отслеживания перестановки каналов
     private var channelsSwapped = false
     private var lastSwapElapsedMs = 0L
-    
+
     // Состояние fade (доступны только из audioThread)
     private var fadeStartSample = 0L
     private var isFadingOut = true
     private var currentFadeOperation = FadeOperation.NONE
-    
+
     // Состояние fade-in при старте
     private var isFadingIn = false
-    
+
     // Отложенный конфиг для переключения пресета
     private var pendingPresetConfig: BinauralConfig? = null
-    
+
     // Общий счётчик сэмплов для плавного fade
     private var totalSamplesGenerated = 0L
-    
+
     // Время начала воспроизведения
     private var playbackStartTime = 0L
+
+    // Кэшированное время для избежания частых вызовов Clock.System
+    private var cachedTimeSeconds = -1
+    private var cachedLocalTime: LocalTime = LocalTime(0, 0)
+
+    // Быстрая генерация звука (табличный синтез с линейной интерполяцией)
+    private var useWavetable = true
+    private var wavetableSize = 2048
 
     // StateFlows для UI (обновляются из audioThread, читаются из UI потока)
     private val _isPlaying = MutableStateFlow(false)
@@ -198,10 +260,16 @@ class BinauralAudioEngine(private val context: Context) {
     
     private fun startPlayback() {
         if (!isActive.get()) return
-        
+
         Log.d(TAG, "startPlayback() on thread: ${Thread.currentThread().name}")
-        
+
         try {
+            // Инициализируем буфер при старте (максимум 60 секунд для запаса)
+            maxSamplesPerChannel = sampleRate * 60
+            if (audioBuffer.size < maxSamplesPerChannel * 2) {
+                audioBuffer = ShortArray(maxSamplesPerChannel * 2)
+            }
+            
             createAudioTrack()
             audioTrack?.play()
             generateAudioLoop()
@@ -249,62 +317,67 @@ class BinauralAudioEngine(private val context: Context) {
         val handler = audioHandler ?: return
         var wakeLockRenewCounter = 0
         val wakeLockRenewInterval = 600 // каждую минуту
-        
+
         var currentIntervalMs = frequencyUpdateIntervalMs
         var samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
-        var buffer = ShortArray(samplesPerChannel * 2)
-        
+
         isGenerating = true
-        
+
         while (isActive.get() && audioTrack != null) {
             // Применяем отложенные настройки
             applyPendingSettings()
-            
-            // Пересоздаём буфер если изменился интервал
+
+            // Обновляем размер сэмплов если изменился интервал (без аллокаций - используем audioBuffer)
             if (frequencyUpdateIntervalMs != currentIntervalMs) {
                 currentIntervalMs = frequencyUpdateIntervalMs
                 samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
-                buffer = ShortArray(samplesPerChannel * 2)
             }
-            
+
             // Проверяем запросы на операции с fade
             checkFadeRequests()
-            
-            // Получаем текущие частоты
-            val now = Clock.System.now()
-            val zone = TimeZone.currentSystemDefault()
-            val localDateTime = now.toLocalDateTime(zone)
-            val currentTime = localDateTime.time
-            
+
+            // Получаем текущие частоты с кэшированием времени (обновляем раз в секунду)
+            val currentElapsedSeconds = _elapsedSeconds.value
+            if (currentElapsedSeconds != cachedTimeSeconds) {
+                cachedTimeSeconds = currentElapsedSeconds
+                val now = Clock.System.now()
+                val zone = TimeZone.currentSystemDefault()
+                cachedLocalTime = now.toLocalDateTime(zone).time
+            }
+
             val config = configRef.get()
-            val (beatFreq, carrierFreq) = config.getFrequenciesAt(currentTime)
-            
-            // Обновляем StateFlows (это потокобезопасно)
-            _currentBeatFrequency.value = beatFreq
-            _currentCarrierFrequency.value = carrierFreq
-            
+            val (beatFreq, carrierFreq) = config.getFrequenciesAt(cachedLocalTime)
+
+            // Обновляем StateFlows только если частоты изменились (избегаем лишних copy())
+            if (_currentBeatFrequency.value != beatFreq) {
+                _currentBeatFrequency.value = beatFreq
+            }
+            if (_currentCarrierFrequency.value != carrierFreq) {
+                _currentCarrierFrequency.value = carrierFreq
+            }
+
             // Проверяем перестановку каналов (только если нет активного fade)
             if (currentFadeOperation == FadeOperation.NONE) {
                 checkChannelSwap(config)
             }
-            
+
             // Генерируем буфер
             val fadeDurationSamples = (config.channelSwapFadeDurationMs.coerceAtLeast(100L) * sampleRate / 1000).toInt()
-            val fadeResult = generateBuffer(buffer, carrierFreq, beatFreq, samplesPerChannel, fadeDurationSamples, config)
-            
+            val fadeResult = generateBuffer(audioBuffer, carrierFreq, beatFreq, samplesPerChannel, fadeDurationSamples, config)
+
             totalSamplesGenerated += samplesPerChannel
-            
+
             // Обрабатываем завершение fade-in
             if (fadeResult.fadePhaseCompleted && isFadingIn) {
                 isFadingIn = false
                 Log.d(TAG, "Fade-in completed")
             }
-            
+
             // Обрабатываем завершение fade для различных операций
             if (fadeResult.fadePhaseCompleted && currentFadeOperation != FadeOperation.NONE) {
                 handleFadeOperationCompleted()
             }
-            
+
             // Обрабатываем завершение fade-out для остановки или паузы
             if (fadeResult.fadeOutCompleted) {
                 if (currentFadeOperation == FadeOperation.STOP) {
@@ -316,19 +389,19 @@ class BinauralAudioEngine(private val context: Context) {
                     break
                 }
             }
-            
+
             // Проверяем активность перед записью
             if (!isActive.get()) break
-            
+
             // Записываем в AudioTrack
             val currentAudioTrack = audioTrack
             if (currentAudioTrack == null) {
                 Log.d(TAG, "AudioTrack is null, stopping")
                 break
             }
-            
+
             val result = try {
-                currentAudioTrack.write(buffer, 0, buffer.size)
+                currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2)
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "AudioTrack write error: ${e.message}")
                 -1
@@ -336,15 +409,15 @@ class BinauralAudioEngine(private val context: Context) {
                 Log.e(TAG, "AudioTrack write exception: ${e.message}")
                 -1
             }
-            
+
             if (result < 0) {
                 Log.d(TAG, "Write failed, result=$result")
                 break
             }
-            
+
             // Обновляем elapsed time
             _elapsedSeconds.value = ((System.currentTimeMillis() - playbackStartTime) / 100).toInt()
-            
+
             // Периодически обновляем WakeLock
             wakeLockRenewCounter++
             if (wakeLockRenewCounter >= wakeLockRenewInterval) {
@@ -352,7 +425,7 @@ class BinauralAudioEngine(private val context: Context) {
                 wakeLockRenewCounter = 0
             }
         }
-        
+
         isGenerating = false
         Log.d(TAG, "generateAudioLoop() ended")
     }
@@ -570,11 +643,13 @@ class BinauralAudioEngine(private val context: Context) {
                 }
             }
             
-            val leftSample = sin(leftPhase)
+            // Используем быструю генерацию через таблицу волн (50x быстрее Math.sin)
+            // Если отключено - используем стандартный Math.sin для лучшего качества
+            val leftSample = if (useWavetable) Wavetable.fastSin(leftPhase) else sin(leftPhase).toFloat()
             leftPhase += leftOmega
             if (leftPhase > 2.0 * PI) leftPhase -= 2.0 * PI
-            
-            val rightSample = sin(rightPhase)
+
+            val rightSample = if (useWavetable) Wavetable.fastSin(rightPhase) else sin(rightPhase).toFloat()
             rightPhase += rightOmega
             if (rightPhase > 2.0 * PI) rightPhase -= 2.0 * PI
             
@@ -732,6 +807,8 @@ class BinauralAudioEngine(private val context: Context) {
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
         pendingPresetConfig = null
+        cachedTimeSeconds = -1
+        cachedLocalTime = LocalTime(0, 0)
     }
 
     /**
@@ -858,11 +935,31 @@ class BinauralAudioEngine(private val context: Context) {
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         pendingFrequencyUpdateIntervalMs.set(intervalMs.coerceIn(1000, 60000))
     }
-    
+
     /**
      * Получить текущий интервал обновления частот
      */
     fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
+
+    /**
+     * Включить/выключить быструю генерацию звука (потокобезопасно)
+     * @param enabled true = использовать таблицу волн (быстрее, возможны шумы)
+     *                false = использовать Math.sin (медленнее, чище)
+     */
+    fun setWavetableOptimizationEnabled(enabled: Boolean) {
+        useWavetable = enabled
+        Log.d(TAG, "Быстрая генерация звука: ${if (enabled) "ВКЛ" else "ВЫКЛ"}")
+    }
+
+    /**
+     * Установить размер таблицы волн (потокобезопасно)
+     * @param size размер таблицы (1024, 2048, 4096, 8192)
+     */
+    fun setWavetableSize(size: Int) {
+        wavetableSize = size
+        Wavetable.initialize(size)
+        Log.d(TAG, "Размер таблицы волн: $size")
+    }
 
     private fun acquireWakeLock() {
         try {

@@ -79,15 +79,9 @@ fun MiniFrequencyGraph(
     currentCarrierFrequency: Double = 0.0,
     currentBeatFrequency: Double = 0.0
 ) {
-    // Вычисляем частоты из кривой для текущего времени, если они не переданы или равны 0
-    val displayCarrierFrequency = remember(currentTime, frequencyCurve, currentCarrierFrequency) {
-        if (currentCarrierFrequency > 0) currentCarrierFrequency
-        else frequencyCurve.getCarrierFrequencyAt(currentTime)
-    }
-    val displayBeatFrequency = remember(currentTime, frequencyCurve, currentBeatFrequency) {
-        if (currentBeatFrequency > 0) currentBeatFrequency
-        else frequencyCurve.getBeatFrequencyAt(currentTime)
-    }
+    // Используем переданные частоты напрямую - они уже вычислены в ViewModel/родителе
+    val displayCarrierFrequency = currentCarrierFrequency
+    val displayBeatFrequency = currentBeatFrequency
     val density = LocalDensity.current
     val sortedPoints = remember(frequencyCurve.points) {
         frequencyCurve.points.sortedBy { it.time.toSecondOfDay() }

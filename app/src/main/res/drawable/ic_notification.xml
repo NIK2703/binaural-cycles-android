@@ -27,13 +27,13 @@
         android:pathData="M30,54 A24,24 0 0 0 76.56,45.79"/>
     
     <!-- Нижняя дуга: часть той же окружности -->
-    <!-- От ~20° до ~160°, по часовой стрелке через низ (90°) -->
+    <!-- От 0° до 160°, против часовой стрелки через низ (90°) -->
     <!-- Угол дуги ~140° < 180°, поэтому large-arc=0 -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
         android:strokeLineCap="round"
         android:fillColor="@android:color/transparent"
-        android:pathData="M78,54 A24,24 0 0 1 31.44,62.21"/>
+        android:pathData="M78,54 A24,24 0 0 0 31.44,62.21"/>
     
 </vector>
