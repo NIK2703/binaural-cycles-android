@@ -623,15 +623,32 @@ class BinauralAudioEngine(private val context: Context) {
             return Pair(1.0, 1.0)
         }
 
-        // Strength can now be from 0 to 2.0 (0% - 200%)
+        // Strength from 0 to 2.0 (0% - 200%)
         val strength = config.volumeNormalizationStrength.coerceIn(0f, 2f)
         val minFreq = minOf(leftFreq, rightFreq)
+        val maxFreq = maxOf(leftFreq, rightFreq)
 
-        val leftNormalized = minFreq / leftFreq
-        val rightNormalized = minFreq / rightFreq
+        // Calculate frequency ratio (always >= 1.0)
+        val freqRatio = maxFreq / minFreq
 
-        val leftAmplitude = 1.0 + strength * (leftNormalized - 1.0)
-        val rightAmplitude = 1.0 + strength * (rightNormalized - 1.0)
+        // Normalization factor: at 100% strength, reduce the louder channel
+        // At 200% strength, apply stronger reduction but never below 0.5
+        // This prevents complete silencing and maintains audio quality
+        val maxReduction = 0.5 // Never reduce below 50% amplitude
+        val baseReduction = 1.0 - (1.0 / freqRatio) // 0 to ~1.0 depending on freq ratio
+        val actualReduction = (strength * baseReduction * 0.5).coerceAtMost(maxReduction)
+
+        // Apply reduction to the higher frequency channel
+        val leftAmplitude = if (leftFreq == maxFreq) {
+            1.0 - actualReduction
+        } else {
+            1.0
+        }
+        val rightAmplitude = if (rightFreq == maxFreq) {
+            1.0 - actualReduction
+        } else {
+            1.0
+        }
 
         return Pair(leftAmplitude, rightAmplitude)
     }
