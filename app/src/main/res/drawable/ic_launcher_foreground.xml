@@ -3,7 +3,7 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-
+    
     <!-- Central wave (sine wave) - white -->
     <path
         android:strokeColor="#FFFFFF"
@@ -15,25 +15,25 @@
                          Q48,68 54,54
                          Q60,40 66,54
                          Q72,68 78,54"/>
-
-    <!-- Upper arc: from 200° to 0° through TOP (270°) -->
-    <!-- sweep=1 (clockwise): 200° → 270° → 0°/360° through TOP -->
+    
+    <!-- Upper arc: from left end (180°) to 340° through TOP (270°) -->
+    <!-- sweep=1 (clockwise): 180° → 270° → 340° through TOP -->
     <!-- arc=160° < 180°, large-arc=0 -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
         android:strokeLineCap="round"
         android:fillColor="@android:color/transparent"
-        android:pathData="M31.44,45.79 A24,24 0 0 1 78,54"/>
-
-    <!-- Lower arc: from 180° to 340° through BOTTOM (90°) -->
-    <!-- sweep=1 (clockwise): 180° → 90° → 340° through BOTTOM -->
+        android:pathData="M30,54 A24,24 0 0 1 76.56,45.79"/>
+    
+    <!-- Lower arc: from right end (0°) to 160° through BOTTOM (90°) -->
+    <!-- sweep=1 (clockwise): 0° → 90° → 160° through BOTTOM -->
     <!-- arc=160° < 180°, large-arc=0 -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
         android:strokeLineCap="round"
         android:fillColor="@android:color/transparent"
-        android:pathData="M30,54 A24,24 0 0 1 76.56,62.21"/>
-
+        android:pathData="M78,54 A24,24 0 0 1 31.44,62.21"/>
+    
 </vector>

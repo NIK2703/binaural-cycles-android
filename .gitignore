@@ -94,3 +94,5 @@ Thumbs.db
 
 # Logs
 logs/
+.qwen/
+gha-creds-*.json
