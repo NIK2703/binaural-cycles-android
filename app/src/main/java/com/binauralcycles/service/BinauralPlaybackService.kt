@@ -17,7 +17,6 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
-import androidx.media.app.NotificationCompat.MediaStyle
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
@@ -185,12 +184,12 @@ class BinauralPlaybackService : Service() {
         val channel = NotificationChannel(
             CHANNEL_ID,
             getString(R.string.notification_channel_name),
-            NotificationManager.IMPORTANCE_LOW
+            NotificationManager.IMPORTANCE_MIN
         ).apply {
             description = getString(R.string.notification_channel_description)
             setShowBadge(false)
         }
-        
+
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.createNotificationChannel(channel)
     }
@@ -199,12 +198,12 @@ class BinauralPlaybackService : Service() {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
-        
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        
+
         // Toggle action (Play/Pause)
         val toggleIntent = Intent(this, BinauralPlaybackService::class.java).apply {
             action = ACTION_TOGGLE
@@ -213,39 +212,28 @@ class BinauralPlaybackService : Service() {
             this, 1, toggleIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        
-        // Stop action
-        val stopIntent = Intent(this, BinauralPlaybackService::class.java).apply {
-            action = ACTION_STOP
-        }
-        val stopPendingIntent = PendingIntent.getService(
-            this, 2, stopIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        
+
         val title = if (_isPlaying.value) {
             getString(R.string.notification_playing)
         } else {
             getString(R.string.notification_paused)
         }
-        
+
         val content = getString(
             R.string.notification_content,
             _currentBeatFrequency.value,
             _currentCarrierFrequency.value
         )
-        
+
         val playPauseIcon = if (_isPlaying.value) R.drawable.ic_pause else R.drawable.ic_play
         val playPauseText = if (_isPlaying.value) getString(R.string.action_pause) else getString(R.string.action_play)
-        
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(content)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .addAction(playPauseIcon, playPauseText, togglePendingIntent)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_stop), stopPendingIntent)
-            .setStyle(MediaStyle().setShowActionsInCompactView(0, 1))
             .setOngoing(_isPlaying.value)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
