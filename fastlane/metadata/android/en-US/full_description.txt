@@ -1,0 +1,8 @@
+Binaural Cycles is an app that lets you create and listen to dynamic binaural beats aligned with human circadian rhythms by scheduling carrier and beat frequency changes throughout the day.
+
+Features:
+
+• Customizable presets — create and listen to binaural beat presets with precise carrier and beat frequency distribution throughout the day
+• Interpolation modes — linear or cubic interpolation between frequency points
+• Auto channel swap — periodic left/right channel switching for balanced stimulation
+• Volume normalization — automatic volume balancing between channels based on frequency ratio

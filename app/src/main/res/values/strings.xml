@@ -41,11 +41,8 @@
     <string name="point_interpolation">Интерполяция по точкам</string>
     <string name="interpolation_description">Метод расчёта значений между точками графика</string>
     <string name="linear">Линейная</string>
-    <string name="cardinal">Кардин.</string>
-    <string name="monotone">Монотон.</string>
-    <string name="linear_full">Линейная</string>
-    <string name="cardinal_full">Кардинальная</string>
-    <string name="monotone_full">Монотонная</string>
+    <string name="cardinal">Кардинальная</string>
+    <string name="monotone">Монотонная</string>
     <string name="spline_tension">Натяжение сплайна</string>
     <string name="spline_tension_description">0 = плавный Catmull-Rom, 1 = почти линейный</string>
     

@@ -69,7 +69,7 @@ fun PresetSettingsCard(
                     onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
                     label = { 
                         Text(
-                            text = stringResource(R.string.linear_full),
+                            text = stringResource(R.string.linear),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         ) 
@@ -81,7 +81,7 @@ fun PresetSettingsCard(
                     onClick = { onInterpolationTypeChange(InterpolationType.MONOTONE) },
                     label = { 
                         Text(
-                            text = stringResource(R.string.monotone_full),
+                            text = stringResource(R.string.monotone),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         ) 
@@ -93,7 +93,7 @@ fun PresetSettingsCard(
                     onClick = { onInterpolationTypeChange(InterpolationType.CARDINAL) },
                     label = { 
                         Text(
-                            text = stringResource(R.string.cardinal_full),
+                            text = stringResource(R.string.cardinal),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         ) 

@@ -8,11 +8,15 @@ plugins {
 }
 
 import java.util.Properties
+import java.io.FileInputStream
 
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties()
+var hasKeystore = false
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(keystorePropertiesFile.inputStream())
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+    hasKeystore = keystoreProperties.getProperty("storePassword")?.isNotEmpty() == true &&
+                  keystoreProperties.getProperty("keyPassword")?.isNotEmpty() == true
 }
 
 android {
@@ -20,11 +24,13 @@ android {
     compileSdk = 34
 
     signingConfigs {
-        create("release") {
-            storeFile = file("../${keystoreProperties.getProperty("storeFile", "keystore.jks")}")
-            storePassword = keystoreProperties.getProperty("storePassword", "")
-            keyAlias = keystoreProperties.getProperty("keyAlias", "binaural")
-            keyPassword = keystoreProperties.getProperty("keyPassword", "")
+        if (hasKeystore) {
+            create("release") {
+                storeFile = file("../${keystoreProperties.getProperty("storeFile", "keystore.jks")}")
+                storePassword = keystoreProperties.getProperty("storePassword", "")
+                keyAlias = keystoreProperties.getProperty("keyAlias", "binaural")
+                keyPassword = keystoreProperties.getProperty("keyPassword", "")
+            }
         }
     }
 
@@ -44,7 +50,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("release")
+            if (hasKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

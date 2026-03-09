@@ -1,0 +1,8 @@
+First release of Binaural Cycles:
+• Create and edit binaural beat presets
+• Interpolation modes (linear, cardinal, monotone)
+• Auto channel swap for balanced stimulation
+• Volume normalization
+• Wavetable synthesis for better performance
+• Background playback with notification controls
+• Import/Export presets

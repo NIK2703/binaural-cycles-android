@@ -1,0 +1,24 @@
+Categories:
+  - Multimedia
+  - Science & Education
+License: GPL-3.0-or-later
+AuthorName: Nikita
+SourceCode: https://github.com/NIK2703/binaural-cycles-android
+IssueTracker: https://github.com/NIK2703/binaural-cycles-android/issues
+RepoType: git
+Repo: https://github.com/NIK2703/binaural-cycles-android.git
+
+AutoName: Binaural Cycles
+
+Builds:
+  - versionName: '0.2'
+    versionCode: 2
+    commit: v0.2
+    subdir: app
+    gradle:
+      - yes
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: '0.2'
+CurrentVersionCode: 2
