@@ -55,8 +55,9 @@ data class FrequencyRange(
  */
 @Serializable
 enum class InterpolationType {
-    LINEAR,         // Линейная интерполяция
-    CUBIC_SPLINE    // Кубический сплайн Catmull-Rom (плавная кривая)
+    LINEAR,             // Линейная интерполяция
+    CARDINAL,           // Кардинальный сплайн (с параметром tension: 0=Catmull-Rom, 1=линейная)
+    MONOTONE            // Монотонный сплайн (без overshoot, сохраняет форму данных)
 }
 
 /**
@@ -89,7 +90,8 @@ data class FrequencyCurve(
     val points: List<FrequencyPoint>,
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
-    val interpolationType: InterpolationType = InterpolationType.LINEAR
+    val interpolationType: InterpolationType = InterpolationType.LINEAR,
+    val splineTension: Float = 0.0f  // 0.0 = Catmull-Rom (плавный), 1.0 = почти линейный
 ) {
     // Предварительно отсортированные точки для оптимизации интерполяции
     private val sortedPoints: List<FrequencyPoint> = points.sortedBy { it.time.toSecondOfDay() }
@@ -115,6 +117,28 @@ data class FrequencyCurve(
      */
     fun getBeatFrequencyAt(time: LocalTime): Double {
         return interpolate(time) { it.beatFrequency }.coerceAtLeast(0.0)
+    }
+    
+    /**
+     * Получить частоту ВЕРХНЕГО канала для заданного времени путём интерполяции
+     * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier + beat/2)
+     * Каждая точка кривой канала: carrier + beat/2
+     */
+    fun getUpperChannelFrequencyAt(time: LocalTime): Double {
+        return interpolate(time) { point ->
+            point.carrierFrequency + point.beatFrequency / 2.0
+        }.coerceAtLeast(0.0)
+    }
+    
+    /**
+     * Получить частоту НИЖНЕГО канала для заданного времени путём интерполяции
+     * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier - beat/2)
+     * Каждая точка кривой канала: carrier - beat/2
+     */
+    fun getLowerChannelFrequencyAt(time: LocalTime): Double {
+        return interpolate(time) { point ->
+            point.carrierFrequency - point.beatFrequency / 2.0
+        }.coerceAtLeast(0.0)
     }
 
     private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
@@ -203,24 +227,14 @@ data class FrequencyCurve(
         
         val ratio = (t - t1).toDouble() / (t2 - t1)
         
-        return when (interpolationType) {
-                InterpolationType.LINEAR -> {
-                    linearInterpolate(frequencySelector(leftPoint), frequencySelector(rightPoint), ratio)
-                }
-                InterpolationType.CUBIC_SPLINE -> {
-                    // Для Catmull-Rom нужны 4 точки: P0 (до левой), P1 (левая), P2 (правая), P3 (после правой)
-                    val p0 = getNeighborPoint(leftIndex, -1, frequencySelector, isWrapping)
-                    val p1 = frequencySelector(leftPoint)
-                    val p2 = frequencySelector(rightPoint)
-                    val p3 = getNeighborPoint(rightIndex, +1, frequencySelector, isWrapping)
-
-                    val result = catmullRomInterpolate(p0, p1, p2, p3, ratio)
-                    
-                    // ВАЖНО: Catmull-Rom сплайн может давать значения за пределами [p1, p2]
-                    // Ограничиваем результат минимумом 0, т.к. частота не может быть отрицательной
-                    result.coerceAtLeast(0.0)
-                }
-            }
+        // Получаем 4 точки для интерполяции
+        val p0 = getNeighborPoint(leftIndex, -1, frequencySelector, isWrapping)
+        val p1 = frequencySelector(leftPoint)
+        val p2 = frequencySelector(rightPoint)
+        val p3 = getNeighborPoint(rightIndex, +1, frequencySelector, isWrapping)
+        
+        // Используем общий объект интерполяции с параметром tension для CARDINAL
+        return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
     }
     
     /**
@@ -250,34 +264,6 @@ data class FrequencyCurve(
         }
     }
     
-    /**
-     * Линейная интерполяция
-     */
-    private fun linearInterpolate(y1: Double, y2: Double, t: Double): Double {
-        return y1 + t * (y2 - y1)
-    }
-    
-    /**
-     * Интерполяция Catmull-Rom
-     * Использует 4 точки для создания плавной кривой
-     * P0 - точка до левой границы
-     * P1 - левая граница
-     * P2 - правая граница  
-     * P3 - точка после правой границы
-     */
-    private fun catmullRomInterpolate(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
-        val t2 = t * t
-        val t3 = t2 * t
-        
-        // Формула Catmull-Rom сплайна
-        return 0.5 * (
-            (2.0 * p1) +
-            (-p0 + p2) * t +
-            (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
-            (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-        )
-    }
-
     
     /**
      * Получить все интерполированные значения для отображения на графике
@@ -334,11 +320,25 @@ data class BinauralConfig(
 ) {
     /**
      * Получить текущие частоты для заданного времени
+     * Возвращает (частота_биений, несущая_частота)
      */
     fun getFrequenciesAt(time: LocalTime): Pair<Double, Double> {
         val beatFreq = frequencyCurve.getBeatFrequencyAt(time)
         val carrierFreq = frequencyCurve.getCarrierFrequencyAt(time)
         return Pair(beatFreq, carrierFreq)
+    }
+    
+    /**
+     * Получить частоты каналов для заданного времени
+     * Интерполяция применяется НАПРЯМУЮ к кривым каналов
+     * Возвращает (нижняя_частота, верхняя_частота) = (carrier - beat/2, carrier + beat/2)
+     * 
+     * ВАЖНО: Каждая кривая канала интерполируется отдельно через свои точки!
+     */
+    fun getChannelFrequenciesAt(time: LocalTime): Pair<Double, Double> {
+        val lowerFreq = frequencyCurve.getLowerChannelFrequencyAt(time)
+        val upperFreq = frequencyCurve.getUpperChannelFrequencyAt(time)
+        return Pair(lowerFreq, upperFreq)
     }
 }
 

@@ -118,6 +118,7 @@ fun MiniFrequencyGraph(
                             graphParams = graphParams,
                             primaryColor = primaryColor,
                             interpolationType = frequencyCurve.interpolationType,
+                            splineTension = frequencyCurve.splineTension,
                             isPlaying = isPlaying,
                             currentTime = currentTime,
                             currentCarrierFrequency = displayCarrierFrequency,
@@ -191,6 +192,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniGraphConten
     graphParams: MiniGraphParams,
     primaryColor: Color,
     interpolationType: InterpolationType,
+    splineTension: Float,
     isPlaying: Boolean,
     currentTime: LocalTime,
     currentCarrierFrequency: Double,
@@ -224,8 +226,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniGraphConten
     }
     
     if (sortedPoints.size >= 2) {
-        drawMiniBeatArea(sortedPoints, graphParams, primaryColor, width, height, interpolationType)
-        drawMiniCarrierLine(sortedPoints, graphParams, primaryColor, width, height, interpolationType)
+        drawMiniBeatArea(sortedPoints, graphParams, primaryColor, width, height, interpolationType, splineTension)
+        drawMiniCarrierLine(sortedPoints, graphParams, primaryColor, width, height, interpolationType, splineTension)
     }
     
     // Рисуем точки с метками частот
@@ -269,7 +271,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     primaryColor: Color,
     width: Float,
     height: Float,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    splineTension: Float
 ) {
     val numSamples = 100
     
@@ -278,8 +281,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     
     // Начинаем с левой границы
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
-    val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType)
+    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
+    val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType, splineTension)
     val startUpperY = params.beatUpperY(startCarrier, startBeat)
     val startLowerY = params.beatLowerY(startCarrier, startBeat)
     
@@ -289,8 +292,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
         val upperY = params.beatUpperY(carrier, beat)
         val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
@@ -305,8 +308,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     for (i in numSamples downTo 0) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
         val lowerY = params.beatLowerY(carrier, beat)
         val x = (t * width).toFloat()
         combinedPath.lineTo(x, lowerY)
@@ -337,14 +340,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
     primaryColor: Color,
     width: Float,
     height: Float,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    splineTension: Float
 ) {
     val numSamples = 100
     val carrierPath = Path()
     
     // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
+    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
@@ -352,7 +356,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
         val y = params.carrierToY(carrier)
         val x = (t * width).toFloat()
         carrierPath.lineTo(x, y)

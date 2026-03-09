@@ -39,8 +39,15 @@
     
     <!-- Interpolation -->
     <string name="point_interpolation">Интерполяция по точкам</string>
+    <string name="interpolation_description">Метод расчёта значений между точками графика</string>
     <string name="linear">Линейная</string>
-    <string name="cubic">Кубическая</string>
+    <string name="cardinal">Кардин.</string>
+    <string name="monotone">Монотон.</string>
+    <string name="linear_full">Линейная</string>
+    <string name="cardinal_full">Кардинальная</string>
+    <string name="monotone_full">Монотонная</string>
+    <string name="spline_tension">Натяжение сплайна</string>
+    <string name="spline_tension_description">0 = плавный Catmull-Rom, 1 = почти линейный</string>
     
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Авто-перестановка каналов</string>
@@ -58,19 +65,22 @@
     <string name="normalization_strength">Сила нормализации</string>
     
     <!-- App Settings -->
-    <string name="update_interval">Интервал обновления</string>
-    <string name="audio_quality">Качество звука</string>
-    <string name="quality_ultra_low">Ультра-низкое (8 kHz) — максимальная экономия</string>
-    <string name="quality_very_low">Очень низкое (16 kHz)</string>
-    <string name="quality_low">Низкое (22 kHz) — экономия батареи</string>
-    <string name="quality_standard">Стандарт (44 kHz)</string>
-    <string name="quality_high">Высокое (48 kHz)</string>
+    <string name="update_interval">Интервал обновления частоты</string>
+    <string name="update_interval_description">Как часто пересчитываются частоты воспроизведения</string>
+    <string name="audio_quality">Частота дискретизации</string>
+    <string name="audio_quality_description">Низкие значения экономят заряд батареи</string>
+    <string name="quality_ultra_low">8 кГц — максимальная экономия</string>
+    <string name="quality_very_low">16 кГц</string>
+    <string name="quality_low">22 кГц — экономия батареи</string>
+    <string name="quality_standard">44 кГц — стандарт</string>
+    <string name="quality_high">48 кГц — максимальное качество</string>
     
     <!-- Wavetable Optimization -->
-    <string name="wavetable_optimization">Использовать таблицу волн</string>
-    <string name="wavetable_optimization_enabled_desc">Табличный синтез с интерполяцией (рекомендуется)</string>
-    <string name="wavetable_optimization_disabled_desc">Классическая генерация (Math.sin)</string>
-    <string name="wavetable_size">Размер таблицы волн</string>
+    <string name="wavetable_optimization">Табличный синтез волн</string>
+    <string name="wavetable_optimization_enabled_desc">Снижает нагрузку на процессор через табличный синтез</string>
+    <string name="wavetable_optimization_disabled_desc">Прямой расчёт синусоиды в реальном времени</string>
+    <string name="wavetable_size">Точность синтеза</string>
+    <string name="wavetable_size_description">Больше значение — точнее звук, но чуть больше потребление памяти</string>
     
     <!-- Time units -->
     <string name="seconds_short">сек</string>

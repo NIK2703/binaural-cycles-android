@@ -54,7 +54,8 @@ data class SerializableFrequencyCurve(
     val points: List<SerializableFrequencyPoint>,
     val carrierRange: SerializableFrequencyRange? = null,
     val beatRange: SerializableFrequencyRange? = null,
-    val interpolationType: String? = null
+    val interpolationType: String? = null,
+    val splineTension: Float? = null
 )
 
 /**
@@ -166,7 +167,8 @@ class BinauralPreferencesRepository @Inject constructor(
             },
             carrierRange = SerializableFrequencyRange(curve.carrierRange.min, curve.carrierRange.max),
             beatRange = SerializableFrequencyRange(curve.beatRange.min, curve.beatRange.max),
-            interpolationType = curve.interpolationType.name
+            interpolationType = curve.interpolationType.name,
+            splineTension = curve.splineTension
         )
         return json.encodeToString(serializable)
     }
@@ -190,7 +192,8 @@ class BinauralPreferencesRepository @Inject constructor(
                 } ?: FrequencyRange.DEFAULT_BEAT,
                 interpolationType = serializable.interpolationType?.let {
                     try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
-                } ?: InterpolationType.LINEAR
+                } ?: InterpolationType.LINEAR,
+                splineTension = serializable.splineTension ?: 0.0f
             )
         } catch (e: Exception) {
             FrequencyCurve.defaultCurve()
@@ -334,7 +337,7 @@ class BinauralPreferencesRepository @Inject constructor(
 
     /**
      * Получить размер таблицы волн (качество)
-     * @return размер таблицы (1024, 2048, 4096, 8192)
+     * @return размер таблицы (512, 1024, 2048, 4096)
      */
     fun getWavetableSize(): Flow<Int> {
         return dataStore.data.map { preferences ->
@@ -344,7 +347,7 @@ class BinauralPreferencesRepository @Inject constructor(
 
     /**
      * Сохранить размер таблицы волн
-     * @param size размер таблицы (1024, 2048, 4096, 8192)
+     * @param size размер таблицы (512, 1024, 2048, 4096)
      */
     suspend fun saveWavetableSize(size: Int) {
         dataStore.edit { preferences ->
@@ -515,7 +518,8 @@ class BinauralPreferencesRepository @Inject constructor(
                         preset.frequencyCurve.beatRange.min,
                         preset.frequencyCurve.beatRange.max
                     ),
-                    interpolationType = preset.frequencyCurve.interpolationType.name
+                    interpolationType = preset.frequencyCurve.interpolationType.name,
+                    splineTension = preset.frequencyCurve.splineTension
                 ),
                 channelSwapSettings = SerializableChannelSwapSettings(
                     enabled = preset.channelSwapSettings.enabled,
@@ -557,7 +561,8 @@ class BinauralPreferencesRepository @Inject constructor(
                         } ?: FrequencyRange.DEFAULT_BEAT,
                         interpolationType = serializable.curve.interpolationType?.let {
                             try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
-                        } ?: InterpolationType.LINEAR
+                        } ?: InterpolationType.LINEAR,
+                        splineTension = serializable.curve.splineTension ?: 0.0f
                     ),
                     channelSwapSettings = serializable.channelSwapSettings?.let {
                         ChannelSwapSettings(

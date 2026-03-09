@@ -25,9 +25,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.model.FrequencyPoint
-import com.binauralcycles.R
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
+import com.binauralcycles.R
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
@@ -128,6 +129,7 @@ fun FrequencyGraph(
     carrierRange: FrequencyRange,
     beatRange: FrequencyRange,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f,
     isPlaying: Boolean,
     onPointSelected: (Int) -> Unit,
     onPointTimeChanged: (Int, LocalTime) -> Unit,
@@ -194,7 +196,8 @@ fun FrequencyGraph(
                             currentCarrierFrequency = currentCarrierFrequency,
                             currentBeatFrequency = currentBeatFrequency,
                             primaryColor = primaryColor,
-                            interpolationType = interpolationType
+                            interpolationType = interpolationType,
+                            splineTension = splineTension
                         )
                     }
                     .pointerInput(Unit) {
@@ -364,7 +367,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     currentCarrierFrequency: Double,
     currentBeatFrequency: Double,
     primaryColor: Color,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    splineTension: Float = 0.0f
 ) {
     val width = size.width
     val height = size.height
@@ -383,8 +387,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     }
     
     if (sortedPoints.size >= 2) {
-        drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType)
-        drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType)
+        drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
+        drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
     }
     
     val currentX = graphParams.timeToX(currentLocalTime)
@@ -402,7 +406,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
     primaryColor: Color,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    splineTension: Float = 0.0f
 ) {
     val width = size.width
     val numSamples = 200 // Больше сэмплов для более гладких кривых
@@ -412,10 +417,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     
     // Начинаем с левой границы
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
-    val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType)
-    val startUpperY = params.beatUpperY(startCarrier, startBeat)
-    val startLowerY = params.beatLowerY(startCarrier, startBeat)
+    // Интерполируем частоты каналов НАПРЯМУЮ - каждая кривая проходит через свои точки
+    val startUpperFreq = interpolateChannelFrequency(sortedPoints, startTime, interpolationType, splineTension, isUpper = true)
+    val startLowerFreq = interpolateChannelFrequency(sortedPoints, startTime, interpolationType, splineTension, isUpper = false)
+    val startUpperY = params.carrierToY(startUpperFreq)
+    val startLowerY = params.carrierToY(startLowerFreq)
     
     upperPath.moveTo(0f, startUpperY)
     lowerPath.moveTo(0f, startLowerY)
@@ -424,10 +430,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val upperY = params.beatUpperY(carrier, beat)
-        val lowerY = params.beatLowerY(carrier, beat)
+        // Интерполируем частоты каналов НАПРЯМУЮ
+        val upperFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = true)
+        val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
+        val upperY = params.carrierToY(upperFreq)
+        val lowerY = params.carrierToY(lowerFreq)
         val x = (t * width).toFloat()
         upperPath.lineTo(x, upperY)
         lowerPath.lineTo(x, lowerY)
@@ -441,9 +448,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     for (i in numSamples downTo 0) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType)
-        val lowerY = params.beatLowerY(carrier, beat)
+        val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
+        val lowerY = params.carrierToY(lowerFreq)
         val x = (t * width).toFloat()
         combinedPath.lineTo(x, lowerY)
     }
@@ -452,7 +458,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     
     // Заливка области биений
     drawPath(path = combinedPath, color = primaryColor.copy(alpha = 0.2f), style = Fill)
-    // Границы области
+    // Границы области (кривые частот каналов)
     drawPath(path = upperPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
     drawPath(path = lowerPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
 }
@@ -461,7 +467,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
     primaryColor: Color,
-    interpolationType: InterpolationType
+    interpolationType: InterpolationType,
+    splineTension: Float = 0.0f
 ) {
     val width = size.width
     val numSamples = 200 // Больше сэмплов для более гладких кривых
@@ -469,7 +476,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     
     // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType)
+    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
@@ -477,7 +484,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType)
+        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
         val y = params.carrierToY(carrier)
         val x = (t * width).toFloat()
         carrierPath.lineTo(x, y)
@@ -580,16 +587,50 @@ private fun calculateCarrierFromDrag(startCarrier: Double, dragY: Float, carrier
 }
 
 // Функции интерполяции
-fun interpolateCarrierFrequency(points: List<FrequencyPoint>, time: LocalTime, interpolationType: InterpolationType = InterpolationType.LINEAR): Double = 
-    interpolateFrequency(points, time, interpolationType) { it.carrierFrequency }
+fun interpolateCarrierFrequency(
+    points: List<FrequencyPoint>, 
+    time: LocalTime, 
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f
+): Double = interpolateFrequency(points, time, interpolationType, splineTension) { it.carrierFrequency }
 
-fun interpolateBeatFrequency(points: List<FrequencyPoint>, time: LocalTime, interpolationType: InterpolationType = InterpolationType.LINEAR): Double = 
-    interpolateFrequency(points, time, interpolationType) { it.beatFrequency }
+fun interpolateBeatFrequency(
+    points: List<FrequencyPoint>, 
+    time: LocalTime, 
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f
+): Double = interpolateFrequency(points, time, interpolationType, splineTension) { it.beatFrequency }
+
+/**
+ * Интерполяция частоты канала (верхнего или нижнего)
+ * Каждая кривая канала проходит через точки: carrier ± beat/2
+ * Это означает что интерполяция применяется К КАЖДОЙ кривой отдельно
+ * 
+ * @param isUpper true = верхний канал (carrier + beat/2), false = нижний (carrier - beat/2)
+ */
+fun interpolateChannelFrequency(
+    points: List<FrequencyPoint>, 
+    time: LocalTime, 
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f,
+    isUpper: Boolean
+): Double {
+    // Селектор, который вычисляет частоту канала для каждой точки
+    val channelSelector: (FrequencyPoint) -> Double = { point ->
+        if (isUpper) {
+            point.carrierFrequency + point.beatFrequency / 2.0
+        } else {
+            point.carrierFrequency - point.beatFrequency / 2.0
+        }
+    }
+    return interpolateFrequency(points, time, interpolationType, splineTension, channelSelector)
+}
 
 fun interpolateFrequency(
     points: List<FrequencyPoint>, 
     time: LocalTime, 
     interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f,
     frequencySelector: (FrequencyPoint) -> Double
 ): Double {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
@@ -618,6 +659,7 @@ fun interpolateFrequency(
             time,
             frequencySelector,
             interpolationType,
+            splineTension,
             isWrapping = true
         )
     }
@@ -629,6 +671,7 @@ fun interpolateFrequency(
         time,
         frequencySelector,
         interpolationType,
+        splineTension,
         isWrapping = false
     )
 }
@@ -643,6 +686,7 @@ private fun interpolateBetweenPoints(
     time: LocalTime,
     frequencySelector: (FrequencyPoint) -> Double,
     interpolationType: InterpolationType,
+    splineTension: Float,
     isWrapping: Boolean
 ): Double {
     val leftPoint = sortedPoints[leftIndex]
@@ -665,23 +709,14 @@ private fun interpolateBetweenPoints(
     
     val ratio = (t - t1).toDouble() / (t2 - t1)
     
-    return when (interpolationType) {
-        InterpolationType.LINEAR -> {
-            frequencySelector(leftPoint) + ratio * (frequencySelector(rightPoint) - frequencySelector(leftPoint))
-        }
-        InterpolationType.CUBIC_SPLINE -> {
-            // Для Catmull-Rom нужны 4 точки с учётом перехода через полночь
-            val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
-            val p1 = frequencySelector(leftPoint)
-            val p2 = frequencySelector(rightPoint)
-            val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
-            
-            val result = catmullRomInterpolate(p0, p1, p2, p3, ratio)
-            
-            // Ограничиваем результат минимальным значением 0 для частоты биений
-            result.coerceAtLeast(0.0)
-        }
-    }
+    // Получаем 4 точки для интерполяции
+    val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
+    val p1 = frequencySelector(leftPoint)
+    val p2 = frequencySelector(rightPoint)
+    val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
+    
+    // Используем общий объект интерполяции с параметром tension
+    return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
 }
 
 /**
@@ -725,20 +760,3 @@ private fun getNeighborPoint(
     }
 }
 
-/**
- * Интерполяция Catmull-Rom
- * Использует 4 точки для создания плавной кривой
- * Важно: может давать значения за пределами [p1, p2], поэтому требуется clamp
- */
-private fun catmullRomInterpolate(p0: Double, p1: Double, p2: Double, p3: Double, t: Double): Double {
-    val t2 = t * t
-    val t3 = t2 * t
-    
-    // Формула Catmull-Rom сплайна
-    return 0.5 * (
-        (2.0 * p1) +
-        (-p0 + p2) * t +
-        (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 +
-        (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3
-    )
-}

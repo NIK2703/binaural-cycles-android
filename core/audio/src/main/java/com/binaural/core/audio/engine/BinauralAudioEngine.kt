@@ -346,7 +346,13 @@ class BinauralAudioEngine(private val context: Context) {
             }
 
             val config = configRef.get()
-            val (beatFreq, carrierFreq) = config.getFrequenciesAt(cachedLocalTime)
+            // Получаем частоты каналов НАПРЯМУЮ через интерполяцию их кривых
+            // Каждая кривая канала интерполируется отдельно: carrier ± beat/2
+            val (lowerFreq, upperFreq) = config.getChannelFrequenciesAt(cachedLocalTime)
+            
+            // Вычисляем несущую и частоту биений для отображения
+            val carrierFreq = (upperFreq + lowerFreq) / 2.0
+            val beatFreq = upperFreq - lowerFreq
 
             // Обновляем StateFlows только если частоты изменились (избегаем лишних copy())
             if (_currentBeatFrequency.value != beatFreq) {

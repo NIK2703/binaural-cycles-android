@@ -167,6 +167,7 @@ fun PresetEditScreen(
                         carrierRange = editingCurve.carrierRange,
                         beatRange = editingCurve.beatRange,
                         interpolationType = editingCurve.interpolationType,
+                        splineTension = editingCurve.splineTension,
                         isPlaying = uiState.isPlaying,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
@@ -214,6 +215,7 @@ fun PresetEditScreen(
                     channelSwapSettings = uiState.editingChannelSwapSettings,
                     volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
                     interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
+                    splineTension = editingCurve?.splineTension ?: 0.0f,
                     isChannelsSwapped = uiState.isChannelsSwapped,
                     currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
                     currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
@@ -223,7 +225,8 @@ fun PresetEditScreen(
                     onChannelSwapFadeDurationChange = { viewModel.setEditingChannelSwapFadeDuration(it) },
                     onVolumeNormalizationEnabledChange = { viewModel.setEditingVolumeNormalizationEnabled(it) },
                     onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
-                    onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
+                    onInterpolationTypeChange = { viewModel.setInterpolationType(it) },
+                    onSplineTensionChange = { viewModel.setSplineTension(it) }
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))

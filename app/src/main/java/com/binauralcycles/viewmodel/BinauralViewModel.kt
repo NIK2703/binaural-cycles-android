@@ -600,7 +600,14 @@ class BinauralViewModel @Inject constructor(
         interpolationType: InterpolationType = InterpolationType.LINEAR
     ) {
         try {
-            val newCurve = FrequencyCurve(points, carrierRange, beatRange, interpolationType)
+            val currentCurve = _uiState.value.editingFrequencyCurve
+            val newCurve = FrequencyCurve(
+                points = points,
+                carrierRange = carrierRange,
+                beatRange = beatRange,
+                interpolationType = interpolationType,
+                splineTension = currentCurve?.splineTension ?: 0.0f
+            )
             _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
             
             // Обновляем кривую в сервисе только если редактируется активный пресет
@@ -626,7 +633,31 @@ class BinauralViewModel @Inject constructor(
             points = curve.points,
             carrierRange = curve.carrierRange,
             beatRange = curve.beatRange,
-            interpolationType = type
+            interpolationType = type,
+            splineTension = curve.splineTension
+        )
+        _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
+        
+        // Обновляем кривую в сервисе только если редактируется активный пресет
+        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+        if (isActivePreset) {
+            playbackService?.updateFrequencyCurve(newCurve)
+        }
+    }
+    
+    /**
+     * Установить натяжение сплайна для редактируемой кривой
+     */
+    fun setSplineTension(tension: Float) {
+        val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
+        
+        val newCurve = FrequencyCurve(
+            points = curve.points,
+            carrierRange = curve.carrierRange,
+            beatRange = curve.beatRange,
+            interpolationType = curve.interpolationType,
+            splineTension = tension.coerceIn(0f, 1f)
         )
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         

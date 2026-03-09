@@ -1,6 +1,8 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -8,6 +10,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapSettings
@@ -24,6 +27,7 @@ fun PresetSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
     volumeNormalizationSettings: VolumeNormalizationSettings,
     interpolationType: InterpolationType,
+    splineTension: Float,
     isChannelsSwapped: Boolean,
     currentLeftFreq: Double,
     currentRightFreq: Double,
@@ -33,30 +37,107 @@ fun PresetSettingsCard(
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
-    onInterpolationTypeChange: (InterpolationType) -> Unit
+    onInterpolationTypeChange: (InterpolationType) -> Unit,
+    onSplineTensionChange: (Float) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // Интерполяция по точкам
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.point_interpolation)) },
-            trailingContent = {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.LINEAR,
-                        onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
-                        label = { Text(stringResource(R.string.linear)) }
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.point_interpolation),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Text(
+                text = stringResource(R.string.interpolation_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+            ) {
+                FilterChip(
+                    selected = interpolationType == InterpolationType.LINEAR,
+                    onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.linear_full),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = interpolationType == InterpolationType.MONOTONE,
+                    onClick = { onInterpolationTypeChange(InterpolationType.MONOTONE) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.monotone_full),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = interpolationType == InterpolationType.CARDINAL,
+                    onClick = { onInterpolationTypeChange(InterpolationType.CARDINAL) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.cardinal_full),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        
+        // Слайдер натяжения для кардинального сплайна
+        if (interpolationType == InterpolationType.CARDINAL) {
+            var localTension by remember(splineTension) { mutableFloatStateOf(splineTension) }
+            
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        stringResource(R.string.spline_tension),
+                        style = MaterialTheme.typography.bodyMedium
                     )
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.CUBIC_SPLINE,
-                        onClick = { onInterpolationTypeChange(InterpolationType.CUBIC_SPLINE) },
-                        label = { Text(stringResource(R.string.cubic)) }
+                    Text(
+                        String.format("%.2f", localTension),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
+                Slider(
+                    value = localTension,
+                    onValueChange = { localTension = it },
+                    onValueChangeFinished = {
+                        onSplineTensionChange(localTension)
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    valueRange = 0f..1f
+                )
+                Text(
+                    stringResource(R.string.spline_tension_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
-        )
+        }
         
         HorizontalDivider()
         
@@ -202,27 +283,46 @@ fun AppSettingsCard(
 
         // Размер таблицы волн (показываем только когда оптимизация включена)
         if (wavetableOptimizationEnabled) {
-            DiscreteSliderWavetableSize(
-                label = stringResource(R.string.wavetable_size),
-                value = wavetableSize,
-                values = listOf(1024, 2048, 4096, 8192),
-                valueLabel = formatWavetableSize(wavetableSize),
-                onValueChange = onWavetableSizeChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                DiscreteSliderWavetableSize(
+                    label = stringResource(R.string.wavetable_size),
+                    value = wavetableSize,
+                    values = listOf(512, 1024, 2048, 4096),
+                    valueLabel = formatWavetableSize(wavetableSize),
+                    onValueChange = onWavetableSizeChange,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = stringResource(R.string.wavetable_size_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         HorizontalDivider()
 
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
-        DiscreteSlider(
-            label = stringResource(R.string.update_interval),
-            value = frequencyUpdateIntervalMs,
-            values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
-            valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
-            onValueChange = onFrequencyUpdateIntervalChange,
-            modifier = Modifier.padding(horizontal = 16.dp)
-        )
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            Text(
+                text = stringResource(R.string.update_interval),
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                text = stringResource(R.string.update_interval_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            DiscreteSlider(
+                label = "",
+                value = frequencyUpdateIntervalMs,
+                values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
+                valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
+                onValueChange = onFrequencyUpdateIntervalChange,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
         
         // Качество аудио - раскрывающийся список
         var sampleRateExpanded by remember { mutableStateOf(false) }
@@ -230,89 +330,81 @@ fun AppSettingsCard(
         ListItem(
             headlineContent = { Text(stringResource(R.string.audio_quality)) },
             supportingContent = {
-                Column {
-                    Text(
-                        when (sampleRate) {
-                            SampleRate.ULTRA_LOW -> stringResource(R.string.quality_ultra_low)
-                            SampleRate.VERY_LOW -> stringResource(R.string.quality_very_low)
-                            SampleRate.LOW -> stringResource(R.string.quality_low)
-                            SampleRate.MEDIUM -> stringResource(R.string.quality_standard)
-                            SampleRate.HIGH -> stringResource(R.string.quality_high)
-                        }
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    ExposedDropdownMenuBox(
-                        expanded = sampleRateExpanded,
-                        onExpandedChange = { sampleRateExpanded = it },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        OutlinedTextField(
-                            value = when (sampleRate) {
-                                SampleRate.ULTRA_LOW -> "8 kHz"
-                                SampleRate.VERY_LOW -> "16 kHz"
-                                SampleRate.LOW -> "22 kHz"
-                                SampleRate.MEDIUM -> "44 kHz"
-                                SampleRate.HIGH -> "48 kHz"
-                            },
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = {
-                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = sampleRateExpanded)
-                            },
-                            modifier = Modifier
-                                .menuAnchor()
-                                .fillMaxWidth()
-                        )
-                        
-                        ExposedDropdownMenu(
-                            expanded = sampleRateExpanded,
-                            onDismissRequest = { sampleRateExpanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("8 kHz") },
-                                onClick = {
-                                    onSampleRateChange(SampleRate.ULTRA_LOW)
-                                    sampleRateExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                            DropdownMenuItem(
-                                text = { Text("16 kHz") },
-                                onClick = {
-                                    onSampleRateChange(SampleRate.VERY_LOW)
-                                    sampleRateExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                            DropdownMenuItem(
-                                text = { Text("22 kHz") },
-                                onClick = {
-                                    onSampleRateChange(SampleRate.LOW)
-                                    sampleRateExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                            DropdownMenuItem(
-                                text = { Text("44 kHz") },
-                                onClick = {
-                                    onSampleRateChange(SampleRate.MEDIUM)
-                                    sampleRateExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                            DropdownMenuItem(
-                                text = { Text("48 kHz") },
-                                onClick = {
-                                    onSampleRateChange(SampleRate.HIGH)
-                                    sampleRateExpanded = false
-                                },
-                                contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
-                            )
-                        }
-                    }
-                }
+                Text(stringResource(R.string.audio_quality_description))
             }
         )
+        
+        ExposedDropdownMenuBox(
+            expanded = sampleRateExpanded,
+            onExpandedChange = { sampleRateExpanded = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+        ) {
+            OutlinedTextField(
+                value = when (sampleRate) {
+                    SampleRate.ULTRA_LOW -> stringResource(R.string.quality_ultra_low)
+                    SampleRate.VERY_LOW -> stringResource(R.string.quality_very_low)
+                    SampleRate.LOW -> stringResource(R.string.quality_low)
+                    SampleRate.MEDIUM -> stringResource(R.string.quality_standard)
+                    SampleRate.HIGH -> stringResource(R.string.quality_high)
+                },
+                onValueChange = {},
+                readOnly = true,
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = sampleRateExpanded)
+                },
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+            )
+            
+            ExposedDropdownMenu(
+                expanded = sampleRateExpanded,
+                onDismissRequest = { sampleRateExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.quality_ultra_low)) },
+                    onClick = {
+                        onSampleRateChange(SampleRate.ULTRA_LOW)
+                        sampleRateExpanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.quality_very_low)) },
+                    onClick = {
+                        onSampleRateChange(SampleRate.VERY_LOW)
+                        sampleRateExpanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.quality_low)) },
+                    onClick = {
+                        onSampleRateChange(SampleRate.LOW)
+                        sampleRateExpanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.quality_standard)) },
+                    onClick = {
+                        onSampleRateChange(SampleRate.MEDIUM)
+                        sampleRateExpanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.quality_high)) },
+                    onClick = {
+                        onSampleRateChange(SampleRate.HIGH)
+                        sampleRateExpanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                )
+            }
+        }
     }
 }
 

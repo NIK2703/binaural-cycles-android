@@ -39,8 +39,12 @@
     
     <!-- Interpolation -->
     <string name="point_interpolation">Point interpolation</string>
+    <string name="interpolation_description">Method for calculating values between graph points</string>
     <string name="linear">Linear</string>
-    <string name="cubic">Cubic</string>
+    <string name="cardinal">Cardinal</string>
+    <string name="monotone">Monotone</string>
+    <string name="spline_tension">Spline tension</string>
+    <string name="spline_tension_description">0 = smooth Catmull-Rom, 1 = nearly linear</string>
     
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Auto channel swap</string>
@@ -58,13 +62,22 @@
     <string name="normalization_strength">Normalization strength</string>
     
     <!-- App Settings -->
-    <string name="update_interval">Update interval</string>
-    <string name="audio_quality">Audio quality</string>
-    <string name="quality_ultra_low">Ultra-low (8 kHz) — maximum battery saving</string>
-    <string name="quality_very_low">Very low (16 kHz)</string>
-    <string name="quality_low">Low (22 kHz) — battery saving</string>
-    <string name="quality_standard">Standard (44 kHz)</string>
-    <string name="quality_high">High (48 kHz)</string>
+    <string name="update_interval">Frequency update interval</string>
+    <string name="update_interval_description">How often playback frequencies are recalculated</string>
+    <string name="audio_quality">Sample rate</string>
+    <string name="audio_quality_description">Lower values save battery life</string>
+    <string name="quality_ultra_low">8 kHz — maximum battery saving</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz — battery saving</string>
+    <string name="quality_standard">44 kHz — standard</string>
+    <string name="quality_high">48 kHz — maximum quality</string>
+    
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Wavetable synthesis</string>
+    <string name="wavetable_optimization_enabled_desc">Reduces CPU load through table-based synthesis</string>
+    <string name="wavetable_optimization_disabled_desc">Direct sine wave calculation in real-time</string>
+    <string name="wavetable_size">Synthesis precision</string>
+    <string name="wavetable_size_description">Higher value = more precise sound, slightly more memory usage</string>
     
     <!-- Time units -->
     <string name="seconds_short">sec</string>
