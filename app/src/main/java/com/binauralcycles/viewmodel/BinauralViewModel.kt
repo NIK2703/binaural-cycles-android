@@ -231,9 +231,9 @@ class BinauralViewModel @Inject constructor(
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val state = _uiState.value
         
-        // Если уже воспроизводится этот пресет - останавливаем
+        // Если уже воспроизводится этот пресет - останавливаем с затуханием
         if (state.activePreset?.id == presetId && state.isPlaying) {
-            playbackService?.stop()
+            playbackService?.stopWithFade()
             return
         }
         
@@ -390,9 +390,9 @@ class BinauralViewModel @Inject constructor(
      * Удалить пресет
      */
     fun deletePreset(presetId: String) {
-        // Если удаляем активный пресет - останавливаем воспроизведение
+        // Если удаляем активный пресет - останавливаем воспроизведение с затуханием
         if (_uiState.value.activePreset?.id == presetId) {
-            playbackService?.stop()
+            playbackService?.stopWithFade()
             _uiState.update { it.copy(activePreset = null) }
             lastActivePresetId = null
             viewModelScope.launch {
@@ -411,8 +411,8 @@ class BinauralViewModel @Inject constructor(
         val state = _uiState.value
         
         if (state.isPlaying) {
-            // Немедленная остановка
-            playbackService?.stop()
+            // Плавная остановка с затуханием
+            playbackService?.stopWithFade()
         } else {
             // Если есть активный пресет - обновляем конфиг и продолжаем воспроизведение
             if (state.activePreset != null) {
