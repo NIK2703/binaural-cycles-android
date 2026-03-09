@@ -7,16 +7,33 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+import java.util.Properties
+
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(keystorePropertiesFile.inputStream())
+}
+
 android {
     namespace = "com.binauralcycles"
     compileSdk = 34
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("../${keystoreProperties.getProperty("storeFile", "keystore.jks")}")
+            storePassword = keystoreProperties.getProperty("storePassword", "")
+            keyAlias = keystoreProperties.getProperty("keyAlias", "binaural")
+            keyPassword = keystoreProperties.getProperty("keyPassword", "")
+        }
+    }
 
     defaultConfig {
         applicationId = "com.binauralcycles"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -27,6 +44,7 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
