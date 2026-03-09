@@ -145,20 +145,23 @@ fun FrequencyGraph(
     var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
     var tempRangeValue by remember { mutableStateOf("") }
     
+    // Инициализируем текущим временем сразу при первом отображении
+    LaunchedEffect(Unit) {
+        val now = Clock.System.now()
+        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+    }
+    
+    // Обновляем время каждые 5 секунд при воспроизведении
+    // При паузе не обновляем, но и не сбрасываем в 12:00
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             while (true) {
                 kotlinx.coroutines.delay(5000)
                 val now = Clock.System.now()
-                val zone = TimeZone.currentSystemDefault()
-                currentTime.value = now.toLocalDateTime(zone).time
+                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
             }
         }
-    }
-    
-    LaunchedEffect(Unit) {
-        val now = Clock.System.now()
-        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+        // При isPlaying = false НЕ сбрасываем время - оставляем текущее
     }
     
     val currentLocalTime = currentTime.value
@@ -167,7 +170,7 @@ fun FrequencyGraph(
     // Используем кэшированные sortedPoints если доступны (оптимизация)
     val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
 
-    Box(
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
@@ -175,7 +178,7 @@ fun FrequencyGraph(
             .padding(16.dp)
     ) {
         BoxWithConstraints(
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.weight(1f).fillMaxWidth()
         ) {
             val widthPx = with(density) { maxWidth.roundToPx() }
             val heightPx = with(density) { maxHeight.roundToPx() }
@@ -197,7 +200,8 @@ fun FrequencyGraph(
                             currentBeatFrequency = currentBeatFrequency,
                             primaryColor = primaryColor,
                             interpolationType = interpolationType,
-                            splineTension = splineTension
+                            splineTension = splineTension,
+                            isPlaying = isPlaying
                         )
                     }
                     .pointerInput(Unit) {
@@ -303,7 +307,7 @@ fun FrequencyGraph(
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
                     modifier = Modifier.clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
                 ) {
-                    Text("%.0f".format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                    Text("%.0f Гц".format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
@@ -312,21 +316,19 @@ fun FrequencyGraph(
                     Text("%.0f Гц".format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
             }
-
-            // Ось X - отметки каждые 3 часа
-            Row(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("0ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("3ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("6ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("9ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("12ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("15ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("18ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("21ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("24ч", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            
-            Text("%02d:%02d".format(currentLocalTime.hour, currentLocalTime.minute), style = MaterialTheme.typography.labelSmall, color = Color.Red, modifier = Modifier.align(Alignment.TopEnd))
+        }
+        
+        // Ось X - отметки каждые 3 часа (ниже графика)
+        Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("0", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("3", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("6", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("9", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("12", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("15", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("18", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("21", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("24", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     
@@ -368,7 +370,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     currentBeatFrequency: Double,
     primaryColor: Color,
     interpolationType: InterpolationType,
-    splineTension: Float = 0.0f
+    splineTension: Float = 0.0f,
+    isPlaying: Boolean = false
 ) {
     val width = size.width
     val height = size.height
@@ -391,15 +394,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
         drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
     }
     
-    val currentX = graphParams.timeToX(currentLocalTime)
-    val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
-    val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
-    val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
-    
-    drawLine(color = Color.Red.copy(alpha = 0.7f), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = 2f)
-    drawCircle(color = Color.Red, radius = 8f, center = Offset(currentX, currentCarrierY))
-    // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
-    drawLine(color = Color.Red.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+    // Рисуем указатель текущей частоты только если воспроизводится этот график
+    if (isPlaying) {
+        val currentX = graphParams.timeToX(currentLocalTime)
+        val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
+        val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
+        val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
+        
+        drawLine(color = Color.Red.copy(alpha = 0.7f), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = 2f)
+        drawCircle(color = Color.Red, radius = 8f, center = Offset(currentX, currentCarrierY))
+        // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
+        drawLine(color = Color.Red.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+    }
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
@@ -490,7 +496,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
         carrierPath.lineTo(x, y)
     }
     
-    drawPath(path = carrierPath, color = primaryColor, style = Stroke(width = 3f))
+    drawPath(path = carrierPath, color = primaryColor.copy(alpha = 0.6f), style = Stroke(width = 3f))
 }
 
 private enum class RangeType { MIN, MAX }

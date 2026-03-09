@@ -258,9 +258,22 @@ class BinauralViewModel @Inject constructor(
             volumeNormalizationStrength = preset.volumeNormalizationSettings.strength
         )
         
-        // Обновляем конфиг мгновенно (без fade при переключении пресетов)
-        playbackService?.updateConfig(config)
-        if (!state.isPlaying) {
+        // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
+        // Сначала fade-out на старом пресете, затем fade-in на новом
+        if (state.isPlaying) {
+            // Сначала останавливаем с fade-out на старом пресете
+            playbackService?.stopWithFade()
+            // Ждем завершения fade-out (250мс + запас), затем запускаем новый пресет
+            viewModelScope.launch {
+                kotlinx.coroutines.delay(300)
+                // Применяем новый конфиг
+                playbackService?.updateConfig(config)
+                // Запускаем воспроизведение с fade-in
+                playbackService?.play()
+            }
+        } else {
+            // Не воспроизводится - просто обновляем конфиг и запускаем
+            playbackService?.updateConfig(config)
             playbackService?.play()
         }
         

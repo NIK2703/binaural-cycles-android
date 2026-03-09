@@ -364,7 +364,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
     
     drawPath(
         path = carrierPath,
-        color = primaryColor,
+        color = primaryColor.copy(alpha = 0.6f),
         style = Stroke(width = 1.5f)
     )
 }

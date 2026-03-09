@@ -158,6 +158,8 @@ fun PresetEditScreen(
                 
                 // График частот (используем редактируемую кривую)
                 val editingCurve = uiState.editingFrequencyCurve
+                // Показываем указатель текущей частоты только если редактируется активный пресет
+                val isEditingActivePreset = presetId != null && uiState.activePreset?.id == presetId
                 if (editingCurve != null) {
                     FrequencyGraph(
                         points = editingCurve.points,
@@ -168,7 +170,8 @@ fun PresetEditScreen(
                         beatRange = editingCurve.beatRange,
                         interpolationType = editingCurve.interpolationType,
                         splineTension = editingCurve.splineTension,
-                        isPlaying = uiState.isPlaying,
+                        // Показываем указатель только если редактируется активный пресет
+                        isPlaying = isEditingActivePreset && uiState.isPlaying,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
                             viewModel.updateEditingPointTimeDirect(index, newTime)

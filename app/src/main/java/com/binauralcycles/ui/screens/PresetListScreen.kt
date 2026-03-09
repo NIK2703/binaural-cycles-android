@@ -25,6 +25,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.ui.components.MiniFrequencyGraph
+import com.binauralcycles.ui.components.interpolateCarrierFrequency
+import com.binauralcycles.ui.components.interpolateBeatFrequency
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
 import kotlinx.datetime.Clock
@@ -101,14 +103,30 @@ fun PresetListScreen(
                     contentPadding = PaddingValues(top = 8.dp)
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
+                        val isActivePreset = uiState.activePreset?.id == preset.id
+                        // Всегда вычисляем частоты из кривой пресета в текущий момент времени
+                        // Это обеспечивает мгновенное отображение указателя без задержки
+                        // (для активного пресета аудио-движок будет использовать свои значения для воспроизведения)
+                        val carrierFreq = interpolateCarrierFrequency(
+                            preset.frequencyCurve.points,
+                            currentTime.value,
+                            preset.frequencyCurve.interpolationType,
+                            preset.frequencyCurve.splineTension
+                        )
+                        val beatFreq = interpolateBeatFrequency(
+                            preset.frequencyCurve.points,
+                            currentTime.value,
+                            preset.frequencyCurve.interpolationType,
+                            preset.frequencyCurve.splineTension
+                        )
                         PresetCard(
                             presetId = preset.id,
                             name = preset.name,
                             frequencyCurve = preset.frequencyCurve,
-                            isActive = uiState.activePreset?.id == preset.id,
-                            isPlaying = uiState.activePreset?.id == preset.id && uiState.isPlaying,
-                            currentCarrierFrequency = uiState.currentCarrierFrequency,
-                            currentBeatFrequency = uiState.currentBeatFrequency,
+                            isActive = isActivePreset,
+                            isPlaying = isActivePreset && uiState.isPlaying,
+                            currentCarrierFrequency = carrierFreq,
+                            currentBeatFrequency = beatFreq,
                             currentTime = currentTime.value, // Передаём время из родителя
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
@@ -128,11 +146,22 @@ fun PresetListScreen(
 /**
  * Возвращает StateFlow с текущим временем, обновляемым каждые 5 секунд при воспроизведении
  * Оптимизация: одна корутина на весь экран вместо по одной на каждую карточку
+ * 
+ * Время всегда показывается текущее (не сбрасывается в 12:00 при паузе),
+ * чтобы указатель на графике сразу появлялся в правильной позиции при выборе пресета.
  */
 @Composable
 private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
     val currentTime = remember { mutableStateOf(LocalTime.fromSecondOfDay(12 * 3600)) }
     
+    // Инициализируем текущим временем сразу при первом отображении
+    LaunchedEffect(Unit) {
+        val now = Clock.System.now()
+        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+    }
+    
+    // Обновляем время каждые 5 секунд при воспроизведении
+    // При паузе не обновляем, но и не сбрасываем в 12:00 - оставляем текущее время
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
             while (true) {
@@ -140,14 +169,9 @@ private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
                 currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
                 kotlinx.coroutines.delay(5000)
             }
-        } else {
-            currentTime.value = LocalTime.fromSecondOfDay(12 * 3600)
         }
-    }
-
-    LaunchedEffect(Unit) {
-        val now = Clock.System.now()
-        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
+        // При isPlaying = false НЕ сбрасываем время в 12:00
+        // Указатель остаётся на текущей позиции
     }
     
     return currentTime
