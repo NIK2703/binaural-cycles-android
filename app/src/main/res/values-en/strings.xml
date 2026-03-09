@@ -93,6 +93,26 @@
     <string name="milliseconds_short">ms</string>
     <string name="seconds_full">s</string>
     
+    <!-- Playback Controls -->
+    <string name="play">Play</string>
+    <string name="stop">Stop</string>
+    <string name="volume">Volume</string>
+    
+    <!-- Point Editor -->
+    <string name="point">Point</string>
+    <string name="carrier">Carrier</string>
+    <string name="beats">Beats</string>
+    <string name="max_format">max %.1f</string>
+    <string name="apply">Apply</string>
+    <string name="close">Close</string>
+    
+    <!-- Frequencies -->
+    <string name="beat_frequency">Beats</string>
+    <string name="carrier_frequency">Carrier</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+    
     <!-- Notification -->
     <string name="notification_channel_name">Playback</string>
     <string name="notification_channel_description">Binaural beats playback control</string>

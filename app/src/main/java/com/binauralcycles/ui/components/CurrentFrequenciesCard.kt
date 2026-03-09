@@ -5,10 +5,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binaural.core.ui.theme.BeatFrequencyColor
 import com.binaural.core.ui.theme.CarrierFrequencyColor
+import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
 
@@ -20,6 +22,12 @@ fun CurrentFrequenciesCard(
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
     val isLeftChannelTooLow = leftChannelFreq < MIN_AUDIBLE_FREQUENCY
+    
+    // Локализованные строки
+    val beatLabel = stringResource(R.string.beat_frequency)
+    val carrierLabel = stringResource(R.string.carrier_frequency)
+    val hzDecimalFormat = stringResource(R.string.hz_value_format_decimal)
+    val hzFormat = stringResource(R.string.hz_value_format)
     
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -36,8 +44,8 @@ fun CurrentFrequenciesCard(
         ) {
             // Частота биений
             FrequencyColumn(
-                label = "Биения",
-                value = "%.1f Гц".format(beatFrequency),
+                label = beatLabel,
+                value = hzDecimalFormat.format(beatFrequency),
                 color = BeatFrequencyColor
             )
             
@@ -48,8 +56,8 @@ fun CurrentFrequenciesCard(
             
             // Несущая частота
             FrequencyColumn(
-                label = "Несущая",
-                value = "%.0f Гц".format(carrierFrequency),
+                label = carrierLabel,
+                value = hzFormat.format(carrierFrequency),
                 color = CarrierFrequencyColor
             )
             

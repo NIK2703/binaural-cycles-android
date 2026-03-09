@@ -145,6 +145,9 @@ fun FrequencyGraph(
     var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
     var tempRangeValue by remember { mutableStateOf("") }
     
+    // Локализованный формат Гц - объявляем здесь для использования во всём компоненте
+    val hzFormat = stringResource(R.string.hz_value_format)
+    
     // Инициализируем текущим временем сразу при первом отображении
     LaunchedEffect(Unit) {
         val now = Clock.System.now()
@@ -289,8 +292,8 @@ fun FrequencyGraph(
                                 Text(
                                     text = when (dragState.direction) {
                                         DragDirection.HORIZONTAL -> "%02d:%02d".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute)
-                                        DragDirection.VERTICAL -> "%.0f Гц".format(dragState.currentCarrier)
-                                        DragDirection.NONE -> "%02d:%02d / %.0f Гц".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute, dragState.currentCarrier)
+                                        DragDirection.VERTICAL -> hzFormat.format(dragState.currentCarrier)
+                                        DragDirection.NONE -> "%02d:%02d / %s".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute, hzFormat.format(dragState.currentCarrier))
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Bold,
@@ -307,13 +310,13 @@ fun FrequencyGraph(
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
                     modifier = Modifier.clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
                 ) {
-                    Text("%.0f Гц".format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                    Text(hzFormat.format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
                     modifier = Modifier.clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
                 ) {
-                    Text("%.0f Гц".format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
+                    Text(hzFormat.format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
             }
         }

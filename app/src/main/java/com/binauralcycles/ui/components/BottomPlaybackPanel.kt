@@ -7,11 +7,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binaural.core.ui.theme.BeatFrequencyColor
 import com.binaural.core.ui.theme.CarrierFrequencyColor
+import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
 
@@ -36,6 +38,12 @@ fun BottomPlaybackPanel(
     
     // Локальное состояние для мгновенного отклика слайдера
     var localVolume by remember(volume) { mutableFloatStateOf(volume) }
+    
+    // Локализованные строки
+    val hzDecimalFormat = stringResource(R.string.hz_value_format_decimal)
+    val hzFormat = stringResource(R.string.hz_value_format)
+    val playLabel = stringResource(R.string.play)
+    val stopLabel = stringResource(R.string.stop)
 
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -72,7 +80,7 @@ fun BottomPlaybackPanel(
                 ) {
                     // Частота биений
                     Text(
-                        text = "%.1f Гц".format(beatFrequency),
+                        text = hzDecimalFormat.format(beatFrequency),
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
                         color = BeatFrequencyColor
@@ -86,7 +94,7 @@ fun BottomPlaybackPanel(
                     
                     // Несущая частота
                     Text(
-                        text = "%.0f Гц".format(carrierFrequency),
+                        text = hzFormat.format(carrierFrequency),
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
                         color = CarrierFrequencyColor
@@ -166,7 +174,7 @@ fun BottomPlaybackPanel(
             ) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) "Стоп" else "Воспроизведение",
+                    contentDescription = if (isPlaying) stopLabel else playLabel,
                     modifier = Modifier.size(24.dp)
                 )
             }

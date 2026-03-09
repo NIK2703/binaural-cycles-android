@@ -8,6 +8,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -15,6 +16,7 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.ui.theme.BeatFrequencyColor
 import com.binaural.core.ui.theme.CarrierFrequencyColor
+import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
 
@@ -44,6 +46,16 @@ fun PointEditor(
     val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0
     // Валидация частоты биений: ограничена формулой несущая * 2 - 20
     val isBeatValid = beatValue != null && beatValue >= beatRange.min && beatValue <= maxBeatFrequency
+    
+    // Локализованные строки
+    val pointLabel = stringResource(R.string.point)
+    val deleteLabel = stringResource(R.string.delete)
+    val closeLabel = stringResource(R.string.close)
+    val applyLabel = stringResource(R.string.apply)
+    val carrierLabel = stringResource(R.string.carrier)
+    val beatsLabel = stringResource(R.string.beats)
+    val hzLabel = stringResource(R.string.hz)
+    val maxFormat = stringResource(R.string.max_format)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -59,7 +71,7 @@ fun PointEditor(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Точка: %02d:%02d".format(point.time.hour, point.time.minute),
+                    text = "$pointLabel: %02d:%02d".format(point.time.hour, point.time.minute),
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
@@ -68,7 +80,7 @@ fun PointEditor(
                     IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.Delete,
-                            contentDescription = "Удалить",
+                            contentDescription = deleteLabel,
                             tint = MaterialTheme.colorScheme.error,
                             modifier = Modifier.size(18.dp)
                         )
@@ -76,7 +88,7 @@ fun PointEditor(
                     IconButton(onClick = onDeselect, modifier = Modifier.size(32.dp)) {
                         Icon(
                             Icons.Default.Close,
-                            contentDescription = "Закрыть",
+                            contentDescription = closeLabel,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -91,7 +103,7 @@ fun PointEditor(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Несущая:",
+                    "$carrierLabel:",
                     style = MaterialTheme.typography.bodySmall,
                     color = CarrierFrequencyColor,
                     modifier = Modifier.width(70.dp)
@@ -110,7 +122,7 @@ fun PointEditor(
                     singleLine = true,
                     isError = !isCarrierValid && tempCarrierFrequency.isNotEmpty(),
                     modifier = Modifier.width(90.dp),
-                    suffix = { Text("Гц", style = MaterialTheme.typography.bodySmall) },
+                    suffix = { Text(hzLabel, style = MaterialTheme.typography.bodySmall) },
                     textStyle = LocalTextStyle.current.copy(
                         fontSize = MaterialTheme.typography.bodySmall.fontSize
                     )
@@ -124,7 +136,7 @@ fun PointEditor(
                     ) {
                         Icon(
                             Icons.Default.Check,
-                            contentDescription = "Применить",
+                            contentDescription = applyLabel,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
                         )
@@ -154,7 +166,7 @@ fun PointEditor(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Биения:",
+                    "$beatsLabel:",
                     style = MaterialTheme.typography.bodySmall,
                     color = BeatFrequencyColor,
                     modifier = Modifier.width(70.dp)
@@ -174,7 +186,7 @@ fun PointEditor(
                     singleLine = true,
                     isError = !isBeatValid && tempBeatFrequency.isNotEmpty(),
                     modifier = Modifier.width(90.dp),
-                    suffix = { Text("Гц", style = MaterialTheme.typography.bodySmall) },
+                    suffix = { Text(hzLabel, style = MaterialTheme.typography.bodySmall) },
                     textStyle = LocalTextStyle.current.copy(
                         fontSize = MaterialTheme.typography.bodySmall.fontSize
                     )
@@ -188,7 +200,7 @@ fun PointEditor(
                     ) {
                         Icon(
                             Icons.Default.Check,
-                            contentDescription = "Применить",
+                            contentDescription = applyLabel,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
                         )
@@ -198,7 +210,7 @@ fun PointEditor(
                 Spacer(modifier = Modifier.weight(1f))
                 
                 Text(
-                    "макс %.1f".format(maxBeatFrequency),
+                    maxFormat.format(maxBeatFrequency),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

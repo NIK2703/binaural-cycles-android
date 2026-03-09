@@ -7,7 +7,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.binauralcycles.R
 
 @Composable
 fun VolumeSlider(
@@ -15,13 +17,14 @@ fun VolumeSlider(
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val volumeLabel = stringResource(R.string.volume)
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             Icons.Default.VolumeDown,
-            contentDescription = "Громкость",
+            contentDescription = volumeLabel,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp)
         )
@@ -34,7 +37,7 @@ fun VolumeSlider(
         )
         Icon(
             Icons.Default.VolumeUp,
-            contentDescription = "Громкость",
+            contentDescription = volumeLabel,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp)
         )
@@ -46,6 +49,9 @@ fun PlayButton(
     isPlaying: Boolean,
     onClick: () -> Unit
 ) {
+    val playLabel = stringResource(R.string.play)
+    val stopLabel = stringResource(R.string.stop)
+    
     FilledIconButton(
         onClick = onClick,
         modifier = Modifier.size(56.dp),
@@ -56,7 +62,7 @@ fun PlayButton(
     ) {
         Icon(
             imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-            contentDescription = if (isPlaying) "Стоп" else "Воспроизведение",
+            contentDescription = if (isPlaying) stopLabel else playLabel,
             modifier = Modifier.size(28.dp)
         )
     }

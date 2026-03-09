@@ -93,6 +93,26 @@
     <string name="milliseconds_short">мс</string>
     <string name="seconds_full">с</string>
     
+    <!-- Playback Controls -->
+    <string name="play">Воспроизведение</string>
+    <string name="stop">Стоп</string>
+    <string name="volume">Громкость</string>
+    
+    <!-- Point Editor -->
+    <string name="point">Точка</string>
+    <string name="carrier">Несущая</string>
+    <string name="beats">Биения</string>
+    <string name="max_format">макс %.1f</string>
+    <string name="apply">Применить</string>
+    <string name="close">Закрыть</string>
+    
+    <!-- Frequencies -->
+    <string name="beat_frequency">Биения</string>
+    <string name="carrier_frequency">Несущая</string>
+    <string name="hz_format">%s Гц</string>
+    <string name="hz_value_format">%.0f Гц</string>
+    <string name="hz_value_format_decimal">%.1f Гц</string>
+    
     <!-- Notification -->
     <string name="notification_channel_name">Воспроизведение</string>
     <string name="notification_channel_description">Управление воспроизведением бинауральных ритмов</string>
