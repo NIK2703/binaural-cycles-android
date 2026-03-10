@@ -15,6 +15,7 @@ import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -74,8 +75,8 @@ data class SerializableChannelSwapSettings(
  */
 @Serializable
 data class SerializableVolumeNormalizationSettings(
-    val enabled: Boolean = true,
-    val strength: Float = 0.5f
+    val type: String = "CHANNEL",  // NONE, CHANNEL, TEMPORAL
+    val strength: Float = 1.0f
 )
 
 /**
@@ -528,7 +529,7 @@ class BinauralPreferencesRepository @Inject constructor(
                     fadeDurationMs = preset.channelSwapSettings.fadeDurationMs
                 ),
                 volumeNormalizationSettings = SerializableVolumeNormalizationSettings(
-                    enabled = preset.volumeNormalizationSettings.enabled,
+                    type = preset.volumeNormalizationSettings.type.name,
                     strength = preset.volumeNormalizationSettings.strength
                 ),
                 createdAt = preset.createdAt,
@@ -574,7 +575,7 @@ class BinauralPreferencesRepository @Inject constructor(
                     } ?: ChannelSwapSettings(),
                     volumeNormalizationSettings = serializable.volumeNormalizationSettings?.let {
                         VolumeNormalizationSettings(
-                            enabled = it.enabled,
+                            type = try { NormalizationType.valueOf(it.type) } catch (e: Exception) { NormalizationType.CHANNEL },
                             strength = it.strength
                         )
                     } ?: VolumeNormalizationSettings(),

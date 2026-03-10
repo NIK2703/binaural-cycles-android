@@ -58,8 +58,19 @@
     
     <!-- Volume Normalization -->
     <string name="volume_normalization">Нормализация громкости</string>
-    <string name="volume_normalization_description">Выравнивание громкости между каналами по соотношению частот их тонов</string>
+    <string name="volume_normalization_description">Выравнивание громкости для равномерного звучания</string>
     <string name="normalization_strength">Сила нормализации</string>
+    
+    <!-- Normalization Types -->
+    <string name="normalization_none">Нет</string>
+    <string name="normalization_channel">Канальная</string>
+    <string name="normalization_temporal">Временная</string>
+    <string name="normalization_channel_description">Выравнивание громкости между левым и правым каналом по соотношению частот их тонов</string>
+    <string name="normalization_temporal_description">Выравнивание громкости между точками графика для равномерного звучания в течение дня</string>
+    
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Временная нормализация</string>
+    <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
     
     <!-- App Settings -->
     <string name="update_interval">Интервал обновления частоты</string>
