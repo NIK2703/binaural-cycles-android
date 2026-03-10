@@ -1,0 +1,8 @@
+Version 0.3:
+• Improved frequency graph visualization
+• Enhanced preset editing experience
+• Better point editor controls
+• Temporary volume normalization
+• Frequency interpolation within audio buffer
+• UI refinements and bug fixes
+• Performance improvements

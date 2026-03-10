@@ -57,7 +57,7 @@
     <string name="normalization_strength">Normalization strength</string>
     
     <!-- Normalization Types -->
-    <string name="normalization_none">None</string>
+    <string name="normalization_none">Disabled</string>
     <string name="normalization_channel">Channel</string>
     <string name="normalization_temporal">Temporal</string>
     <string name="normalization_channel_description">Balance volume between left and right channels based on their tone frequency ratio</string>
