@@ -563,6 +563,25 @@ class BinauralViewModel @Inject constructor(
             updateEditingCurve(points, newCarrierRange, curve.beatRange, curve.interpolationType)
         }
     }
+    
+    fun updateEditingPointBeatFrequencyDirect(index: Int, newBeat: Double) {
+        val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
+        val points = curve.points.toMutableList()
+        if (index in points.indices) {
+            val oldPoint = points[index]
+            // Ограничиваем частоту биения максимально допустимой для данной несущей
+            val maxBeat = (oldPoint.carrierFrequency * 2 - 20).coerceAtLeast(1.0)
+            val clampedBeat = newBeat.coerceIn(curve.beatRange.min, maxBeat)
+            
+            points[index] = FrequencyPoint(
+                time = oldPoint.time,
+                carrierFrequency = oldPoint.carrierFrequency,
+                beatFrequency = clampedBeat
+            )
+            updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
+        }
+    }
 
     fun addEditingPoint(time: LocalTime, carrierFrequency: Double, beatFrequency: Double) {
         val state = _uiState.value

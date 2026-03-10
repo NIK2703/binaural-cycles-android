@@ -58,8 +58,10 @@ private data class PointDragState(
     val startIndex: Int = -1,
     val startTime: LocalTime? = null,
     val startCarrier: Double = 0.0,
+    val startBeat: Double = 0.0,
     val currentTime: LocalTime? = null,
-    val currentCarrier: Double = 0.0
+    val currentCarrier: Double = 0.0,
+    val currentBeat: Double = 0.0
 )
 
 /**
@@ -134,6 +136,7 @@ fun FrequencyGraph(
     onPointSelected: (Int) -> Unit,
     onPointTimeChanged: (Int, LocalTime) -> Unit,
     onPointCarrierChanged: (Int, Double) -> Unit,
+    onPointBeatChanged: (Int, Double) -> Unit = { _, _ -> },
     onAddPoint: (LocalTime, Double, Double) -> Unit,
     onCarrierRangeChange: (Double, Double) -> Unit,
     modifier: Modifier = Modifier
@@ -213,7 +216,14 @@ fun FrequencyGraph(
                                 // Добавляем точку при двойном нажатии
                                 val time = graphParams.xToTime(offset.x)
                                 val carrier = graphParams.yToCarrier(offset.y)
-                                onAddPoint(time, carrier, beatRange.min)
+                                // Интерполируем частоту биения на основе соседних точек
+                                val interpolatedBeat = if (displayPoints.size >= 2) {
+                                    kotlin.math.round(interpolateBeatFrequency(displayPoints, time, interpolationType, splineTension))
+                                        .coerceIn(beatRange.min, maxBeatForCarrier(carrier))
+                                } else {
+                                    beatRange.min
+                                }
+                                onAddPoint(time, carrier, interpolatedBeat)
                             }
                         )
                     }
@@ -254,28 +264,35 @@ fun FrequencyGraph(
                         graphHeightPx = heightPx,
                         primaryColor = primaryColor,
                         onPointSelected = onPointSelected,
-                        onDragStart = { index, time, carrier ->
+                        onDragStart = { index, time, carrier, beat ->
                             dragState = PointDragState(
                                 direction = DragDirection.NONE,
                                 startIndex = index,
                                 startTime = time,
                                 startCarrier = carrier,
+                                startBeat = beat,
                                 currentTime = time,
-                                currentCarrier = carrier
+                                currentCarrier = carrier,
+                                currentBeat = beat
                             )
                         },
-                        onDragUpdate = { index, newTime, newCarrier, direction ->
+                        onDragUpdate = { index, newTime, newCarrier, newBeat, direction ->
                             dragState = dragState.copy(
                                 direction = direction,
                                 currentTime = newTime,
-                                currentCarrier = newCarrier
+                                currentCarrier = newCarrier,
+                                currentBeat = newBeat
                             )
                         },
-                        onDragEnd = { index, newTime, newCarrier, direction ->
+                        onDragEnd = { index, newTime, newCarrier, newBeat, direction ->
                             if (direction == DragDirection.HORIZONTAL) {
                                 onPointTimeChanged(index, newTime)
                             } else if (direction == DragDirection.VERTICAL) {
                                 onPointCarrierChanged(index, newCarrier)
+                                // Если частота биения была скорректирована
+                                if (newBeat != dragState.startBeat) {
+                                    onPointBeatChanged(index, newBeat)
+                                }
                             }
                             dragState = PointDragState()
                         }
@@ -504,6 +521,16 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
 
 private enum class RangeType { MIN, MAX }
 
+/**
+ * Вычисляет скорректированную частоту биения для заданной несущей частоты.
+ * Если текущая частота биения превышает максимально допустимую, она уменьшается.
+ * Формула: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
+ */
+fun adjustBeatForCarrier(carrier: Double, currentBeat: Double): Double {
+    val maxBeat = maxBeatForCarrier(carrier)
+    return currentBeat.coerceAtMost(maxBeat)
+}
+
 @Composable
 fun DraggablePoint(
     xPx: Float,
@@ -519,9 +546,9 @@ fun DraggablePoint(
     graphHeightPx: Int,
     primaryColor: Color,
     onPointSelected: (Int) -> Unit,
-    onDragStart: (Int, LocalTime, Double) -> Unit,
-    onDragUpdate: (Int, LocalTime, Double, DragDirection) -> Unit,
-    onDragEnd: (Int, LocalTime, Double, DragDirection) -> Unit
+    onDragStart: (Int, LocalTime, Double, Double) -> Unit,
+    onDragUpdate: (Int, LocalTime, Double, Double, DragDirection) -> Unit,
+    onDragEnd: (Int, LocalTime, Double, Double, DragDirection) -> Unit
 ) {
     val density = LocalDensity.current
     
@@ -531,6 +558,7 @@ fun DraggablePoint(
     var hasDirectionDetermined by remember { mutableStateOf(false) }
     var startSeconds by remember { mutableStateOf(0) }
     var startCarrier by remember { mutableStateOf(0.0) }
+    var startBeat by remember { mutableStateOf(0.0) }
     
     val pointSize = if (isSelected) 30.dp else 24.dp
     val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
@@ -542,7 +570,7 @@ fun DraggablePoint(
             .background(if (isSelected) primaryColor else primaryColor.copy(alpha = 0.7f), CircleShape)
             .border(2.dp, Color.White, CircleShape)
             .clickable { onPointSelected(originalIndex) }
-            .pointerInput(originalIndex) {
+            .pointerInput(originalIndex, point.time, point.carrierFrequency, point.beatFrequency) {
                 detectDragGestures(
                     onDragStart = { _ ->
                         totalDragX = 0f; totalDragY = 0f
@@ -550,12 +578,14 @@ fun DraggablePoint(
                         hasDirectionDetermined = false
                         startSeconds = point.time.toSecondOfDay()
                         startCarrier = point.carrierFrequency
-                        onDragStart(originalIndex, point.time, point.carrierFrequency)
+                        startBeat = point.beatFrequency
+                        onDragStart(originalIndex, point.time, point.carrierFrequency, point.beatFrequency)
                     },
                     onDragEnd = {
                         val newTime = calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat())
                         val newCarrier = calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat())
-                        onDragEnd(originalIndex, newTime, newCarrier, currentDragDirection)
+                        val adjustedBeat = adjustBeatForCarrier(newCarrier, startBeat)
+                        onDragEnd(originalIndex, newTime, newCarrier, adjustedBeat, currentDragDirection)
                         totalDragX = 0f; totalDragY = 0f
                         currentDragDirection = DragDirection.NONE
                         hasDirectionDetermined = false
@@ -572,10 +602,11 @@ fun DraggablePoint(
 
                         val newTime = calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat())
                         val newCarrier = calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat())
+                        val adjustedBeat = adjustBeatForCarrier(newCarrier, startBeat)
                         when (currentDragDirection) {
-                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, newTime, startCarrier, DragDirection.HORIZONTAL)
-                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, newCarrier, DragDirection.VERTICAL)
-                            DragDirection.NONE -> onDragUpdate(originalIndex, newTime, newCarrier, DragDirection.NONE)
+                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, newTime, startCarrier, startBeat, DragDirection.HORIZONTAL)
+                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, newCarrier, adjustedBeat, DragDirection.VERTICAL)
+                            DragDirection.NONE -> onDragUpdate(originalIndex, newTime, newCarrier, adjustedBeat, DragDirection.NONE)
                         }
                     }
                 )
@@ -586,9 +617,45 @@ fun DraggablePoint(
     }
 }
 
+// Порог прилипания к целым часам (в минутах)
+private const val HOUR_SNAP_THRESHOLD_MINUTES = 5
+
+/**
+ * Вычисляет время из перетаскивания с прилипанием к целым часам.
+ * Если время находится в пределах ±5 минут от целого часа, оно "прилипает" к этому часу.
+ */
 private fun calculateTimeFromDrag(startSeconds: Int, dragX: Float, minSeconds: Int, maxSeconds: Int, graphWidth: Float): LocalTime {
     val newSeconds = (startSeconds + (dragX * 24 * 3600 / graphWidth).toInt()).coerceIn(minSeconds, maxSeconds)
-    return LocalTime.fromSecondOfDay(newSeconds)
+    
+    // Проверяем прилипание к целому часу
+    val snapResult = snapToHour(newSeconds)
+    
+    // Убеждаемся, что прилипшее время не выходит за границы
+    val finalSeconds = snapResult.coerceIn(minSeconds, maxSeconds)
+    return LocalTime.fromSecondOfDay(finalSeconds)
+}
+
+/**
+ * Если время находится в пределах HOUR_SNAP_THRESHOLD_MINUTES от целого часа,
+ * возвращаем время этого часа, иначе возвращаем исходное время.
+ */
+private fun snapToHour(seconds: Int): Int {
+    val thresholdSeconds = HOUR_SNAP_THRESHOLD_MINUTES * 60
+    val currentMinute = (seconds % 3600) / 60
+    val currentHour = seconds / 3600
+    
+    // Проверяем прилипание к текущему часу (0-5 минут)
+    if (currentMinute < HOUR_SNAP_THRESHOLD_MINUTES) {
+        return currentHour * 3600
+    }
+    
+    // Проверяем прилипание к следующему часу (55-59 минут)
+    if (currentMinute >= 60 - HOUR_SNAP_THRESHOLD_MINUTES) {
+        val nextHour = (currentHour + 1) % 24
+        return nextHour * 3600
+    }
+    
+    return seconds
 }
 
 private fun calculateCarrierFromDrag(startCarrier: Double, dragY: Float, carrierRange: FrequencyRange, graphHeight: Float): Double {

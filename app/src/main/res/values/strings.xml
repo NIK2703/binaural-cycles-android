@@ -62,7 +62,7 @@
     <string name="normalization_strength">Сила нормализации</string>
     
     <!-- Normalization Types -->
-    <string name="normalization_none">Нет</string>
+    <string name="normalization_none">Отключена</string>
     <string name="normalization_channel">Канальная</string>
     <string name="normalization_temporal">Временная</string>
     <string name="normalization_channel_description">Выравнивание громкости между левым и правым каналом по соотношению частот их тонов</string>

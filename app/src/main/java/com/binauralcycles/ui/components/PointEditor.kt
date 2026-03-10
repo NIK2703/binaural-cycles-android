@@ -149,7 +149,7 @@ fun PointEditor(
                 onValueChange = {
                     val rounded = kotlin.math.round(it)
                     sliderCarrier = rounded
-                    tempCarrierFrequency = "%.0f".format(rounded)
+                    tempCarrierFrequency = "%.3f".format(rounded)
                 },
                 onValueChangeFinished = { onCarrierFrequencyChange(kotlin.math.round(sliderCarrier).toDouble()) },
                 valueRange = carrierRange.min.toFloat()..carrierRange.max.toFloat(),
@@ -223,7 +223,7 @@ fun PointEditor(
                 onValueChange = {
                     val rounded = kotlin.math.round(it).coerceIn(minBeatForSlider, maxBeatForSlider)
                     sliderBeat = rounded
-                    tempBeatFrequency = "%.0f".format(rounded)
+                    tempBeatFrequency = "%.3f".format(rounded)
                 },
                 onValueChangeFinished = { onBeatFrequencyChange(kotlin.math.round(sliderBeat).toDouble()) },
                 valueRange = minBeatForSlider..maxBeatForSlider,

@@ -179,6 +179,9 @@ fun PresetEditScreen(
                         onPointCarrierChanged = { index, newCarrier ->
                             viewModel.updateEditingPointCarrierFrequencyDirect(index, newCarrier)
                         },
+                        onPointBeatChanged = { index, newBeat ->
+                            viewModel.updateEditingPointBeatFrequencyDirect(index, newBeat)
+                        },
                         onAddPoint = { time, carrier, beat ->
                             viewModel.addEditingPoint(time, carrier, beat)
                         },
