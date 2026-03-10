@@ -18,8 +18,19 @@ import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        const val ACTION_EXIT = "com.binauralcycles.action.EXIT_APP"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Проверяем, нужно ли закрыть приложение
+        if (intent?.action == ACTION_EXIT) {
+            finishAndRemoveTask()
+            return
+        }
         
         // Запускаем сервис для воспроизведения в фоне
         val serviceIntent = Intent(this, BinauralPlaybackService::class.java)
@@ -40,6 +51,14 @@ class MainActivity : ComponentActivity() {
                     BinauralNavigation(navController = navController)
                 }
             }
+        }
+    }
+    
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Обрабатываем запрос на выход, если он пришёл во время работы Activity
+        if (intent.action == ACTION_EXIT) {
+            finishAndRemoveTask()
         }
     }
 }

@@ -228,6 +228,7 @@ fun PresetEditScreen(
                     onChannelSwapFadeDurationChange = { viewModel.setEditingChannelSwapFadeDuration(it) },
                     onVolumeNormalizationEnabledChange = { viewModel.setEditingVolumeNormalizationEnabled(it) },
                     onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
+                    onTemporalNormalizationEnabledChange = { viewModel.setEditingTemporalNormalizationEnabled(it) },
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) },
                     onSplineTensionChange = { viewModel.setSplineTension(it) }
                 )

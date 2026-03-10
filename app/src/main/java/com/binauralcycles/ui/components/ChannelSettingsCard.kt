@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binauralcycles.R
 
@@ -37,6 +38,7 @@ fun PresetSettingsCard(
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
+    onTemporalNormalizationEnabledChange: (Boolean) -> Unit,
     onInterpolationTypeChange: (InterpolationType) -> Unit,
     onSplineTensionChange: (Float) -> Unit
 ) {
@@ -196,21 +198,66 @@ fun PresetSettingsCard(
         HorizontalDivider()
         
         // Нормализация громкости
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.volume_normalization)) },
-            supportingContent = { 
-                Text(stringResource(R.string.volume_normalization_description))
-            },
-            trailingContent = {
-                Switch(
-                    checked = volumeNormalizationSettings.enabled,
-                    onCheckedChange = onVolumeNormalizationEnabledChange
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.volume_normalization),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Text(
+                text = stringResource(R.string.volume_normalization_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+            ) {
+                FilterChip(
+                    selected = volumeNormalizationSettings.type == NormalizationType.NONE,
+                    onClick = { onVolumeNormalizationEnabledChange(false) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.normalization_none),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = volumeNormalizationSettings.type == NormalizationType.CHANNEL,
+                    onClick = { onVolumeNormalizationEnabledChange(true) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.normalization_channel),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = volumeNormalizationSettings.type == NormalizationType.TEMPORAL,
+                    onClick = { onTemporalNormalizationEnabledChange(true) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.normalization_temporal),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
                 )
             }
-        )
+        }
         
-        // Слайдер силы нормализации
-        if (volumeNormalizationSettings.enabled) {
+        // Слайдер силы нормализации (показываем для CHANNEL и TEMPORAL)
+        if (volumeNormalizationSettings.type != NormalizationType.NONE) {
             // Локальное состояние для мгновенного отклика UI
             var localStrength by remember(volumeNormalizationSettings.strength) {
                 mutableFloatStateOf(volumeNormalizationSettings.strength)
@@ -241,6 +288,18 @@ fun PresetSettingsCard(
                     valueRange = 0f..2f
                 )
             }
+            
+            // Описание типа нормализации
+            Text(
+                text = when (volumeNormalizationSettings.type) {
+                    NormalizationType.CHANNEL -> stringResource(R.string.normalization_channel_description)
+                    NormalizationType.TEMPORAL -> stringResource(R.string.normalization_temporal_description)
+                    NormalizationType.NONE -> ""
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
     }
 }

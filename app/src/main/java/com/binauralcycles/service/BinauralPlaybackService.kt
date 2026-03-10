@@ -13,9 +13,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import androidx.core.app.NotificationCompat
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
@@ -67,12 +65,8 @@ class BinauralPlaybackService : Service() {
     private val binder = LocalBinder()
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
-    // Handler для асинхронного выполнения команд из UI потока
-    private val serviceHandler by lazy { Handler(Looper.getMainLooper()) }
-    
-    // Debounce для обновления notification
-    private var notificationUpdateJob: Job? = null
-    private val notificationUpdateDelay = 1000L // 1 секунда debounce
+    // Интервал обновления частот (из настроек)
+    private val _frequencyUpdateIntervalMs = MutableStateFlow(10000) // По умолчанию 10 секунд
     
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -127,16 +121,16 @@ class BinauralPlaybackService : Service() {
             startForeground(NOTIFICATION_ID, createNotification())
         }
         
-        // Наблюдаем за состоянием воспроизведения - обновляем notification только при изменении isPlaying
+        // Наблюдаем за состоянием воспроизведения
         serviceScope.launch {
             audioEngine?.isPlaying?.collectLatest { playing ->
                 _isPlaying.value = playing
-                // Обновляем notification только при изменении состояния воспроизведения
+                // Обновляем notification при изменении состояния воспроизведения
                 updateNotificationImmediately()
             }
         }
         
-        // Частоты обновляем без notification (debounce для UI)
+        // Частоты обновляем в UI напрямую из audioEngine
         serviceScope.launch {
             audioEngine?.currentBeatFrequency?.collectLatest { freq ->
                 _currentBeatFrequency.value = freq
@@ -160,6 +154,9 @@ class BinauralPlaybackService : Service() {
                 _elapsedSeconds.value = elapsed
             }
         }
+        
+        // Периодическое обновление notification во время воспроизведения
+        startNotificationUpdateJob()
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -249,6 +246,7 @@ class BinauralPlaybackService : Service() {
             .addAction(playPauseIcon, playPauseText, togglePendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_exit), exitPendingIntent)
             .setOngoing(_isPlaying.value)
+            .setOnlyAlertOnce(true) // Предотвращает мерцание иконки при обновлении
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
@@ -262,6 +260,44 @@ class BinauralPlaybackService : Service() {
             notificationManager.notify(NOTIFICATION_ID, createNotification())
         } catch (e: Exception) {
             android.util.Log.e("BinauralPlaybackService", "Failed to update notification", e)
+        }
+    }
+    
+    /**
+     * Тихое обновление notification (только текст, без мерцания иконки)
+     * Использует setSilent для предотвращения визуального мерцания
+     */
+    private fun updateNotificationSilently() {
+        try {
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            val notification = createNotification()
+            // Используем флаг FLAG_ONLY_ALERT_ONCE через setSilent (API 29+)
+            val silentNotification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                notification.extras.putBoolean("android.silent", true)
+                notification
+            } else {
+                notification
+            }
+            notificationManager.notify(NOTIFICATION_ID, silentNotification)
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralPlaybackService", "Failed to update notification silently", e)
+        }
+    }
+    
+    // Job для периодического обновления уведомления
+    private var notificationUpdateJob: Job? = null
+    
+    /**
+     * Запускает периодическое обновление уведомления во время воспроизведения
+     */
+    private fun startNotificationUpdateJob() {
+        notificationUpdateJob = serviceScope.launch {
+            while (true) {
+                delay(_frequencyUpdateIntervalMs.value.toLong())
+                if (_isPlaying.value) {
+                    updateNotificationSilently()
+                }
+            }
         }
     }
 
@@ -286,6 +322,15 @@ class BinauralPlaybackService : Service() {
         }
         
         audioEngine?.play()
+        
+        // Обновляем уведомление при старте воспроизведения
+        updateNotificationSilently()
+        
+        // Дополнительное обновление частот после старта воспроизведения
+        serviceScope.launch {
+            delay(200) // Ждём, пока аудио-движок установит начальные частоты
+            updateNotificationSilently()
+        }
     }
 
     fun stopPlayback() {
@@ -296,22 +341,20 @@ class BinauralPlaybackService : Service() {
     }
 
     private fun exitApp() {
-        // Останавливаем аудио
-        audioEngine?.stop()
+        // Останавливаем аудио с затуханием
+        audioEngine?.stopWithFade()
         abandonAudioFocus()
+        
+        // Отправляем Intent в MainActivity для закрытия
+        val exitIntent = Intent(this, MainActivity::class.java).apply {
+            action = MainActivity.ACTION_EXIT
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        startActivity(exitIntent)
         
         // Останавливаем foreground service
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-        
-        // Закрываем приложение
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-        startActivity(intent)
-        
-        // Завершаем процесс
-        android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     private fun requestAudioFocus(): Boolean {
@@ -374,6 +417,7 @@ class BinauralPlaybackService : Service() {
     }
     
     fun setFrequencyUpdateInterval(intervalMs: Int) {
+        _frequencyUpdateIntervalMs.value = intervalMs
         audioEngine?.setFrequencyUpdateInterval(intervalMs)
     }
 
@@ -391,11 +435,11 @@ class BinauralPlaybackService : Service() {
     
     fun togglePlayback() {
         if (_isPlaying.value) {
-            audioEngine?.stop()
+            audioEngine?.stopWithFade()
             abandonAudioFocus()
         } else {
             requestAudioFocus()
-            audioEngine?.play()
+            audioEngine?.resumeWithFade()
         }
     }
     

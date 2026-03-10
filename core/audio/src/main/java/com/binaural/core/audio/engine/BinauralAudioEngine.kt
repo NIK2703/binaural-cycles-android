@@ -13,6 +13,7 @@ import android.os.PowerManager
 import android.util.Log
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.NormalizationType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -549,7 +550,7 @@ class BinauralAudioEngine(private val context: Context) {
             // Для переключения пресета тоже используется значение из конфигурации
             val channelSwapFadeDurationSamples = (config.channelSwapFadeDurationMs.coerceAtLeast(100L) * sampleRate / 1000).toInt()
             val presetSwitchFadeDurationSamples = (config.channelSwapFadeDurationMs.coerceAtLeast(100L) * sampleRate / 1000).toInt()
-            val fadeResult = generateBuffer(audioBuffer, carrierFreq, beatFreq, samplesPerChannel, channelSwapFadeDurationSamples, presetSwitchFadeDurationSamples, config)
+            val fadeResult = generateBuffer(audioBuffer, carrierFreq, beatFreq, samplesPerChannel, channelSwapFadeDurationSamples, presetSwitchFadeDurationSamples, config, cachedLocalTime)
 
             totalSamplesGenerated += samplesPerChannel
 
@@ -730,6 +731,26 @@ class BinauralAudioEngine(private val context: Context) {
 
     private data class FadeResult(val fadePhaseCompleted: Boolean)
     
+    /**
+     * Вычислить частоты каналов для заданного времени с учётом смещения в миллисекундах
+     */
+    private fun getChannelFrequenciesAtTime(
+        config: BinauralConfig,
+        baseTime: LocalTime,
+        offsetMs: Long
+    ): Pair<Double, Double> {
+        // Вычисляем время с учётом смещения
+        val baseSeconds = baseTime.toSecondOfDay()
+        val offsetSeconds = offsetMs / 1000.0
+        val totalSeconds = baseSeconds + offsetSeconds
+        
+        // Нормализуем в пределах суток (86400 секунд)
+        val normalizedSeconds = ((totalSeconds % 86400) + 86400) % 86400
+        val adjustedTime = LocalTime.fromSecondOfDay(normalizedSeconds.toInt())
+        
+        return config.getChannelFrequenciesAt(adjustedTime)
+    }
+    
     private fun generateBuffer(
         buffer: ShortArray,
         carrierFreq: Double,
@@ -737,15 +758,41 @@ class BinauralAudioEngine(private val context: Context) {
         samplesPerChannel: Int,
         channelSwapFadeDurationSamples: Int,
         presetSwitchFadeDurationSamples: Int,
-        config: BinauralConfig
+        config: BinauralConfig,
+        currentTime: LocalTime
     ): FadeResult {
-        val leftFreq = carrierFreq - beatFreq / 2.0
-        val rightFreq = carrierFreq + beatFreq / 2.0
+        // Начальные частоты (в текущий момент)
+        val startLeftFreq = carrierFreq - beatFreq / 2.0
+        val startRightFreq = carrierFreq + beatFreq / 2.0
         
-        val (leftAmplitude, rightAmplitude) = calculateNormalizedAmplitudes(leftFreq, rightFreq, config)
+        // Конечные частоты (через интервал обновления)
+        // Интервал обновления в миллисекундах
+        val bufferDurationMs = (samplesPerChannel.toLong() * 1000) / sampleRate
+        val (endLowerFreq, endUpperFreq) = getChannelFrequenciesAtTime(config, currentTime, bufferDurationMs)
+        val endLeftFreq = endLowerFreq
+        val endRightFreq = endUpperFreq
         
-        val leftOmega = 2.0 * PI * leftFreq / sampleRate
-        val rightOmega = 2.0 * PI * rightFreq / sampleRate
+        // Вычисляем начальные и конечные амплитуды для временной нормализации
+        val (startLeftAmplitude, startRightAmplitude) = calculateNormalizedAmplitudes(startLeftFreq, startRightFreq, config, currentTime)
+        
+        // Конечные амплитуды (через интервал обновления)
+        val (endLeftAmplitude, endRightAmplitude) = if (config.normalizationType == NormalizationType.TEMPORAL) {
+            // Вычисляем амплитуды для конечного времени
+            val endTimeAdjusted = LocalTime.fromSecondOfDay(
+                ((currentTime.toSecondOfDay() + bufferDurationMs / 1000) % 86400).toInt()
+            )
+            calculateNormalizedAmplitudes(endLeftFreq, endRightFreq, config, endTimeAdjusted)
+        } else {
+            startLeftAmplitude to startRightAmplitude
+        }
+        
+        // Шаги изменения частот на каждый сэмпл (линейная интерполяция)
+        val freqStepLeft = (endLeftFreq - startLeftFreq) / samplesPerChannel
+        val freqStepRight = (endRightFreq - startRightFreq) / samplesPerChannel
+        
+        // Шаги изменения амплитуд на каждый сэмпл (линейная интерполяция для временной нормализации)
+        val ampStepLeft = (endLeftAmplitude - startLeftAmplitude) / samplesPerChannel
+        val ampStepRight = (endRightAmplitude - startRightAmplitude) / samplesPerChannel
         
         val channelsSwappedAtStart = channelsSwapped
         var fadePhaseCompleted = false
@@ -821,6 +868,18 @@ class BinauralAudioEngine(private val context: Context) {
                 }
             }
             
+            // Линейная интерполяция частот для текущего сэмпла
+            val currentLeftFreq = startLeftFreq + freqStepLeft * i
+            val currentRightFreq = startRightFreq + freqStepRight * i
+            
+            // Линейная интерполяция амплитуд для текущего сэмпла
+            val currentLeftAmplitude = startLeftAmplitude + ampStepLeft * i
+            val currentRightAmplitude = startRightAmplitude + ampStepRight * i
+            
+            // Вычисляем угловые частоты для текущего сэмпла
+            val leftOmega = 2.0 * PI * currentLeftFreq / sampleRate
+            val rightOmega = 2.0 * PI * currentRightFreq / sampleRate
+            
             val leftSample = if (useWavetable) Wavetable.fastSin(leftPhase) else sin(leftPhase).toFloat()
             leftPhase += leftOmega
             if (leftPhase > 2.0 * PI) leftPhase -= 2.0 * PI
@@ -830,8 +889,8 @@ class BinauralAudioEngine(private val context: Context) {
             if (rightPhase > 2.0 * PI) rightPhase -= 2.0 * PI
             
             val baseAmplitude = 0.5 * Short.MAX_VALUE * fadeMultiplier * config.volume
-            val leftAmp = baseAmplitude * leftAmplitude
-            val rightAmp = baseAmplitude * rightAmplitude
+            val leftAmp = baseAmplitude * currentLeftAmplitude
+            val rightAmp = baseAmplitude * currentRightAmplitude
             
             val swapForSample = if (config.channelSwapEnabled) {
                 if (swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) {
@@ -864,20 +923,79 @@ class BinauralAudioEngine(private val context: Context) {
     private fun calculateNormalizedAmplitudes(
         leftFreq: Double,
         rightFreq: Double,
-        config: BinauralConfig
+        config: BinauralConfig,
+        currentTime: LocalTime
     ): Pair<Double, Double> {
-        if (!config.volumeNormalizationEnabled) {
-            return Pair(1.0, 1.0)
-        }
-
+        // Базовые амплитуды без нормализации
+        var leftAmplitude = 1.0
+        var rightAmplitude = 1.0
+        
         val strength = config.volumeNormalizationStrength.coerceIn(0f, 2f)
-        val minFreq = minOf(leftFreq, rightFreq)
+        
+        when (config.normalizationType) {
+            com.binaural.core.audio.model.NormalizationType.NONE -> {
+                // Без нормализации - амплитуды остаются 1.0
+            }
+            com.binaural.core.audio.model.NormalizationType.CHANNEL -> {
+                // Канальная нормализация (уравнивание между левым и правым каналом)
+                val minFreq = minOf(leftFreq, rightFreq)
 
-        val leftNormalized = minFreq / leftFreq
-        val rightNormalized = minFreq / rightFreq
+                val leftNormalized = minFreq / leftFreq
+                val rightNormalized = minFreq / rightFreq
 
-        val leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
-        val rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
+                leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
+                rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
+            }
+            com.binaural.core.audio.model.NormalizationType.TEMPORAL -> {
+                // Временная нормализация (уравнивание громкости во времени)
+                // Масштабирует амплитуду по всему динамическому диапазону графика
+                // 
+                // Формула: amplitude = (minFreq / currentFreq) ^ strength
+                // 
+                // На минимальной частоте графика: amplitude = 1.0 (максимум)
+                // На максимальной частоте графика: amplitude = min/max (минимум)
+                // 
+                // Это обеспечивает одинаковую воспринимаемую громкость на протяжении
+                // всего графика, компенсируя изменение частоты тона.
+                
+                val curve = config.frequencyCurve
+                
+                // Находим минимальные и максимальные частоты для каждого канала по всему графику
+                // Нижний канал (левый): carrier - beat/2
+                val minLowerFreq = curve.points.minOf { point ->
+                    (point.carrierFrequency - point.beatFrequency / 2.0).coerceAtLeast(0.0)
+                }
+                val maxLowerFreq = curve.points.maxOf { point ->
+                    point.carrierFrequency - point.beatFrequency / 2.0
+                }
+                
+                // Верхний канал (правый): carrier + beat/2
+                val minUpperFreq = curve.points.minOf { point ->
+                    point.carrierFrequency + point.beatFrequency / 2.0
+                }
+                val maxUpperFreq = curve.points.maxOf { point ->
+                    point.carrierFrequency + point.beatFrequency / 2.0
+                }
+                
+                // Рассчитываем коэффициенты по фактическим частотам в текущий момент
+                // coeff = minFreq / currentFreq
+                // Это даёт 1.0 на минимальной частоте и min/max на максимальной
+                val leftNormalized = if (leftFreq > 0) minLowerFreq / leftFreq else 1.0
+                val rightNormalized = if (rightFreq > 0) minUpperFreq / rightFreq else 1.0
+                
+                // Применяем strength (экспоненциально)
+                // strength = 0: без нормализации (всё 1.0)
+                // strength = 1: полная нормализация
+                // strength > 1: усиленный эффект
+                leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
+                rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
+                
+                // Логирование для отладки (можно убрать в релизе)
+                // Диапазон: leftFreq в [minLowerFreq, maxLowerFreq]
+                //           rightFreq в [minUpperFreq, maxUpperFreq]
+                // Амплитуды: от 1.0 (на min) до min/max (на max)
+            }
+        }
 
         return Pair(leftAmplitude, rightAmplitude)
     }

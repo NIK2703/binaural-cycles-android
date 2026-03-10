@@ -61,6 +61,16 @@ enum class InterpolationType {
 }
 
 /**
+ * Тип нормализации громкости
+ */
+@Serializable
+enum class NormalizationType {
+    NONE,               // Без нормализации
+    CHANNEL,            // Канальная нормализация (уравнивание между левым и правым каналом)
+    TEMPORAL            // Временная нормализация (уравнивание между точками графика, поверх канальной)
+}
+
+/**
  * Точка на графике зависимости частот от времени суток
  * Содержит время, несущую частоту и частоту биений
  */
@@ -140,7 +150,7 @@ data class FrequencyCurve(
             point.carrierFrequency - point.beatFrequency / 2.0
         }.coerceAtLeast(0.0)
     }
-
+    
     private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
         val targetSeconds = time.toSecondOfDay()
         
@@ -315,8 +325,13 @@ data class BinauralConfig(
     val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
     val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
     // Настройки нормализации громкости
-    val volumeNormalizationEnabled: Boolean = true,  // Включено по умолчанию
-    val volumeNormalizationStrength: Float = 0.5f // от 0 до 1.0
+    val normalizationType: NormalizationType = NormalizationType.CHANNEL,  // тип нормализации
+    val volumeNormalizationStrength: Float = 0.5f, // от 0 до 2.0
+    // Поля для обратной совместимости
+    @kotlinx.serialization.Transient
+    val volumeNormalizationEnabled: Boolean = true,  // DEPRECATED: используйте normalizationType
+    @kotlinx.serialization.Transient
+    val temporalNormalizationEnabled: Boolean = false  // DEPRECATED: используйте normalizationType
 ) {
     /**
      * Получить текущие частоты для заданного времени
@@ -368,8 +383,13 @@ data class ChannelSwapSettings(
  */
 @Serializable
 data class VolumeNormalizationSettings(
-    val enabled: Boolean = true,           // включено по умолчанию
-    val strength: Float = 1.0f             // от 0 до 2.0 (0% - 200%)
+    val type: NormalizationType = NormalizationType.CHANNEL,  // тип нормализации
+    val strength: Float = 1.0f,            // от 0 до 2.0 (0% - 200%)
+    // Поля для обратной совместимости со старыми пресетами
+    @kotlinx.serialization.Transient
+    val enabled: Boolean = true,           // DEPRECATED: используйте type
+    @kotlinx.serialization.Transient  
+    val temporalNormalizationEnabled: Boolean = false  // DEPRECATED: используйте type
 )
 
 /**

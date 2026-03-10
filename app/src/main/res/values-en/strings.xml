@@ -40,12 +40,7 @@
     <!-- Interpolation -->
     <string name="point_interpolation">Point interpolation</string>
     <string name="interpolation_description">Method for calculating values between graph points</string>
-    <string name="linear">Linear</string>
-    <string name="cardinal">Cardinal</string>
-    <string name="monotone">Monotone</string>
-    <string name="spline_tension">Spline tension</string>
-    <string name="spline_tension_description">0 = smooth Catmull-Rom, 1 = nearly linear</string>
-    
+
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Auto channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
@@ -58,8 +53,19 @@
     
     <!-- Volume Normalization -->
     <string name="volume_normalization">Volume normalization</string>
-    <string name="volume_normalization_description">Balance volume between channels based on frequency ratio</string>
+    <string name="volume_normalization_description">Balance volume for consistent sound</string>
     <string name="normalization_strength">Normalization strength</string>
+    
+    <!-- Normalization Types -->
+    <string name="normalization_none">None</string>
+    <string name="normalization_channel">Channel</string>
+    <string name="normalization_temporal">Temporal</string>
+    <string name="normalization_channel_description">Balance volume between left and right channels based on their tone frequency ratio</string>
+    <string name="normalization_temporal_description">Balance volume between graph points for consistent sound throughout the day</string>
+    
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Temporal normalization</string>
+    <string name="temporal_normalization_description">Balance volume between graph points for consistent sound throughout the rhythm</string>
     
     <!-- App Settings -->
     <string name="update_interval">Frequency update interval</string>

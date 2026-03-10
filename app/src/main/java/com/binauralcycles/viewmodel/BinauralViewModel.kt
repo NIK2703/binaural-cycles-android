@@ -17,6 +17,7 @@ import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -254,7 +255,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapIntervalSeconds = preset.channelSwapSettings.intervalSeconds,
             channelSwapFadeEnabled = preset.channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = preset.channelSwapSettings.fadeDurationMs,
-            volumeNormalizationEnabled = preset.volumeNormalizationSettings.enabled,
+            normalizationType = preset.volumeNormalizationSettings.type,
             volumeNormalizationStrength = preset.volumeNormalizationSettings.strength
         )
         
@@ -727,9 +728,11 @@ class BinauralViewModel @Inject constructor(
 
     fun setEditingVolumeNormalizationEnabled(enabled: Boolean) {
         val state = _uiState.value
+        // При включении устанавливаем CHANNEL, при выключении - NONE
+        val newType = if (enabled) NormalizationType.CHANNEL else NormalizationType.NONE
         _uiState.update { 
             it.copy(
-                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(enabled = enabled)
+                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = newType)
             )
         }
         updateAudioConfigIfActivePresetEditing()
@@ -741,6 +744,31 @@ class BinauralViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(strength = clampedStrength)
+            )
+        }
+        updateAudioConfigIfActivePresetEditing()
+    }
+
+    fun setEditingTemporalNormalizationEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        // При включении временной нормализации устанавливаем TEMPORAL
+        val newType = if (enabled) NormalizationType.TEMPORAL else NormalizationType.CHANNEL
+        _uiState.update {
+            it.copy(
+                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = newType)
+            )
+        }
+        updateAudioConfigIfActivePresetEditing()
+    }
+    
+    /**
+     * Установить тип нормализации напрямую
+     */
+    fun setEditingNormalizationType(type: NormalizationType) {
+        val state = _uiState.value
+        _uiState.update {
+            it.copy(
+                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = type)
             )
         }
         updateAudioConfigIfActivePresetEditing()
@@ -820,7 +848,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
             channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
-            volumeNormalizationEnabled = volumeNormalizationSettings.enabled,
+            normalizationType = volumeNormalizationSettings.type,
             volumeNormalizationStrength = volumeNormalizationSettings.strength
         )
         playbackService?.updateConfig(config)
