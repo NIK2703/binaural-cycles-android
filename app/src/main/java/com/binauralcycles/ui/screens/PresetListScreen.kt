@@ -1,11 +1,8 @@
 package com.binauralcycles.ui.screens
 
-import android.app.Activity
-import android.content.Intent
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -17,16 +14,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.ui.components.MiniFrequencyGraph
-import com.binauralcycles.ui.components.interpolateCarrierFrequency
-import com.binauralcycles.ui.components.interpolateBeatFrequency
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
 import kotlinx.datetime.Clock
@@ -104,21 +97,11 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
-                        // Всегда вычисляем частоты из кривой пресета в текущий момент времени
-                        // Это обеспечивает мгновенное отображение указателя без задержки
-                        // (для активного пресета аудио-движок будет использовать свои значения для воспроизведения)
-                        val carrierFreq = interpolateCarrierFrequency(
-                            preset.frequencyCurve.points,
-                            currentTime.value,
-                            preset.frequencyCurve.interpolationType,
-                            preset.frequencyCurve.splineTension
-                        )
-                        val beatFreq = interpolateBeatFrequency(
-                            preset.frequencyCurve.points,
-                            currentTime.value,
-                            preset.frequencyCurve.interpolationType,
-                            preset.frequencyCurve.splineTension
-                        )
+                        // ОПТИМИЗАЦИЯ: Используем методы FrequencyCurve вместо внешних функций
+                        // FrequencyCurve использует бинарный поиск и предвычисленные значения
+                        val carrierFreq = preset.frequencyCurve.getCarrierFrequencyAt(currentTime.value)
+                        val beatFreq = preset.frequencyCurve.getBeatFrequencyAt(currentTime.value)
+                        
                         PresetCard(
                             presetId = preset.id,
                             name = preset.name,
