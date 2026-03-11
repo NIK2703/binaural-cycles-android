@@ -1,5 +1,6 @@
 package com.binauralcycles.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
@@ -81,8 +82,8 @@ fun PresetEditScreen(
                 volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
             )
         }
-        // Порождаем состояние редактирования без восстановления кривой в сервисе
-        viewModel.finishEditing()
+        // Завершаем редактирование без очистки состояния для плавной анимации
+        viewModel.finishEditingWithoutClear()
         onNavigateBack()
     }
     
@@ -90,10 +91,16 @@ fun PresetEditScreen(
         if (hasChanges) {
             showUnsavedDialog = true
         } else {
-            // Порожаем состояние редактирования при выходе без изменений
-            viewModel.cancelEditing()
+            // Восстанавливаем кривую активного пресета в сервисе (если нужно)
+            // Но не очищаем editingFrequencyCurve - это позволит анимации работать плавно
+            viewModel.cancelEditingInService()
             onNavigateBack()
         }
+    }
+    
+    // Обработка системной кнопки "назад"
+    BackHandler(enabled = true) {
+        navigateBackWithCheck()
     }
     
     with(sharedTransitionScope) {
@@ -259,8 +266,9 @@ fun PresetEditScreen(
             dismissButton = {
                 TextButton(onClick = {
                     showUnsavedDialog = false
-                    // Отменяем редактирование и восстанавливаем кривую активного пресета
-                    viewModel.cancelEditing()
+                    // Восстанавливаем кривую активного пресета в сервисе
+                    // Но не очищаем editingFrequencyCurve - это произойдёт после анимации
+                    viewModel.cancelEditingInService()
                     onNavigateBack()
                 }) {
                     Text(stringResource(R.string.do_not_save))
