@@ -44,7 +44,8 @@ private fun parseFrequency(value: String): Double? {
 fun PointEditor(
     point: FrequencyPoint,
     carrierRange: FrequencyRange,
-    beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
+    beatRange: FrequencyRange,
+    autoExpandGraphRange: Boolean,
     onCarrierFrequencyChange: (Double) -> Unit,
     onBeatFrequencyChange: (Double) -> Unit,
     onRemove: () -> Unit,
@@ -70,26 +71,61 @@ fun PointEditor(
     
     val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0
     
-    // Максимальная частота биений для слайдера ограничена двумя условиями:
+    // Максимальная частота биений для слайдера ограничена условиями:
     // 1. Нижняя боковая частота >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
     // 2. Верхняя боковая частота <= 2000 Гц: carrier + beat/2 <= 2000 → beat <= 2*(2000 - carrier)
+    // 3. Если autoExpandGraphRange = false, дополнительно ограничиваем границами графика:
+    //    - Нижняя боковая >= carrierRange.min: beat <= 2*(carrier - carrierRange.min)
+    //    - Верхняя боковая <= carrierRange.max: beat <= 2*(carrierRange.max - carrier)
+    
     // Максимальная частота биений вычисляется от текущего значения в текстовом поле (для валидации)
     // или от значения точки (для слайдера)
     val maxBeatFrequencyForValidation = if (carrierValue != null && isCarrierValid) {
-        minOf(
+        val globalMax = minOf(
             (carrierValue - MIN_AUDIBLE_FREQUENCY) * 2,  // нижняя боковая >= 20 Гц
             (2000.0 - carrierValue) * 2  // верхняя боковая <= 2000 Гц
-        ).coerceAtLeast(1.0)
+        )
+        if (autoExpandGraphRange) {
+            globalMax.coerceAtLeast(1.0)
+        } else {
+            // Дополнительно ограничиваем границами графика
+            val rangeMax = minOf(
+                (carrierValue - carrierRange.min) * 2,  // нижняя боковая >= carrierRange.min
+                (carrierRange.max - carrierValue) * 2   // верхняя боковая <= carrierRange.max
+            )
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+        }
     } else {
-        minOf(
+        val globalMax = minOf(
             (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
             (2000.0 - point.carrierFrequency) * 2
-        ).coerceAtLeast(1.0)
+        )
+        if (autoExpandGraphRange) {
+            globalMax.coerceAtLeast(1.0)
+        } else {
+            val rangeMax = minOf(
+                (point.carrierFrequency - carrierRange.min) * 2,
+                (carrierRange.max - point.carrierFrequency) * 2
+            )
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+        }
     }
-    val maxBeatFrequencyForSlider = minOf(
-        (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-        (2000.0 - point.carrierFrequency) * 2
-    ).coerceAtLeast(1.0)
+    
+    val maxBeatFrequencyForSlider = run {
+        val globalMax = minOf(
+            (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
+            (2000.0 - point.carrierFrequency) * 2
+        )
+        if (autoExpandGraphRange) {
+            globalMax.coerceAtLeast(1.0)
+        } else {
+            val rangeMax = minOf(
+                (point.carrierFrequency - carrierRange.min) * 2,
+                (carrierRange.max - point.carrierFrequency) * 2
+            )
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+        }
+    }
     
     // Валидация частоты биений - проверяем относительно текущего значения несущей в поле ввода
     val isBeatValid = beatValue != null && beatValue >= beatRange.min && beatValue <= maxBeatFrequencyForValidation

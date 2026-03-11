@@ -314,15 +314,36 @@ fun AppSettingsCard(
     frequencyUpdateIntervalMs: Int,
     wavetableOptimizationEnabled: Boolean,
     wavetableSize: Int,
+    autoExpandGraphRange: Boolean,
     onSampleRateChange: (SampleRate) -> Unit,
     onFrequencyUpdateIntervalChange: (Int) -> Unit,
     onWavetableOptimizationChange: (Boolean) -> Unit,
-    onWavetableSizeChange: (Int) -> Unit
+    onWavetableSizeChange: (Int) -> Unit,
+    onAutoExpandGraphRangeChange: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Автоматическое расширение границ графика
+        ListItem(
+            headlineContent = { Text(stringResource(R.string.auto_expand_graph_range)) },
+            supportingContent = {
+                Text(
+                    if (autoExpandGraphRange) stringResource(R.string.auto_expand_graph_range_enabled_desc)
+                    else stringResource(R.string.auto_expand_graph_range_disabled_desc)
+                )
+            },
+            trailingContent = {
+                Switch(
+                    checked = autoExpandGraphRange,
+                    onCheckedChange = onAutoExpandGraphRangeChange
+                )
+            }
+        )
+        
+        HorizontalDivider()
+        
         // Wavetable оптимизация
         ListItem(
             headlineContent = { Text(stringResource(R.string.wavetable_optimization)) },

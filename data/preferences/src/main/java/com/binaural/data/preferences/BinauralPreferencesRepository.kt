@@ -129,6 +129,8 @@ class BinauralPreferencesRepository @Inject constructor(
         private val WAVETABLE_OPTIMIZATION_KEY = booleanPreferencesKey("wavetable_optimization")
         // Размер таблицы волн (качество)
         private val WAVETABLE_SIZE_KEY = intPreferencesKey("wavetable_size")
+        // Автоматическое расширение границ графика при редактировании
+        private val AUTO_EXPAND_GRAPH_RANGE_KEY = booleanPreferencesKey("auto_expand_graph_range")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -353,6 +355,30 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveWavetableSize(size: Int) {
         dataStore.edit { preferences ->
             preferences[WAVETABLE_SIZE_KEY] = size
+        }
+    }
+    
+    // Методы для автоматического расширения границ графика
+    
+    /**
+     * Получить статус автоматического расширения границ графика
+     * @return true если границы расширяются автоматически при редактировании,
+     *         false если значения ограничиваются заданными границами (по умолчанию)
+     */
+    fun getAutoExpandGraphRange(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[AUTO_EXPAND_GRAPH_RANGE_KEY] ?: false // false по умолчанию - ограничивать значения
+        }
+    }
+    
+    /**
+     * Сохранить статус автоматического расширения границ графика
+     * @param enabled true = автоматически расширять границы при выходе за пределы
+     *                false = ограничивать значения заданными границами
+     */
+    suspend fun saveAutoExpandGraphRange(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[AUTO_EXPAND_GRAPH_RANGE_KEY] = enabled
         }
     }
     
