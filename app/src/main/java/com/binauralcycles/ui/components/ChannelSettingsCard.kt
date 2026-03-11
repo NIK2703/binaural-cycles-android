@@ -59,49 +59,74 @@ fun PresetSettingsCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
+            // Чипы интерполяции в две строки с уменьшенным расстоянием между строками
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                    .padding(horizontal = 16.dp)
+                    .padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy((-8).dp)
             ) {
-                FilterChip(
-                    selected = interpolationType == InterpolationType.LINEAR,
-                    onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.linear),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = interpolationType == InterpolationType.MONOTONE,
-                    onClick = { onInterpolationTypeChange(InterpolationType.MONOTONE) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.monotone),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = interpolationType == InterpolationType.CARDINAL,
-                    onClick = { onInterpolationTypeChange(InterpolationType.CARDINAL) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.cardinal),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
+                // Первая строка: Ступенчатая, Линейная
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.STEP,
+                        onClick = { onInterpolationTypeChange(InterpolationType.STEP) },
+                        label = { 
+                            Text(
+                                text = stringResource(R.string.step),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            ) 
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.LINEAR,
+                        onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
+                        label = { 
+                            Text(
+                                text = stringResource(R.string.linear),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            ) 
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                // Вторая строка: Монотонная, Кардинальная
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.MONOTONE,
+                        onClick = { onInterpolationTypeChange(InterpolationType.MONOTONE) },
+                        label = { 
+                            Text(
+                                text = stringResource(R.string.monotone),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            ) 
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = interpolationType == InterpolationType.CARDINAL,
+                        onClick = { onInterpolationTypeChange(InterpolationType.CARDINAL) },
+                        label = { 
+                            Text(
+                                text = stringResource(R.string.cardinal),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            ) 
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
         

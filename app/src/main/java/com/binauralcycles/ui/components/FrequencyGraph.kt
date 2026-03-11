@@ -459,18 +459,61 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     upperPath.moveTo(0f, startUpperY)
     lowerPath.moveTo(0f, startLowerY)
     
-    // Проходим по всему графику с интерполяцией
-    for (i in 1..numSamples) {
-        val t = i.toDouble() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        // Интерполируем частоты каналов НАПРЯМУЮ
-        val upperFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = true)
-        val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
-        val upperY = params.carrierToY(upperFreq)
-        val lowerY = params.carrierToY(lowerFreq)
-        val x = (t * width).toFloat()
-        upperPath.lineTo(x, upperY)
-        lowerPath.lineTo(x, lowerY)
+    // Для ступенчатой интерполяции используем специальный алгоритм отрисовки
+    if (interpolationType == InterpolationType.STEP) {
+        // Рисуем ступеньки напрямую по точкам
+        // Каждая ступенька: горизонтальная линия от текущей точки до X следующей точки, затем вертикальный переход
+        
+        // Находим значение на левой границе (до первой точки)
+        val firstPointX = params.timeToX(sortedPoints.first().time)
+        val firstUpperY = params.carrierToY(sortedPoints.last().carrierFrequency + sortedPoints.last().beatFrequency / 2.0)
+        val firstLowerY = params.carrierToY(sortedPoints.last().carrierFrequency - sortedPoints.last().beatFrequency / 2.0)
+        
+        // От левой границы до первой точки - значение последней точки (переход через полночь)
+        upperPath.lineTo(firstPointX, firstUpperY)
+        lowerPath.lineTo(firstPointX, firstLowerY)
+        
+        // Рисуем ступеньки между точками
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
+            
+            val currentX = params.timeToX(currentPoint.time)
+            val nextX = if (i == sortedPoints.size - 1) {
+                width // до правой границы
+            } else {
+                params.timeToX(nextPoint.time)
+            }
+            
+            val currentUpperY = params.carrierToY(currentPoint.carrierFrequency + currentPoint.beatFrequency / 2.0)
+            val currentLowerY = params.carrierToY(currentPoint.carrierFrequency - currentPoint.beatFrequency / 2.0)
+            
+            // Вертикальный переход в точке (если не первая точка)
+            if (i > 0 || currentUpperY != firstUpperY) {
+                upperPath.lineTo(currentX, currentUpperY)
+            }
+            if (i > 0 || currentLowerY != firstLowerY) {
+                lowerPath.lineTo(currentX, currentLowerY)
+            }
+            
+            // Горизонтальная линия до следующей точки
+            upperPath.lineTo(nextX, currentUpperY)
+            lowerPath.lineTo(nextX, currentLowerY)
+        }
+    } else {
+        // Обычная интерполяция для других типов
+        for (i in 1..numSamples) {
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            // Интерполируем частоты каналов НАПРЯМУЮ
+            val upperFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = true)
+            val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
+            val upperY = params.carrierToY(upperFreq)
+            val lowerY = params.carrierToY(lowerFreq)
+            val x = (t * width).toFloat()
+            upperPath.lineTo(x, upperY)
+            lowerPath.lineTo(x, lowerY)
+        }
     }
     
     // Замыкаем путь для заливки
@@ -504,7 +547,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     splineTension: Float = 0.0f
 ) {
     val width = size.width
-    val numSamples = 200 // Больше сэмплов для более гладких кривых
     val carrierPath = Path()
     
     // Начинаем с левой границы (время 0)
@@ -513,14 +555,45 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
-    // Рисуем кривую с интерполяцией по всем сэмплам
-    for (i in 1..numSamples) {
-        val t = i.toDouble() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-        val y = params.carrierToY(carrier)
-        val x = (t * width).toFloat()
-        carrierPath.lineTo(x, y)
+    // Для ступенчатой интерполяции рисуем ступеньки напрямую по точкам
+    if (interpolationType == InterpolationType.STEP) {
+        // Находим значение на левой границе (до первой точки) - это значение последней точки (переход через полночь)
+        val firstPointX = params.timeToX(sortedPoints.first().time)
+        val lastCarrierY = params.carrierToY(sortedPoints.last().carrierFrequency)
+        
+        // От левой границы до первой точки - значение последней точки
+        carrierPath.lineTo(firstPointX, lastCarrierY)
+        
+        // Рисуем ступеньки между точками
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
+            
+            val currentX = params.timeToX(currentPoint.time)
+            val nextX = if (i == sortedPoints.size - 1) {
+                width // до правой границы
+            } else {
+                params.timeToX(nextPoint.time)
+            }
+            
+            val currentCarrierY = params.carrierToY(currentPoint.carrierFrequency)
+            
+            // Вертикальный переход в точке
+            carrierPath.lineTo(currentX, currentCarrierY)
+            // Горизонтальная линия до следующей точки
+            carrierPath.lineTo(nextX, currentCarrierY)
+        }
+    } else {
+        // Обычная интерполяция для других типов
+        val numSamples = 200
+        for (i in 1..numSamples) {
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+            val y = params.carrierToY(carrier)
+            val x = (t * width).toFloat()
+            carrierPath.lineTo(x, y)
+        }
     }
     
     drawPath(path = carrierPath, color = primaryColor.copy(alpha = 0.6f), style = Stroke(width = 3f))

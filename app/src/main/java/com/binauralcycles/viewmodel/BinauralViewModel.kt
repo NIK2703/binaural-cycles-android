@@ -88,13 +88,16 @@ class BinauralViewModel @Inject constructor(
             _uiState.update { it.copy(isServiceConnected = true) }
             android.util.Log.d("BinauralViewModel", "Service connected")
             
-            // При подключении сервиса обновляем конфиг с активным пресетом
-            // Это важно, т.к. при загрузке preferences сервис мог быть ещё не подключен
+            // При подключении сервиса ВСЕГДА обновляем конфиг
+            // Это гарантирует, что настройки (включая channelSwap) будут применены
+            // даже если сервис подключился после загрузки пресетов
             val state = _uiState.value
             if (state.activePreset != null) {
-                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}")
-                updateAudioConfig()
+                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}, channelSwap=${state.activePreset.channelSwapSettings.enabled}")
             }
+            // Всегда вызываем updateAudioConfig - это обновит конфиг даже если activePreset ещё не загружен
+            // (в этом случае будет использован дефолтный конфиг, который потом заменится при загрузке пресета)
+            updateAudioConfig()
             
             // Наблюдаем за состоянием воспроизведения из сервиса
             observeServiceState()
@@ -1029,6 +1032,13 @@ class BinauralViewModel @Inject constructor(
             normalizationType = volumeNormalizationSettings.type,
             volumeNormalizationStrength = volumeNormalizationSettings.strength
         )
+        
+        android.util.Log.d("BinauralViewModel", "updateAudioConfig: activePreset=${state.activePreset?.name}, " +
+            "channelSwapEnabled=${channelSwapSettings.enabled}, " +
+            "channelSwapInterval=${channelSwapSettings.intervalSeconds}s, " +
+            "isServiceConnected=${state.isServiceConnected}, " +
+            "isActivePresetEditing=$isActivePresetEditing")
+        
         playbackService?.updateConfig(config)
     }
 
