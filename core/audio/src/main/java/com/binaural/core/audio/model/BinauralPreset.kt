@@ -45,7 +45,7 @@ data class FrequencyRange(
     fun clamp(value: Double): Double = value.coerceIn(min, max)
     
     companion object {
-        val DEFAULT_CARRIER = FrequencyRange(20.0, 500.0)
+        val DEFAULT_CARRIER = FrequencyRange(50.0, 500.0)
         val DEFAULT_BEAT = FrequencyRange(0.0, 1000.0)
     }
 }
@@ -307,7 +307,9 @@ data class FrequencyCurve(
                     FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 18.0),  // Вторая половина дня - бета
                     FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0, beatFrequency = 12.0),  // Вечерний спад - альфа
                     FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 10.0),  // Подготовка ко сну - альфа
-                )
+                ),
+                carrierRange = FrequencyRange(100.0, 500.0),
+                interpolationType = InterpolationType.MONOTONE
             )
         }
     }
@@ -325,7 +327,7 @@ data class BinauralConfig(
     val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
     val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
     // Настройки нормализации громкости
-    val normalizationType: NormalizationType = NormalizationType.CHANNEL,  // тип нормализации
+    val normalizationType: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
     val volumeNormalizationStrength: Float = 0.5f, // от 0 до 2.0
     // Поля для обратной совместимости
     @kotlinx.serialization.Transient
@@ -383,7 +385,7 @@ data class ChannelSwapSettings(
  */
 @Serializable
 data class VolumeNormalizationSettings(
-    val type: NormalizationType = NormalizationType.CHANNEL,  // тип нормализации
+    val type: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
     val strength: Float = 1.0f,            // от 0 до 2.0 (0% - 200%)
     // Поля для обратной совместимости со старыми пресетами
     @kotlinx.serialization.Transient
@@ -443,7 +445,9 @@ data class BinauralPreset(
                         FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 40.0), // Второй пик - гамма
                         FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 7.5),  // Расслабление - альфа/тета
                         FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 4.0),  // Подготовка ко сну - тета
-                    )
+                    ),
+                    carrierRange = FrequencyRange(100.0, 500.0),
+                    interpolationType = InterpolationType.CARDINAL
                 )
             )
         }
@@ -466,7 +470,9 @@ data class BinauralPreset(
                         FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0, beatFrequency = 25.0), // Максимальная продуктивность - верхний бета
                         FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 9.0),  // Вечернее расслабление - нижняя альфа
                         FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0, beatFrequency = 5.0),  // Подготовка ко сну - тета
-                    )
+                    ),
+                    carrierRange = FrequencyRange(100.0, 500.0),
+                    interpolationType = InterpolationType.CARDINAL
                 )
             )
         }

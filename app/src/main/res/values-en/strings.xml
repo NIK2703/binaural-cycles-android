@@ -108,6 +108,8 @@
     <string name="point">Point</string>
     <string name="carrier">Carrier</string>
     <string name="beats">Beats</string>
+    <string name="carrier_tone_frequency">Carrier tone frequency</string>
+    <string name="beat_frequency_full">Beat frequency</string>
     <string name="max_format">max %.1f</string>
     <string name="apply">Apply</string>
     <string name="close">Close</string>
