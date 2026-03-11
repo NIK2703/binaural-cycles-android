@@ -57,7 +57,8 @@ data class FrequencyRange(
 enum class InterpolationType {
     LINEAR,             // Линейная интерполяция
     CARDINAL,           // Кардинальный сплайн (с параметром tension: 0=Catmull-Rom, 1=линейная)
-    MONOTONE            // Монотонный сплайн (без overshoot, сохраняет форму данных)
+    MONOTONE,           // Монотонный сплайн (без overshoot, сохраняет форму данных)
+    STEP                // Ступенчатая интерполяция (без интерполяции, значение до следующей точки)
 }
 
 /**

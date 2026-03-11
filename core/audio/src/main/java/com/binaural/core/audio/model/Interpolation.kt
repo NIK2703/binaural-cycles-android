@@ -8,6 +8,7 @@ package com.binaural.core.audio.model
  * - LINEAR: простая линейная интерполяция, без overshoot
  * - CARDINAL: кубический сплайн с параметром tension (0=Catmull-Rom плавный, 1=почти линейный)
  * - MONOTONE: сохраняет форму данных, гарантированно без overshoot
+ * - STEP: ступенчатая интерполяция, значение остаётся постоянным до следующей точки
  */
 object Interpolation {
     
@@ -102,6 +103,25 @@ object Interpolation {
      * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom, 1.0=почти линейный)
      * @return интерполированное значение
      */
+    /**
+     * Ступенчатая интерполяция
+     * Значение остаётся постоянным (равным левой точке) до следующей точки
+     */
+    fun step(p1: Double): Double {
+        return p1
+    }
+    
+    /**
+     * Выполняет интерполяцию указанным методом
+     * @param type тип интерполяции
+     * @param p0 точка до левой границы
+     * @param p1 левая граница интервала
+     * @param p2 правая граница интервала
+     * @param p3 точка после правой границы
+     * @param t нормализованная позиция в интервале [0, 1]
+     * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom, 1.0=почти линейный)
+     * @return интерполированное значение
+     */
     fun interpolate(
         type: InterpolationType,
         p0: Double, p1: Double, p2: Double, p3: Double,
@@ -112,6 +132,7 @@ object Interpolation {
             InterpolationType.LINEAR -> linear(p1, p2, t)
             InterpolationType.CARDINAL -> cardinal(p0, p1, p2, p3, t, tension.toDouble())
             InterpolationType.MONOTONE -> monotone(p0, p1, p2, p3, t)
+            InterpolationType.STEP -> step(p1)
         }
         return result.coerceAtLeast(0.0)
     }

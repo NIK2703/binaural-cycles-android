@@ -43,6 +43,7 @@
     <string name="linear">Линейная</string>
     <string name="cardinal">Кардинальная</string>
     <string name="monotone">Монотонная</string>
+    <string name="step">Ступенчатая</string>
     <string name="spline_tension">Натяжение сплайна</string>
     <string name="spline_tension_description">0 = плавный Catmull-Rom, 1 = почти линейный</string>
     

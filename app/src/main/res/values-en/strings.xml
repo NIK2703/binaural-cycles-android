@@ -40,6 +40,12 @@
     <!-- Interpolation -->
     <string name="point_interpolation">Point interpolation</string>
     <string name="interpolation_description">Method for calculating values between graph points</string>
+    <string name="linear">Linear</string>
+    <string name="cardinal">Cardinal</string>
+    <string name="monotone">Monotone</string>
+    <string name="step">Step</string>
+    <string name="spline_tension">Spline tension</string>
+    <string name="spline_tension_description">0 = smooth Catmull-Rom, 1 = almost linear</string>
 
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Auto channel swap</string>

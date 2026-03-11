@@ -289,16 +289,54 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniBeatArea(
     upperPath.moveTo(0f, startUpperY)
     lowerPath.moveTo(0f, startLowerY)
     
-    for (i in 1..numSamples) {
-        val t = i.toDouble() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
-        val upperY = params.beatUpperY(carrier, beat)
-        val lowerY = params.beatLowerY(carrier, beat)
-        val x = (t * width).toFloat()
-        upperPath.lineTo(x, upperY)
-        lowerPath.lineTo(x, lowerY)
+    // Для ступенчатой интерполяции используем специальный алгоритм отрисовки
+    if (interpolationType == InterpolationType.STEP) {
+        // Находим значение на левой границе (до первой точки)
+        val firstPointX = params.timeToX(sortedPoints.first().time)
+        val lastPoint = sortedPoints.last()
+        val firstUpperY = params.beatUpperY(lastPoint.carrierFrequency, lastPoint.beatFrequency)
+        val firstLowerY = params.beatLowerY(lastPoint.carrierFrequency, lastPoint.beatFrequency)
+        
+        // От левой границы до первой точки - значение последней точки (переход через полночь)
+        upperPath.lineTo(firstPointX, firstUpperY)
+        lowerPath.lineTo(firstPointX, firstLowerY)
+        
+        // Рисуем ступеньки между точками
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
+            
+            val currentX = params.timeToX(currentPoint.time)
+            val nextX = if (i == sortedPoints.size - 1) {
+                width // до правой границы
+            } else {
+                params.timeToX(nextPoint.time)
+            }
+            
+            val currentUpperY = params.beatUpperY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
+            val currentLowerY = params.beatLowerY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
+            
+            // Вертикальный переход в точке
+            upperPath.lineTo(currentX, currentUpperY)
+            lowerPath.lineTo(currentX, currentLowerY)
+            
+            // Горизонтальная линия до следующей точки
+            upperPath.lineTo(nextX, currentUpperY)
+            lowerPath.lineTo(nextX, currentLowerY)
+        }
+    } else {
+        // Обычная интерполяция для других типов
+        for (i in 1..numSamples) {
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+            val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
+            val upperY = params.beatUpperY(carrier, beat)
+            val lowerY = params.beatLowerY(carrier, beat)
+            val x = (t * width).toFloat()
+            upperPath.lineTo(x, upperY)
+            lowerPath.lineTo(x, lowerY)
+        }
     }
     
     // Замыкаем путь
@@ -343,7 +381,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
     interpolationType: InterpolationType,
     splineTension: Float
 ) {
-    val numSamples = 100
     val carrierPath = Path()
     
     // Начинаем с левой границы (время 0)
@@ -352,14 +389,45 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawMiniCarrierLine
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
-    // Рисуем кривую с интерполяцией
-    for (i in 1..numSamples) {
-        val t = i.toDouble() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-        val y = params.carrierToY(carrier)
-        val x = (t * width).toFloat()
-        carrierPath.lineTo(x, y)
+    // Для ступенчатой интерполяции рисуем ступеньки напрямую по точкам
+    if (interpolationType == InterpolationType.STEP) {
+        // Находим значение на левой границе (до первой точки) - это значение последней точки (переход через полночь)
+        val firstPointX = params.timeToX(sortedPoints.first().time)
+        val lastCarrierY = params.carrierToY(sortedPoints.last().carrierFrequency)
+        
+        // От левой границы до первой точки - значение последней точки
+        carrierPath.lineTo(firstPointX, lastCarrierY)
+        
+        // Рисуем ступеньки между точками
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
+            
+            val currentX = params.timeToX(currentPoint.time)
+            val nextX = if (i == sortedPoints.size - 1) {
+                width // до правой границы
+            } else {
+                params.timeToX(nextPoint.time)
+            }
+            
+            val currentCarrierY = params.carrierToY(currentPoint.carrierFrequency)
+            
+            // Вертикальный переход в точке
+            carrierPath.lineTo(currentX, currentCarrierY)
+            // Горизонтальная линия до следующей точки
+            carrierPath.lineTo(nextX, currentCarrierY)
+        }
+    } else {
+        // Обычная интерполяция для других типов
+        val numSamples = 100
+        for (i in 1..numSamples) {
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+            val y = params.carrierToY(carrier)
+            val x = (t * width).toFloat()
+            carrierPath.lineTo(x, y)
+        }
     }
     
     drawPath(
