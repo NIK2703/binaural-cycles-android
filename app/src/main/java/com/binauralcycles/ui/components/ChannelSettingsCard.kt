@@ -143,60 +143,6 @@ fun PresetSettingsCard(
         
         HorizontalDivider()
         
-        // Авто-перестановка каналов
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
-            supportingContent = { 
-                Text(if (channelSwapSettings.enabled) stringResource(R.string.channel_swap_description) else stringResource(R.string.channel_swap_disabled))
-            },
-            trailingContent = {
-                Switch(
-                    checked = channelSwapSettings.enabled,
-                    onCheckedChange = onChannelSwapEnabledChange
-                )
-            }
-        )
-        
-        // Слайдер интервала перестановки (показываем только когда включено)
-        if (channelSwapSettings.enabled) {
-            DiscreteSlider(
-                label = stringResource(R.string.swap_interval),
-                value = channelSwapSettings.intervalSeconds,
-                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
-                valueLabel = formatInterval(channelSwapSettings.intervalSeconds),
-                onValueChange = onChannelSwapIntervalChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            
-            // Затухание при смене каналов
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.smooth_fade)) },
-                supportingContent = { 
-                    Text(if (channelSwapSettings.fadeEnabled) stringResource(R.string.smooth_fade_description) else stringResource(R.string.instant_switch))
-                },
-                trailingContent = {
-                    Switch(
-                        checked = channelSwapSettings.fadeEnabled,
-                        onCheckedChange = onChannelSwapFadeEnabledChange
-                    )
-                }
-            )
-            
-            // Слайдер длительности затухания
-            if (channelSwapSettings.fadeEnabled) {
-                DiscreteSliderLong(
-                    label = stringResource(R.string.fade_duration),
-                    value = channelSwapSettings.fadeDurationMs,
-                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
-                    valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
-                    onValueChange = onChannelSwapFadeDurationChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
-        }
-        
-        HorizontalDivider()
-        
         // Нормализация громкости
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -300,6 +246,60 @@ fun PresetSettingsCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+        }
+        
+        HorizontalDivider()
+        
+        // Авто-перестановка каналов
+        ListItem(
+            headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
+            supportingContent = { 
+                Text(if (channelSwapSettings.enabled) stringResource(R.string.channel_swap_description) else stringResource(R.string.channel_swap_disabled))
+            },
+            trailingContent = {
+                Switch(
+                    checked = channelSwapSettings.enabled,
+                    onCheckedChange = onChannelSwapEnabledChange
+                )
+            }
+        )
+        
+        // Слайдер интервала перестановки (показываем только когда включено)
+        if (channelSwapSettings.enabled) {
+            DiscreteSlider(
+                label = stringResource(R.string.swap_interval),
+                value = channelSwapSettings.intervalSeconds,
+                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
+                valueLabel = formatInterval(channelSwapSettings.intervalSeconds),
+                onValueChange = onChannelSwapIntervalChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            
+            // Затухание при смене каналов
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.smooth_fade)) },
+                supportingContent = { 
+                    Text(if (channelSwapSettings.fadeEnabled) stringResource(R.string.smooth_fade_description) else stringResource(R.string.instant_switch))
+                },
+                trailingContent = {
+                    Switch(
+                        checked = channelSwapSettings.fadeEnabled,
+                        onCheckedChange = onChannelSwapFadeEnabledChange
+                    )
+                }
+            )
+            
+            // Слайдер длительности затухания
+            if (channelSwapSettings.fadeEnabled) {
+                DiscreteSliderLong(
+                    label = stringResource(R.string.fade_duration),
+                    value = channelSwapSettings.fadeDurationMs,
+                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
+                    valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
+                    onValueChange = onChannelSwapFadeDurationChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
         }
     }
 }

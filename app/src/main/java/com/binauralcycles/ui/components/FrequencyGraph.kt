@@ -43,6 +43,9 @@ private const val DRAG_DIRECTION_THRESHOLD = 10f
 // Минимальная слышимая частота
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
 
+// Максимальная частота для графика
+private const val MAX_FREQUENCY = 2000.0
+
 /**
  * Направление перетаскивания
  */
@@ -66,10 +69,10 @@ private data class PointDragState(
 
 /**
  * Вычисляет максимальную частоту биений для заданной несущей частоты
- * Формула: carrierFrequency * 2 - 20 (гарантирует, что обе боковые частоты останутся в слышимом диапазоне >= 20 Гц)
+ * Формула: (carrierFrequency - 20) * 2 (гарантирует, что нижняя боковая частота останется >= 20 Гц)
  */
 fun maxBeatForCarrier(carrierFrequency: Double): Double {
-    return (carrierFrequency * 2 - MIN_AUDIBLE_FREQUENCY).coerceAtLeast(0.0)
+    return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0)
 }
 
 /**
@@ -235,8 +238,11 @@ fun FrequencyGraph(
                     val prevPoint = displayPoints.getOrNull(sortedIndex - 1)
                     val nextPoint = displayPoints.getOrNull(sortedIndex + 1)
                     
-                    val minTimeSeconds = prevPoint?.time?.toSecondOfDay()?.plus(60) ?: 0
-                    val maxTimeSeconds = nextPoint?.time?.toSecondOfDay()?.minus(60) ?: (24 * 3600 - 60)
+                    // Минимум: соседняя точка + 5 минут (шаг перемещения)
+                    val minTimeSeconds = prevPoint?.time?.toSecondOfDay()?.plus(TIME_STEP_MINUTES * 60) ?: 0
+                    // Максимум: соседняя точка - 5 минут, или 23:55 (последнее значение с шагом 5 минут)
+                    val maxTimeSeconds = nextPoint?.time?.toSecondOfDay()?.minus(TIME_STEP_MINUTES * 60) 
+                        ?: (23 * 3600 + 55 * 60) // 23:55
                     
                     val displayTime = if (dragState.startIndex == originalIndex && dragState.currentTime != null) {
                         dragState.currentTime!!
@@ -299,7 +305,7 @@ fun FrequencyGraph(
                     )
                 }
                 
-                if (dragState.startIndex >= 0 && dragState.currentTime != null) {
+                if (dragState.startIndex >= 0 && dragState.currentTime != null && dragState.direction != DragDirection.NONE) {
                     val previewXPx = graphParams.timeToX(dragState.currentTime!!)
                     val previewYPx = graphParams.carrierToY(dragState.currentCarrier)
                     
@@ -310,7 +316,7 @@ fun FrequencyGraph(
                                     text = when (dragState.direction) {
                                         DragDirection.HORIZONTAL -> "%02d:%02d".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute)
                                         DragDirection.VERTICAL -> hzFormat.format(dragState.currentCarrier)
-                                        DragDirection.NONE -> "%02d:%02d / %s".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute, hzFormat.format(dragState.currentCarrier))
+                                        DragDirection.NONE -> ""
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Bold,
@@ -371,7 +377,8 @@ fun FrequencyGraph(
                     val value = tempRangeValue.toDoubleOrNull()
                     if (value != null && value >= MIN_AUDIBLE_FREQUENCY) {
                         val newMin = if (editingRangeType == RangeType.MIN) value else carrierRange.min
-                        val newMax = if (editingRangeType == RangeType.MAX) value else carrierRange.max
+                        // Ограничиваем максимум значением 2000 Гц
+                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(2000.0) else carrierRange.max
                         if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
                     }
                     showRangeDialog = false
@@ -522,12 +529,23 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
 private enum class RangeType { MIN, MAX }
 
 /**
+ * Вычисляет максимальную частоту биений для верхней границы (2000 Гц).
+ * Формула: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
+ */
+fun maxBeatForUpperLimit(carrierFrequency: Double): Double {
+    return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0)
+}
+
+/**
  * Вычисляет скорректированную частоту биения для заданной несущей частоты.
- * Если текущая частота биения превышает максимально допустимую, она уменьшается.
- * Формула: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
+ * Учитывает обе границы: нижнюю (20 Гц) и верхнюю (2000 Гц).
+ * Нижняя граница: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
+ * Верхняя граница: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
  */
 fun adjustBeatForCarrier(carrier: Double, currentBeat: Double): Double {
-    val maxBeat = maxBeatForCarrier(carrier)
+    val maxBeatForLower = maxBeatForCarrier(carrier)  // для нижней границы (20 Гц)
+    val maxBeatForUpper = maxBeatForUpperLimit(carrier)  // для верхней границы (2000 Гц)
+    val maxBeat = minOf(maxBeatForLower, maxBeatForUpper)
     return currentBeat.coerceAtMost(maxBeat)
 }
 
@@ -617,45 +635,22 @@ fun DraggablePoint(
     }
 }
 
-// Порог прилипания к целым часам (в минутах)
-private const val HOUR_SNAP_THRESHOLD_MINUTES = 5
+// Шаг перемещения по времени (в минутах)
+private const val TIME_STEP_MINUTES = 5
 
 /**
- * Вычисляет время из перетаскивания с прилипанием к целым часам.
- * Если время находится в пределах ±5 минут от целого часа, оно "прилипает" к этому часу.
+ * Вычисляет время из перетаскивания с шагом в 5 минут.
  */
 private fun calculateTimeFromDrag(startSeconds: Int, dragX: Float, minSeconds: Int, maxSeconds: Int, graphWidth: Float): LocalTime {
     val newSeconds = (startSeconds + (dragX * 24 * 3600 / graphWidth).toInt()).coerceIn(minSeconds, maxSeconds)
     
-    // Проверяем прилипание к целому часу
-    val snapResult = snapToHour(newSeconds)
+    // Округляем до шага в 5 минут
+    val stepSeconds = TIME_STEP_MINUTES * 60
+    val snappedSeconds = (newSeconds / stepSeconds) * stepSeconds
     
-    // Убеждаемся, что прилипшее время не выходит за границы
-    val finalSeconds = snapResult.coerceIn(minSeconds, maxSeconds)
+    // Убеждаемся, что время не выходит за границы
+    val finalSeconds = snappedSeconds.coerceIn(minSeconds, maxSeconds)
     return LocalTime.fromSecondOfDay(finalSeconds)
-}
-
-/**
- * Если время находится в пределах HOUR_SNAP_THRESHOLD_MINUTES от целого часа,
- * возвращаем время этого часа, иначе возвращаем исходное время.
- */
-private fun snapToHour(seconds: Int): Int {
-    val thresholdSeconds = HOUR_SNAP_THRESHOLD_MINUTES * 60
-    val currentMinute = (seconds % 3600) / 60
-    val currentHour = seconds / 3600
-    
-    // Проверяем прилипание к текущему часу (0-5 минут)
-    if (currentMinute < HOUR_SNAP_THRESHOLD_MINUTES) {
-        return currentHour * 3600
-    }
-    
-    // Проверяем прилипание к следующему часу (55-59 минут)
-    if (currentMinute >= 60 - HOUR_SNAP_THRESHOLD_MINUTES) {
-        val nextHour = (currentHour + 1) % 24
-        return nextHour * 3600
-    }
-    
-    return seconds
 }
 
 private fun calculateCarrierFromDrag(startCarrier: Double, dragY: Float, carrierRange: FrequencyRange, graphHeight: Float): Double {

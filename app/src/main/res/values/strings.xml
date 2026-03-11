@@ -113,6 +113,8 @@
     <string name="point">Точка</string>
     <string name="carrier">Несущая</string>
     <string name="beats">Биения</string>
+    <string name="carrier_tone_frequency">Частота тона несущей</string>
+    <string name="beat_frequency_full">Частота биения</string>
     <string name="max_format">макс %.1f</string>
     <string name="apply">Применить</string>
     <string name="close">Закрыть</string>
