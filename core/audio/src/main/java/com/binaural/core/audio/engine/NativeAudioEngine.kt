@@ -82,6 +82,32 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     private external fun nativeIsChannelsSwapped(): Boolean
     private external fun nativeUpdateElapsedTime()
     
+    // === Нативные методы для интерполяции (используются в UI для графика) ===
+    
+    private external fun nativeInterpolate(
+        p0: Double, p1: Double, p2: Double, p3: Double,
+        t: Double,
+        interpolationType: Int,
+        tension: Float
+    ): Double
+    
+    private external fun nativeGenerateInterpolatedCurve(
+        timePoints: IntArray,
+        values: DoubleArray,
+        numOutputPoints: Int,
+        interpolationType: Int,
+        tension: Float
+    ): DoubleArray?
+    
+    private external fun nativeGetChannelFrequencies(
+        timePoints: IntArray,
+        carrierFreqs: DoubleArray,
+        beatFreqs: DoubleArray,
+        targetTimeSeconds: Int,
+        interpolationType: Int,
+        tension: Float
+    ): DoubleArray?
+    
     /**
      * Инициализация движка
      */
@@ -181,10 +207,6 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     
     /**
      * Сгенерировать буфер аудио (FloatArray версия - с копированием)
-     * @param buffer буфер для заполнения (interleaved stereo, размер = samplesPerChannel * 2)
-     * @param samplesPerChannel количество сэмплов на канал
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
-     * @return true если генерация успешна
      */
     fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean {
         return nativeGenerateBuffer(buffer, samplesPerChannel, frequencyUpdateIntervalMs)
@@ -193,12 +215,6 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     /**
      * Сгенерировать буфер аудио (Zero-copy через DirectByteBuffer)
      * ОПТИМИЗАЦИЯ: Избегает копирования данных между Java и C++
-     * 
-     * @param directBuffer прямой буфер из ByteBuffer.allocateDirect()
-     *                     должен быть размером samplesPerChannel * 2 * 4 байт (float)
-     * @param samplesPerChannel количество сэмплов на канал
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
-     * @return true если генерация успешна
      */
     fun generateBufferDirect(
         directBuffer: java.nio.ByteBuffer, 
@@ -208,71 +224,101 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         return nativeGenerateBufferDirect(directBuffer, samplesPerChannel, frequencyUpdateIntervalMs)
     }
     
-    /**
-     * Получить текущую частоту биений
-     */
     fun getCurrentBeatFrequency(): Double = nativeGetCurrentBeatFrequency()
-    
-    /**
-     * Получить текущую несущую частоту
-     */
     fun getCurrentCarrierFrequency(): Double = nativeGetCurrentCarrierFrequency()
-    
-    /**
-     * Получить прошедшее время в секундах
-     */
     fun getElapsedSeconds(): Int = nativeGetElapsedSeconds()
-    
-    /**
-     * Проверить, переставлены ли каналы
-     */
     fun isChannelsSwapped(): Boolean = nativeIsChannelsSwapped()
     
-    /**
-     * Установить интервал обновления частот
-     * @param intervalMs интервал в миллисекундах (1000-60000)
-     * 
-     * Этот параметр определяет размер порции генерации буфера:
-     * - Большой интервал (10-60 сек): меньше прерываний, лучше энергоэффективность
-     * - Малый интервал (1-5 сек): более частое обновление UI, но выше нагрузка
-     */
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         nativeSetFrequencyUpdateInterval(intervalMs.coerceIn(1000, 60000))
         Log.d(TAG, "Frequency update interval set to $intervalMs ms")
     }
     
-    /**
-     * Получить интервал обновления частот
-     */
     fun getFrequencyUpdateInterval(): Int = nativeGetFrequencyUpdateInterval()
+    fun getRecommendedBufferSize(): Int = nativeGetRecommendedBufferSize()
+    
+    // === Публичные методы для интерполяции (используются в UI для графика) ===
     
     /**
-     * Получить рекомендуемый размер буфера в сэмплах на канал
-     * на основе интервала обновления частот и частоты дискретизации
+     * Выполнить интерполяцию одного значения через C++
      */
-    fun getRecommendedBufferSize(): Int = nativeGetRecommendedBufferSize()
+    fun interpolate(
+        p0: Double, p1: Double, p2: Double, p3: Double,
+        t: Double,
+        interpolationType: InterpolationType,
+        tension: Float = 0.0f
+    ): Double {
+        val typeInt = when (interpolationType) {
+            InterpolationType.LINEAR -> 0
+            InterpolationType.CARDINAL -> 1
+            InterpolationType.MONOTONE -> 2
+            InterpolationType.STEP -> 3
+        }
+        return nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension)
+    }
+    
+    /**
+     * Генерация массива интерполированных значений для графика
+     * @param timePoints массив временных точек (секунды с начала суток)
+     * @param values массив значений в этих точках
+     * @param numOutputPoints количество выходных точек (обычно 100 для графика)
+     * @param interpolationType тип интерполяции
+     * @param tension параметр натяжения для CARDINAL
+     * @return массив интерполированных значений или null при ошибке
+     */
+    fun generateInterpolatedCurve(
+        timePoints: IntArray,
+        values: DoubleArray,
+        numOutputPoints: Int,
+        interpolationType: InterpolationType,
+        tension: Float = 0.0f
+    ): DoubleArray? {
+        val typeInt = when (interpolationType) {
+            InterpolationType.LINEAR -> 0
+            InterpolationType.CARDINAL -> 1
+            InterpolationType.MONOTONE -> 2
+            InterpolationType.STEP -> 3
+        }
+        return nativeGenerateInterpolatedCurve(timePoints, values, numOutputPoints, typeInt, tension)
+    }
+    
+    /**
+     * Получение частот каналов для заданного времени (для UI)
+     * @return Pair(нижняя частота, верхняя частота) или null при ошибке
+     */
+    fun getChannelFrequenciesAt(
+        timePoints: IntArray,
+        carrierFreqs: DoubleArray,
+        beatFreqs: DoubleArray,
+        targetTimeSeconds: Int,
+        interpolationType: InterpolationType,
+        tension: Float = 0.0f
+    ): Pair<Double, Double>? {
+        val typeInt = when (interpolationType) {
+            InterpolationType.LINEAR -> 0
+            InterpolationType.CARDINAL -> 1
+            InterpolationType.MONOTONE -> 2
+            InterpolationType.STEP -> 3
+        }
+        val result = nativeGetChannelFrequencies(
+            timePoints, carrierFreqs, beatFreqs, 
+            targetTimeSeconds, typeInt, tension
+        )
+        return result?.let { Pair(it[0], it[1]) }
+    }
     
     // === Callback'и из C++ ===
     
-    /**
-     * Вызывается из C++ при изменении частот
-     */
     override fun onFrequencyChanged(beatFreq: Double, carrierFreq: Double) {
         _currentBeatFrequency.value = beatFreq
         _currentCarrierFrequency.value = carrierFreq
     }
     
-    /**
-     * Вызывается из C++ при перестановке каналов
-     */
     override fun onChannelsSwapped(swapped: Boolean) {
         _isChannelsSwapped.value = swapped
         Log.d(TAG, "Channels swapped: $swapped")
     }
     
-    /**
-     * Вызывается из C++ при изменении прошедшего времени
-     */
     override fun onElapsedChanged(elapsedSeconds: Int) {
         _elapsedSeconds.value = elapsedSeconds
     }
