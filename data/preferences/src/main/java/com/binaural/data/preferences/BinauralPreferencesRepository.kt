@@ -131,6 +131,8 @@ class BinauralPreferencesRepository @Inject constructor(
         private val WAVETABLE_SIZE_KEY = intPreferencesKey("wavetable_size")
         // Автоматическое расширение границ графика при редактировании
         private val AUTO_EXPAND_GRAPH_RANGE_KEY = booleanPreferencesKey("auto_expand_graph_range")
+        // Использовать нативный движок (C++)
+        private val USE_NATIVE_ENGINE_KEY = booleanPreferencesKey("use_native_engine")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -379,6 +381,30 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveAutoExpandGraphRange(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[AUTO_EXPAND_GRAPH_RANGE_KEY] = enabled
+        }
+    }
+    
+    // Методы для нативного движка (C++)
+    
+    /**
+     * Получить статус использования нативного движка
+     * @return true если используется C++ движок (по умолчанию - быстрее),
+     *         false если используется Kotlin движок (fallback при проблемах)
+     */
+    fun getUseNativeEngine(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[USE_NATIVE_ENGINE_KEY] ?: true // C++ по умолчанию (быстрее, оптимизирован NEON)
+        }
+    }
+    
+    /**
+     * Сохранить статус использования нативного движка
+     * @param enabled true = использовать C++ движок (NEON оптимизация, быстрее)
+     *                false = использовать Kotlin движок (стабильнее при проблемах с C++)
+     */
+    suspend fun saveUseNativeEngine(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[USE_NATIVE_ENGINE_KEY] = enabled
         }
     }
     
