@@ -211,20 +211,22 @@ GenerateResult AudioGenerator::generateBuffer(
     const BinauralConfig& config,
     GeneratorState& state,
     int32_t timeSeconds,
-    int64_t elapsedMs
+    int64_t elapsedMs,
+    int frequencyUpdateIntervalMs
 ) {
     GenerateResult result;
     
-    // Длительность буфера в мс
-    const int64_t bufferDurationMs = (static_cast<int64_t>(samplesPerChannel) * 1000) / m_sampleRate;
+    // Используем переданный интервал обновления частот для интерполяции
+    // Это обеспечивает точное соответствие настройкам пользователя
+    const int32_t intervalSeconds = frequencyUpdateIntervalMs / 1000;
     
-    // Начальные частоты
+    // Начальные частоты (точка графика для текущего момента)
     double startLeftFreq, startRightFreq;
     interpolateChannelFrequencies(config.curve, timeSeconds, startLeftFreq, startRightFreq);
     
-    // Конечные частоты (через интервал обновления)
+    // Конечные частоты (точка графика, отстоящая на интервал обновления)
     double endLeftFreq, endRightFreq;
-    int32_t endTimeSeconds = timeSeconds + static_cast<int32_t>(bufferDurationMs / 1000);
+    int32_t endTimeSeconds = timeSeconds + intervalSeconds;
     endTimeSeconds = ((endTimeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
     interpolateChannelFrequencies(config.curve, endTimeSeconds, endLeftFreq, endRightFreq);
     

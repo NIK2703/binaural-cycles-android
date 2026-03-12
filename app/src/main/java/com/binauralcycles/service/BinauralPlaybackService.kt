@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -14,7 +15,9 @@ import android.media.AudioManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import android.content.BroadcastReceiver
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
@@ -67,6 +70,9 @@ class BinauralPlaybackService : Service() {
     
     // Интервал обновления частот (из настроек)
     private val _frequencyUpdateIntervalMs = MutableStateFlow(10000) // По умолчанию 10 секунд
+    
+    // Следим за изменением интервала для перезапуска notificationUpdateJob
+    private var notificationIntervalObserver: Job? = null
     
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -157,6 +163,9 @@ class BinauralPlaybackService : Service() {
         
         // Периодическое обновление notification во время воспроизведения
         startNotificationUpdateJob()
+        
+        // Регистрируем приёмник для режима энергосбережения
+        registerPowerSaveReceiver()
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -287,15 +296,57 @@ class BinauralPlaybackService : Service() {
     // Job для периодического обновления уведомления
     private var notificationUpdateJob: Job? = null
     
+    // BroadcastReceiver для режима энергосбережения
+    private var powerSaveReceiver: BroadcastReceiver? = null
+    
     /**
-     * Запускает периодическое обновление уведомления во время воспроизведения
+     * Регистрирует приёмник для отслеживания изменений режима энергосбережения
+     */
+    private fun registerPowerSaveReceiver() {
+        powerSaveReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == PowerManager.ACTION_POWER_SAVE_MODE_CHANGED) {
+                    audioEngine?.applyPowerSaveMode()
+                    android.util.Log.d("BinauralPlaybackService", "Power save mode changed")
+                }
+            }
+        }
+        
+        val filter = IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(powerSaveReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(powerSaveReceiver, filter)
+        }
+    }
+    
+    private fun unregisterPowerSaveReceiver() {
+        powerSaveReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                android.util.Log.e("BinauralPlaybackService", "Error unregistering receiver", e)
+            }
+        }
+        powerSaveReceiver = null
+    }
+    
+    /**
+     * Запускает периодическое обновление уведомления во время воспроизведения.
+     * Автоматически адаптируется к изменению интервала из настроек.
      */
     private fun startNotificationUpdateJob() {
+        notificationUpdateJob?.cancel()
         notificationUpdateJob = serviceScope.launch {
-            while (true) {
-                delay(_frequencyUpdateIntervalMs.value.toLong())
-                if (_isPlaying.value) {
-                    updateNotificationSilently()
+            // Используем collectLatest для автоматического перезапуска при изменении интервала
+            _frequencyUpdateIntervalMs.collectLatest { intervalMs ->
+                android.util.Log.d("BinauralPlaybackService", "Notification interval changed to $intervalMs ms")
+                while (true) {
+                    delay(intervalMs.toLong())
+                    if (_isPlaying.value) {
+                        updateNotificationSilently()
+                    }
                 }
             }
         }
@@ -464,6 +515,7 @@ class BinauralPlaybackService : Service() {
         android.util.Log.d("BinauralPlaybackService", "onDestroy()")
         
         notificationUpdateJob?.cancel()
+        unregisterPowerSaveReceiver()
         
         audioEngine?.release()
         audioEngine = null

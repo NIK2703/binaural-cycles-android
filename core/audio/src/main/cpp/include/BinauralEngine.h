@@ -84,9 +84,10 @@ public:
      * 
      * @param buffer выходной буфер (float*, interleaved stereo)
      * @param samplesPerChannel количество сэмплов на канал
+     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
      * @return true если генерация успешна
      */
-    bool generateAudioBuffer(float* buffer, int samplesPerChannel);
+    bool generateAudioBuffer(float* buffer, int samplesPerChannel, int frequencyUpdateIntervalMs);
     
     /**
      * Получить текущее состояние проигрывания

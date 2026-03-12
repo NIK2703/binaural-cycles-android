@@ -312,20 +312,23 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaybackStartTime
 
 /**
  * Генерация буфера аудио
+ * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
  */
 JNIEXPORT jboolean JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBuffer(
     JNIEnv* env,
     jobject thiz,
     jfloatArray buffer,
-    jint samplesPerChannel
+    jint samplesPerChannel,
+    jint frequencyUpdateIntervalMs
 ) {
     if (!g_engine) return JNI_FALSE;
     
     jfloat* bufferPtr = env->GetFloatArrayElements(buffer, nullptr);
     if (!bufferPtr) return JNI_FALSE;
     
-    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
+    // Передаём интервал обновления частот для точной интерполяции
+    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel, frequencyUpdateIntervalMs);
     
     // Коммитим изменения в Java массив
     env->ReleaseFloatArrayElements(buffer, bufferPtr, 0);
