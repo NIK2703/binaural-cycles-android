@@ -69,7 +69,13 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     private external fun nativeResetState()
     private external fun nativeSetPlaying(playing: Boolean)
     private external fun nativeSetPlaybackStartTime(startTimeMs: Long)
+    
+    // FloatArray версия (с копированием) - для обратной совместимости
     private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
+    
+    // Zero-copy версия через DirectByteBuffer - ОПТИМИЗИРОВАНО
+    private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
+    
     private external fun nativeGetCurrentBeatFrequency(): Double
     private external fun nativeGetCurrentCarrierFrequency(): Double
     private external fun nativeGetElapsedSeconds(): Int
@@ -174,7 +180,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     }
     
     /**
-     * Сгенерировать буфер аудио
+     * Сгенерировать буфер аудио (FloatArray версия - с копированием)
      * @param buffer буфер для заполнения (interleaved stereo, размер = samplesPerChannel * 2)
      * @param samplesPerChannel количество сэмплов на канал
      * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
@@ -182,6 +188,24 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      */
     fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean {
         return nativeGenerateBuffer(buffer, samplesPerChannel, frequencyUpdateIntervalMs)
+    }
+    
+    /**
+     * Сгенерировать буфер аудио (Zero-copy через DirectByteBuffer)
+     * ОПТИМИЗАЦИЯ: Избегает копирования данных между Java и C++
+     * 
+     * @param directBuffer прямой буфер из ByteBuffer.allocateDirect()
+     *                     должен быть размером samplesPerChannel * 2 * 4 байт (float)
+     * @param samplesPerChannel количество сэмплов на канал
+     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
+     * @return true если генерация успешна
+     */
+    fun generateBufferDirect(
+        directBuffer: java.nio.ByteBuffer, 
+        samplesPerChannel: Int, 
+        frequencyUpdateIntervalMs: Int
+    ): Boolean {
+        return nativeGenerateBufferDirect(directBuffer, samplesPerChannel, frequencyUpdateIntervalMs)
     }
     
     /**

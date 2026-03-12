@@ -74,6 +74,9 @@ class BinauralAudioEngine(private val context: Context) {
     // Предварительно выделенный буфер для генерации аудио
     private var audioBuffer = FloatArray(0)
     private var maxSamplesPerChannel = 0
+    
+    // DirectByteBuffer для zero-copy генерации (ОПТИМИЗАЦИЯ)
+    private var directAudioBuffer: java.nio.ByteBuffer? = null
 
     // AudioTrack
     private var audioTrack: AudioTrack? = null
@@ -132,8 +135,9 @@ class BinauralAudioEngine(private val context: Context) {
      * Инициализация движка. Должна вызываться один раз при создании.
      */
     fun initialize() {
-        // NORM_PRIORITY + 1 достаточно для аудио и лучше для энергосбережения
-        audioThread = HandlerThread(THREAD_NAME, Thread.NORM_PRIORITY + 1).apply { start() }
+        // THREAD_PRIORITY_AUDIO (-16) обеспечивает наилучший приоритет для аудио-потока
+        // Это предотвращает задержки и прерывания при генерации звука
+        audioThread = HandlerThread(THREAD_NAME, android.os.Process.THREAD_PRIORITY_AUDIO).apply { start() }
         audioHandler = Handler(audioThread!!.looper)
         
         // Инициализируем нативный движок

@@ -311,8 +311,9 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaybackStartTime
 }
 
 /**
- * Генерация буфера аудио
+ * Генерация буфера аудио (FloatArray версия - с копированием)
  * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
+ * @deprecated Используйте nativeGenerateBufferDirect для zero-copy
  */
 JNIEXPORT jboolean JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBuffer(
@@ -332,6 +333,47 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBuffer(
     
     // Коммитим изменения в Java массив
     env->ReleaseFloatArrayElements(buffer, bufferPtr, 0);
+    
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Zero-copy генерация буфера через DirectByteBuffer
+ * Избегает копирования данных между Java и C++
+ * 
+ * @param directBuffer прямой буфер из Java (ByteBuffer.allocateDirect())
+ * @param samplesPerChannel количество сэмплов на канал
+ * @param frequencyUpdateIntervalMs интервал обновления частот в мс
+ * @return true если генерация успешна
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect(
+    JNIEnv* env,
+    jobject thiz,
+    jobject directBuffer,
+    jint samplesPerChannel,
+    jint frequencyUpdateIntervalMs
+) {
+    if (!g_engine) return JNI_FALSE;
+    
+    // Получаем прямой указатель на буфер без копирования
+    float* bufferPtr = static_cast<float*>(env->GetDirectBufferAddress(directBuffer));
+    if (!bufferPtr) {
+        LOGE("nativeGenerateBufferDirect: Failed to get direct buffer address");
+        return JNI_FALSE;
+    }
+    
+    // Проверяем размер буфера
+    jlong bufferCapacity = env->GetDirectBufferCapacity(directBuffer);
+    jlong requiredSize = samplesPerChannel * 2 * sizeof(float);
+    if (bufferCapacity < requiredSize) {
+        LOGE("nativeGenerateBufferDirect: Buffer too small. Required: %ld, Got: %ld", 
+             (long)requiredSize, (long)bufferCapacity);
+        return JNI_FALSE;
+    }
+    
+    // Генерируем напрямую в буфер без копирования
+    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel, frequencyUpdateIntervalMs);
     
     return result ? JNI_TRUE : JNI_FALSE;
 }
