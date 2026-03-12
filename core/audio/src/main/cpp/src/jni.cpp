@@ -1,7 +1,10 @@
 #include <jni.h>
 #include <android/log.h>
 #include "BinauralEngine.h"
+#include "Interpolation.h"
 #include <memory>
+#include <vector>
+#include <algorithm>
 
 #define LOG_TAG "NativeAudioEngine"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -433,6 +436,429 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeUpdateElapsedTime(
     if (g_engine) {
         g_engine->updateElapsedTime();
     }
+}
+
+// ============================================================================
+// JNI методы для интерполяции (используются в UI для графика)
+// ============================================================================
+
+/**
+ * Интерполяция одного значения
+ * @param p0 точка до левой границы
+ * @param p1 левая граница интервала
+ * @param p2 правая граница интервала
+ * @param p3 точка после правой границы
+ * @param t нормализованная позиция [0, 1]
+ * @param interpolationType тип интерполяции (0=LINEAR, 1=CARDINAL, 2=MONOTONE, 3=STEP)
+ * @param tension параметр натяжения для CARDINAL
+ * @return интерполированное значение
+ */
+JNIEXPORT jdouble JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInterpolate(
+    JNIEnv* env,
+    jobject thiz,
+    jdouble p0,
+    jdouble p1,
+    jdouble p2,
+    jdouble p3,
+    jdouble t,
+    jint interpolationType,
+    jfloat tension
+) {
+    return binaural::Interpolation::interpolate(
+        static_cast<binaural::InterpolationType>(interpolationType),
+        p0, p1, p2, p3, t, tension
+    );
+}
+
+/**
+ * Генерация массива интерполированных значений для графика
+ * @param timePoints массив временных точек (секунды с начала суток)
+ * @param values массив значений в этих точках
+ * @param numOutputPoints количество выходных точек
+ * @param interpolationType тип интерполяции
+ * @param tension параметр натяжения
+ * @return массив интерполированных значений
+ */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolatedCurve(
+    JNIEnv* env,
+    jobject thiz,
+    jintArray timePoints,
+    jdoubleArray values,
+    jint numOutputPoints,
+    jint interpolationType,
+    jfloat tension
+) {
+    if (!timePoints || !values || numOutputPoints <= 0) {
+        return nullptr;
+    }
+    
+    const jint numInputPoints = env->GetArrayLength(timePoints);
+    if (numInputPoints < 2) {
+        return nullptr;
+    }
+    
+    // Получаем входные данные
+    jint* times = env->GetIntArrayElements(timePoints, nullptr);
+    jdouble* vals = env->GetDoubleArrayElements(values, nullptr);
+    
+    // Создаём выходной массив
+    jdoubleArray result = env->NewDoubleArray(numOutputPoints);
+    if (!result) {
+        env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
+        env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+        return nullptr;
+    }
+    
+    std::vector<double> outputValues(numOutputPoints);
+    
+    // Константы для времени суток
+    constexpr int SECONDS_PER_DAY = 86400;
+    
+    // Генерируем интерполированные значения
+    for (int i = 0; i < numOutputPoints; ++i) {
+        // Равномерно распределяем точки по суткам
+        const double t = static_cast<double>(i) / (numOutputPoints - 1);
+        const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
+        
+        // Находим интервал (бинарный поиск)
+        int leftIndex = -1;
+        for (int j = 0; j < numInputPoints - 1; ++j) {
+            if (times[j] <= targetSeconds && targetSeconds < times[j + 1]) {
+                leftIndex = j;
+                break;
+            }
+        }
+        
+        // Если не нашли - это переход через полночь или выход за границы
+        if (leftIndex < 0) {
+            if (targetSeconds >= times[numInputPoints - 1] || targetSeconds < times[0]) {
+                // Переход через полночь: между последней и первой точкой
+                leftIndex = numInputPoints - 1;
+            } else {
+                // Fallback
+                outputValues[i] = vals[0];
+                continue;
+            }
+        }
+        
+        const int rightIndex = (leftIndex + 1) % numInputPoints;
+        
+        // Вычисляем нормализованную позицию t в интервале
+        int t1 = times[leftIndex];
+        int t2 = times[rightIndex];
+        
+        // Обработка перехода через полночь
+        bool isWrapping = (leftIndex == numInputPoints - 1);
+        if (isWrapping) {
+            t2 += SECONDS_PER_DAY;
+            if (targetSeconds < t1) {
+                // targetSeconds после полуночи
+                const double ratio = static_cast<double>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+                const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+                
+                // Получаем 4 точки для сплайна
+                const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
+                const int nextIndex = rightIndex;
+                const int nextNextIndex = (rightIndex + 1) % numInputPoints;
+                
+                outputValues[i] = binaural::Interpolation::interpolate(
+                    static_cast<binaural::InterpolationType>(interpolationType),
+                    vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
+                    clampedRatio, tension
+                );
+                continue;
+            }
+        }
+        
+        const double ratio = static_cast<double>(targetSeconds - t1) / (t2 - t1);
+        const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+        
+        // Получаем 4 точки для сплайна
+        const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
+        const int nextNextIndex = (rightIndex + 1) % numInputPoints;
+        
+        outputValues[i] = binaural::Interpolation::interpolate(
+            static_cast<binaural::InterpolationType>(interpolationType),
+            vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
+            clampedRatio, tension
+        );
+    }
+    
+    // Копируем результат
+    env->SetDoubleArrayRegion(result, 0, numOutputPoints, outputValues.data());
+    
+    // Освобождаем ресурсы
+    env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+    
+    return result;
+}
+
+/**
+ * Получение частот каналов для заданного времени (для UI)
+ * @param timePoints массив временных точек (секунды с начала суток)
+ * @param carrierFreqs массив несущих частот
+ * @param beatFreqs массив частот биений
+ * @param targetTimeSeconds целевое время в секундах с начала суток
+ * @param interpolationType тип интерполяции
+ * @param tension параметр натяжения
+ * @return double[2]: [0] = нижняя частота канала, [1] = верхняя частота канала
+ */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencies(
+    JNIEnv* env,
+    jobject thiz,
+    jintArray timePoints,
+    jdoubleArray carrierFreqs,
+    jdoubleArray beatFreqs,
+    jint targetTimeSeconds,
+    jint interpolationType,
+    jfloat tension
+) {
+    if (!timePoints || !carrierFreqs || !beatFreqs) {
+        return nullptr;
+    }
+    
+    const jint numPoints = env->GetArrayLength(timePoints);
+    if (numPoints < 2) {
+        return nullptr;
+    }
+    
+    // Получаем входные данные
+    jint* times = env->GetIntArrayElements(timePoints, nullptr);
+    jdouble* carriers = env->GetDoubleArrayElements(carrierFreqs, nullptr);
+    jdouble* beats = env->GetDoubleArrayElements(beatFreqs, nullptr);
+    
+    // Вычисляем частоты каналов для каждой точки
+    std::vector<double> lowerFreqs(numPoints);
+    std::vector<double> upperFreqs(numPoints);
+    
+    for (int i = 0; i < numPoints; ++i) {
+        lowerFreqs[i] = carriers[i] - beats[i] / 2.0;
+        upperFreqs[i] = carriers[i] + beats[i] / 2.0;
+    }
+    
+    // Находим интервал
+    constexpr int SECONDS_PER_DAY = 86400;
+    int leftIndex = -1;
+    
+    for (int j = 0; j < numPoints - 1; ++j) {
+        if (times[j] <= targetTimeSeconds && targetTimeSeconds < times[j + 1]) {
+            leftIndex = j;
+            break;
+        }
+    }
+    
+    // Если не нашли - переход через полночь
+    if (leftIndex < 0) {
+        if (targetTimeSeconds >= times[numPoints - 1] || targetTimeSeconds < times[0]) {
+            leftIndex = numPoints - 1;
+        } else {
+            leftIndex = 0;
+        }
+    }
+    
+    const int rightIndex = (leftIndex + 1) % numPoints;
+    
+    // Вычисляем нормализованную позицию
+    int t1 = times[leftIndex];
+    int t2 = times[rightIndex];
+    
+    double ratio;
+    bool isWrapping = (leftIndex == numPoints - 1);
+    
+    if (isWrapping) {
+        t2 += SECONDS_PER_DAY;
+        if (targetTimeSeconds < t1) {
+            ratio = static_cast<double>(targetTimeSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+        } else {
+            ratio = static_cast<double>(targetTimeSeconds - t1) / (t2 - t1);
+        }
+    } else {
+        ratio = static_cast<double>(targetTimeSeconds - t1) / (t2 - t1);
+    }
+    
+    ratio = std::clamp(ratio, 0.0, 1.0);
+    
+    // Получаем 4 точки для сплайна
+    const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
+    const int nextNextIndex = (rightIndex + 1) % numPoints;
+    
+    double lowerFreq = binaural::Interpolation::interpolate(
+        static_cast<binaural::InterpolationType>(interpolationType),
+        lowerFreqs[prevIndex], lowerFreqs[leftIndex], lowerFreqs[rightIndex], lowerFreqs[nextNextIndex],
+        ratio, tension
+    );
+    
+    double upperFreq = binaural::Interpolation::interpolate(
+        static_cast<binaural::InterpolationType>(interpolationType),
+        upperFreqs[prevIndex], upperFreqs[leftIndex], upperFreqs[rightIndex], upperFreqs[nextNextIndex],
+        ratio, tension
+    );
+    
+    // Гарантируем неотрицательные частоты
+    lowerFreq = std::max(0.0, lowerFreq);
+    upperFreq = std::max(0.0, upperFreq);
+    
+    // Освобождаем ресурсы
+    env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(carrierFreqs, carriers, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(beatFreqs, beats, JNI_ABORT);
+    
+    // Возвращаем результат
+    jdoubleArray result = env->NewDoubleArray(2);
+    if (result) {
+        const double resultData[2] = { lowerFreq, upperFreq };
+        env->SetDoubleArrayRegion(result, 0, 2, resultData);
+    }
+    
+    return result;
+}
+
+// ============================================================================
+// Статические JNI методы для NativeInterpolation (используются в UI)
+// ============================================================================
+
+/**
+ * Статическая интерполяция одного значения (не требует экземпляра движка)
+ */
+JNIEXPORT jdouble JNICALL
+Java_com_binaural_core_audio_engine_NativeInterpolation_nativeInterpolate(
+    JNIEnv* env,
+    jobject thiz,
+    jdouble p0,
+    jdouble p1,
+    jdouble p2,
+    jdouble p3,
+    jdouble t,
+    jint interpolationType,
+    jfloat tension
+) {
+    return binaural::Interpolation::interpolate(
+        static_cast<binaural::InterpolationType>(interpolationType),
+        p0, p1, p2, p3, t, tension
+    );
+}
+
+/**
+ * Статическая генерация интерполированной кривой (не требует экземпляра движка)
+ */
+JNIEXPORT jdoubleArray JNICALL
+Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolatedCurve(
+    JNIEnv* env,
+    jobject thiz,
+    jintArray timePoints,
+    jdoubleArray values,
+    jint numOutputPoints,
+    jint interpolationType,
+    jfloat tension
+) {
+    if (!timePoints || !values || numOutputPoints <= 0) {
+        return nullptr;
+    }
+    
+    const jint numInputPoints = env->GetArrayLength(timePoints);
+    if (numInputPoints < 2) {
+        return nullptr;
+    }
+    
+    // Получаем входные данные
+    jint* times = env->GetIntArrayElements(timePoints, nullptr);
+    jdouble* vals = env->GetDoubleArrayElements(values, nullptr);
+    
+    // Создаём выходной массив
+    jdoubleArray result = env->NewDoubleArray(numOutputPoints);
+    if (!result) {
+        env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
+        env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+        return nullptr;
+    }
+    
+    std::vector<double> outputValues(numOutputPoints);
+    
+    // Константы для времени суток
+    constexpr int SECONDS_PER_DAY = 86400;
+    
+    // Генерируем интерполированные значения
+    for (int i = 0; i < numOutputPoints; ++i) {
+        // Равномерно распределяем точки по суткам
+        const double t = static_cast<double>(i) / (numOutputPoints - 1);
+        const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
+        
+        // Находим интервал (бинарный поиск)
+        int leftIndex = -1;
+        for (int j = 0; j < numInputPoints - 1; ++j) {
+            if (times[j] <= targetSeconds && targetSeconds < times[j + 1]) {
+                leftIndex = j;
+                break;
+            }
+        }
+        
+        // Если не нашли - это переход через полночь или выход за границы
+        if (leftIndex < 0) {
+            if (targetSeconds >= times[numInputPoints - 1] || targetSeconds < times[0]) {
+                // Переход через полночь: между последней и первой точкой
+                leftIndex = numInputPoints - 1;
+            } else {
+                // Fallback
+                outputValues[i] = vals[0];
+                continue;
+            }
+        }
+        
+        const int rightIndex = (leftIndex + 1) % numInputPoints;
+        
+        // Вычисляем нормализованную позицию t в интервале
+        int t1 = times[leftIndex];
+        int t2 = times[rightIndex];
+        
+        // Обработка перехода через полночь
+        bool isWrapping = (leftIndex == numInputPoints - 1);
+        if (isWrapping) {
+            t2 += SECONDS_PER_DAY;
+            if (targetSeconds < t1) {
+                // targetSeconds после полуночи
+                const double ratio = static_cast<double>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+                const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+                
+                // Получаем 4 точки для сплайна
+                const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
+                const int nextIndex = rightIndex;
+                const int nextNextIndex = (rightIndex + 1) % numInputPoints;
+                
+                outputValues[i] = binaural::Interpolation::interpolate(
+                    static_cast<binaural::InterpolationType>(interpolationType),
+                    vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
+                    clampedRatio, tension
+                );
+                continue;
+            }
+        }
+        
+        const double ratio = static_cast<double>(targetSeconds - t1) / (t2 - t1);
+        const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+        
+        // Получаем 4 точки для сплайна
+        const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
+        const int nextNextIndex = (rightIndex + 1) % numInputPoints;
+        
+        outputValues[i] = binaural::Interpolation::interpolate(
+            static_cast<binaural::InterpolationType>(interpolationType),
+            vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
+            clampedRatio, tension
+        );
+    }
+    
+    // Копируем результат
+    env->SetDoubleArrayRegion(result, 0, numOutputPoints, outputValues.data());
+    
+    // Освобождаем ресурсы
+    env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
+    env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+    
+    return result;
 }
 
 } // extern "C"

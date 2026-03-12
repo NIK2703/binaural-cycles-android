@@ -71,12 +71,15 @@ class BinauralAudioEngine(private val context: Context) {
     private var sampleRate: Int = SampleRate.MEDIUM.value
     private var frequencyUpdateIntervalMs: Int = 10000
 
-    // Предварительно выделенный буфер для генерации аудио
+    // Предварительно выделенный буфер для генерации аудио (fallback для старых устройств)
     private var audioBuffer = FloatArray(0)
     private var maxSamplesPerChannel = 0
     
     // DirectByteBuffer для zero-copy генерации (ОПТИМИЗАЦИЯ)
+    // Запись в AudioTrack выполняется порциями не больше audioTrackBufferSize
     private var directAudioBuffer: java.nio.ByteBuffer? = null
+    private var useDirectBuffer = true  // Включено
+    private var audioTrackBufferSize = 0  // Размер буфера AudioTrack в байтах
 
     // AudioTrack
     private var audioTrack: AudioTrack? = null
@@ -238,6 +241,17 @@ class BinauralAudioEngine(private val context: Context) {
 
         try {
             maxSamplesPerChannel = sampleRate * 60
+            
+            // Создаём DirectByteBuffer для zero-copy генерации
+            // Размер: maxSamplesPerChannel * 2 канала * 4 байта на float
+            val directBufferSize = maxSamplesPerChannel * 2 * 4
+            if (directAudioBuffer == null || directAudioBuffer!!.capacity() < directBufferSize) {
+                directAudioBuffer = java.nio.ByteBuffer.allocateDirect(directBufferSize)
+                    .order(java.nio.ByteOrder.nativeOrder())
+                Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes")
+            }
+            
+            // Fallback буфер на случай проблем с DirectByteBuffer
             if (audioBuffer.size < maxSamplesPerChannel * 2) {
                 audioBuffer = FloatArray(maxSamplesPerChannel * 2)
             }
@@ -290,6 +304,7 @@ class BinauralAudioEngine(private val context: Context) {
             .build()
 
         audioTrack?.setVolume(1.0f)
+        audioTrackBufferSize = bufferSize
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
     }
     
@@ -372,11 +387,16 @@ class BinauralAudioEngine(private val context: Context) {
     
     private fun generateAudioLoop() {
         val engine = nativeEngine ?: return
+        val directBuffer = directAudioBuffer
 
         var currentIntervalMs = frequencyUpdateIntervalMs
         var samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
 
         isGenerating = true
+        
+        // Счётчик ошибок для fallback на FloatArray
+        var directBufferErrors = 0
+        val maxDirectBufferErrors = 3
 
         while (isActive.get() && audioTrack != null) {
             applyPendingSettings()
@@ -388,9 +408,25 @@ class BinauralAudioEngine(private val context: Context) {
 
             checkFadeRequests()
 
-            val success = engine.generateBuffer(audioBuffer, samplesPerChannel, currentIntervalMs)
+            // Выбираем метод генерации: DirectByteBuffer (zero-copy) или FloatArray (fallback)
+            val success = if (useDirectBuffer && directBuffer != null && directBufferErrors < maxDirectBufferErrors) {
+                // Zero-copy генерация через DirectByteBuffer
+                directBuffer.clear()
+                engine.generateBufferDirect(directBuffer, samplesPerChannel, currentIntervalMs)
+            } else {
+                // Fallback: генерация с копированием через FloatArray
+                engine.generateBuffer(audioBuffer, samplesPerChannel, currentIntervalMs)
+            }
             
             if (!success) {
+                directBufferErrors++
+                if (directBufferErrors >= maxDirectBufferErrors && useDirectBuffer) {
+                    Log.w(TAG, "DirectByteBuffer failed $directBufferErrors times, switching to FloatArray fallback")
+                    useDirectBuffer = false
+                }
+                if (directBufferErrors < maxDirectBufferErrors) {
+                    continue  // Пробуем ещё раз
+                }
                 Log.e(TAG, "Native buffer generation failed")
                 break
             }
@@ -421,8 +457,41 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            val result = try {
-                currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2, AudioTrack.WRITE_BLOCKING)
+            // Запись в AudioTrack: ByteBuffer (zero-copy) или FloatArray
+            val writeResult = try {
+                if (useDirectBuffer && directBuffer != null) {
+                    // DirectByteBuffer: данные уже в нужном формате (float, native byte order)
+                    // Размер в байтах: samplesPerChannel * 2 канала * 4 байта на float
+                    directBuffer.flip()
+                    val sizeInBytes = samplesPerChannel * 2 * 4
+                    
+                    // Записываем порциями не больше audioTrackBufferSize
+                    var totalWritten = 0
+                    while (totalWritten < sizeInBytes && isActive.get()) {
+                        val remaining = sizeInBytes - totalWritten
+                        val chunkSize = minOf(remaining, audioTrackBufferSize)
+                        
+                        // Устанавливаем limit для текущей порции
+                        directBuffer.position(totalWritten)
+                        directBuffer.limit(totalWritten + chunkSize)
+                        
+                        val written = currentAudioTrack.write(directBuffer, chunkSize, AudioTrack.WRITE_BLOCKING)
+                        if (written < 0) {
+                            Log.e(TAG, "DirectByteBuffer write failed at offset $totalWritten: $written")
+                            break
+                        }
+                        totalWritten += written
+                    }
+                    
+                    if (totalWritten == sizeInBytes) {
+                        sizeInBytes  // Возвращаем размер как признак успеха
+                    } else {
+                        -1  // Ошибка
+                    }
+                } else {
+                    // FloatArray: запись с копированием
+                    currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2, AudioTrack.WRITE_BLOCKING)
+                }
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "AudioTrack write error: ${e.message}")
                 -1
@@ -431,14 +500,14 @@ class BinauralAudioEngine(private val context: Context) {
                 -1
             }
 
-            if (result < 0) {
-                Log.d(TAG, "Write failed, result=$result")
+            if (writeResult < 0) {
+                Log.d(TAG, "Write failed, result=$writeResult")
                 break
             }
         }
 
         isGenerating = false
-        Log.d(TAG, "generateAudioLoop() ended")
+        Log.d(TAG, "generateAudioLoop() ended (directBuffer=${useDirectBuffer})")
     }
     
     private fun checkFadeRequests() {
@@ -477,19 +546,22 @@ class BinauralAudioEngine(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             currentFadeVolume = getVolumeFromShaper()
             
+            // Используем полную длительность fade для корректного затухания до нуля
+            // Добавляем небольшой запас (50ms) для гарантированного завершения
             val adjustedDuration = if (currentFadeVolume <= MIN_VOLUME) {
                 0L
             } else {
-                (durationMs * currentFadeVolume).toLong().coerceAtLeast(50)
+                durationMs.coerceAtLeast(50)
             }
             
-            createVolumeShaper(durationMs, targetVolume = 0.0f)
+            createVolumeShaper(adjustedDuration, targetVolume = 0.0f)
             startVolumeShaper()
             
             if (adjustedDuration == 0L) {
                 audioHandler?.post(callback)
             } else {
-                audioHandler?.postDelayed(callback, adjustedDuration)
+                // Добавляем запас 50ms для гарантированного завершения fade
+                audioHandler?.postDelayed(callback, adjustedDuration + 50)
             }
         } else {
             callback()
