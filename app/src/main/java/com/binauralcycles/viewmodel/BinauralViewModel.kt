@@ -309,6 +309,7 @@ class BinauralViewModel @Inject constructor(
                 editingPresetId = presetId,
                 carrierRange = preset.frequencyCurve.carrierRange,
                 beatRange = preset.frequencyCurve.beatRange,
+                selectedPointIndex = null,  // Сбрасываем выбранную точку при начале редактирования
                 editingChannelSwapSettings = preset.channelSwapSettings,
                 editingVolumeNormalizationSettings = preset.volumeNormalizationSettings
             )

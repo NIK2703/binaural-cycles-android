@@ -25,6 +25,35 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.PI
 import kotlin.math.sin
+import kotlin.math.abs
+import kotlin.math.ln
+import kotlin.math.exp
+
+// Константа 2π для оптимизации вычислений
+private const val TWO_PI = 2.0 * PI
+private const val INV_TWO_PI = 1.0 / TWO_PI
+
+/**
+ * Быстрая аппроксимация функции pow(x, n) для положительных x и n в диапазоне [0, 2].
+ * Использует комбинацию exp и ln для вычисления: x^n = exp(n * ln(x))
+ * 
+ * Оптимизация: избегаем дорогостоящего Math.pow путём прямого использования
+ * аппроксимированных функций exp/ln из kotlin.math.
+ * 
+ * @param x основание (должно быть положительным)
+ * @param n показатель степени (обычно 0.0-2.0 для нормализации)
+ * @return x^n
+ */
+@Suppress("NOTHING_TO_INLINE")
+private inline fun fastPow(x: Double, n: Double): Double {
+    // Для n=0 возвращаем 1, для n=1 возвращаем x
+    if (n == 0.0) return 1.0
+    if (n == 1.0) return x
+    if (x <= 0.0) return 0.0
+    
+    // x^n = exp(n * ln(x))
+    return exp(n * ln(x))
+}
 
 /**
  * Wavetable для быстрой генерации синусоид с линейной интерполяцией
@@ -188,6 +217,14 @@ class BinauralAudioEngine(private val context: Context) {
     // Быстрая генерация звука (табличный синтез с линейной интерполяцией)
     private var useWavetable = true
     private var wavetableSize = 2048
+    
+    // Кэш для нормализации TEMPORAL - минимальные и максимальные частоты каналов
+    // Обновляется при смене конфигурации
+    private var cachedMinLowerFreq: Double = 0.0
+    private var cachedMaxLowerFreq: Double = 0.0
+    private var cachedMinUpperFreq: Double = 0.0
+    private var cachedMaxUpperFreq: Double = 0.0
+    private var cachedCurveHash: Int = -1
 
     // StateFlows для UI
     private val _isPlaying = MutableStateFlow(false)
@@ -786,13 +823,28 @@ class BinauralAudioEngine(private val context: Context) {
             startLeftAmplitude to startRightAmplitude
         }
         
-        // Шаги изменения частот на каждый сэмпл (линейная интерполяция)
-        val freqStepLeft = (endLeftFreq - startLeftFreq) / samplesPerChannel
-        val freqStepRight = (endRightFreq - startRightFreq) / samplesPerChannel
+        // ===== ОПТИМИЗАЦИЯ: Предвычисление констант вне цикла =====
+        val twoPiOverSampleRate = 2.0 * PI / sampleRate
+        val baseVolumeFactor = 0.5 * Short.MAX_VALUE * config.volume
         
-        // Шаги изменения амплитуд на каждый сэмпл (линейная интерполяция для временной нормализации)
+        // Начальные и конечные фазовые инкременты (омега) - вычисляем один раз
+        var leftOmega = twoPiOverSampleRate * startLeftFreq
+        var rightOmega = twoPiOverSampleRate * startRightFreq
+        val endLeftOmega = twoPiOverSampleRate * endLeftFreq
+        val endRightOmega = twoPiOverSampleRate * endRightFreq
+        
+        // Шаги изменения фазовых инкрементов на каждый сэмпл (инкрементальное обновление)
+        val omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel
+        val omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel
+        
+        // Текущие амплитуды (будут обновляться инкрементально)
+        var leftAmplitude = startLeftAmplitude
+        var rightAmplitude = startRightAmplitude
+        
+        // Шаги изменения амплитуд на каждый сэмпл (инкрементальное обновление)
         val ampStepLeft = (endLeftAmplitude - startLeftAmplitude) / samplesPerChannel
         val ampStepRight = (endRightAmplitude - startRightAmplitude) / samplesPerChannel
+        // ===== КОНЕЦ ОПТИМИЗАЦИИ =====
         
         val channelsSwappedAtStart = channelsSwapped
         var fadePhaseCompleted = false
@@ -807,6 +859,16 @@ class BinauralAudioEngine(private val context: Context) {
         
         val presetCheckInterval = sampleRate / 100
         var lastPresetCheck = 0
+        
+        // Кэшируем проверку channelSwapEnabled
+        val channelSwapEnabled = config.channelSwapEnabled
+        
+        // ОПТИМИЗАЦИЯ: Кэшируем функцию генерации синуса вне цикла
+        val sinFunc: (Double) -> Float = if (useWavetable) {
+            { phase -> Wavetable.fastSin(phase) }
+        } else {
+            { phase -> sin(phase).toFloat() }
+        }
         
         for (i in 0 until samplesPerChannel) {
             val currentSample = totalSamplesGenerated + i
@@ -843,13 +905,11 @@ class BinauralAudioEngine(private val context: Context) {
                             _isChannelsSwapped.value = localChannelsSwapped
                             localIsFadingOut = false
                             localFadeStartSample = currentSample
-                            Log.d(TAG, "Channel swap executed at sample $currentSample")
                         } else if (localFadeOperation == FadeOperation.PRESET_SWITCH && configSwitchAtSample < 0) {
                             configSwitchAtSample = currentSample
                             localPendingPresetConfig?.let { newConfig ->
                                 configRef.set(newConfig)
                                 _currentConfig.value = newConfig
-                                Log.d(TAG, "Preset config applied at sample $currentSample")
                             }
                             localPendingPresetConfig = null
                             localIsFadingOut = false
@@ -868,31 +928,29 @@ class BinauralAudioEngine(private val context: Context) {
                 }
             }
             
-            // Линейная интерполяция частот для текущего сэмпла
-            val currentLeftFreq = startLeftFreq + freqStepLeft * i
-            val currentRightFreq = startRightFreq + freqStepRight * i
-            
-            // Линейная интерполяция амплитуд для текущего сэмпла
-            val currentLeftAmplitude = startLeftAmplitude + ampStepLeft * i
-            val currentRightAmplitude = startRightAmplitude + ampStepRight * i
-            
-            // Вычисляем угловые частоты для текущего сэмпла
-            val leftOmega = 2.0 * PI * currentLeftFreq / sampleRate
-            val rightOmega = 2.0 * PI * currentRightFreq / sampleRate
-            
-            val leftSample = if (useWavetable) Wavetable.fastSin(leftPhase) else sin(leftPhase).toFloat()
+            // ===== ОПТИМИЗАЦИЯ: Генерация сэмпла с инкрементальным обновлением =====
+            val leftSample = sinFunc(leftPhase)
             leftPhase += leftOmega
-            if (leftPhase > 2.0 * PI) leftPhase -= 2.0 * PI
+            if (leftPhase > TWO_PI) leftPhase -= TWO_PI
 
-            val rightSample = if (useWavetable) Wavetable.fastSin(rightPhase) else sin(rightPhase).toFloat()
+            val rightSample = sinFunc(rightPhase)
             rightPhase += rightOmega
-            if (rightPhase > 2.0 * PI) rightPhase -= 2.0 * PI
+            if (rightPhase > TWO_PI) rightPhase -= TWO_PI
             
-            val baseAmplitude = 0.5 * Short.MAX_VALUE * fadeMultiplier * config.volume
-            val leftAmp = baseAmplitude * currentLeftAmplitude
-            val rightAmp = baseAmplitude * currentRightAmplitude
+            // Предвычисленная базовая амплитуда с fade
+            val baseAmplitude = baseVolumeFactor * fadeMultiplier
+            val leftAmp = baseAmplitude * leftAmplitude
+            val rightAmp = baseAmplitude * rightAmplitude
             
-            val swapForSample = if (config.channelSwapEnabled) {
+            // Инкрементальное обновление для следующего сэмпла
+            leftOmega += omegaStepLeft
+            rightOmega += omegaStepRight
+            leftAmplitude += ampStepLeft
+            rightAmplitude += ampStepRight
+            // ===== КОНЕЦ ОПТИМИЗАЦИИ =====
+            
+            // ОПТИМИЗАЦИЯ: Оптимизированное ветвление для swap
+            val swapForSample = if (channelSwapEnabled) {
                 if (swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) {
                     localChannelsSwapped
                 } else {
@@ -943,8 +1001,9 @@ class BinauralAudioEngine(private val context: Context) {
                 val leftNormalized = minFreq / leftFreq
                 val rightNormalized = minFreq / rightFreq
 
-                leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
-                rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
+                // ОПТИМИЗАЦИЯ: Используем fastPow вместо Math.pow
+                leftAmplitude = fastPow(leftNormalized, strength.toDouble())
+                rightAmplitude = fastPow(rightNormalized, strength.toDouble())
             }
             com.binaural.core.audio.model.NormalizationType.TEMPORAL -> {
                 // Временная нормализация (уравнивание громкости во времени)
@@ -960,40 +1019,41 @@ class BinauralAudioEngine(private val context: Context) {
                 
                 val curve = config.frequencyCurve
                 
-                // Находим минимальные и максимальные частоты для каждого канала по всему графику
-                // Нижний канал (левый): carrier - beat/2
-                val minLowerFreq = curve.points.minOf { point ->
-                    (point.carrierFrequency - point.beatFrequency / 2.0).coerceAtLeast(0.0)
-                }
-                val maxLowerFreq = curve.points.maxOf { point ->
-                    point.carrierFrequency - point.beatFrequency / 2.0
-                }
-                
-                // Верхний канал (правый): carrier + beat/2
-                val minUpperFreq = curve.points.minOf { point ->
-                    point.carrierFrequency + point.beatFrequency / 2.0
-                }
-                val maxUpperFreq = curve.points.maxOf { point ->
-                    point.carrierFrequency + point.beatFrequency / 2.0
+                // ОПТИМИЗАЦИЯ: Кэшируем min/max частоты для кривой
+                // Вычисляем только если кривая изменилась (по хешу)
+                val curveHash = curve.hashCode()
+                if (curveHash != cachedCurveHash) {
+                    // Нижний канал (левый): carrier - beat/2
+                    cachedMinLowerFreq = curve.points.minOf { point ->
+                        (point.carrierFrequency - point.beatFrequency / 2.0).coerceAtLeast(0.0)
+                    }
+                    cachedMaxLowerFreq = curve.points.maxOf { point ->
+                        point.carrierFrequency - point.beatFrequency / 2.0
+                    }
+                    
+                    // Верхний канал (правый): carrier + beat/2
+                    cachedMinUpperFreq = curve.points.minOf { point ->
+                        point.carrierFrequency + point.beatFrequency / 2.0
+                    }
+                    cachedMaxUpperFreq = curve.points.maxOf { point ->
+                        point.carrierFrequency + point.beatFrequency / 2.0
+                    }
+                    cachedCurveHash = curveHash
                 }
                 
                 // Рассчитываем коэффициенты по фактическим частотам в текущий момент
                 // coeff = minFreq / currentFreq
                 // Это даёт 1.0 на минимальной частоте и min/max на максимальной
-                val leftNormalized = if (leftFreq > 0) minLowerFreq / leftFreq else 1.0
-                val rightNormalized = if (rightFreq > 0) minUpperFreq / rightFreq else 1.0
+                val leftNormalized = if (leftFreq > 0) cachedMinLowerFreq / leftFreq else 1.0
+                val rightNormalized = if (rightFreq > 0) cachedMinUpperFreq / rightFreq else 1.0
                 
                 // Применяем strength (экспоненциально)
                 // strength = 0: без нормализации (всё 1.0)
                 // strength = 1: полная нормализация
                 // strength > 1: усиленный эффект
-                leftAmplitude = Math.pow(leftNormalized, strength.toDouble())
-                rightAmplitude = Math.pow(rightNormalized, strength.toDouble())
-                
-                // Логирование для отладки (можно убрать в релизе)
-                // Диапазон: leftFreq в [minLowerFreq, maxLowerFreq]
-                //           rightFreq в [minUpperFreq, maxUpperFreq]
-                // Амплитуды: от 1.0 (на min) до min/max (на max)
+                // ОПТИМИЗАЦИЯ: Используем fastPow вместо Math.pow
+                leftAmplitude = fastPow(leftNormalized, strength.toDouble())
+                rightAmplitude = fastPow(rightNormalized, strength.toDouble())
             }
         }
 
