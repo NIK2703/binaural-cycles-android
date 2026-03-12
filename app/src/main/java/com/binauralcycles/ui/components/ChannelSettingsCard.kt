@@ -299,40 +299,15 @@ fun PresetSettingsCard(
 fun AppSettingsCard(
     sampleRate: SampleRate,
     frequencyUpdateIntervalMs: Int,
-    wavetableOptimizationEnabled: Boolean,
-    wavetableSize: Int,
     autoExpandGraphRange: Boolean,
-    useNativeEngine: Boolean,
     onSampleRateChange: (SampleRate) -> Unit,
     onFrequencyUpdateIntervalChange: (Int) -> Unit,
-    onWavetableOptimizationChange: (Boolean) -> Unit,
-    onWavetableSizeChange: (Int) -> Unit,
-    onAutoExpandGraphRangeChange: (Boolean) -> Unit,
-    onUseNativeEngineChange: (Boolean) -> Unit
+    onAutoExpandGraphRangeChange: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Нативный движок (C++)
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.native_engine)) },
-            supportingContent = {
-                Text(
-                    if (useNativeEngine) stringResource(R.string.native_engine_enabled_desc)
-                    else stringResource(R.string.native_engine_disabled_desc)
-                )
-            },
-            trailingContent = {
-                Switch(
-                    checked = useNativeEngine,
-                    onCheckedChange = onUseNativeEngineChange
-                )
-            }
-        )
-        
-        HorizontalDivider()
-        
         // Автоматическое расширение границ графика
         ListItem(
             headlineContent = { Text(stringResource(R.string.auto_expand_graph_range)) },
@@ -350,44 +325,6 @@ fun AppSettingsCard(
             }
         )
         
-        HorizontalDivider()
-        
-        // Wavetable оптимизация
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.wavetable_optimization)) },
-            supportingContent = {
-                Text(
-                    if (wavetableOptimizationEnabled) stringResource(R.string.wavetable_optimization_enabled_desc)
-                    else stringResource(R.string.wavetable_optimization_disabled_desc)
-                )
-            },
-            trailingContent = {
-                Switch(
-                    checked = wavetableOptimizationEnabled,
-                    onCheckedChange = onWavetableOptimizationChange
-                )
-            }
-        )
-
-        // Размер таблицы волн (показываем только когда оптимизация включена)
-        if (wavetableOptimizationEnabled) {
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                DiscreteSliderWavetableSize(
-                    label = stringResource(R.string.wavetable_size),
-                    value = wavetableSize,
-                    values = listOf(512, 1024, 2048, 4096),
-                    valueLabel = formatWavetableSize(wavetableSize),
-                    onValueChange = onWavetableSizeChange,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Text(
-                    text = stringResource(R.string.wavetable_size_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-        }
-
         HorizontalDivider()
 
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
