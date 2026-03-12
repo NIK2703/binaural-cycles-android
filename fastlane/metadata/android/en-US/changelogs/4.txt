@@ -1,0 +1,7 @@
+- Native C++ audio engine with NEON SIMD optimization
+- Zero-copy audio generation via DirectByteBuffer
+- Adaptive frequency update interval for battery saving
+- Battery Saver mode support (3x interval increase)
+- Native interpolation for UI graphs
+- Improved fade-out timing
+- Removed wavetable settings (always optimized now)
