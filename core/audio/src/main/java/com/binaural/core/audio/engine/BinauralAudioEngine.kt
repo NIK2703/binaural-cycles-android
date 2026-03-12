@@ -546,22 +546,19 @@ class BinauralAudioEngine(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             currentFadeVolume = getVolumeFromShaper()
             
-            // Используем полную длительность fade для корректного затухания до нуля
-            // Добавляем небольшой запас (50ms) для гарантированного завершения
             val adjustedDuration = if (currentFadeVolume <= MIN_VOLUME) {
                 0L
             } else {
-                durationMs.coerceAtLeast(50)
+                (durationMs * currentFadeVolume).toLong().coerceAtLeast(50)
             }
             
-            createVolumeShaper(adjustedDuration, targetVolume = 0.0f)
+            createVolumeShaper(durationMs, targetVolume = 0.0f)
             startVolumeShaper()
             
             if (adjustedDuration == 0L) {
                 audioHandler?.post(callback)
             } else {
-                // Добавляем запас 50ms для гарантированного завершения fade
-                audioHandler?.postDelayed(callback, adjustedDuration + 50)
+                audioHandler?.postDelayed(callback, adjustedDuration)
             }
         } else {
             callback()
@@ -639,8 +636,7 @@ class BinauralAudioEngine(private val context: Context) {
                     return
                 }
                 
-                // Используем полную длительность fade для корректного затухания до нуля
-                val adjustedDuration = durationMs.coerceAtLeast(50)
+                val adjustedDuration = (durationMs * startVolume).toLong().coerceAtLeast(50)
                 
                 volumeShaper?.close()
                 volumeShaper = null
@@ -662,13 +658,12 @@ class BinauralAudioEngine(private val context: Context) {
                     fadeTargetVolume = 0.0f
                     isFadeInProgress = true
                     
-                    // Добавляем запас 100ms для гарантированного завершения fade и проигрывания буфера
                     audioHandler?.postDelayed({
                         if (isActive.get()) {
                             isActive.set(false)
                             stopPlayback()
                         }
-                    }, adjustedDuration + 100)
+                    }, adjustedDuration + 50)
                 } else {
                     isActive.set(false)
                     audioHandler?.post(::stopPlayback)
@@ -685,15 +680,7 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun stopPlayback() {
-        // Гарантируем нулевую громкость перед остановкой для предотвращения щелчка
-        try {
-            audioTrack?.setVolume(0.0f)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting volume to 0: ${e.message}")
-        }
-        
-        // Небольшая пауза для проигрывания оставшихся сэмплов в буфере
-        Thread.sleep(10)
+        val finalVolume = getVolumeFromShaper()
         
         audioTrack?.stop()
         audioTrack?.release()
@@ -702,7 +689,7 @@ class BinauralAudioEngine(private val context: Context) {
         volumeShaper = null
         isFadeInProgress = false
         
-        currentFadeVolume = 0.0f
+        currentFadeVolume = if (finalVolume < 0.05f) 0.0f else finalVolume
         
         releaseWakeLock()
         resetState()
@@ -714,15 +701,7 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun cleanupPlayback() {
-        // Гарантируем нулевую громкость перед остановкой для предотвращения щелчка
-        try {
-            audioTrack?.setVolume(0.0f)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error setting volume to 0: ${e.message}")
-        }
-        
-        // Небольшая пауза для проигрывания оставшихся сэмплов в буфере
-        Thread.sleep(10)
+        currentFadeVolume = getVolumeFromShaper()
         
         audioTrack?.stop()
         audioTrack?.release()
@@ -736,7 +715,6 @@ class BinauralAudioEngine(private val context: Context) {
         isFadeInProgress = false
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
-        currentFadeVolume = 0.0f
         
         Log.d(TAG, "cleanupPlayback() completed")
     }
