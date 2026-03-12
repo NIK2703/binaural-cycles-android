@@ -3,6 +3,10 @@
 #include <algorithm>
 #include <android/log.h>
 
+#ifdef USE_NEON
+#include <arm_neon.h>
+#endif
+
 #define LOG_TAG "BinauralEngine"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
@@ -15,6 +19,12 @@ BinauralEngine::BinauralEngine() {
     // Это обеспечивает оптимальный баланс между отзывчивостью UI
     // и энергоэффективностью (меньше прерываний)
     m_frequencyUpdateIntervalMs = 10000;
+    
+#ifdef USE_NEON
+    LOGD("BinauralEngine initialized with NEON SIMD optimization");
+#else
+    LOGD("BinauralEngine initialized (scalar mode)");
+#endif
 }
 
 BinauralEngine::~BinauralEngine() = default;
@@ -62,11 +72,32 @@ int BinauralEngine::getRecommendedBufferSize() const {
 }
 
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
-    // Получаем текущее время суток
+    // Thread-safe получение текущего времени суток
+    // Используем chrono вместо localtime для избежания mutex contention
     auto now = std::chrono::system_clock::now();
-    auto time_t = std::chrono::system_clock::to_time_t(now);
-    struct tm* tm_info = localtime(&time_t);
-    return tm_info->tm_hour * 3600 + tm_info->tm_min * 60 + tm_info->tm_sec;
+    auto duration = now.time_since_epoch();
+    
+    // Получаем секунды с начала эпохи Unix
+    auto totalSeconds = std::chrono::duration_cast<std::chrono::seconds>(duration).count();
+    
+    // Конвертируем в секунды с начала суток (86400 секунд в сутках)
+    // Используем арифметику вместо localtime для thread-safety
+    constexpr int32_t SECONDS_PER_DAY = 86400;
+    int32_t timeOfDay = static_cast<int32_t>(totalSeconds % SECONDS_PER_DAY);
+    
+    // Учитываем временную зону (UTC+6 для Omsk, Asia/Omsk)
+    // Для production нужно получать timezone из системы, но это требует thread-safe подхода
+    // Здесь используем упрощённый вариант - localtime_r если доступен
+#ifdef __ANDROID__
+    // На Android используем localtime_r (thread-safe версия)
+    time_t time = std::chrono::system_clock::to_time_t(now);
+    struct tm tm_info;
+    localtime_r(&time, &tm_info);
+    return tm_info.tm_hour * 3600 + tm_info.tm_min * 60 + tm_info.tm_sec;
+#else
+    // Fallback: используем UTC (для тестирования)
+    return timeOfDay;
+#endif
 }
 
 void BinauralEngine::updateElapsedTime() {
@@ -103,7 +134,18 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         config = m_config;
     }
     
-    // Передаём интервал обновления частот для точной интерполяции
+    // Используем NEON-оптимизированную версию если доступна
+#ifdef USE_NEON
+    GenerateResult result = m_generator.generateBufferNeon(
+        buffer,
+        samplesPerChannel,
+        config,
+        m_state,
+        timeSeconds,
+        elapsedMs,
+        frequencyUpdateIntervalMs
+    );
+#else
     GenerateResult result = m_generator.generateBuffer(
         buffer,
         samplesPerChannel,
@@ -113,17 +155,21 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         elapsedMs,
         frequencyUpdateIntervalMs
     );
+#endif
     
     // Обновляем атомарные значения для Java
-    if (result.currentBeatFreq != m_currentBeatFreq.load()) {
-        m_currentBeatFreq.store(result.currentBeatFreq);
+    // ОПТИМИЗАЦИЯ: callback вызываем только при реальном изменении
+    const double prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq);
+    m_currentCarrierFreq.store(result.currentCarrierFreq);
+    
+    // Callback только при значительном изменении частоты (> 0.1 Hz)
+    if (std::abs(result.currentBeatFreq - prevBeatFreq) > 0.1) {
         if (m_callbacks.onFrequencyChanged) {
             m_callbacks.onFrequencyChanged(result.currentBeatFreq, result.currentCarrierFreq);
         }
     }
-    m_currentCarrierFreq.store(result.currentCarrierFreq);
     
-    // Уведомляем о перестановке каналов
+    // Уведомляем о перестановке каналов (редкое событие)
     if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
