@@ -3,8 +3,7 @@ package com.binauralcycles.ui.screens
 import androidx.compose.animation.AnimatedVisibilityScope
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionScope
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,11 +13,16 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.geometry.Offset
 import com.binauralcycles.ui.components.MiniFrequencyGraph
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
@@ -160,7 +164,7 @@ private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
     return currentTime
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalSharedTransitionApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 private fun PresetCard(
     presetId: String,
@@ -181,9 +185,16 @@ private fun PresetCard(
 ) {
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showDropdownMenu by remember { mutableStateOf(false) }
-
-    // Удаляем внутреннюю корутину - время приходит от родителя (оптимизация)
     
+    // Позиция долгого нажатия для центрирования меню
+    var longPressOffset by remember { mutableStateOf(Offset.Zero) }
+    
+    // Ширина карточки и меню для расчёта смещения
+    var cardWidth by remember { mutableStateOf(0) }
+    var menuWidth by remember { mutableStateOf(0) }
+    
+    val density = LocalDensity.current
+
     Box(
         modifier = Modifier.fillMaxWidth()
     ) {
@@ -199,10 +210,18 @@ private fun PresetCard(
                         animatedVisibilityScope = animatedVisibilityScope,
                         clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.large)
                     )
-                    .combinedClickable(
-                        onClick = onPlayClick,
-                        onLongClick = { showDropdownMenu = true }
-                    ),
+                    .onGloballyPositioned { coordinates ->
+                        cardWidth = coordinates.size.width
+                    }
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { onPlayClick() },
+                            onLongPress = { offset ->
+                                longPressOffset = offset
+                                showDropdownMenu = true
+                            }
+                        )
+                    },
                 colors = CardDefaults.cardColors(
                     containerColor = if (isActive)
                         MaterialTheme.colorScheme.secondaryContainer
@@ -241,11 +260,23 @@ private fun PresetCard(
             }
         }
         
-        // Контекстное меню (сверху справа над карточкой)
+        // Контекстное меню (по центру от позиции долгого нажатия)
+        // Рассчитываем смещение по горизонтали, чтобы меню было центрировано относительно позиции нажатия
+        val menuOffsetX = if (cardWidth > 0 && menuWidth > 0) {
+            with(density) {
+                // Позиция нажатия относительно левого края карточки минус половина ширины меню
+                // DropdownMenu anchor находится слева, поэтому смещение = x - menuWidth/2
+                (longPressOffset.x - menuWidth / 2f).toInt()
+            }
+        } else 0
+        
         DropdownMenu(
             expanded = showDropdownMenu,
             onDismissRequest = { showDropdownMenu = false },
-            modifier = Modifier.align(Alignment.TopEnd)
+            modifier = Modifier.onGloballyPositioned { coordinates ->
+                menuWidth = coordinates.size.width
+            },
+            offset = DpOffset(with(density) { menuOffsetX.toDp() }, 0.dp)
         ) {
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.edit)) },
