@@ -421,17 +421,6 @@ class BinauralPlaybackService : Service() {
         audioEngine?.setFrequencyUpdateInterval(intervalMs)
     }
 
-    fun setWavetableOptimizationEnabled(enabled: Boolean) {
-        audioEngine?.setWavetableOptimizationEnabled(enabled)
-    }
-
-    fun setWavetableSize(size: Int) {
-        audioEngine?.setWavetableSize(size)
-    }
-    
-    fun setUseNativeEngine(enabled: Boolean) {
-        audioEngine?.setUseNativeEngine(enabled)
-    }
     
     fun getFrequencyUpdateInterval(): Int {
         return audioEngine?.getFrequencyUpdateInterval() ?: 100

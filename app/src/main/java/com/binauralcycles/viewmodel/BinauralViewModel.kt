@@ -59,13 +59,8 @@ data class BinauralUiState(
     // Общие настройки приложения
     val sampleRate: SampleRate = SampleRate.LOW,
     val frequencyUpdateIntervalMs: Int = 10000,
-    // Wavetable оптимизация (быстрая генерация синусоид с линейной интерполяцией)
-    val wavetableOptimizationEnabled: Boolean = true,
-    val wavetableSize: Int = 2048,
     // Автоматическое расширение границ графика при редактировании
     val autoExpandGraphRange: Boolean = false,
-    // Использовать нативный движок (C++)
-    val useNativeEngine: Boolean = false,
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false
 )
@@ -181,22 +176,6 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.setFrequencyUpdateInterval(interval)
             }
         }
-        // Wavetable оптимизация
-        viewModelScope.launch {
-            preferencesRepository.getWavetableOptimizationEnabled().collect { enabled ->
-                _uiState.update { it.copy(wavetableOptimizationEnabled = enabled) }
-                // Передаём в сервис для применения в аудио-движке
-                playbackService?.setWavetableOptimizationEnabled(enabled)
-            }
-        }
-        // Размер таблицы волн
-        viewModelScope.launch {
-            preferencesRepository.getWavetableSize().collect { size ->
-                _uiState.update { it.copy(wavetableSize = size) }
-                // Передаём в сервис для применения в аудио-движке
-                playbackService?.setWavetableSize(size)
-            }
-        }
         // Громкость
         viewModelScope.launch {
             preferencesRepository.getVolume().collect { volume ->
@@ -208,13 +187,6 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getAutoExpandGraphRange().collect { autoExpand ->
                 _uiState.update { it.copy(autoExpandGraphRange = autoExpand) }
-            }
-        }
-        // Нативный движок
-        viewModelScope.launch {
-            preferencesRepository.getUseNativeEngine().collect { useNative ->
-                _uiState.update { it.copy(useNativeEngine = useNative) }
-                playbackService?.setUseNativeEngine(useNative)
             }
         }
     }
@@ -989,34 +961,10 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    fun setWavetableOptimizationEnabled(enabled: Boolean) {
-        _uiState.update { it.copy(wavetableOptimizationEnabled = enabled) }
-        playbackService?.setWavetableOptimizationEnabled(enabled)
-        viewModelScope.launch {
-            preferencesRepository.saveWavetableOptimizationEnabled(enabled)
-        }
-    }
-
-    fun setWavetableSize(size: Int) {
-        _uiState.update { it.copy(wavetableSize = size) }
-        playbackService?.setWavetableSize(size)
-        viewModelScope.launch {
-            preferencesRepository.saveWavetableSize(size)
-        }
-    }
-
     fun setAutoExpandGraphRange(enabled: Boolean) {
         _uiState.update { it.copy(autoExpandGraphRange = enabled) }
         viewModelScope.launch {
             preferencesRepository.saveAutoExpandGraphRange(enabled)
-        }
-    }
-
-    fun setUseNativeEngine(enabled: Boolean) {
-        _uiState.update { it.copy(useNativeEngine = enabled) }
-        playbackService?.setUseNativeEngine(enabled)
-        viewModelScope.launch {
-            preferencesRepository.saveUseNativeEngine(enabled)
         }
     }
 
