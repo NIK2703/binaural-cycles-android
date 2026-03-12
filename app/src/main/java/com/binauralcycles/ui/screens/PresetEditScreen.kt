@@ -13,8 +13,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import com.binauralcycles.ui.components.*
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binauralcycles.R
@@ -98,8 +101,12 @@ fun PresetEditScreen(
         }
     }
     
+    // Очистка фокуса при скрытии клавиатуры
+    val focusManager = LocalFocusManager.current
+    
     // Обработка системной кнопки "назад"
     BackHandler(enabled = true) {
+        focusManager.clearFocus()
         navigateBackWithCheck()
     }
     
@@ -111,7 +118,10 @@ fun PresetEditScreen(
                         Text(if (presetId == null) stringResource(R.string.new_preset) else stringResource(R.string.edit_preset)) 
                     },
                     navigationIcon = {
-                        IconButton(onClick = { navigateBackWithCheck() }) {
+                        IconButton(onClick = { 
+                            focusManager.clearFocus()
+                            navigateBackWithCheck() 
+                        }) {
                             Icon(Icons.Default.ArrowBack, contentDescription = stringResource(R.string.back))
                         }
                     },
@@ -146,6 +156,11 @@ fun PresetEditScreen(
                         ),
                         animatedVisibilityScope = animatedVisibilityScope
                     )
+                    .pointerInput(Unit) {
+                        detectTapGestures(onTap = {
+                            focusManager.clearFocus()
+                        })
+                    }
                     .padding(horizontal = 16.dp)
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -216,6 +231,7 @@ fun PresetEditScreen(
                             autoExpandGraphRange = uiState.autoExpandGraphRange,
                             onCarrierFrequencyChange = { viewModel.updateEditingPointCarrierFrequency(it) },
                             onBeatFrequencyChange = { viewModel.updateEditingPointBeatFrequency(it) },
+                            onTimeChange = { viewModel.updateEditingPointTimeDirect(uiState.selectedPointIndex!!, it) },
                             onRemove = { viewModel.removeEditingPoint(uiState.selectedPointIndex!!) },
                             onDeselect = { viewModel.deselectPoint() }
                         )

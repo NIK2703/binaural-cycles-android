@@ -29,6 +29,7 @@ import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.ui.theme.BeatFrequencyColor
 import com.binaural.core.ui.theme.CarrierFrequencyColor
 import com.binauralcycles.R
+import kotlinx.datetime.LocalTime
 import java.util.Locale
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
@@ -40,6 +41,55 @@ private fun parseFrequency(value: String): Double? {
     return value.replace(',', '.').toDoubleOrNull()
 }
 
+/**
+ * Ограничивает ввод частоты: максимум 4 знака в целой части и 2 в дробной
+ * Разрешает только одну точку или запятую как разделитель
+ * Убирает ведущие нули в целой части (кроме случая "0.xxx")
+ */
+private fun limitFrequencyInput(value: String): String {
+    // Находим позицию первого разделителя (точки или запятой)
+    val firstDotIndex = value.indexOf('.')
+    val firstCommaIndex = value.indexOf(',')
+    
+    // Определяем позицию первого разделителя
+    val separatorIndex = when {
+        firstDotIndex == -1 && firstCommaIndex == -1 -> -1
+        firstDotIndex == -1 -> firstCommaIndex
+        firstCommaIndex == -1 -> firstDotIndex
+        else -> minOf(firstDotIndex, firstCommaIndex)
+    }
+    
+    return if (separatorIndex == -1) {
+        // Нет разделителя - только целая часть, максимум 4 цифры
+        val digits = value.filter { it.isDigit() }.take(4)
+        // Убираем ведущие нули, но оставляем один ноль если всё число состоит из нулей
+        digits.trimLeadingZeros()
+    } else {
+        // Есть разделитель - разбиваем на целую и дробную части
+        val integerPart = value.substring(0, separatorIndex).filter { it.isDigit() }.take(4)
+        val decimalPart = value.substring(separatorIndex + 1).filter { it.isDigit() }.take(2)
+        
+        // Убираем ведущие нули в целой части, но оставляем один ноль для чисел вида "0.xxx"
+        val normalizedInteger = integerPart.trimLeadingZeros()
+        
+        // Собираем результат с точкой как разделителем
+        // Всегда сохраняем точку, даже если дробная часть пуста (пользователь продолжает ввод)
+        if (decimalPart.isEmpty()) {
+            "$normalizedInteger."
+        } else {
+            "$normalizedInteger.$decimalPart"
+        }
+    }
+}
+
+/**
+ * Убирает ведущие нули из строки цифр, но оставляет один ноль если строка пустая или состоит только из нулей
+ */
+private fun String.trimLeadingZeros(): String {
+    val trimmed = this.trimStart('0')
+    return if (trimmed.isEmpty()) "0" else trimmed
+}
+
 @Composable
 fun PointEditor(
     point: FrequencyPoint,
@@ -48,6 +98,7 @@ fun PointEditor(
     autoExpandGraphRange: Boolean,
     onCarrierFrequencyChange: (Double) -> Unit,
     onBeatFrequencyChange: (Double) -> Unit,
+    onTimeChange: (LocalTime) -> Unit,
     onRemove: () -> Unit,
     onDeselect: () -> Unit
 ) {
@@ -150,7 +201,24 @@ fun PointEditor(
     val carrierLabel = stringResource(R.string.carrier_tone_frequency)
     val beatsLabel = stringResource(R.string.beat_frequency_full)
     val hzLabel = stringResource(R.string.hz)
-
+    
+    // Состояние для редактирования времени
+    var tempHours by remember(point.time.hour) { mutableStateOf(point.time.hour.toString().padStart(2, '0')) }
+    var tempMinutes by remember(point.time.minute) { mutableStateOf(point.time.minute.toString().padStart(2, '0')) }
+    
+    // Focus requesters для полей времени
+    val hoursFocusRequester = remember { FocusRequester() }
+    val minutesFocusRequester = remember { FocusRequester() }
+    var hoursWasFocused by remember { mutableStateOf(false) }
+    var minutesWasFocused by remember { mutableStateOf(false) }
+    
+    // Функция валидации и сохранения времени
+    fun validateAndSaveTime() {
+        val hours = tempHours.toIntOrNull()?.coerceIn(0, 23) ?: point.time.hour
+        val minutes = tempMinutes.toIntOrNull()?.coerceIn(0, 59) ?: point.time.minute
+        onTimeChange(LocalTime(hours, minutes))
+    }
+    
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -164,11 +232,123 @@ fun PointEditor(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "$pointLabel: %02d:%02d".format(point.time.hour, point.time.minute),
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
+                // Текст "Точка:" и поля ввода времени
+                Row(
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "$pointLabel:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    
+                    // Поле ввода часов
+                    BasicTextField(
+                        value = tempHours,
+                        onValueChange = { newValue ->
+                            val filtered = newValue.filter { it.isDigit() }.take(2)
+                            tempHours = filtered
+                            // Автопереход на минуты при вводе 2 цифр
+                            if (filtered.length == 2) {
+                                minutesFocusRequester.requestFocus()
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Next
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onNext = { minutesFocusRequester.requestFocus() }
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .width(32.dp)
+                            .focusRequester(hoursFocusRequester)
+                            .onFocusEvent { focusState ->
+                                if (focusState.isFocused) {
+                                    hoursWasFocused = true
+                                } else if (hoursWasFocused) {
+                                    hoursWasFocused = false
+                                    // Валидация при потере фокуса
+                                    val hours = tempHours.toIntOrNull()
+                                    if (hours == null || hours !in 0..23) {
+                                        tempHours = point.time.hour.toString().padStart(2, '0')
+                                    } else {
+                                        tempHours = hours.toString().padStart(2, '0')
+                                    }
+                                    validateAndSaveTime()
+                                }
+                            }
+                            .clip(MaterialTheme.shapes.small)
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        textStyle = MaterialTheme.typography.titleSmall.copy(
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary)
+                    )
+                    
+                    Text(
+                        text = ":",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 2.dp)
+                    )
+                    
+                    // Поле ввода минут
+                    BasicTextField(
+                        value = tempMinutes,
+                        onValueChange = { newValue ->
+                            tempMinutes = newValue.filter { it.isDigit() }.take(2)
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number,
+                            imeAction = ImeAction.Done
+                        ),
+                        keyboardActions = KeyboardActions(
+                            onDone = {
+                                val minutes = tempMinutes.toIntOrNull()
+                                if (minutes == null || minutes !in 0..59) {
+                                    tempMinutes = point.time.minute.toString().padStart(2, '0')
+                                } else {
+                                    tempMinutes = minutes.toString().padStart(2, '0')
+                                }
+                                validateAndSaveTime()
+                                keyboardController?.hide()
+                                focusManager.clearFocus()
+                            }
+                        ),
+                        singleLine = true,
+                        modifier = Modifier
+                            .width(32.dp)
+                            .focusRequester(minutesFocusRequester)
+                            .onFocusEvent { focusState ->
+                                if (focusState.isFocused) {
+                                    minutesWasFocused = true
+                                } else if (minutesWasFocused) {
+                                    minutesWasFocused = false
+                                    // Валидация при потере фокуса
+                                    val minutes = tempMinutes.toIntOrNull()
+                                    if (minutes == null || minutes !in 0..59) {
+                                        tempMinutes = point.time.minute.toString().padStart(2, '0')
+                                    } else {
+                                        tempMinutes = minutes.toString().padStart(2, '0')
+                                    }
+                                    validateAndSaveTime()
+                                }
+                            }
+                            .clip(MaterialTheme.shapes.small)
+                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
+                        textStyle = MaterialTheme.typography.titleSmall.copy(
+                            textAlign = TextAlign.Center,
+                            color = MaterialTheme.colorScheme.onSurface
+                        ),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary)
+                    )
+                }
                 
                 Row {
                     IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
@@ -194,7 +374,7 @@ fun PointEditor(
             // Несущая частота - подпись
             Text(
                 "$carrierLabel:",
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.titleSmall,
                 color = CarrierFrequencyColor
             )
             
@@ -208,7 +388,7 @@ fun PointEditor(
                 BasicTextField(
                     value = tempCarrierFrequency,
                     onValueChange = { newValue ->
-                        tempCarrierFrequency = newValue
+                        tempCarrierFrequency = limitFrequencyInput(newValue)
                     },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal,
@@ -231,7 +411,7 @@ fun PointEditor(
                     ),
                     singleLine = true,
                     modifier = Modifier
-                        .width(48.dp)
+                        .width(60.dp)
                         .focusRequester(carrierFocusRequester)
                         .onFocusEvent { focusState ->
                             if (focusState.isFocused) {
@@ -257,7 +437,7 @@ fun PointEditor(
                                 MaterialTheme.colorScheme.surfaceContainerHighest
                         )
                         .padding(horizontal = 4.dp, vertical = 4.dp),
-                    textStyle = MaterialTheme.typography.labelSmall.copy(
+                    textStyle = MaterialTheme.typography.titleSmall.copy(
                         textAlign = TextAlign.End,
                         color = if (!isCarrierValid && tempCarrierFrequency.isNotEmpty())
                             MaterialTheme.colorScheme.error
@@ -269,7 +449,7 @@ fun PointEditor(
                 
                 Text(
                     text = hzLabel,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp)
                 )
@@ -296,7 +476,7 @@ fun PointEditor(
             // Частота биений - подпись
             Text(
                 "$beatsLabel:",
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.titleSmall,
                 color = BeatFrequencyColor
             )
             
@@ -310,7 +490,7 @@ fun PointEditor(
                 BasicTextField(
                     value = tempBeatFrequency,
                     onValueChange = { newValue ->
-                        tempBeatFrequency = newValue
+                        tempBeatFrequency = limitFrequencyInput(newValue)
                     },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal,
@@ -332,7 +512,7 @@ fun PointEditor(
                     ),
                     singleLine = true,
                     modifier = Modifier
-                        .width(48.dp)
+                        .width(60.dp)
                         .focusRequester(beatFocusRequester)
                         .onFocusEvent { focusState ->
                             if (focusState.isFocused) {
@@ -358,7 +538,7 @@ fun PointEditor(
                                 MaterialTheme.colorScheme.surfaceContainerHighest
                         )
                         .padding(horizontal = 4.dp, vertical = 4.dp),
-                    textStyle = MaterialTheme.typography.labelSmall.copy(
+                    textStyle = MaterialTheme.typography.titleSmall.copy(
                         textAlign = TextAlign.End,
                         color = if (!isBeatValid && tempBeatFrequency.isNotEmpty())
                             MaterialTheme.colorScheme.error
@@ -370,7 +550,7 @@ fun PointEditor(
                 
                 Text(
                     text = hzLabel,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(start = 4.dp)
                 )
