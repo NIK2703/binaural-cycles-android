@@ -11,6 +11,10 @@ namespace binaural {
 BinauralEngine::BinauralEngine() {
     // Инициализация конфигурации по умолчанию
     m_config.curve.updateCache();
+    // Интервал обновления частот по умолчанию - 10 секунд
+    // Это обеспечивает оптимальный баланс между отзывчивостью UI
+    // и энергоэффективностью (меньше прерываний)
+    m_frequencyUpdateIntervalMs = 10000;
 }
 
 BinauralEngine::~BinauralEngine() = default;
@@ -48,6 +52,13 @@ void BinauralEngine::resetState() {
     m_elapsedSeconds.store(0);
     m_currentBeatFreq.store(0.0);
     m_currentCarrierFreq.store(0.0);
+}
+
+int BinauralEngine::getRecommendedBufferSize() const {
+    // Вычисляем размер буфера на основе интервала обновления частот
+    // samplesPerChannel = sampleRate * intervalMs / 1000
+    int sampleRate = m_generator.getSampleRate();
+    return (sampleRate * m_frequencyUpdateIntervalMs) / 1000;
 }
 
 int32_t BinauralEngine::getCurrentTimeSeconds() const {

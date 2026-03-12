@@ -63,6 +63,9 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         volumeNormalizationStrength: Float
     )
     private external fun nativeSetSampleRate(sampleRate: Int)
+    private external fun nativeSetFrequencyUpdateInterval(intervalMs: Int)
+    private external fun nativeGetFrequencyUpdateInterval(): Int
+    private external fun nativeGetRecommendedBufferSize(): Int
     private external fun nativeResetState()
     private external fun nativeSetPlaying(playing: Boolean)
     private external fun nativeSetPlaybackStartTime(startTimeMs: Long)
@@ -199,6 +202,30 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      * Проверить, переставлены ли каналы
      */
     fun isChannelsSwapped(): Boolean = nativeIsChannelsSwapped()
+    
+    /**
+     * Установить интервал обновления частот
+     * @param intervalMs интервал в миллисекундах (1000-60000)
+     * 
+     * Этот параметр определяет размер порции генерации буфера:
+     * - Большой интервал (10-60 сек): меньше прерываний, лучше энергоэффективность
+     * - Малый интервал (1-5 сек): более частое обновление UI, но выше нагрузка
+     */
+    fun setFrequencyUpdateInterval(intervalMs: Int) {
+        nativeSetFrequencyUpdateInterval(intervalMs.coerceIn(1000, 60000))
+        Log.d(TAG, "Frequency update interval set to $intervalMs ms")
+    }
+    
+    /**
+     * Получить интервал обновления частот
+     */
+    fun getFrequencyUpdateInterval(): Int = nativeGetFrequencyUpdateInterval()
+    
+    /**
+     * Получить рекомендуемый размер буфера в сэмплах на канал
+     * на основе интервала обновления частот и частоты дискретизации
+     */
+    fun getRecommendedBufferSize(): Int = nativeGetRecommendedBufferSize()
     
     // === Callback'и из C++ ===
     
