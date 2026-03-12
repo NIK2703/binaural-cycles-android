@@ -69,7 +69,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     private external fun nativeResetState()
     private external fun nativeSetPlaying(playing: Boolean)
     private external fun nativeSetPlaybackStartTime(startTimeMs: Long)
-    private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean
+    private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
     private external fun nativeGetCurrentBeatFrequency(): Double
     private external fun nativeGetCurrentCarrierFrequency(): Double
     private external fun nativeGetElapsedSeconds(): Int
@@ -177,10 +177,11 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      * Сгенерировать буфер аудио
      * @param buffer буфер для заполнения (interleaved stereo, размер = samplesPerChannel * 2)
      * @param samplesPerChannel количество сэмплов на канал
+     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
      * @return true если генерация успешна
      */
-    fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean {
-        return nativeGenerateBuffer(buffer, samplesPerChannel)
+    fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean {
+        return nativeGenerateBuffer(buffer, samplesPerChannel, frequencyUpdateIntervalMs)
     }
     
     /**

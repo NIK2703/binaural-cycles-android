@@ -51,6 +51,9 @@ class BinauralAudioEngine(private val context: Context) {
         private const val THREAD_NAME = "BinauralAudioThread"
         private const val MIN_VOLUME = 0.001f
         private const val PLAYBACK_FADE_DURATION_MS = 250L
+        
+        // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
+        private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
     }
     
     // Атомарные ссылки для потокобезопасного доступа
@@ -129,7 +132,8 @@ class BinauralAudioEngine(private val context: Context) {
      * Инициализация движка. Должна вызываться один раз при создании.
      */
     fun initialize() {
-        audioThread = HandlerThread(THREAD_NAME, Thread.MAX_PRIORITY).apply { start() }
+        // NORM_PRIORITY + 1 достаточно для аудио и лучше для энергосбережения
+        audioThread = HandlerThread(THREAD_NAME, Thread.NORM_PRIORITY + 1).apply { start() }
         audioHandler = Handler(audioThread!!.looper)
         
         // Инициализируем нативный движок
@@ -380,7 +384,7 @@ class BinauralAudioEngine(private val context: Context) {
 
             checkFadeRequests()
 
-            val success = engine.generateBuffer(audioBuffer, samplesPerChannel)
+            val success = engine.generateBuffer(audioBuffer, samplesPerChannel, currentIntervalMs)
             
             if (!success) {
                 Log.e(TAG, "Native buffer generation failed")
@@ -746,6 +750,40 @@ class BinauralAudioEngine(private val context: Context) {
     }
 
     fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
+    
+    /**
+     * Проверить, включён ли режим энергосбережения
+     */
+    fun isPowerSaveMode(): Boolean {
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        return powerManager.isPowerSaveMode
+    }
+    
+    /**
+     * Получить адаптивный интервал обновления с учётом Battery Saver
+     * В режиме энергосбережения интервал увеличивается в 3 раза
+     */
+    fun getAdaptiveFrequencyUpdateInterval(): Int {
+        val baseInterval = frequencyUpdateIntervalMs
+        return if (isPowerSaveMode()) {
+            (baseInterval * POWER_SAVE_INTERVAL_MULTIPLIER).coerceAtMost(60000)
+        } else {
+            baseInterval
+        }
+    }
+    
+    /**
+     * Применить адаптивный интервал при изменении режима энергосбережения
+     * Вызывается из сервиса при получении ACTION_POWER_SAVE_MODE_CHANGED
+     */
+    fun applyPowerSaveMode() {
+        val adaptiveInterval = getAdaptiveFrequencyUpdateInterval()
+        if (adaptiveInterval != frequencyUpdateIntervalMs) {
+            pendingFrequencyUpdateIntervalMs.set(adaptiveInterval)
+            nativeEngine?.setFrequencyUpdateInterval(adaptiveInterval)
+            Log.d(TAG, "Power save mode changed, interval adjusted to $adaptiveInterval ms")
+        }
+    }
 
     private fun acquireWakeLock() {
         try {

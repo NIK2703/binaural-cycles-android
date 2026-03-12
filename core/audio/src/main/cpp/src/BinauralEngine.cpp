@@ -84,7 +84,7 @@ void BinauralEngine::updateElapsedTime() {
     }
 }
 
-bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
+bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, int frequencyUpdateIntervalMs) {
     if (!m_isPlaying.load()) {
         return false;
     }
@@ -103,13 +103,15 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         config = m_config;
     }
     
+    // Передаём интервал обновления частот для точной интерполяции
     GenerateResult result = m_generator.generateBuffer(
         buffer,
         samplesPerChannel,
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        frequencyUpdateIntervalMs
     );
     
     // Обновляем атомарные значения для Java

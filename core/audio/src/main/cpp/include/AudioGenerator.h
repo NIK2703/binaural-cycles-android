@@ -50,6 +50,7 @@ public:
      * @param state состояние генератора (изменяется)
      * @param timeSeconds текущее время в секундах с начала суток
      * @param elapsedMs прошедшее время воспроизведения в мс
+     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
      * @return результат генерации
      */
     GenerateResult generateBuffer(
@@ -58,7 +59,8 @@ public:
         const BinauralConfig& config,
         GeneratorState& state,
         int32_t timeSeconds,
-        int64_t elapsedMs
+        int64_t elapsedMs,
+        int frequencyUpdateIntervalMs
     );
     
     /**
