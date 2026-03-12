@@ -14,7 +14,25 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
+        
+        // NDK конфигурация - только ARM архитектуры
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+        }
+        
+        externalNativeBuild {
+            cmake {
+                cppFlags += "-std=c++17 -O3 -ffast-math -funroll-loops"
+                arguments += listOf(
+                    "-DANDROID_STL=c++_shared",
+                    "-DANDROID_TOOLCHAIN=clang"
+                )
+            }
+        }
     }
+    
+    // Используем NDK, установленный в системе
+    ndkVersion = "26.2.11394342"
 
     buildTypes {
         release {
@@ -33,6 +51,14 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+    
+    // CMake конфигурация
+    externalNativeBuild {
+        cmake {
+            path = File("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 

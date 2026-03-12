@@ -429,6 +429,10 @@ class BinauralPlaybackService : Service() {
         audioEngine?.setWavetableSize(size)
     }
     
+    fun setUseNativeEngine(enabled: Boolean) {
+        audioEngine?.setUseNativeEngine(enabled)
+    }
+    
     fun getFrequencyUpdateInterval(): Int {
         return audioEngine?.getFrequencyUpdateInterval() ?: 100
     }

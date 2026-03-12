@@ -28,7 +28,6 @@ fun PresetSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
     volumeNormalizationSettings: VolumeNormalizationSettings,
     interpolationType: InterpolationType,
-    splineTension: Float,
     isChannelsSwapped: Boolean,
     currentLeftFreq: Double,
     currentRightFreq: Double,
@@ -39,8 +38,7 @@ fun PresetSettingsCard(
     onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
     onVolumeNormalizationStrengthChange: (Float) -> Unit,
     onTemporalNormalizationEnabledChange: (Boolean) -> Unit,
-    onInterpolationTypeChange: (InterpolationType) -> Unit,
-    onSplineTensionChange: (Float) -> Unit
+    onInterpolationTypeChange: (InterpolationType) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -127,42 +125,6 @@ fun PresetSettingsCard(
                         modifier = Modifier.weight(1f)
                     )
                 }
-            }
-        }
-        
-        // Слайдер натяжения для кардинального сплайна
-        if (interpolationType == InterpolationType.CARDINAL) {
-            var localTension by remember(splineTension) { mutableFloatStateOf(splineTension) }
-            
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(
-                        stringResource(R.string.spline_tension),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        String.format("%.2f", localTension),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                Slider(
-                    value = localTension,
-                    onValueChange = { localTension = it },
-                    onValueChangeFinished = {
-                        onSplineTensionChange(localTension)
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..1f
-                )
-                Text(
-                    stringResource(R.string.spline_tension_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
         }
         
@@ -340,16 +302,37 @@ fun AppSettingsCard(
     wavetableOptimizationEnabled: Boolean,
     wavetableSize: Int,
     autoExpandGraphRange: Boolean,
+    useNativeEngine: Boolean,
     onSampleRateChange: (SampleRate) -> Unit,
     onFrequencyUpdateIntervalChange: (Int) -> Unit,
     onWavetableOptimizationChange: (Boolean) -> Unit,
     onWavetableSizeChange: (Int) -> Unit,
-    onAutoExpandGraphRangeChange: (Boolean) -> Unit
+    onAutoExpandGraphRangeChange: (Boolean) -> Unit,
+    onUseNativeEngineChange: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Нативный движок (C++)
+        ListItem(
+            headlineContent = { Text(stringResource(R.string.native_engine)) },
+            supportingContent = {
+                Text(
+                    if (useNativeEngine) stringResource(R.string.native_engine_enabled_desc)
+                    else stringResource(R.string.native_engine_disabled_desc)
+                )
+            },
+            trailingContent = {
+                Switch(
+                    checked = useNativeEngine,
+                    onCheckedChange = onUseNativeEngineChange
+                )
+            }
+        )
+        
+        HorizontalDivider()
+        
         // Автоматическое расширение границ графика
         ListItem(
             headlineContent = { Text(stringResource(R.string.auto_expand_graph_range)) },

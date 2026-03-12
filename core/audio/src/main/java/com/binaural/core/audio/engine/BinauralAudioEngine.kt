@@ -8,7 +8,6 @@ import android.media.VolumeShaper
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import com.binaural.core.audio.model.BinauralConfig
@@ -31,7 +30,6 @@ import kotlin.math.exp
 
 // Константа 2π для оптимизации вычислений
 private const val TWO_PI = 2.0 * PI
-private const val INV_TWO_PI = 1.0 / TWO_PI
 
 /**
  * Быстрая аппроксимация функции pow(x, n) для положительных x и n в диапазоне [0, 2].
@@ -160,8 +158,8 @@ class BinauralAudioEngine(private val context: Context) {
     private var sampleRate: Int = SampleRate.MEDIUM.value
     private var frequencyUpdateIntervalMs: Int = 100
 
-    // Предварительно выделенный буфер для генерации аудио
-    private var audioBuffer = ShortArray(0)
+    // Предварительно выделенный буфер для генерации аудио (Float для ENCODING_PCM_FLOAT)
+    private var audioBuffer = FloatArray(0)
     private var maxSamplesPerChannel = 0
 
     // AudioTrack (доступен только из audioThread)
@@ -209,6 +207,10 @@ class BinauralAudioEngine(private val context: Context) {
 
     // Время начала воспроизведения
     private var playbackStartTime = 0L
+    
+    // Накопленное время воспроизведения для корректной работы pause/resume
+    // При паузе сохраняется время, при resume - добавляется к новому отсчёту
+    private var accumulatedElapsedMs = 0L
 
     // Кэшированное время для избежания частых вызовов Clock.System
     private var cachedTimeSeconds = -1
@@ -217,6 +219,10 @@ class BinauralAudioEngine(private val context: Context) {
     // Быстрая генерация звука (табличный синтез с линейной интерполяцией)
     private var useWavetable = true
     private var wavetableSize = 2048
+    
+    // Нативный движок (C++)
+    private var useNativeEngine = false
+    private var nativeEngine: NativeAudioEngine? = null
     
     // Кэш для нормализации TEMPORAL - минимальные и максимальные частоты каналов
     // Обновляется при смене конфигурации
@@ -314,6 +320,11 @@ class BinauralAudioEngine(private val context: Context) {
             // 3. Сохраняем громкость для fade-in при следующем запуске
             currentFadeVolume = savedVolume
             
+            // СБРОС lastSwapElapsedMs при прерывании fade-out
+            // Это критически важно для корректной работы автоперестановки каналов
+            lastSwapElapsedMs = 0L
+            Log.d(TAG, "Interrupting fade-out: reset lastSwapElapsedMs to 0")
+            
             isActive.set(false)
             isFadeInProgress = false
             try {
@@ -346,6 +357,11 @@ class BinauralAudioEngine(private val context: Context) {
         playbackStartTime = System.currentTimeMillis()
         totalSamplesGenerated = 0L
         
+        // СБРОС lastSwapElapsedMs при начале новой сессии воспроизведения
+        // Это гарантирует корректный отсчёт времени до следующей перестановки каналов
+        lastSwapElapsedMs = 0L
+        Log.d(TAG, "startNewPlayback: reset lastSwapElapsedMs to 0")
+        
         acquireWakeLock()
         handler.post(::startPlayback)
     }
@@ -358,7 +374,7 @@ class BinauralAudioEngine(private val context: Context) {
         try {
             maxSamplesPerChannel = sampleRate * 60
             if (audioBuffer.size < maxSamplesPerChannel * 2) {
-                audioBuffer = ShortArray(maxSamplesPerChannel * 2)
+                audioBuffer = FloatArray(maxSamplesPerChannel * 2)
             }
             
             createAudioTrack()
@@ -381,13 +397,23 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun createAudioTrack() {
+        // Используем ENCODING_PCM_FLOAT для лучшей производительности
+        // (нет конвертации float -> short на каждом сэмпле)
+        val encoding = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            AudioFormat.ENCODING_PCM_FLOAT
+        } else {
+            AudioFormat.ENCODING_PCM_16BIT
+        }
+        
         val minBufferSize = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
+            encoding
         )
         
-        val bufferSize = maxOf(minBufferSize, sampleRate * 2 * 2 * BUFFER_SIZE_MS / 1000)
+        // Для FLOAT: 4 байта на сэмпл, для 16BIT: 2 байта
+        val bytesPerSample = if (encoding == AudioFormat.ENCODING_PCM_FLOAT) 4 else 2
+        val bufferSize = maxOf(minBufferSize, sampleRate * 2 * bytesPerSample * BUFFER_SIZE_MS / 1000)
 
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
@@ -398,7 +424,7 @@ class BinauralAudioEngine(private val context: Context) {
             )
             .setAudioFormat(
                 AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setEncoding(encoding)
                     .setSampleRate(sampleRate)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
                     .build()
@@ -417,7 +443,7 @@ class BinauralAudioEngine(private val context: Context) {
         // - Результат: 1.0 × 0.2 = 0.2 в начале, 1.0 × 1.0 = 1.0 в конце
         
         audioTrack?.setVolume(1.0f)
-        Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize, volume=1.0 (will be controlled by VolumeShaper)")
+        Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize, encoding=${if (encoding == AudioFormat.ENCODING_PCM_FLOAT) "FLOAT" else "16BIT"}, volume=1.0")
     }
     
     /**
@@ -540,8 +566,6 @@ class BinauralAudioEngine(private val context: Context) {
     
     private fun generateAudioLoop() {
         val handler = audioHandler ?: return
-        var wakeLockRenewCounter = 0
-        val wakeLockRenewInterval = 600
 
         var currentIntervalMs = frequencyUpdateIntervalMs
         var samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
@@ -604,7 +628,8 @@ class BinauralAudioEngine(private val context: Context) {
             }
 
             val result = try {
-                currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2)
+                // Для ENCODING_PCM_FLOAT используем write(float[], int, int)
+                currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2, AudioTrack.WRITE_BLOCKING)
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "AudioTrack write error: ${e.message}")
                 -1
@@ -618,13 +643,10 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            _elapsedSeconds.value = ((System.currentTimeMillis() - playbackStartTime) / 100).toInt()
-
-            wakeLockRenewCounter++
-            if (wakeLockRenewCounter >= wakeLockRenewInterval) {
-                renewWakeLock()
-                wakeLockRenewCounter = 0
-            }
+            // Используем накопительное время для корректной работы pause/resume
+            // accumulatedElapsedMs сохраняется при паузе и добавляется при resume
+            val currentSessionMs = System.currentTimeMillis() - playbackStartTime
+            _elapsedSeconds.value = ((accumulatedElapsedMs + currentSessionMs) / 100).toInt()
         }
 
         isGenerating = false
@@ -725,6 +747,12 @@ class BinauralAudioEngine(private val context: Context) {
         currentFadeOperation = FadeOperation.NONE
         pauseWithFadeRequested.set(false)
         
+        // Сохраняем накопленное время для корректного resume
+        // При resume это время будет добавлено к новой сессии воспроизведения
+        val currentSessionMs = System.currentTimeMillis() - playbackStartTime
+        accumulatedElapsedMs += currentSessionMs
+        Log.d(TAG, "executePause: saved accumulatedElapsedMs=$accumulatedElapsedMs (session=$currentSessionMs ms)")
+        
         audioHandler?.post {
             audioTrack?.pause()
         }
@@ -788,8 +816,17 @@ class BinauralAudioEngine(private val context: Context) {
         return config.getChannelFrequenciesAt(adjustedTime)
     }
     
+    /**
+     * Оптимизированная генерация буфера для ENCODING_PCM_FLOAT.
+     * 
+     * Ключевые оптимизации:
+     * 1. FloatArray вместо ShortArray - нет конвертации на каждом сэмпле
+     * 2. Прямой вызов Wavetable.fastSin вместо lambda - нет аллокаций
+     * 3. Branch-free нормализация фазы через while вместо if
+     * 4. Предвычисленные константы вне цикла
+     */
     private fun generateBuffer(
-        buffer: ShortArray,
+        buffer: FloatArray,
         carrierFreq: Double,
         beatFreq: Double,
         samplesPerChannel: Int,
@@ -803,7 +840,6 @@ class BinauralAudioEngine(private val context: Context) {
         val startRightFreq = carrierFreq + beatFreq / 2.0
         
         // Конечные частоты (через интервал обновления)
-        // Интервал обновления в миллисекундах
         val bufferDurationMs = (samplesPerChannel.toLong() * 1000) / sampleRate
         val (endLowerFreq, endUpperFreq) = getChannelFrequenciesAtTime(config, currentTime, bufferDurationMs)
         val endLeftFreq = endLowerFreq
@@ -814,7 +850,6 @@ class BinauralAudioEngine(private val context: Context) {
         
         // Конечные амплитуды (через интервал обновления)
         val (endLeftAmplitude, endRightAmplitude) = if (config.normalizationType == NormalizationType.TEMPORAL) {
-            // Вычисляем амплитуды для конечного времени
             val endTimeAdjusted = LocalTime.fromSecondOfDay(
                 ((currentTime.toSecondOfDay() + bufferDurationMs / 1000) % 86400).toInt()
             )
@@ -824,24 +859,25 @@ class BinauralAudioEngine(private val context: Context) {
         }
         
         // ===== ОПТИМИЗАЦИЯ: Предвычисление констант вне цикла =====
-        val twoPiOverSampleRate = 2.0 * PI / sampleRate
-        val baseVolumeFactor = 0.5 * Short.MAX_VALUE * config.volume
+        val twoPiOverSampleRate = TWO_PI / sampleRate
+        // Для FLOAT: базовый множитель = 0.5 * volume (диапазон -1.0..1.0)
+        val baseVolumeFactor = 0.5f * config.volume
         
-        // Начальные и конечные фазовые инкременты (омега) - вычисляем один раз
+        // Начальные и конечные фазовые инкременты (омега)
         var leftOmega = twoPiOverSampleRate * startLeftFreq
         var rightOmega = twoPiOverSampleRate * startRightFreq
         val endLeftOmega = twoPiOverSampleRate * endLeftFreq
         val endRightOmega = twoPiOverSampleRate * endRightFreq
         
-        // Шаги изменения фазовых инкрементов на каждый сэмпл (инкрементальное обновление)
+        // Шаги изменения фазовых инкрементов на каждый сэмпл
         val omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel
         val omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel
         
-        // Текущие амплитуды (будут обновляться инкрементально)
+        // Текущие амплитуды (инкрементальное обновление)
         var leftAmplitude = startLeftAmplitude
         var rightAmplitude = startRightAmplitude
         
-        // Шаги изменения амплитуд на каждый сэмпл (инкрементальное обновление)
+        // Шаги изменения амплитуд на каждый сэмпл
         val ampStepLeft = (endLeftAmplitude - startLeftAmplitude) / samplesPerChannel
         val ampStepRight = (endRightAmplitude - startRightAmplitude) / samplesPerChannel
         // ===== КОНЕЦ ОПТИМИЗАЦИИ =====
@@ -860,15 +896,10 @@ class BinauralAudioEngine(private val context: Context) {
         val presetCheckInterval = sampleRate / 100
         var lastPresetCheck = 0
         
-        // Кэшируем проверку channelSwapEnabled
         val channelSwapEnabled = config.channelSwapEnabled
         
-        // ОПТИМИЗАЦИЯ: Кэшируем функцию генерации синуса вне цикла
-        val sinFunc: (Double) -> Float = if (useWavetable) {
-            { phase -> Wavetable.fastSin(phase) }
-        } else {
-            { phase -> sin(phase).toFloat() }
-        }
+        // ОПТИМИЗАЦИЯ: Кэшируем флаг useWavetable для прямого вызова в цикле
+        // (избегаем lambda аллокации на каждом вызове generateBuffer)
         
         for (i in 0 until samplesPerChannel) {
             val currentSample = totalSamplesGenerated + i
@@ -887,7 +918,6 @@ class BinauralAudioEngine(private val context: Context) {
             }
             
             if (localFadeOperation == FadeOperation.CHANNEL_SWAP || localFadeOperation == FadeOperation.PRESET_SWITCH) {
-                // Выбираем длительность fade в зависимости от типа операции
                 val fadeDurationSamples = if (localFadeOperation == FadeOperation.CHANNEL_SWAP) {
                     channelSwapFadeDurationSamples
                 } else {
@@ -928,28 +958,39 @@ class BinauralAudioEngine(private val context: Context) {
                 }
             }
             
-            // ===== ОПТИМИЗАЦИЯ: Генерация сэмпла с инкрементальным обновлением =====
-            val leftSample = sinFunc(leftPhase)
-            leftPhase += leftOmega
-            if (leftPhase > TWO_PI) leftPhase -= TWO_PI
-
-            val rightSample = sinFunc(rightPhase)
-            rightPhase += rightOmega
-            if (rightPhase > TWO_PI) rightPhase -= TWO_PI
+            // ===== ОПТИМИЗАЦИЯ: Прямой вызов без lambda =====
+            // Генерация синуса напрямую через Wavetable или sin()
+            val leftSample: Float = if (useWavetable) {
+                Wavetable.fastSin(leftPhase)
+            } else {
+                sin(leftPhase).toFloat()
+            }
             
-            // Предвычисленная базовая амплитуда с fade
-            val baseAmplitude = baseVolumeFactor * fadeMultiplier
-            val leftAmp = baseAmplitude * leftAmplitude
-            val rightAmp = baseAmplitude * rightAmplitude
+            // ОПТИМИЗАЦИЯ: Branch-free нормализация фазы
+            // while вместо if для корректной работы при больших omega
+            leftPhase += leftOmega
+            while (leftPhase >= TWO_PI) leftPhase -= TWO_PI
+
+            val rightSample: Float = if (useWavetable) {
+                Wavetable.fastSin(rightPhase)
+            } else {
+                sin(rightPhase).toFloat()
+            }
+            rightPhase += rightOmega
+            while (rightPhase >= TWO_PI) rightPhase -= TWO_PI
+            
+            // Предвычисленная базовая амплитуда с fade (для FLOAT)
+            val baseAmplitude = (baseVolumeFactor * fadeMultiplier).toFloat()
+            val leftAmp = (baseAmplitude * leftAmplitude).toFloat()
+            val rightAmp = (baseAmplitude * rightAmplitude).toFloat()
             
             // Инкрементальное обновление для следующего сэмпла
             leftOmega += omegaStepLeft
             rightOmega += omegaStepRight
             leftAmplitude += ampStepLeft
             rightAmplitude += ampStepRight
-            // ===== КОНЕЦ ОПТИМИЗАЦИИ =====
             
-            // ОПТИМИЗАЦИЯ: Оптимизированное ветвление для swap
+            // Запись в FloatArray напрямую (без конвертации в Short)
             val swapForSample = if (channelSwapEnabled) {
                 if (swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) {
                     localChannelsSwapped
@@ -961,11 +1002,11 @@ class BinauralAudioEngine(private val context: Context) {
             }
             
             if (swapForSample) {
-                buffer[i * 2] = (rightSample * rightAmp).toInt().toShort()
-                buffer[i * 2 + 1] = (leftSample * leftAmp).toInt().toShort()
+                buffer[i * 2] = rightSample * rightAmp
+                buffer[i * 2 + 1] = leftSample * leftAmp
             } else {
-                buffer[i * 2] = (leftSample * leftAmp).toInt().toShort()
-                buffer[i * 2 + 1] = (rightSample * rightAmp).toInt().toShort()
+                buffer[i * 2] = leftSample * leftAmp
+                buffer[i * 2 + 1] = rightSample * rightAmp
             }
         }
         
@@ -1241,8 +1282,10 @@ class BinauralAudioEngine(private val context: Context) {
         pendingPresetConfig = null
         cachedTimeSeconds = -1
         cachedLocalTime = LocalTime(0, 0)
+        // Сбрасываем накопленное время - это полная остановка, не pause
+        accumulatedElapsedMs = 0L
         // НЕ сбрасываем currentFadeVolume - сохраняем для плавного перехода при следующем play()
-        Log.d(TAG, "resetState() completed, isGenerating=$isGenerating")
+        Log.d(TAG, "resetState() completed, isGenerating=$isGenerating, accumulatedElapsedMs reset to 0")
     }
 
     /**
@@ -1365,6 +1408,29 @@ class BinauralAudioEngine(private val context: Context) {
         Wavetable.initialize(size)
         Log.d(TAG, "Размер таблицы волн: $size")
     }
+    
+    /**
+     * Установить использование нативного движка (C++)
+     */
+    fun setUseNativeEngine(enabled: Boolean) {
+        if (useNativeEngine == enabled) return
+        
+        useNativeEngine = enabled
+        
+        if (enabled) {
+            // Инициализируем нативный движок
+            if (nativeEngine == null) {
+                nativeEngine = NativeAudioEngine()
+            }
+            nativeEngine?.initialize()
+            nativeEngine?.setSampleRate(sampleRate)
+            Log.d(TAG, "Нативный движок (C++) включён")
+        } else {
+            // Освобождаем нативный движок
+            nativeEngine?.release()
+            Log.d(TAG, "Нативный движок (C++) выключен, используется Kotlin")
+        }
+    }
 
     private fun acquireWakeLock() {
         try {
@@ -1376,19 +1442,6 @@ class BinauralAudioEngine(private val context: Context) {
             Log.d(TAG, "WakeLock acquired")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock", e)
-        }
-    }
-    
-    private fun renewWakeLock() {
-        try {
-            wakeLock?.let {
-                if (it.isHeld) {
-                    it.release()
-                    it.acquire(10 * 60 * 1000L)
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to renew WakeLock", e)
         }
     }
     

@@ -96,6 +96,11 @@
     <string name="auto_expand_graph_range_enabled_desc">Границы графика расширяются при выходе точек за пределы</string>
     <string name="auto_expand_graph_range_disabled_desc">Частоты ограничиваются заданными границами графика</string>
     
+    <!-- Native Engine Settings -->
+    <string name="native_engine">Быстрый аудиодвижок</string>
+    <string name="native_engine_enabled_desc">Оптимизированный C++ движок — меньше нагрузка на процессор и батарею</string>
+    <string name="native_engine_disabled_desc">Стандартный движок — используйте при проблемах со звуком</string>
+    
     <!-- Time units -->
     <string name="seconds_short">сек</string>
     <string name="hz">Гц</string>

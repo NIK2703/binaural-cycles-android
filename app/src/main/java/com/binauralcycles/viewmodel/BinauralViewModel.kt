@@ -64,6 +64,8 @@ data class BinauralUiState(
     val wavetableSize: Int = 2048,
     // Автоматическое расширение границ графика при редактировании
     val autoExpandGraphRange: Boolean = false,
+    // Использовать нативный движок (C++)
+    val useNativeEngine: Boolean = false,
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false
 )
@@ -206,6 +208,13 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getAutoExpandGraphRange().collect { autoExpand ->
                 _uiState.update { it.copy(autoExpandGraphRange = autoExpand) }
+            }
+        }
+        // Нативный движок
+        viewModelScope.launch {
+            preferencesRepository.getUseNativeEngine().collect { useNative ->
+                _uiState.update { it.copy(useNativeEngine = useNative) }
+                playbackService?.setUseNativeEngine(useNative)
             }
         }
     }
@@ -1000,6 +1009,14 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(autoExpandGraphRange = enabled) }
         viewModelScope.launch {
             preferencesRepository.saveAutoExpandGraphRange(enabled)
+        }
+    }
+
+    fun setUseNativeEngine(enabled: Boolean) {
+        _uiState.update { it.copy(useNativeEngine = enabled) }
+        playbackService?.setUseNativeEngine(enabled)
+        viewModelScope.launch {
+            preferencesRepository.saveUseNativeEngine(enabled)
         }
     }
 

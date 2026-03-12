@@ -221,9 +221,10 @@ fun PresetEditScreen(
                 // Редактирование выбранной точки
                 if (uiState.selectedPointIndex != null && editingCurve != null) {
                     val points = editingCurve.points
+                    val selectedIndex = uiState.selectedPointIndex
                     
-                    if (uiState.selectedPointIndex!! in points.indices) {
-                        val selectedPoint = points[uiState.selectedPointIndex!!]
+                    if (selectedIndex != null && selectedIndex in points.indices) {
+                        val selectedPoint = points[selectedIndex]
                         PointEditor(
                             point = selectedPoint,
                             carrierRange = editingCurve.carrierRange,
@@ -231,8 +232,12 @@ fun PresetEditScreen(
                             autoExpandGraphRange = uiState.autoExpandGraphRange,
                             onCarrierFrequencyChange = { viewModel.updateEditingPointCarrierFrequency(it) },
                             onBeatFrequencyChange = { viewModel.updateEditingPointBeatFrequency(it) },
-                            onTimeChange = { viewModel.updateEditingPointTimeDirect(uiState.selectedPointIndex!!, it) },
-                            onRemove = { viewModel.removeEditingPoint(uiState.selectedPointIndex!!) },
+                            onTimeChange = { time -> 
+                                selectedIndex?.let { viewModel.updateEditingPointTimeDirect(it, time) }
+                            },
+                            onRemove = { 
+                                selectedIndex?.let { viewModel.removeEditingPoint(it) }
+                            },
                             onDeselect = { viewModel.deselectPoint() }
                         )
                     }
@@ -245,7 +250,6 @@ fun PresetEditScreen(
                     channelSwapSettings = uiState.editingChannelSwapSettings,
                     volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
                     interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
-                    splineTension = editingCurve?.splineTension ?: 0.0f,
                     isChannelsSwapped = uiState.isChannelsSwapped,
                     currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
                     currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
@@ -256,8 +260,7 @@ fun PresetEditScreen(
                     onVolumeNormalizationEnabledChange = { viewModel.setEditingVolumeNormalizationEnabled(it) },
                     onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
                     onTemporalNormalizationEnabledChange = { viewModel.setEditingTemporalNormalizationEnabled(it) },
-                    onInterpolationTypeChange = { viewModel.setInterpolationType(it) },
-                    onSplineTensionChange = { viewModel.setSplineTension(it) }
+                    onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))
