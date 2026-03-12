@@ -55,13 +55,23 @@ public:
     
     /**
      * Установить интервал обновления частот в мс
+     * Этот параметр определяет размер порции генерации буфера
+     * Больший интервал = меньше прерываний = лучше энергоэффективность
      */
-    void setFrequencyUpdateInterval(int intervalMs) { m_frequencyUpdateIntervalMs = intervalMs; }
+    void setFrequencyUpdateInterval(int intervalMs) { 
+        m_frequencyUpdateIntervalMs = intervalMs; 
+    }
     
     /**
      * Получить интервал обновления частот
      */
     int getFrequencyUpdateInterval() const { return m_frequencyUpdateIntervalMs; }
+    
+    /**
+     * Получить рекомендуемый размер буфера в сэмплах на канал
+     * на основе интервала обновления частот
+     */
+    int getRecommendedBufferSize() const;
     
     /**
      * Сбросить состояние (при остановке)
@@ -132,7 +142,9 @@ private:
     std::atomic<int> m_elapsedSeconds{0};
     std::atomic<int64_t> m_playbackStartTimeMs{0};
     
-    int m_frequencyUpdateIntervalMs = 100;
+    // Начальное значение до получения из настроек через JNI
+    // Должно соответствовать значению по умолчанию в BinauralPreferencesRepository
+    int m_frequencyUpdateIntervalMs = 10000;
     
     /**
      * Получить текущее время суток в секундах

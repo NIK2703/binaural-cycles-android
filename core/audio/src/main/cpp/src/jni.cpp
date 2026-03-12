@@ -231,6 +231,45 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetSampleRate(
 }
 
 /**
+ * Установка интервала обновления частот
+ * Этот параметр определяет размер порции генерации буфера
+ * Больший интервал = меньше прерываний = лучше энергоэффективность
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetFrequencyUpdateInterval(
+    JNIEnv* env,
+    jobject thiz,
+    jint intervalMs
+) {
+    if (g_engine) {
+        g_engine->setFrequencyUpdateInterval(intervalMs);
+        LOGD("Frequency update interval set to %d ms", intervalMs);
+    }
+}
+
+/**
+ * Получение интервала обновления частот
+ */
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetFrequencyUpdateInterval(
+    JNIEnv* env,
+    jobject thiz
+) {
+    return g_engine ? g_engine->getFrequencyUpdateInterval() : 10000;
+}
+
+/**
+ * Получение рекомендуемого размера буфера в сэмплах на канал
+ */
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetRecommendedBufferSize(
+    JNIEnv* env,
+    jobject thiz
+) {
+    return g_engine ? g_engine->getRecommendedBufferSize() : 0;
+}
+
+/**
  * Сброс состояния
  */
 JNIEXPORT void JNICALL

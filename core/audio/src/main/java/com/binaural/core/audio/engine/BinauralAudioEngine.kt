@@ -156,7 +156,10 @@ class BinauralAudioEngine(private val context: Context) {
     
     // Текущие настройки (доступны только из audioThread)
     private var sampleRate: Int = SampleRate.MEDIUM.value
-    private var frequencyUpdateIntervalMs: Int = 100
+    // Интервал обновления частот - 10 секунд по умолчанию
+    // Это обеспечивает оптимальный баланс между отзывчивостью UI и энергоэффективностью
+    // Больший интервал = меньше прерываний = лучше производительность и энергопотребление
+    private var frequencyUpdateIntervalMs: Int = 10000
 
     // Предварительно выделенный буфер для генерации аудио (Float для ENCODING_PCM_FLOAT)
     private var audioBuffer = FloatArray(0)
@@ -1392,8 +1395,20 @@ class BinauralAudioEngine(private val context: Context) {
     
     fun getSampleRate(): SampleRate = SampleRate.fromValue(sampleRate)
     
+    /**
+     * Установить интервал обновления частот (потокобезопасно)
+     * 
+     * Этот параметр определяет размер порции генерации буфера:
+     * - Большой интервал (10-60 сек): меньше прерываний, лучше энергоэффективность
+     * - Малый интервал (1-5 сек): более частое обновление UI, но выше нагрузка
+     * 
+     * @param intervalMs интервал в миллисекундах (1000-60000)
+     */
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        pendingFrequencyUpdateIntervalMs.set(intervalMs.coerceIn(1000, 60000))
+        val clampedInterval = intervalMs.coerceIn(1000, 60000)
+        pendingFrequencyUpdateIntervalMs.set(clampedInterval)
+        // Синхронизируем с нативным движком если он активен
+        nativeEngine?.setFrequencyUpdateInterval(clampedInterval)
     }
 
     fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
@@ -1411,6 +1426,11 @@ class BinauralAudioEngine(private val context: Context) {
     
     /**
      * Установить использование нативного движка (C++)
+     * 
+     * Нативный движок обеспечивает:
+     * - Оптимизированную генерацию аудио с использованием NEON инструкций
+     * - Меньше нагрузку на CPU и лучше энергоэффективность
+     * - Генерацию больших буферов без прерываний
      */
     fun setUseNativeEngine(enabled: Boolean) {
         if (useNativeEngine == enabled) return
@@ -1424,7 +1444,11 @@ class BinauralAudioEngine(private val context: Context) {
             }
             nativeEngine?.initialize()
             nativeEngine?.setSampleRate(sampleRate)
-            Log.d(TAG, "Нативный движок (C++) включён")
+            // Передаём текущий интервал обновления частот
+            nativeEngine?.setFrequencyUpdateInterval(frequencyUpdateIntervalMs)
+            // Синхронизируем конфигурацию
+            configRef.get()?.let { nativeEngine?.updateConfig(it) }
+            Log.d(TAG, "Нативный движок (C++) включён, interval=${frequencyUpdateIntervalMs}ms")
         } else {
             // Освобождаем нативный движок
             nativeEngine?.release()
