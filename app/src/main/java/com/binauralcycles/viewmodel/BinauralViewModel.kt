@@ -18,6 +18,7 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -54,6 +55,8 @@ data class BinauralUiState(
     // Редактируемые настройки пресета (для экрана редактирования)
     val editingChannelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
     val editingVolumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
+    // Настройки режима расслабления (для экрана редактирования)
+    val editingRelaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     // Состояние перестановки каналов (из сервиса)
     val isChannelsSwapped: Boolean = false,
     // Общие настройки приложения
@@ -253,6 +256,8 @@ class BinauralViewModel @Inject constructor(
             volumeNormalizationStrength = preset.volumeNormalizationSettings.strength
         )
         
+        val relaxationSettings = preset.relaxationModeSettings
+        
         // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
         // Сначала fade-out на старом пресете, затем fade-in на новом
         if (state.isPlaying) {
@@ -262,13 +267,13 @@ class BinauralViewModel @Inject constructor(
             viewModelScope.launch {
                 kotlinx.coroutines.delay(300)
                 // Применяем новый конфиг
-                playbackService?.updateConfig(config)
+                playbackService?.updateConfig(config, relaxationSettings)
                 // Запускаем воспроизведение с fade-in
                 playbackService?.play()
             }
         } else {
             // Не воспроизводится - просто обновляем конфиг и запускаем
-            playbackService?.updateConfig(config)
+            playbackService?.updateConfig(config, relaxationSettings)
             playbackService?.play()
         }
         
@@ -294,7 +299,8 @@ class BinauralViewModel @Inject constructor(
                 beatRange = preset.frequencyCurve.beatRange,
                 selectedPointIndex = null,  // Сбрасываем выбранную точку при начале редактирования
                 editingChannelSwapSettings = preset.channelSwapSettings,
-                editingVolumeNormalizationSettings = preset.volumeNormalizationSettings
+                editingVolumeNormalizationSettings = preset.volumeNormalizationSettings,
+                editingRelaxationModeSettings = preset.relaxationModeSettings
             )
         }
         
@@ -318,7 +324,8 @@ class BinauralViewModel @Inject constructor(
                 beatRange = defaultCurve.beatRange,
                 selectedPointIndex = null,
                 editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
+                editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
         // Не обновляем кривую в сервисе при создании нового пресета
@@ -336,7 +343,8 @@ class BinauralViewModel @Inject constructor(
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
+                editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
         
@@ -369,7 +377,8 @@ class BinauralViewModel @Inject constructor(
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings()
+                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
+                editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
         // Не восстанавливаем кривую в сервисе - новые данные загрузятся через Flow
@@ -387,12 +396,19 @@ class BinauralViewModel @Inject constructor(
     /**
      * Создать новый пресет
      */
-    fun createPreset(name: String, curve: FrequencyCurve, channelSwapSettings: ChannelSwapSettings, volumeNormalizationSettings: VolumeNormalizationSettings) {
+    fun createPreset(
+        name: String, 
+        curve: FrequencyCurve, 
+        channelSwapSettings: ChannelSwapSettings, 
+        volumeNormalizationSettings: VolumeNormalizationSettings,
+        relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
+    ) {
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
             channelSwapSettings = channelSwapSettings,
-            volumeNormalizationSettings = volumeNormalizationSettings
+            volumeNormalizationSettings = volumeNormalizationSettings,
+            relaxationModeSettings = relaxationModeSettings
         )
         viewModelScope.launch {
             preferencesRepository.addPreset(preset)
@@ -402,13 +418,21 @@ class BinauralViewModel @Inject constructor(
     /**
      * Сохранить редактируемый пресет
      */
-    fun saveEditingPreset(presetId: String, name: String, curve: FrequencyCurve, channelSwapSettings: ChannelSwapSettings, volumeNormalizationSettings: VolumeNormalizationSettings) {
+    fun saveEditingPreset(
+        presetId: String, 
+        name: String, 
+        curve: FrequencyCurve, 
+        channelSwapSettings: ChannelSwapSettings, 
+        volumeNormalizationSettings: VolumeNormalizationSettings,
+        relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
+    ) {
         val existingPreset = _uiState.value.presets.find { it.id == presetId } ?: return
         val updatedPreset = existingPreset.copy(
             name = name,
             frequencyCurve = curve,
             channelSwapSettings = channelSwapSettings,
             volumeNormalizationSettings = volumeNormalizationSettings,
+            relaxationModeSettings = relaxationModeSettings,
             updatedAt = System.currentTimeMillis()
         )
         viewModelScope.launch {
@@ -944,6 +968,46 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
+    // ============= Методы для редактирования режима расслабления =============
+    
+    /**
+     * Включить/выключить режим расслабления
+     */
+    fun setEditingRelaxationModeEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(enabled = enabled)
+            )
+        }
+    }
+    
+    /**
+     * Установить процент снижения несущей частоты
+     */
+    fun setEditingCarrierReductionPercent(percent: Int) {
+        val state = _uiState.value
+        val clampedPercent = percent.coerceIn(5, 50)
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(carrierReductionPercent = clampedPercent)
+            )
+        }
+    }
+    
+    /**
+     * Установить процент снижения частоты биений
+     */
+    fun setEditingBeatReductionPercent(percent: Int) {
+        val state = _uiState.value
+        val clampedPercent = percent.coerceIn(5, 50)
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)
+            )
+        }
+    }
+
     // ============= Методы для управления общими настройками приложения =============
     
     fun setSampleRate(rate: SampleRate) {
@@ -976,17 +1040,19 @@ class BinauralViewModel @Inject constructor(
         // Используем настройки из редактируемого пресета если редактируется активный
         val isActivePresetEditing = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
         
-        val (frequencyCurve, channelSwapSettings, volumeNormalizationSettings) = if (isActivePresetEditing) {
-            Triple(
+        val (frequencyCurve, channelSwapSettings, volumeNormalizationSettings, relaxationModeSettings) = if (isActivePresetEditing) {
+            Tuple4(
                 state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
                 state.editingChannelSwapSettings,
-                state.editingVolumeNormalizationSettings
+                state.editingVolumeNormalizationSettings,
+                state.editingRelaxationModeSettings
             )
         } else {
-            Triple(
+            Tuple4(
                 state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
                 state.activePreset?.channelSwapSettings ?: ChannelSwapSettings(),
-                state.activePreset?.volumeNormalizationSettings ?: VolumeNormalizationSettings()
+                state.activePreset?.volumeNormalizationSettings ?: VolumeNormalizationSettings(),
+                state.activePreset?.relaxationModeSettings ?: RelaxationModeSettings()
             )
         }
         
@@ -1004,11 +1070,22 @@ class BinauralViewModel @Inject constructor(
         android.util.Log.d("BinauralViewModel", "updateAudioConfig: activePreset=${state.activePreset?.name}, " +
             "channelSwapEnabled=${channelSwapSettings.enabled}, " +
             "channelSwapInterval=${channelSwapSettings.intervalSeconds}s, " +
+            "relaxationEnabled=${relaxationModeSettings.enabled}, " +
             "isServiceConnected=${state.isServiceConnected}, " +
             "isActivePresetEditing=$isActivePresetEditing")
         
-        playbackService?.updateConfig(config)
+        playbackService?.updateConfig(config, relaxationModeSettings)
     }
+    
+    /**
+     * Вспомогательный класс для 4-элементного кортежа
+     */
+    private data class Tuple4<T1, T2, T3, T4>(
+        val first: T1,
+        val second: T2,
+        val third: T3,
+        val fourth: T4
+    )
 
     // ============= Методы для экспорта/импорта пресетов =============
     
@@ -1079,17 +1156,50 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
-     * Сгенерировать уникальное имя для импортированного пресета
+     * Сгенерировать уникальное имя для дубликата/импортированного пресета
+     * Извлекает базовое имя (без номера в скобках) и находит следующий доступный номер
      */
     private fun generateUniqueName(baseName: String): String {
         val existingNames = _uiState.value.presets.map { it.name }.toSet()
-        if (baseName !in existingNames) return baseName
         
+        // Пытаемся извлечь базовое имя и номер из строки вида "имя (N)"
+        val regex = """^(.+?) \((\d+)\)$""".toRegex()
+        val match = regex.find(baseName)
+        
+        // Если имя уже содержит номер в скобках, извлекаем базовое имя
+        val actualBaseName = if (match != null) {
+            match.groupValues[1]
+        } else {
+            baseName
+        }
+        
+        // Ищем все существующие имена с таким же базовым именем
+        val usedNumbers = mutableSetOf<Int>()
+        var hasExactBaseName = false
+        
+        for (name in existingNames) {
+            if (name == actualBaseName) {
+                hasExactBaseName = true
+            } else {
+                val nameMatch = regex.find(name)
+                if (nameMatch != null && nameMatch.groupValues[1] == actualBaseName) {
+                    usedNumbers.add(nameMatch.groupValues[2].toInt())
+                }
+            }
+        }
+        
+        // Если базовое имя свободно, используем его
+        if (!hasExactBaseName && actualBaseName !in existingNames) {
+            return actualBaseName
+        }
+        
+        // Находим минимальный свободный номер, начиная с 1
         var counter = 1
-        while ("$baseName ($counter)" in existingNames) {
+        while (counter in usedNumbers) {
             counter++
         }
-        return "$baseName ($counter)"
+        
+        return "$actualBaseName ($counter)"
     }
     
     /**

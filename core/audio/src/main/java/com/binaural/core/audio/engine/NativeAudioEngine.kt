@@ -2,11 +2,14 @@ package com.binaural.core.audio.engine
 
 import android.util.Log
 import com.binaural.core.audio.model.BinauralConfig
+import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.datetime.LocalTime
 
 /**
  * JNI обёртка для C++ аудиодвижка.
@@ -44,6 +47,9 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     // Текущая конфигурация
     private var currentConfig: BinauralConfig? = null
     private var isInitialized = false
+    
+    // Настройки режима расслабления
+    private var relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     
     // Нативные методы
     private external fun nativeInitialize(callback: NativeAudioEngineCallback)
@@ -131,17 +137,27 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     }
     
     /**
-     * Установить конфигурацию
+     * Установить конфигурацию с настройками режима расслабления
      */
-    fun updateConfig(config: BinauralConfig) {
+    fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
         currentConfig = config
+        relaxationModeSettings = relaxationSettings
         
         val curve = config.frequencyCurve
-        val numPoints = curve.points.size
         
-        val timePoints = IntArray(numPoints) { curve.points[it].time.toSecondOfDay() }
-        val carrierFreqs = DoubleArray(numPoints) { curve.points[it].carrierFrequency }
-        val beatFreqs = DoubleArray(numPoints) { curve.points[it].beatFrequency }
+        // Генерируем виртуальные точки расслабления и объединяем с реальными
+        val allPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
+            val virtualPoints = generateRelaxationVirtualPoints(curve.points, relaxationSettings)
+            (curve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
+        } else {
+            curve.points
+        }
+        
+        val numPoints = allPoints.size
+        
+        val timePoints = IntArray(numPoints) { allPoints[it].time.toSecondOfDay() }
+        val carrierFreqs = DoubleArray(numPoints) { allPoints[it].carrierFrequency }
+        val beatFreqs = DoubleArray(numPoints) { allPoints[it].beatFrequency }
         
         val interpolationType = when (curve.interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -170,6 +186,76 @@ class NativeAudioEngine : NativeAudioEngineCallback {
             normalizationType = normalizationType,
             volumeNormalizationStrength = config.volumeNormalizationStrength
         )
+        
+        Log.d(TAG, "Config updated with ${curve.points.size} real points, " +
+            "${if (relaxationSettings.enabled) "relaxation mode enabled" else "relaxation mode disabled"}")
+    }
+    
+    /**
+     * Генерирует виртуальные точки режима расслабления между реальными точками.
+     * Виртуальные точки создаются посередине между каждой парой соседних точек.
+     */
+    private fun generateRelaxationVirtualPoints(
+        points: List<FrequencyPoint>,
+        settings: RelaxationModeSettings
+    ): List<FrequencyPoint> {
+        if (!settings.enabled || points.size < 2) return emptyList()
+        
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val virtualPoints = mutableListOf<FrequencyPoint>()
+        
+        val carrierReduction = settings.carrierReductionPercent / 100.0
+        val beatReduction = settings.beatReductionPercent / 100.0
+        
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
+            
+            // Вычисляем время посередине между точками
+            val currentTimeSeconds = currentPoint.time.toSecondOfDay()
+            var nextTimeSeconds = nextPoint.time.toSecondOfDay()
+            
+            // Обработка перехода через полночь
+            if (nextTimeSeconds <= currentTimeSeconds) {
+                nextTimeSeconds += 24 * 3600
+            }
+            
+            val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
+            val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
+            
+            // Интерполируем значения на середине
+            val ratio = 0.5
+            val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
+            val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
+            
+            // Применяем снижение частот для режима расслабления
+            val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
+            val relaxedBeat = midBeat * (1.0 - beatReduction)
+            
+            virtualPoints.add(
+                FrequencyPoint(
+                    time = midTime,
+                    carrierFrequency = relaxedCarrier,
+                    beatFrequency = relaxedBeat
+                )
+            )
+        }
+        
+        return virtualPoints
+    }
+    
+    /**
+     * Обновить настройки режима расслабления
+     */
+    fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
+        relaxationModeSettings = settings
+        
+        // Если есть текущая конфигурация, обновляем с новыми настройками расслабления
+        currentConfig?.let { config ->
+            updateConfig(config, settings)
+        }
+        
+        Log.d(TAG, "Relaxation mode settings updated: enabled=${settings.enabled}")
     }
     
     /**

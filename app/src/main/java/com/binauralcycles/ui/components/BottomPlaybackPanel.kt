@@ -1,6 +1,7 @@
 package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -11,8 +12,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.binaural.core.ui.theme.BeatFrequencyColor
-import com.binaural.core.ui.theme.CarrierFrequencyColor
 import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
@@ -76,15 +75,21 @@ fun BottomPlaybackPanel(
                 // Частоты в одну строку
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    // Частота биений
-                    Text(
-                        text = hzDecimalFormat.format(beatFrequency),
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = BeatFrequencyColor
-                    )
+                    // Частота биений с фоном для выделения
+                    Surface(
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = hzDecimalFormat.format(beatFrequency),
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                     
                     Text(
                         text = "•",
@@ -97,7 +102,7 @@ fun BottomPlaybackPanel(
                         text = hzFormat.format(carrierFrequency),
                         style = MaterialTheme.typography.bodySmall,
                         fontWeight = FontWeight.Bold,
-                        color = CarrierFrequencyColor
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     
                     // Предупреждение о низкой частоте

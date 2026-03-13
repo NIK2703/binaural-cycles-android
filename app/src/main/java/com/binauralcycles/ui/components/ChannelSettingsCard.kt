@@ -16,6 +16,7 @@ import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binauralcycles.R
 
@@ -624,4 +625,104 @@ fun DiscreteSliderWavetableSize(
 @Composable
 fun formatWavetableSize(size: Int): String {
     return "$size samples"
+}
+
+/**
+ * Блок настроек режима расслабления
+ */
+@Composable
+fun RelaxationModeCard(
+    relaxationModeSettings: RelaxationModeSettings,
+    onRelaxationModeEnabledChange: (Boolean) -> Unit,
+    onCarrierReductionChange: (Int) -> Unit,
+    onBeatReductionChange: (Int) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Включение режима расслабления
+        ListItem(
+            headlineContent = { Text(stringResource(R.string.relaxation_mode)) },
+            supportingContent = { 
+                Text(
+                    if (relaxationModeSettings.enabled) stringResource(R.string.relaxation_mode_enabled_desc)
+                    else stringResource(R.string.relaxation_mode_disabled_desc)
+                )
+            },
+            trailingContent = {
+                Switch(
+                    checked = relaxationModeSettings.enabled,
+                    onCheckedChange = onRelaxationModeEnabledChange
+                )
+            }
+        )
+        
+        // Настройки снижения частот (показываем только когда режим включен)
+        if (relaxationModeSettings.enabled) {
+            HorizontalDivider()
+            
+            // Слайдер снижения несущей частоты
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        stringResource(R.string.carrier_reduction),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        stringResource(R.string.reduction_percent_format, relaxationModeSettings.carrierReductionPercent),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = relaxationModeSettings.carrierReductionPercent.toFloat(),
+                    onValueChange = { onCarrierReductionChange(it.toInt()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    valueRange = 5f..50f,
+                    steps = 8  // 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                )
+                Text(
+                    text = stringResource(R.string.carrier_reduction_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Слайдер снижения частоты биений
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        stringResource(R.string.beat_reduction),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        stringResource(R.string.reduction_percent_format, relaxationModeSettings.beatReductionPercent),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = relaxationModeSettings.beatReductionPercent.toFloat(),
+                    onValueChange = { onBeatReductionChange(it.toInt()) },
+                    modifier = Modifier.fillMaxWidth(),
+                    valueRange = 5f..50f,
+                    steps = 8  // 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                )
+                Text(
+                    text = stringResource(R.string.beat_reduction_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }

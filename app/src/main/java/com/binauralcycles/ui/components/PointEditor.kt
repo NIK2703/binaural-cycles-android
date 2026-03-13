@@ -29,8 +29,6 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
-import com.binaural.core.ui.theme.BeatFrequencyColor
-import com.binaural.core.ui.theme.CarrierFrequencyColor
 import com.binauralcycles.R
 import kotlinx.datetime.LocalTime
 import java.util.Locale
@@ -391,7 +389,7 @@ fun PointEditor(
             Text(
                 "$carrierLabel:",
                 style = MaterialTheme.typography.titleSmall,
-                color = CarrierFrequencyColor
+                color = MaterialTheme.colorScheme.onSurface
             )
             
             Spacer(modifier = Modifier.height(4.dp))
@@ -494,8 +492,8 @@ fun PointEditor(
                     valueRange = carrierRange.min.toFloat()..carrierRange.max.toFloat(),
                     modifier = Modifier.weight(1f).padding(start = 4.dp).height(24.dp),
                     colors = SliderDefaults.colors(
-                        thumbColor = CarrierFrequencyColor,
-                        activeTrackColor = CarrierFrequencyColor
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
                     )
                 )
             }
@@ -506,7 +504,7 @@ fun PointEditor(
             Text(
                 "$beatsLabel:",
                 style = MaterialTheme.typography.titleSmall,
-                color = BeatFrequencyColor
+                color = MaterialTheme.colorScheme.onSurface
             )
             
             Spacer(modifier = Modifier.height(4.dp))
@@ -610,8 +608,8 @@ fun PointEditor(
                     valueRange = minBeatForSlider..maxBeatForSlider,
                     modifier = Modifier.weight(1f).padding(start = 4.dp).height(24.dp),
                     colors = SliderDefaults.colors(
-                        thumbColor = BeatFrequencyColor,
-                        activeTrackColor = BeatFrequencyColor
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary
                     )
                 )
             }

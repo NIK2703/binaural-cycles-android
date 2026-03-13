@@ -26,6 +26,7 @@ import androidx.compose.ui.geometry.Offset
 import com.binauralcycles.ui.components.MiniFrequencyGraph
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
@@ -128,15 +129,15 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
-                        // ОПТИМИЗАЦИЯ: Используем методы FrequencyCurve вместо внешних функций
-                        // FrequencyCurve использует бинарный поиск и предвычисленные значения
-                        val carrierFreq = preset.frequencyCurve.getCarrierFrequencyAt(currentTime.value)
-                        val beatFreq = preset.frequencyCurve.getBeatFrequencyAt(currentTime.value)
+                        // Используем методы BinauralPreset для учёта виртуальных точек расслабления
+                        val carrierFreq = preset.getCarrierFrequencyAt(currentTime.value)
+                        val beatFreq = preset.getBeatFrequencyAt(currentTime.value)
                         
                         PresetCard(
                             presetId = preset.id,
                             name = preset.name,
                             frequencyCurve = preset.frequencyCurve,
+                            relaxationModeSettings = preset.relaxationModeSettings,
                             isActive = isActivePreset,
                             isPlaying = isActivePreset && uiState.isPlaying,
                             currentCarrierFrequency = carrierFreq,
@@ -202,6 +203,7 @@ private fun PresetCard(
     presetId: String,
     name: String,
     frequencyCurve: FrequencyCurve,
+    relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     isActive: Boolean,
     isPlaying: Boolean,
     currentCarrierFrequency: Double,
@@ -269,7 +271,8 @@ private fun PresetCard(
                         isPlaying = isPlaying,
                         currentTime = currentTime,
                         currentCarrierFrequency = currentCarrierFrequency,
-                        currentBeatFrequency = currentBeatFrequency
+                        currentBeatFrequency = currentBeatFrequency,
+                        relaxationModeSettings = relaxationModeSettings
                     )
                     
                     // Название пресета поверх графика (сверху слева)

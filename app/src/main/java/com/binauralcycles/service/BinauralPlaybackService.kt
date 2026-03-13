@@ -24,6 +24,7 @@ import com.binaural.core.audio.engine.BinauralAudioEngine
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -447,8 +448,12 @@ class BinauralPlaybackService : Service() {
 
     // ============= Методы для управления аудио (асинхронные, вызываются из ViewModel) =============
     
-    fun updateConfig(config: BinauralConfig) {
-        audioEngine?.updateConfig(config)
+    fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
+        audioEngine?.updateConfig(config, relaxationSettings)
+    }
+    
+    fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
+        audioEngine?.updateRelaxationModeSettings(settings)
     }
 
     fun updateFrequencyCurve(curve: FrequencyCurve) {
