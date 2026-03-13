@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background"/>
+    <!-- Фон для старых версий Android (до Android 13) -->
+    <background android:drawable="@drawable/ic_launcher_background"/>
+    
+    <!-- Основная иконка для старых версий Android -->
     <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+
+    <!-- Слой для Material You (Android 13+) -->
+    <!-- Система возьмет этот слой и покрасит его в цвет темы пользователя -->
+    <monochrome android:drawable="@drawable/ic_launcher_monochrome"/>
 </adaptive-icon>

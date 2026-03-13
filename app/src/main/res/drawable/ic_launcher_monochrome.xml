@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    
+    <!-- Monochrome layer for Material You (Android 13+)
+         Filled silhouette matching the foreground icon shape.
+         Black color (#000000) - system will automatically tint it in contrast color. -->
+    
+    <!-- Central sine wave - thick filled path approximating stroke with width 3.5 -->
+    <!-- Original stroke: M30,54 Q36,40 42,54 Q48,68 54,54 Q60,40 66,54 Q72,68 78,54 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M30,52.25
+                         Q36,38.25 42,52.25
+                         Q48,66.25 54,52.25
+                         Q60,38.25 66,52.25
+                         Q72,66.25 78,52.25
+                         L78,55.75
+                         Q72,69.75 66,55.75
+                         Q60,41.75 54,55.75
+                         Q48,69.75 42,55.75
+                         Q36,41.75 30,55.75
+                         Z"/>
+    
+    <!-- Upper arc - filled shape approximating arc stroke -->
+    <!-- Original: M30,54 A24,24 0 0 1 76.56,45.79 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M30,52.25
+                         A24,24 0 0 1 76.56,44.04
+                         L76.56,47.54
+                         A20.5,20.5 0 0 0 30,55.75
+                         Z"/>
+    
+    <!-- Lower arc - filled shape approximating arc stroke -->
+    <!-- Original: M78,54 A24,24 0 0 1 31.44,62.21 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M78,52.25
+                         A24,24 0 0 1 31.44,60.46
+                         L31.44,63.96
+                         A20.5,20.5 0 0 0 78,55.75
+                         Z"/>
+    
+</vector>
