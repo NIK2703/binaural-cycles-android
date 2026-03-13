@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Dark background for contrast with white foreground -->
+    <!-- Monochrome layer (ic_launcher_monochrome.xml) handles Material You theming -->
     <color name="ic_launcher_background">#1A1A2E</color>
 </resources>

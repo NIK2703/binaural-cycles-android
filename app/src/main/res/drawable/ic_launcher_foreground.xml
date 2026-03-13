@@ -4,7 +4,7 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
     
-    <!-- Central wave (sine wave) - white -->
+    <!-- Central wave (sine wave) - white for foreground layer -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
