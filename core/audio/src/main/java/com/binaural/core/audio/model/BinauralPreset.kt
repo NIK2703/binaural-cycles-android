@@ -387,22 +387,25 @@ data class ChannelSwapSettings(
 @Serializable
 data class RelaxationModeSettings(
     val enabled: Boolean = false,
-    val carrierReductionPercent: Int = 20,  // 5-50%
-    val beatReductionPercent: Int = 20      // 5-50%
+    val carrierReductionPercent: Int = 20,  // 0-50%
+    val beatReductionPercent: Int = 20      // 0-50%
 ) {
     init {
-        require(carrierReductionPercent in 5..50) { "Снижение несущей частоты должно быть от 5% до 50%" }
-        require(beatReductionPercent in 5..50) { "Снижение частоты биений должно быть от 5% до 50%" }
+        require(carrierReductionPercent in 0..50) { "Снижение несущей частоты должно быть от 0% до 50%" }
+        require(beatReductionPercent in 0..50) { "Снижение частоты биений должно быть от 0% до 50%" }
     }
     
     /**
      * Генерирует виртуальные точки режима расслабления между реальными точками.
      * Виртуальные точки создаются посередине между каждой парой соседних точек.
+     * Частоты берутся с интерполированной кривой для корректного отображения.
+     * 
+     * @param curve Кривая частот для интерполяции (должна содержать те же точки)
      */
-    fun generateVirtualPoints(points: List<FrequencyPoint>): List<FrequencyPoint> {
-        if (!enabled || points.size < 2) return emptyList()
+    fun generateVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
+        if (!enabled || curve.points.size < 2) return emptyList()
         
-        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val sortedPoints = curve.points.sortedBy { it.time.toSecondOfDay() }
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
         val carrierReduction = carrierReductionPercent / 100.0
@@ -424,10 +427,9 @@ data class RelaxationModeSettings(
             val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
             val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
             
-            // Интерполируем значения на середине
-            val ratio = 0.5
-            val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
-            val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
+            // Интерполируем значения по кривой (учитывает тип интерполяции)
+            val midCarrier = curve.getCarrierFrequencyAt(midTime)
+            val midBeat = curve.getBeatFrequencyAt(midTime)
             
             // Применяем снижение частот для режима расслабления
             val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
@@ -484,7 +486,7 @@ data class BinauralPreset(
     @kotlinx.serialization.Transient
     val curveWithRelaxation: FrequencyCurve by lazy {
         if (relaxationModeSettings.enabled) {
-            val virtualPoints = relaxationModeSettings.generateVirtualPoints(frequencyCurve.points)
+            val virtualPoints = relaxationModeSettings.generateVirtualPoints(frequencyCurve)
             val allPoints = (frequencyCurve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
             FrequencyCurve(
                 points = allPoints,

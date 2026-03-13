@@ -987,7 +987,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingCarrierReductionPercent(percent: Int) {
         val state = _uiState.value
-        val clampedPercent = percent.coerceIn(5, 50)
+        val clampedPercent = percent.coerceIn(0, 50)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(carrierReductionPercent = clampedPercent)
@@ -1000,7 +1000,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingBeatReductionPercent(percent: Int) {
         val state = _uiState.value
-        val clampedPercent = percent.coerceIn(5, 50)
+        val clampedPercent = percent.coerceIn(0, 50)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)

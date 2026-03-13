@@ -129,10 +129,13 @@ private data class GraphParams(
 /**
  * Генерирует виртуальные точки режима расслабления между реальными точками.
  * Виртуальные точки создаются посередине между каждой парой соседних точек.
+ * Частоты берутся с интерполированной кривой для корректного отображения.
  */
 fun generateRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings
+    relaxationModeSettings: RelaxationModeSettings,
+    interpolationType: InterpolationType = InterpolationType.LINEAR,
+    splineTension: Float = 0.0f
 ): List<FrequencyPoint> {
     if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
     
@@ -158,10 +161,9 @@ fun generateRelaxationVirtualPoints(
         val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
         val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
         
-        // Интерполируем значения на середине
-        val ratio = 0.5
-        val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
-        val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
+        // Интерполируем значения по кривой (учитывает тип интерполяции)
+        val midCarrier = interpolateCarrierFrequency(sortedPoints, midTime, interpolationType, splineTension)
+        val midBeat = interpolateBeatFrequency(sortedPoints, midTime, interpolationType, splineTension)
         
         // Применяем снижение частот для режима расслабления
         val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
@@ -234,9 +236,9 @@ fun FrequencyGraph(
     // Используем кэшированные sortedPoints если доступны (оптимизация)
     val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
     
-    // Генерируем виртуальные точки режима расслабления
-    val virtualPoints = remember(points, relaxationModeSettings) {
-        generateRelaxationVirtualPoints(points, relaxationModeSettings)
+    // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции
+    val virtualPoints = remember(points, relaxationModeSettings, interpolationType, splineTension) {
+        generateRelaxationVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
     }
 
     Column(
@@ -375,31 +377,19 @@ fun FrequencyGraph(
                     )
                 }
                 
-                // Виртуальные точки режима расслабления (нередактируемые)
+                // Виртуальные точки режима расслабления (нередактируемые) - простые кружки
                 virtualPoints.forEach { virtualPoint ->
                     val xPx = graphParams.timeToX(virtualPoint.time)
                     val yPx = graphParams.carrierToY(virtualPoint.carrierFrequency)
-                    val pointSize = 16.dp
+                    val pointSize = 12.dp
                     val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
                     
                     Box(
                         modifier = Modifier
                             .offset { IntOffset((xPx - halfSizePx).toInt(), (yPx - halfSizePx).toInt()) }
                             .size(pointSize)
-                            .background(relaxationColor.copy(alpha = 0.6f), CircleShape)
-                            .border(1.dp, Color.White.copy(alpha = 0.5f), CircleShape)
-                    ) {
-                        // Индикатор размера биения
-                        val beatIndicatorSize = with(density) { 
-                            ((virtualPoint.beatFrequency / graphParams.maxBeat) * 8).toFloat().toDp().coerceAtLeast(2.dp)
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(beatIndicatorSize)
-                                .background(Color.White.copy(alpha = 0.4f), CircleShape)
-                                .align(Alignment.Center)
-                        )
-                    }
+                            .background(relaxationColor.copy(alpha = 0.5f), CircleShape)
+                    )
                 }
                 
                 if (dragState.startIndex >= 0 && dragState.currentTime != null && dragState.direction != DragDirection.NONE) {
