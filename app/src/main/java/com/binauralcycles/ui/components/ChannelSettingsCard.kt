@@ -682,8 +682,8 @@ fun RelaxationModeCard(
                     value = relaxationModeSettings.carrierReductionPercent.toFloat(),
                     onValueChange = { onCarrierReductionChange(it.toInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 5f..50f,
-                    steps = 8  // 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                    valueRange = 0f..50f,
+                    steps = 9  // 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
                 )
                 Text(
                     text = stringResource(R.string.carrier_reduction_description),
@@ -714,8 +714,8 @@ fun RelaxationModeCard(
                     value = relaxationModeSettings.beatReductionPercent.toFloat(),
                     onValueChange = { onBeatReductionChange(it.toInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 5f..50f,
-                    steps = 8  // 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                    valueRange = 0f..50f,
+                    steps = 9  // 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
                 )
                 Text(
                     text = stringResource(R.string.beat_reduction_description),

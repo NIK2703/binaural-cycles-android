@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
@@ -81,11 +82,14 @@ private data class MiniGraphParams(
 /**
  * Генерирует виртуальные точки режима расслабления между реальными точками.
  * Виртуальные точки создаются посередине между каждой парой соседних точек.
+ * Частоты берутся с интерполированной кривой для корректного отображения.
  * Локальная функция для использования в MiniFrequencyGraph.
  */
 private fun createRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings
+    relaxationModeSettings: RelaxationModeSettings,
+    interpolationType: InterpolationType,
+    splineTension: Float
 ): List<FrequencyPoint> {
     if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
     
@@ -111,10 +115,9 @@ private fun createRelaxationVirtualPoints(
         val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
         val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
         
-        // Интерполируем значения на середине
-        val ratio = 0.5
-        val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
-        val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
+        // Интерполируем значения по кривой (учитывает тип интерполяции)
+        val midCarrier = interpolateCarrierFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
+        val midBeat = interpolateBeatFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
         
         // Применяем снижение частот для режима расслабления
         val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
@@ -159,9 +162,9 @@ fun MiniFrequencyGraph(
         frequencyCurve.points.sortedBy { it.time.toSecondOfDay() }
     }
     
-    // Генерируем виртуальные точки режима расслабления
-    val virtualPoints = remember(frequencyCurve.points, relaxationModeSettings) {
-        createRelaxationVirtualPoints(frequencyCurve.points, relaxationModeSettings)
+    // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции
+    val virtualPoints = remember(frequencyCurve.points, relaxationModeSettings, frequencyCurve.interpolationType, frequencyCurve.splineTension) {
+        createRelaxationVirtualPoints(frequencyCurve.points, relaxationModeSettings, frequencyCurve.interpolationType, frequencyCurve.splineTension)
     }
     
     val carrierRange = frequencyCurve.carrierRange
@@ -574,24 +577,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         style = Stroke(width = 1.5f)
     )
     
-    // Рисуем виртуальные точки режима расслабления
+    // Рисуем виртуальные точки режима расслабления - простые кружки без обводки
     if (relaxationModeSettings.enabled) {
         for (point in virtualPoints) {
             val x = graphParams.timeToX(point.time)
             val y = graphParams.carrierToY(point.carrierFrequency)
             
             drawCircle(
-                color = relaxationColor.copy(alpha = 0.6f),
-                radius = 4f,
-                center = Offset(x, y),
-                style = Fill
-            )
-            
-            val beatRatio = (point.beatFrequency / maxBeat).coerceIn(0.0, 1.0)
-            val innerRadius = (1.5f + beatRatio * 1.5f).toFloat()
-            drawCircle(
-                color = Color.White.copy(alpha = 0.4f),
-                radius = innerRadius,
+                color = relaxationColor.copy(alpha = 0.5f),
+                radius = 3f,
                 center = Offset(x, y),
                 style = Fill
             )
@@ -646,5 +640,148 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
             end = Offset(currentX, currentLowerY),
             strokeWidth = 2f
         )
+    }
+}
+
+// Локальные функции интерполяции для MiniFrequencyGraph
+
+/**
+ * Интерполяция несущей частоты
+ */
+private fun interpolateCarrierFrequencyMini(
+    points: List<FrequencyPoint>,
+    time: LocalTime,
+    interpolationType: InterpolationType,
+    splineTension: Float
+): Double = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.carrierFrequency }
+
+/**
+ * Интерполяция частоты биений
+ */
+private fun interpolateBeatFrequencyMini(
+    points: List<FrequencyPoint>,
+    time: LocalTime,
+    interpolationType: InterpolationType,
+    splineTension: Float
+): Double = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.beatFrequency }
+
+/**
+ * Общая функция интерполяции частоты
+ */
+private fun interpolateFrequencyMini(
+    points: List<FrequencyPoint>,
+    time: LocalTime,
+    interpolationType: InterpolationType,
+    splineTension: Float,
+    frequencySelector: (FrequencyPoint) -> Double
+): Double {
+    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+    if (sortedPoints.isEmpty()) return 0.0
+    if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
+    
+    val targetSeconds = time.toSecondOfDay()
+    
+    // Находим интервал, в который попадает время
+    var intervalIndex = -1
+    for (i in 0 until sortedPoints.size - 1) {
+        val current = sortedPoints[i].time.toSecondOfDay()
+        val next = sortedPoints[i + 1].time.toSecondOfDay()
+        if (targetSeconds in current..next) {
+            intervalIndex = i
+            break
+        }
+    }
+    
+    // Если не нашли в обычных интервалах - это переход через полночь
+    if (intervalIndex == -1) {
+        return interpolateBetweenPointsMini(
+            sortedPoints,
+            sortedPoints.size - 1,
+            0,
+            time,
+            frequencySelector,
+            interpolationType,
+            splineTension,
+            isWrapping = true
+        )
+    }
+    
+    return interpolateBetweenPointsMini(
+        sortedPoints,
+        intervalIndex,
+        intervalIndex + 1,
+        time,
+        frequencySelector,
+        interpolationType,
+        splineTension,
+        isWrapping = false
+    )
+}
+
+/**
+ * Интерполяция между двумя точками с учётом соседних для кубического сплайна
+ */
+private fun interpolateBetweenPointsMini(
+    sortedPoints: List<FrequencyPoint>,
+    leftIndex: Int,
+    rightIndex: Int,
+    time: LocalTime,
+    frequencySelector: (FrequencyPoint) -> Double,
+    interpolationType: InterpolationType,
+    splineTension: Float,
+    isWrapping: Boolean
+): Double {
+    val leftPoint = sortedPoints[leftIndex]
+    val rightPoint = sortedPoints[rightIndex]
+    
+    // Вычисляем нормализованную позицию t в интервале [0, 1]
+    val t1 = leftPoint.time.toSecondOfDay()
+    val t2 = if (isWrapping) {
+        rightPoint.time.toSecondOfDay() + 24 * 3600
+    } else {
+        rightPoint.time.toSecondOfDay()
+    }
+    val t = if (time.toSecondOfDay() < t1 && isWrapping) {
+        time.toSecondOfDay() + 24 * 3600
+    } else {
+        time.toSecondOfDay()
+    }
+    
+    if (t2 == t1) return frequencySelector(leftPoint)
+    
+    val ratio = (t - t1).toDouble() / (t2 - t1)
+    
+    // Получаем 4 точки для интерполяции
+    val p0 = getNeighborPointMini(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
+    val p1 = frequencySelector(leftPoint)
+    val p2 = frequencySelector(rightPoint)
+    val p3 = getNeighborPointMini(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
+    
+    // Используем общий объект интерполяции с параметром tension
+    return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
+}
+
+/**
+ * Получить соседнюю точку с учётом цикличности графика и перехода через полночь
+ */
+private fun getNeighborPointMini(
+    points: List<FrequencyPoint>,
+    currentIndex: Int,
+    offset: Int,
+    frequencySelector: (FrequencyPoint) -> Double,
+    isWrapping: Boolean
+): Double {
+    val neighborIndex = currentIndex + offset
+    
+    return when {
+        neighborIndex < 0 -> {
+            if (isWrapping) frequencySelector(points.last())
+            else frequencySelector(points.first())
+        }
+        neighborIndex >= points.size -> {
+            if (isWrapping) frequencySelector(points.first())
+            else frequencySelector(points.last())
+        }
+        else -> frequencySelector(points[neighborIndex])
     }
 }
