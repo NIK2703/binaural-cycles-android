@@ -32,6 +32,9 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import com.binauralcycles.R
 
+// Время блокировки навигации после перехода на экран (для защиты от "пробивания" касаний)
+private const val NAVIGATION_BLOCK_DURATION_MS = 500L
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun PresetListScreen(
@@ -48,6 +51,20 @@ fun PresetListScreen(
 
     // Поднимаем состояние времени на уровень экрана - ОДНА корутина на весь список
     val currentTime = rememberCurrentTime(uiState.isPlaying)
+    
+    // Время последней навигации для защиты от быстрых повторных нажатий
+    var lastNavigationTime by remember { mutableStateOf(0L) }
+    
+    // Функция проверки можно ли выполнять навигацию
+    fun canNavigate(): Boolean {
+        val now = System.currentTimeMillis()
+        return now - lastNavigationTime > NAVIGATION_BLOCK_DURATION_MS
+    }
+    
+    // Обновляем время навигации при выполнении действия
+    fun recordNavigation() {
+        lastNavigationTime = System.currentTimeMillis()
+    }
 
     Scaffold(
         topBar = {
@@ -58,7 +75,12 @@ fun PresetListScreen(
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ),
                 actions = {
-                    IconButton(onClick = onOpenSettings) {
+                    IconButton(onClick = {
+                        if (canNavigate()) {
+                            recordNavigation()
+                            onOpenSettings()
+                        }
+                    }) {
                         Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings))
                     }
                 }
@@ -66,7 +88,12 @@ fun PresetListScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = onCreatePreset,
+                onClick = {
+                    if (canNavigate()) {
+                        recordNavigation()
+                        onCreatePreset()
+                    }
+                },
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             ) {
                 Icon(Icons.Default.Add, contentDescription = stringResource(R.string.add_preset))
@@ -118,7 +145,12 @@ fun PresetListScreen(
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
-                            onEditClick = { onEditPreset(preset.id) },
+                            onEditClick = { 
+                                if (canNavigate()) {
+                                    recordNavigation()
+                                    onEditPreset(preset.id)
+                                }
+                            },
                             onExportClick = { onExportPreset(preset.id) },
                             onDuplicateClick = { viewModel.duplicatePreset(preset.id) },
                             onDeleteClick = { viewModel.deletePreset(preset.id) }
