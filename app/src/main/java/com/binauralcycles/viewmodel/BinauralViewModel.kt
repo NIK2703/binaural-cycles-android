@@ -62,7 +62,9 @@ data class BinauralUiState(
     // Автоматическое расширение границ графика при редактировании
     val autoExpandGraphRange: Boolean = false,
     // Флаг подключения к сервису
-    val isServiceConnected: Boolean = false
+    val isServiceConnected: Boolean = false,
+    // Флаг блокировки навигации во время SharedTransition анимации
+    val isSharedTransitionRunning: Boolean = false
 )
 
 @HiltViewModel
@@ -1104,6 +1106,22 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.addPreset(duplicatedPreset)
         }
+    }
+    
+    // ============= Методы для управления блокировкой навигации =============
+    
+    /**
+     * Начать SharedTransition анимацию (блокирует навигацию)
+     */
+    fun startSharedTransition() {
+        _uiState.update { it.copy(isSharedTransitionRunning = true) }
+    }
+    
+    /**
+     * Завершить SharedTransition анимацию (разблокирует навигацию)
+     */
+    fun endSharedTransition() {
+        _uiState.update { it.copy(isSharedTransitionRunning = false) }
     }
 
     override fun onCleared() {

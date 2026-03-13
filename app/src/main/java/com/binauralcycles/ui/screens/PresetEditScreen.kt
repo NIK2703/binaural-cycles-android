@@ -48,6 +48,9 @@ fun PresetEditScreen(
     var showUnsavedDialog by remember { mutableStateOf(false) }
     var hasChanges by remember { mutableStateOf(false) }
     
+    // Флаг для предотвращения повторных навигаций (локальный debounce)
+    var isNavigating by remember { mutableStateOf(false) }
+    
     // Инициализируем редактируемый пресет в ViewModel
     LaunchedEffect(presetId) {
         if (presetId != null) {
@@ -66,6 +69,10 @@ fun PresetEditScreen(
     } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
     
     fun saveAndNavigateBack() {
+        // Предотвращаем повторный вызов во время навигации
+        if (isNavigating) return
+        isNavigating = true
+        
         val curve = uiState.editingFrequencyCurve ?: return
         if (presetId == null) {
             // Создаём новый пресет
@@ -91,8 +98,13 @@ fun PresetEditScreen(
     }
     
     fun navigateBackWithCheck() {
+        // Предотвращаем повторный вызов во время навигации
+        if (isNavigating) return
+        isNavigating = true
+        
         if (hasChanges) {
             showUnsavedDialog = true
+            isNavigating = false  // Сбрасываем если показываем диалог
         } else {
             // Восстанавливаем кривую активного пресета в сервисе (если нужно)
             // Но не очищаем editingFrequencyCurve - это позволит анимации работать плавно
@@ -275,21 +287,31 @@ fun PresetEditScreen(
             title = { Text(stringResource(R.string.unsaved_changes_title)) },
             text = { Text(stringResource(R.string.unsaved_changes_message)) },
             confirmButton = {
-                TextButton(onClick = {
-                    showUnsavedDialog = false
-                    saveAndNavigateBack()
-                }) {
+                TextButton(
+                    onClick = {
+                        showUnsavedDialog = false
+                        saveAndNavigateBack()
+                    },
+                    enabled = !isNavigating
+                ) {
                     Text(stringResource(R.string.save))
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showUnsavedDialog = false
-                    // Восстанавливаем кривую активного пресета в сервисе
-                    // Но не очищаем editingFrequencyCurve - это произойдёт после анимации
-                    viewModel.cancelEditingInService()
-                    onNavigateBack()
-                }) {
+                TextButton(
+                    onClick = {
+                        // Предотвращаем повторный вызов
+                        if (isNavigating) return@TextButton
+                        isNavigating = true
+                        
+                        showUnsavedDialog = false
+                        // Восстанавливаем кривую активного пресета в сервисе
+                        // Но не очищаем editingFrequencyCurve - это произойдёт после анимации
+                        viewModel.cancelEditingInService()
+                        onNavigateBack()
+                    },
+                    enabled = !isNavigating
+                ) {
                     Text(stringResource(R.string.do_not_save))
                 }
             }

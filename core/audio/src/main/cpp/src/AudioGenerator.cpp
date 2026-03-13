@@ -326,6 +326,7 @@ GenerateResult AudioGenerator::generateBuffer(
                 if (progress >= 1.0) {
                     fadeMultiplier = 1.0;
                     result.fadePhaseCompleted = true;
+                    localFadeOperation = GeneratorState::FadeOperation::NONE;
                 } else if (progress >= 0.0) {
                     fadeMultiplier = progress;
                 }
@@ -528,6 +529,7 @@ GenerateResult AudioGenerator::generateBufferNeon(
                     if (progress >= 1.0) {
                         fadeMultiplier = 1.0;
                         result.fadePhaseCompleted = true;
+                        localFadeOperation = GeneratorState::FadeOperation::NONE;
                     } else if (progress >= 0.0) {
                         fadeMultiplier = progress;
                     }
@@ -614,6 +616,7 @@ GenerateResult AudioGenerator::generateBufferNeon(
                 if (progress >= 1.0) {
                     fadeMultiplier = 1.0;
                     result.fadePhaseCompleted = true;
+                    localFadeOperation = GeneratorState::FadeOperation::NONE;
                 } else if (progress >= 0.0) {
                     fadeMultiplier = progress;
                 }
@@ -624,10 +627,10 @@ GenerateResult AudioGenerator::generateBufferNeon(
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
         state.leftPhase += leftOmega;
-        while (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+        while (state.leftPhase >= TWO_PI) state.leftPhase -= static_cast<float>(TWO_PI);
         
         state.rightPhase += rightOmega;
-        while (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+        while (state.rightPhase >= TWO_PI) state.rightPhase -= static_cast<float>(TWO_PI);
         
         const float baseAmplitude = baseVolumeFactor * static_cast<float>(fadeMultiplier);
         const float leftAmp = baseAmplitude * leftAmplitude;
