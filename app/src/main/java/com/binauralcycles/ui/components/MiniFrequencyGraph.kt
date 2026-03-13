@@ -2,19 +2,17 @@ package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binaural.core.audio.model.FrequencyCurve
@@ -24,6 +22,7 @@ import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
+import android.graphics.Paint
 
 /**
  * Кэшированные данные графика для оптимизации отрисовки
@@ -34,8 +33,11 @@ private data class CachedGraphPaths(
     val upperBeatPath: Path,
     val lowerBeatPath: Path,
     val combinedBeatPath: Path,
-    val gridLines: List<Offset>,  // Горизонтальные линии
-    val verticalLines: List<Offset>,  // Вертикальные линии (парами start-end)
+    val gridLines: FloatArray,  // Горизонтальные линии (только Y координаты)
+    val verticalLines: FloatArray,  // Вертикальные линии (только X координаты)
+    // Предвычисленные позиции точек и меток
+    val pointPositions: FloatArray,  // [x0, y0, x1, y1, ...] для каждой точки
+    val labeltexts: List<String>,  // Тексты меток
     // Флаг: используется ли режим расслабления
     val isRelaxationMode: Boolean
 )
@@ -139,7 +141,8 @@ private fun createRelaxationVirtualPoints(
  * Мини-график частот для отображения в списке пресетов
  * Показывает кривую несущей частоты и область биений
  * 
- * ОПТИМИЗАЦИЯ: Пути графика кэшируются и пересчитываются только при изменении данных пресета.
+ * ОПТИМИЗАЦИЯ: Все элементы отрисовываются через Canvas без лишних Composable.
+ * Пути графика кэшируются и пересчитываются только при изменении данных пресета.
  * При прокрутке списка используется кэшированные пути, что устраняет лаги.
  */
 @Composable
@@ -179,123 +182,92 @@ fun MiniFrequencyGraph(
         maxOf(maxFromPoints, maxFromVirtual).coerceAtLeast(1.0)
     }
     
-    Box(
-        modifier = modifier
-    ) {
-        BoxWithConstraints(
-            modifier = Modifier.fillMaxSize()
-        ) {
-            val widthPx = with(density) { maxWidth.roundToPx() }
-            val heightPx = with(density) { maxHeight.roundToPx() }
-            
-            val graphParams = remember(widthPx, heightPx, carrierRange, maxBeat) {
-                MiniGraphParams(widthPx, heightPx, carrierRange, maxBeat)
-            }
-            
-            // КЭШИРОВАНИЕ ПУТЕЙ - ключевая оптимизация!
-            // Пути вычисляются только при изменении данных пресета или размера графика
-            val cachedPaths = remember(
-                sortedPoints,
-                virtualPoints,
-                graphParams,
-                frequencyCurve.interpolationType,
-                frequencyCurve.splineTension,
-                relaxationModeSettings
-            ) {
-                computeGraphPaths(
-                    sortedPoints, 
-                    graphParams, 
-                    frequencyCurve.interpolationType, 
-                    frequencyCurve.splineTension,
-                    virtualPoints,
-                    relaxationModeSettings
-                )
-            }
-            
-            // График на весь размер
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .drawBehind {
-                        // Отрисовка кэшированных путей (быстро, без вычислений)
-                        drawCachedGraph(
-                            cachedPaths = cachedPaths,
-                            primaryColor = primaryColor,
-                            indicatorColor = indicatorColor,
-                            relaxationColor = relaxationColor,
-                            sortedPoints = sortedPoints,
-                            virtualPoints = virtualPoints,
-                            graphParams = graphParams,
-                            maxBeat = maxBeat,
-                            isPlaying = isPlaying,
-                            currentTime = currentTime,
-                            currentCarrierFrequency = currentCarrierFrequency,
-                            currentBeatFrequency = currentBeatFrequency,
-                            relaxationModeSettings = relaxationModeSettings
-                        )
-                    }
-            ) {
-                // Метки частот для каждой точки - мемоизируем вычисления
-                sortedPoints.forEach { point ->
-                    val xPx = graphParams.timeToX(point.time)
-                    val yPx = graphParams.carrierToY(point.carrierFrequency)
-                    
-                    // Форматируем частоту биения без лишних нулей
-                    val label = remember(point.carrierFrequency, point.beatFrequency) {
-                        val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toDouble()) {
-                            point.beatFrequency.toLong().toString()
-                        } else {
-                            point.beatFrequency.toString()
-                        }
-                        "%.0f(%s)".format(point.carrierFrequency, beatStr)
-                    }
-                    
-                    // Позиционируем метку над точкой
-                    Box(
-                        modifier = Modifier
-                            .offset { 
-                                IntOffset(
-                                    (xPx - 25f).toInt().coerceAtLeast(0), 
-                                    (yPx - 20f).toInt().coerceAtLeast(0)
-                                ) 
-                            }
-                    ) {
-                        Text(
-                            text = label,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontSize = 7.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = primaryColor.copy(alpha = 0.8f)
-                        )
-                    }
-                }
-            }
-            
-            // Ось Y - мин/макс частоты (справа поверх графика)
-            Column(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight()
-                    .padding(top = 4.dp, bottom = 4.dp, end = 6.dp),
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = "%.0f".format(carrierRange.max),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 9.sp,
-                    color = primaryColor
-                )
-                Text(
-                    text = "%.0f".format(carrierRange.min),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 9.sp,
-                    color = primaryColor
-                )
-            }
+    // Размеры графика - вычисляем один раз
+    var widthPx by remember { mutableIntStateOf(0) }
+    var heightPx by remember { mutableIntStateOf(0) }
+    
+    // Предвычисленный Paint для меток (переиспользуется)
+    val labelPaint = remember {
+        Paint().apply {
+            textSize = 18f  // ~7sp
+            isAntiAlias = true
         }
     }
+    
+    // Предвычисленный Paint для меток оси Y
+    val axisPaint = remember {
+        Paint().apply {
+            textSize = 24f  // ~9sp
+            isAntiAlias = true
+            isFakeBoldText = true
+        }
+    }
+    
+    // Параметры графика (пересчитываются при изменении размеров)
+    val graphParams = remember(widthPx, heightPx, carrierRange, maxBeat) {
+        if (widthPx > 0 && heightPx > 0) {
+            MiniGraphParams(widthPx, heightPx, carrierRange, maxBeat)
+        } else {
+            null
+        }
+    }
+    
+    // КЭШИРОВАНИЕ ПУТЕЙ - ключевая оптимизация!
+    // Пути вычисляются только при изменении данных пресета или размера графика
+    val cachedPaths = remember(
+        sortedPoints,
+        virtualPoints,
+        graphParams,
+        frequencyCurve.interpolationType,
+        frequencyCurve.splineTension,
+        relaxationModeSettings
+    ) {
+        if (graphParams != null) {
+            computeGraphPaths(
+                sortedPoints, 
+                graphParams, 
+                frequencyCurve.interpolationType, 
+                frequencyCurve.splineTension,
+                virtualPoints,
+                relaxationModeSettings
+            )
+        } else {
+            null
+        }
+    }
+    
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .onSizeChanged { size ->
+                widthPx = size.width
+                heightPx = size.height
+            }
+            .drawBehind {
+                val paths = cachedPaths ?: return@drawBehind
+                val params = graphParams ?: return@drawBehind
+                
+                // Отрисовка кэшированных путей (быстро, без вычислений)
+                drawCachedGraph(
+                    cachedPaths = paths,
+                    primaryColor = primaryColor,
+                    indicatorColor = indicatorColor,
+                    relaxationColor = relaxationColor,
+                    sortedPoints = sortedPoints,
+                    virtualPoints = virtualPoints,
+                    graphParams = params,
+                    maxBeat = maxBeat,
+                    isPlaying = isPlaying,
+                    currentTime = currentTime,
+                    currentCarrierFrequency = currentCarrierFrequency,
+                    currentBeatFrequency = currentBeatFrequency,
+                    relaxationModeSettings = relaxationModeSettings,
+                    labelPaint = labelPaint,
+                    axisPaint = axisPaint,
+                    carrierRange = carrierRange
+                )
+            }
+    )
 }
 
 /**
@@ -313,20 +285,29 @@ private fun computeGraphPaths(
     val width = params.widthPx.toFloat()
     val height = params.heightPx.toFloat()
     
-    // Сетка - горизонтальные линии
-    val gridLines = mutableListOf<Offset>()
-    for (i in 1..3) {
-        val y = height * i / 4
-        gridLines.add(Offset(0f, y))
-        gridLines.add(Offset(width, y))
-    }
+    // Сетка - горизонтальные линии (только Y координаты для экономии памяти)
+    val gridLines = FloatArray(3) { (height * (it + 1) / 4).toFloat() }
     
-    // Вертикальные линии каждые 3 часа (парами start-end)
-    val verticalLines = mutableListOf<Offset>()
-    for (hour in 3 until 24 step 3) {
-        val x = width * hour / 24
-        verticalLines.add(Offset(x, 0f))
-        verticalLines.add(Offset(x, height))
+    // Вертикальные линии каждые 3 часа (только X координаты)
+    val verticalLines = FloatArray(7) { (width * (it + 1) * 3 / 24).toFloat() }
+    
+    // Предвычисляем позиции точек и тексты меток
+    val pointPositions = FloatArray(sortedPoints.size * 2)
+    val labelTexts = mutableListOf<String>()
+    
+    sortedPoints.forEachIndexed { index, point ->
+        val x = params.timeToX(point.time)
+        val y = params.carrierToY(point.carrierFrequency)
+        pointPositions[index * 2] = x
+        pointPositions[index * 2 + 1] = y
+        
+        // Форматируем текст метки
+        val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toDouble()) {
+            point.beatFrequency.toLong().toString()
+        } else {
+            point.beatFrequency.toString()
+        }
+        labelTexts.add("%.0f(%s)".format(point.carrierFrequency, beatStr))
     }
     
     // Вычисляем пути только если есть минимум 2 точки
@@ -338,6 +319,8 @@ private fun computeGraphPaths(
             combinedBeatPath = Path(),
             gridLines = gridLines,
             verticalLines = verticalLines,
+            pointPositions = pointPositions,
+            labeltexts = labelTexts,
             isRelaxationMode = false
         )
     }
@@ -361,19 +344,11 @@ private fun computeGraphPaths(
         combinedBeatPath = combinedPath,
         gridLines = gridLines,
         verticalLines = verticalLines,
+        pointPositions = pointPositions,
+        labeltexts = labelTexts,
         isRelaxationMode = relaxationModeSettings.enabled && virtualPoints.isNotEmpty()
     )
 }
-
-/**
- * Вспомогательный класс для хранения 4 значений
- */
-private data class Tuple4<T1, T2, T3, T4>(
-    val first: T1,
-    val second: T2,
-    val third: T3,
-    val fourth: T4
-)
 
 /**
  * Вычисляет путь несущей частоты
@@ -520,34 +495,33 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
     currentTime: LocalTime,
     currentCarrierFrequency: Double,
     currentBeatFrequency: Double,
-    relaxationModeSettings: RelaxationModeSettings
+    relaxationModeSettings: RelaxationModeSettings,
+    labelPaint: Paint,
+    axisPaint: Paint,
+    carrierRange: FrequencyRange
 ) {
     val width = size.width
     val height = size.height
     val gridColor = primaryColor.copy(alpha = 0.1f)
     
     // Отрисовка сетки (горизонтальные линии)
-    var i = 0
-    while (i < cachedPaths.gridLines.size) {
+    for (y in cachedPaths.gridLines) {
         drawLine(
             color = gridColor,
-            start = cachedPaths.gridLines[i],
-            end = cachedPaths.gridLines[i + 1],
+            start = Offset(0f, y),
+            end = Offset(width, y),
             strokeWidth = 0.5f
         )
-        i += 2
     }
     
     // Вертикальные линии
-    i = 0
-    while (i < cachedPaths.verticalLines.size) {
+    for (x in cachedPaths.verticalLines) {
         drawLine(
             color = gridColor,
-            start = cachedPaths.verticalLines[i],
-            end = cachedPaths.verticalLines[i + 1],
+            start = Offset(x, 0f),
+            end = Offset(x, height),
             strokeWidth = 0.5f
         )
-        i += 2
     }
     
     // Выбираем цвет в зависимости от режима
@@ -592,10 +566,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         }
     }
     
-    // Рисуем основные точки
-    for (point in sortedPoints) {
-        val x = graphParams.timeToX(point.time)
-        val y = graphParams.carrierToY(point.carrierFrequency)
+    // Рисуем основные точки и метки
+    val pointPositions = cachedPaths.pointPositions
+    val labelTexts = cachedPaths.labeltexts
+    
+    for (i in sortedPoints.indices) {
+        val x = pointPositions[i * 2]
+        val y = pointPositions[i * 2 + 1]
+        val point = sortedPoints[i]
         
         drawCircle(
             color = primaryColor,
@@ -612,7 +590,55 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
             center = Offset(x, y),
             style = Fill
         )
+        
+        // Отрисовка метки через nativeCanvas (без Composable)
+        val label = labelTexts[i]
+        labelPaint.color = android.graphics.Color.argb(
+            (0.8f * 255).toInt(),
+            (primaryColor.red * 255).toInt(),
+            (primaryColor.green * 255).toInt(),
+            (primaryColor.blue * 255).toInt()
+        )
+        
+        // Позиционируем метку над точкой (с clamp к границам)
+        val labelX = (x - 25f).coerceAtLeast(0f)
+        val labelY = (y - 8f).coerceAtLeast(15f)
+        
+        drawContext.canvas.nativeCanvas.drawText(
+            label,
+            labelX,
+            labelY,
+            labelPaint
+        )
     }
+    
+    // Ось Y - мин/макс частоты (справа поверх графика, с отступом от скругления карточки)
+    axisPaint.color = android.graphics.Color.argb(
+        255,
+        (primaryColor.red * 255).toInt(),
+        (primaryColor.green * 255).toInt(),
+        (primaryColor.blue * 255).toInt()
+    )
+    axisPaint.textAlign = Paint.Align.RIGHT  // Выравнивание по правому краю
+    
+    val maxLabel = "%.0f".format(carrierRange.max)
+    val minLabel = "%.0f".format(carrierRange.min)
+    val axisX = width - 20f  // Отступ от правого края с учётом скругления карточки
+    val axisPadding = 20f    // Одинаковый отступ сверху и снизу для меток
+    
+    drawContext.canvas.nativeCanvas.drawText(
+        maxLabel,
+        axisX,
+        axisPadding + axisPaint.textSize,
+        axisPaint
+    )
+    
+    drawContext.canvas.nativeCanvas.drawText(
+        minLabel,
+        axisX,
+        height - axisPadding,
+        axisPaint
+    )
     
     // Индикатор текущего воспроизведения (вычисляется динамически, но это минимальные затраты)
     if (isPlaying) {
