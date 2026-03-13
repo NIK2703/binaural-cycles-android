@@ -12,6 +12,7 @@ import android.os.PowerManager
 import android.util.Log
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -155,10 +156,17 @@ class BinauralAudioEngine(private val context: Context) {
     /**
      * Обновить конфигурацию (потокобезопасно)
      */
-    fun updateConfig(config: BinauralConfig) {
+    fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
         configRef.set(config)
         _currentConfig.value = config
-        nativeEngine?.updateConfig(config)
+        nativeEngine?.updateConfig(config, relaxationSettings)
+    }
+    
+    /**
+     * Обновить настройки режима расслабления (потокобезопасно)
+     */
+    fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
+        nativeEngine?.updateRelaxationModeSettings(settings)
     }
 
     /**

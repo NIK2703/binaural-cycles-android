@@ -16,6 +16,7 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -80,6 +81,16 @@ data class SerializableVolumeNormalizationSettings(
 )
 
 /**
+ * Сериализуемые настройки режима расслабления
+ */
+@Serializable
+data class SerializableRelaxationModeSettings(
+    val enabled: Boolean = false,
+    val carrierReductionPercent: Int = 20,
+    val beatReductionPercent: Int = 20
+)
+
+/**
  * Сериализуемый пресет для хранения
  */
 @Serializable
@@ -89,6 +100,7 @@ data class SerializablePreset(
     val curve: SerializableFrequencyCurve,
     val channelSwapSettings: SerializableChannelSwapSettings? = null,
     val volumeNormalizationSettings: SerializableVolumeNormalizationSettings? = null,
+    val relaxationModeSettings: SerializableRelaxationModeSettings? = null,
     val createdAt: Long,
     val updatedAt: Long
 )
@@ -562,6 +574,11 @@ class BinauralPreferencesRepository @Inject constructor(
                     type = preset.volumeNormalizationSettings.type.name,
                     strength = preset.volumeNormalizationSettings.strength
                 ),
+                relaxationModeSettings = SerializableRelaxationModeSettings(
+                    enabled = preset.relaxationModeSettings.enabled,
+                    carrierReductionPercent = preset.relaxationModeSettings.carrierReductionPercent,
+                    beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent
+                ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
             )
@@ -609,6 +626,13 @@ class BinauralPreferencesRepository @Inject constructor(
                             strength = it.strength
                         )
                     } ?: VolumeNormalizationSettings(),
+                    relaxationModeSettings = serializable.relaxationModeSettings?.let {
+                        RelaxationModeSettings(
+                            enabled = it.enabled,
+                            carrierReductionPercent = it.carrierReductionPercent,
+                            beatReductionPercent = it.beatReductionPercent
+                        )
+                    } ?: RelaxationModeSettings(),
                     createdAt = serializable.createdAt,
                     updatedAt = serializable.updatedAt
                 )

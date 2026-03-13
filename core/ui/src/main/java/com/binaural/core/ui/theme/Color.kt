@@ -17,10 +17,6 @@ val DawnOrange = Color(0xFFFF7043)     // Оранжевый для рассве
 val DayBlue = Color(0xFF42A5F5)        // Яркий синий для дня
 val DuskPurple = Color(0xFF7E57C2)     // Фиолетовый для заката
 
-// Цвета для графика
-val BeatFrequencyColor = Color(0xFF4CAF50)    // Зелёный для частоты биений
-val CarrierFrequencyColor = Color(0xFF2196F3) // Синий для несущей частоты
-
 // Фоновые цвета
 val BackgroundDark = Color(0xFF0D1117)
 val SurfaceDark = Color(0xFF161B22)

@@ -65,7 +65,8 @@ fun PresetEditScreen(
         preset.name != presetName || 
         uiState.editingFrequencyCurve != preset.frequencyCurve ||
         uiState.editingChannelSwapSettings != preset.channelSwapSettings ||
-        uiState.editingVolumeNormalizationSettings != preset.volumeNormalizationSettings
+        uiState.editingVolumeNormalizationSettings != preset.volumeNormalizationSettings ||
+        uiState.editingRelaxationModeSettings != preset.relaxationModeSettings
     } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
     
     fun saveAndNavigateBack() {
@@ -80,7 +81,8 @@ fun PresetEditScreen(
                 name = presetName,
                 curve = curve,
                 channelSwapSettings = uiState.editingChannelSwapSettings,
-                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
+                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
+                relaxationModeSettings = uiState.editingRelaxationModeSettings
             )
         } else {
             // Обновляем существующий
@@ -89,7 +91,8 @@ fun PresetEditScreen(
                 name = presetName,
                 curve = curve,
                 channelSwapSettings = uiState.editingChannelSwapSettings,
-                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings
+                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
+                relaxationModeSettings = uiState.editingRelaxationModeSettings
             )
         }
         // Завершаем редактирование без очистки состояния для плавной анимации
@@ -206,6 +209,7 @@ fun PresetEditScreen(
                         splineTension = editingCurve.splineTension,
                         // Показываем указатель только если редактируется активный пресет
                         isPlaying = isEditingActivePreset && uiState.isPlaying,
+                        relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
                             viewModel.updateEditingPointTimeDirect(index, newTime)
@@ -273,6 +277,18 @@ fun PresetEditScreen(
                     onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
                     onTemporalNormalizationEnabledChange = { viewModel.setEditingTemporalNormalizationEnabled(it) },
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                // Режим расслабления
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                RelaxationModeCard(
+                    relaxationModeSettings = uiState.editingRelaxationModeSettings,
+                    onRelaxationModeEnabledChange = { viewModel.setEditingRelaxationModeEnabled(it) },
+                    onCarrierReductionChange = { viewModel.setEditingCarrierReductionPercent(it) },
+                    onBeatReductionChange = { viewModel.setEditingBeatReductionPercent(it) }
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))

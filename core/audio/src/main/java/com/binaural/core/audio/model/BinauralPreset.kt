@@ -382,6 +382,71 @@ data class ChannelSwapSettings(
 )
 
 /**
+ * Настройки режима расслабления для пресета
+ */
+@Serializable
+data class RelaxationModeSettings(
+    val enabled: Boolean = false,
+    val carrierReductionPercent: Int = 20,  // 5-50%
+    val beatReductionPercent: Int = 20      // 5-50%
+) {
+    init {
+        require(carrierReductionPercent in 5..50) { "Снижение несущей частоты должно быть от 5% до 50%" }
+        require(beatReductionPercent in 5..50) { "Снижение частоты биений должно быть от 5% до 50%" }
+    }
+    
+    /**
+     * Генерирует виртуальные точки режима расслабления между реальными точками.
+     * Виртуальные точки создаются посередине между каждой парой соседних точек.
+     */
+    fun generateVirtualPoints(points: List<FrequencyPoint>): List<FrequencyPoint> {
+        if (!enabled || points.size < 2) return emptyList()
+        
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val virtualPoints = mutableListOf<FrequencyPoint>()
+        
+        val carrierReduction = carrierReductionPercent / 100.0
+        val beatReduction = beatReductionPercent / 100.0
+        
+        for (i in 0 until sortedPoints.size) {
+            val currentPoint = sortedPoints[i]
+            val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
+            
+            // Вычисляем время посередине между точками
+            val currentTimeSeconds = currentPoint.time.toSecondOfDay()
+            var nextTimeSeconds = nextPoint.time.toSecondOfDay()
+            
+            // Обработка перехода через полночь
+            if (nextTimeSeconds <= currentTimeSeconds) {
+                nextTimeSeconds += 24 * 3600
+            }
+            
+            val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
+            val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
+            
+            // Интерполируем значения на середине
+            val ratio = 0.5
+            val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
+            val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
+            
+            // Применяем снижение частот для режима расслабления
+            val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
+            val relaxedBeat = midBeat * (1.0 - beatReduction)
+            
+            virtualPoints.add(
+                FrequencyPoint(
+                    time = midTime,
+                    carrierFrequency = relaxedCarrier,
+                    beatFrequency = relaxedBeat
+                )
+            )
+        }
+        
+        return virtualPoints
+    }
+}
+
+/**
  * Настройки нормализации громкости для пресета
  */
 @Serializable
@@ -407,9 +472,45 @@ data class BinauralPreset(
     val channelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
     // Настройки нормализации громкости (для каждого пресета отдельно)
     val volumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
+    // Настройки режима расслабления (для каждого пресета отдельно)
+    val relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
+    /**
+     * Кэшированная кривая с виртуальными точками расслабления
+     * Вычисляется лениво при первом обращении
+     */
+    @kotlinx.serialization.Transient
+    val curveWithRelaxation: FrequencyCurve by lazy {
+        if (relaxationModeSettings.enabled) {
+            val virtualPoints = relaxationModeSettings.generateVirtualPoints(frequencyCurve.points)
+            val allPoints = (frequencyCurve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
+            FrequencyCurve(
+                points = allPoints,
+                carrierRange = frequencyCurve.carrierRange,
+                beatRange = frequencyCurve.beatRange,
+                interpolationType = frequencyCurve.interpolationType,
+                splineTension = frequencyCurve.splineTension
+            )
+        } else {
+            frequencyCurve
+        }
+    }
+    
+    /**
+     * Получить несущую частоту для заданного времени с учётом режима расслабления
+     */
+    fun getCarrierFrequencyAt(time: LocalTime): Double {
+        return curveWithRelaxation.getCarrierFrequencyAt(time)
+    }
+    
+    /**
+     * Получить частоту биений для заданного времени с учётом режима расслабления
+     */
+    fun getBeatFrequencyAt(time: LocalTime): Double {
+        return curveWithRelaxation.getBeatFrequencyAt(time)
+    }
     companion object {
         // Фиксированные ID для стандартных пресетов (важно для сохранения изменений)
         const val DEFAULT_PRESET_ID = "preset-circadian-rhythm"

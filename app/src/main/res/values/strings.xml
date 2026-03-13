@@ -12,7 +12,7 @@
     <string name="no_presets_message">Нет сохранённых пресетов.\nНажмите + для создания нового.</string>
     
     <!-- Preset Edit Screen -->
-    <string name="new_preset">Новый пресет</string>
+    <string name="new_preset">Новая предустановка</string>
     
     <!-- Default preset names -->
     <string name="preset_circadian_rhythm">Циркадный ритм</string>
@@ -72,6 +72,17 @@
     <!-- Temporal Normalization (deprecated, kept for compatibility) -->
     <string name="temporal_normalization">Временная нормализация</string>
     <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
+    
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Периоды расслабления</string>
+    <string name="relaxation_mode_description">Снижение частот в серединах интервалов между точками</string>
+    <string name="relaxation_mode_enabled_desc">Снижение частот в серединах интервалов между точками</string>
+    <string name="relaxation_mode_disabled_desc">Частоты следуют графику без снижения</string>
+    <string name="carrier_reduction">Снижение несущей частоты</string>
+    <string name="carrier_reduction_description">Процент снижения несущей частоты в середине интервала</string>
+    <string name="beat_reduction">Снижение частоты биений</string>
+    <string name="beat_reduction_description">Процент снижения частоты биений в середине интервала</string>
+    <string name="reduction_percent_format">%d%%</string>
     
     <!-- App Settings -->
     <string name="update_interval">Интервал обновления частоты</string>

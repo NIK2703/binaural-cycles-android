@@ -8,8 +8,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.binaural.core.ui.theme.BeatFrequencyColor
-import com.binaural.core.ui.theme.CarrierFrequencyColor
 import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0
@@ -46,7 +44,7 @@ fun CurrentFrequenciesCard(
             FrequencyColumn(
                 label = beatLabel,
                 value = hzDecimalFormat.format(beatFrequency),
-                color = BeatFrequencyColor
+                color = MaterialTheme.colorScheme.primary
             )
             
             VerticalDivider(
@@ -58,7 +56,7 @@ fun CurrentFrequenciesCard(
             FrequencyColumn(
                 label = carrierLabel,
                 value = hzFormat.format(carrierFrequency),
-                color = CarrierFrequencyColor
+                color = MaterialTheme.colorScheme.onSurface
             )
             
             if (isLeftChannelTooLow) {
