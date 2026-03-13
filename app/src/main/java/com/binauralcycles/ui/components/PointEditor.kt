@@ -1,6 +1,7 @@
 package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -22,7 +23,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -114,11 +117,15 @@ fun PointEditor(
     }
     
     // Отображаем частоты с ненулевыми десятичными знаками
-    var tempCarrierFrequency by remember(point.carrierFrequency) { mutableStateOf(formatFrequency(point.carrierFrequency)) }
-    var tempBeatFrequency by remember(point.beatFrequency) { mutableStateOf(formatFrequency(point.beatFrequency)) }
+    var tempCarrierFrequency by remember(point.carrierFrequency) { 
+        mutableStateOf(TextFieldValue(formatFrequency(point.carrierFrequency))) 
+    }
+    var tempBeatFrequency by remember(point.beatFrequency) { 
+        mutableStateOf(TextFieldValue(formatFrequency(point.beatFrequency))) 
+    }
     
-    val carrierValue = parseFrequency(tempCarrierFrequency)
-    val beatValue = parseFrequency(tempBeatFrequency)
+    val carrierValue = parseFrequency(tempCarrierFrequency.text)
+    val beatValue = parseFrequency(tempBeatFrequency.text)
     
     val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0
     
@@ -219,13 +226,12 @@ fun PointEditor(
         onTimeChange(LocalTime(hours, minutes))
     }
     
-    Card(
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
-        )
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.medium
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             // Заголовок с временем и кнопками
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -263,7 +269,7 @@ fun PointEditor(
                         singleLine = true,
                         modifier = Modifier
                             .padding(start = 8.dp)
-                            .width(32.dp)
+                            .width(36.dp)
                             .focusRequester(hoursFocusRequester)
                             .onFocusEvent { focusState ->
                                 if (focusState.isFocused) {
@@ -281,7 +287,12 @@ fun PointEditor(
                                 }
                             }
                             .clip(MaterialTheme.shapes.small)
-                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline,
+                                shape = MaterialTheme.shapes.small
+                            )
                             .padding(horizontal = 4.dp, vertical = 4.dp),
                         textStyle = MaterialTheme.typography.titleSmall.copy(
                             textAlign = TextAlign.Center,
@@ -322,7 +333,7 @@ fun PointEditor(
                         ),
                         singleLine = true,
                         modifier = Modifier
-                            .width(32.dp)
+                            .width(36.dp)
                             .focusRequester(minutesFocusRequester)
                             .onFocusEvent { focusState ->
                                 if (focusState.isFocused) {
@@ -340,7 +351,12 @@ fun PointEditor(
                                 }
                             }
                             .clip(MaterialTheme.shapes.small)
-                            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+                            .background(MaterialTheme.colorScheme.surface)
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline,
+                                shape = MaterialTheme.shapes.small
+                            )
                             .padding(horizontal = 4.dp, vertical = 4.dp),
                         textStyle = MaterialTheme.typography.titleSmall.copy(
                             textAlign = TextAlign.Center,
@@ -388,7 +404,17 @@ fun PointEditor(
                 BasicTextField(
                     value = tempCarrierFrequency,
                     onValueChange = { newValue ->
-                        tempCarrierFrequency = limitFrequencyInput(newValue)
+                        val limited = limitFrequencyInput(newValue.text)
+                        // Если при удалении появился "0", выделяем его полностью
+                        if (limited == "0" && tempCarrierFrequency.text.length > 1) {
+                            tempCarrierFrequency = TextFieldValue(limited, selection = TextRange(0, 1))
+                        } else if (limited != newValue.text) {
+                            // Текст был изменён (ограничен), сохраняем курсор в конце
+                            tempCarrierFrequency = TextFieldValue(limited, selection = TextRange(limited.length))
+                        } else {
+                            // Текст не изменился, сохраняем оригинальный selection
+                            tempCarrierFrequency = newValue.copy(text = limited)
+                        }
                     },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal,
@@ -397,13 +423,13 @@ fun PointEditor(
                     keyboardActions = KeyboardActions(
                         onDone = {
                             // Сохраняем значение при нажатии Done
-                            val value = parseFrequency(tempCarrierFrequency)
+                            val value = parseFrequency(tempCarrierFrequency.text)
                             if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0) {
                                 sliderCarrier = value.toFloat()
                                 onCarrierFrequencyChange(value)
                             } else {
                                 // Восстанавливаем предыдущее значение при ошибке
-                                tempCarrierFrequency = formatFrequency(point.carrierFrequency)
+                                tempCarrierFrequency = TextFieldValue(formatFrequency(point.carrierFrequency))
                             }
                             keyboardController?.hide()
                             focusManager.clearFocus()
@@ -411,7 +437,7 @@ fun PointEditor(
                     ),
                     singleLine = true,
                     modifier = Modifier
-                        .width(60.dp)
+                        .width(64.dp)
                         .focusRequester(carrierFocusRequester)
                         .onFocusEvent { focusState ->
                             if (focusState.isFocused) {
@@ -419,27 +445,30 @@ fun PointEditor(
                             } else if (carrierWasFocused) {
                                 // Фокус был потерян после того как был получен - сохраняем
                                 carrierWasFocused = false
-                                val value = parseFrequency(tempCarrierFrequency)
+                                val value = parseFrequency(tempCarrierFrequency.text)
                                 if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0) {
                                     sliderCarrier = value.toFloat()
                                     onCarrierFrequencyChange(value)
                                 } else {
                                     // Восстанавливаем предыдущее значение при ошибке
-                                    tempCarrierFrequency = formatFrequency(point.carrierFrequency)
+                                    tempCarrierFrequency = TextFieldValue(formatFrequency(point.carrierFrequency))
                                 }
                             }
                         }
                         .clip(MaterialTheme.shapes.small)
-                        .background(
-                            if (!isCarrierValid && tempCarrierFrequency.isNotEmpty())
-                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(
+                            width = 1.dp,
+                            color = if (!isCarrierValid && tempCarrierFrequency.text.isNotEmpty())
+                                MaterialTheme.colorScheme.error
                             else
-                                MaterialTheme.colorScheme.surfaceContainerHighest
+                                MaterialTheme.colorScheme.outline,
+                            shape = MaterialTheme.shapes.small
                         )
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                     textStyle = MaterialTheme.typography.titleSmall.copy(
                         textAlign = TextAlign.End,
-                        color = if (!isCarrierValid && tempCarrierFrequency.isNotEmpty())
+                        color = if (!isCarrierValid && tempCarrierFrequency.text.isNotEmpty())
                             MaterialTheme.colorScheme.error
                         else
                             MaterialTheme.colorScheme.onSurface
@@ -459,7 +488,7 @@ fun PointEditor(
                     onValueChange = {
                         val rounded = kotlin.math.round(it)
                         sliderCarrier = rounded
-                        tempCarrierFrequency = formatFrequency(rounded.toDouble())
+                        tempCarrierFrequency = TextFieldValue(formatFrequency(rounded.toDouble()))
                     },
                     onValueChangeFinished = { onCarrierFrequencyChange(kotlin.math.round(sliderCarrier).toDouble()) },
                     valueRange = carrierRange.min.toFloat()..carrierRange.max.toFloat(),
@@ -490,7 +519,17 @@ fun PointEditor(
                 BasicTextField(
                     value = tempBeatFrequency,
                     onValueChange = { newValue ->
-                        tempBeatFrequency = limitFrequencyInput(newValue)
+                        val limited = limitFrequencyInput(newValue.text)
+                        // Если при удалении появился "0", выделяем его полностью
+                        if (limited == "0" && tempBeatFrequency.text.length > 1) {
+                            tempBeatFrequency = TextFieldValue(limited, selection = TextRange(0, 1))
+                        } else if (limited != newValue.text) {
+                            // Текст был изменён (ограничен), сохраняем курсор в конце
+                            tempBeatFrequency = TextFieldValue(limited, selection = TextRange(limited.length))
+                        } else {
+                            // Текст не изменился, сохраняем оригинальный selection
+                            tempBeatFrequency = newValue.copy(text = limited)
+                        }
                     },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Decimal,
@@ -499,12 +538,12 @@ fun PointEditor(
                     keyboardActions = KeyboardActions(
                         onDone = {
                             // Сохраняем значение при нажатии Done
-                            val value = parseFrequency(tempBeatFrequency)
+                            val value = parseFrequency(tempBeatFrequency.text)
                             if (value != null && value >= beatRange.min && value <= maxBeatFrequencyForValidation) {
                                 onBeatFrequencyChange(value)
                             } else {
                                 // Восстанавливаем предыдущее значение при ошибке
-                                tempBeatFrequency = formatFrequency(point.beatFrequency)
+                                tempBeatFrequency = TextFieldValue(formatFrequency(point.beatFrequency))
                             }
                             keyboardController?.hide()
                             focusManager.clearFocus()
@@ -512,7 +551,7 @@ fun PointEditor(
                     ),
                     singleLine = true,
                     modifier = Modifier
-                        .width(60.dp)
+                        .width(64.dp)
                         .focusRequester(beatFocusRequester)
                         .onFocusEvent { focusState ->
                             if (focusState.isFocused) {
@@ -520,27 +559,30 @@ fun PointEditor(
                             } else if (beatWasFocused) {
                                 // Фокус был потерян после того как был получен - сохраняем
                                 beatWasFocused = false
-                                val value = parseFrequency(tempBeatFrequency)
+                                val value = parseFrequency(tempBeatFrequency.text)
                                 if (value != null && value >= beatRange.min && value <= maxBeatFrequencyForValidation) {
                                     sliderBeat = value.toFloat()
                                     onBeatFrequencyChange(value)
                                 } else {
                                     // Восстанавливаем предыдущее значение при ошибке
-                                    tempBeatFrequency = formatFrequency(point.beatFrequency)
+                                    tempBeatFrequency = TextFieldValue(formatFrequency(point.beatFrequency))
                                 }
                             }
                         }
                         .clip(MaterialTheme.shapes.small)
-                        .background(
-                            if (!isBeatValid && tempBeatFrequency.isNotEmpty())
-                                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f)
+                        .background(MaterialTheme.colorScheme.surface)
+                        .border(
+                            width = 1.dp,
+                            color = if (!isBeatValid && tempBeatFrequency.text.isNotEmpty())
+                                MaterialTheme.colorScheme.error
                             else
-                                MaterialTheme.colorScheme.surfaceContainerHighest
+                                MaterialTheme.colorScheme.outline,
+                            shape = MaterialTheme.shapes.small
                         )
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
                     textStyle = MaterialTheme.typography.titleSmall.copy(
                         textAlign = TextAlign.End,
-                        color = if (!isBeatValid && tempBeatFrequency.isNotEmpty())
+                        color = if (!isBeatValid && tempBeatFrequency.text.isNotEmpty())
                             MaterialTheme.colorScheme.error
                         else
                             MaterialTheme.colorScheme.onSurface
@@ -562,7 +604,7 @@ fun PointEditor(
                     onValueChange = {
                         val rounded = kotlin.math.round(it).coerceIn(minBeatForSlider, maxBeatForSlider)
                         sliderBeat = rounded
-                        tempBeatFrequency = formatFrequency(rounded.toDouble())
+                        tempBeatFrequency = TextFieldValue(formatFrequency(rounded.toDouble()))
                     },
                     onValueChangeFinished = { onBeatFrequencyChange(kotlin.math.round(sliderBeat).toDouble()) },
                     valueRange = minBeatForSlider..maxBeatForSlider,
