@@ -52,11 +52,12 @@ data class BinauralUiState(
     // Диапазоны частот для редактирования
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
-    // Редактируемые настройки пресета (для экрана редактирования)
-    val editingChannelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
-    val editingVolumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
     // Настройки режима расслабления (для экрана редактирования)
     val editingRelaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
+    // Глобальные настройки нормализации громкости (не зависят от пресета)
+    val volumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
+    // Глобальные настройки перестановки каналов (не зависят от пресета)
+    val channelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
     // Состояние перестановки каналов (из сервиса)
     val isChannelsSwapped: Boolean = false,
     // Общие настройки приложения
@@ -95,7 +96,7 @@ class BinauralViewModel @Inject constructor(
             // даже если сервис подключился после загрузки пресетов
             val state = _uiState.value
             if (state.activePreset != null) {
-                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}, channelSwap=${state.activePreset.channelSwapSettings.enabled}")
+                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}, channelSwap=${state.channelSwapSettings.enabled}")
             }
             // Всегда вызываем updateAudioConfig - это обновит конфиг даже если activePreset ещё не загружен
             // (в этом случае будет использован дефолтный конфиг, который потом заменится при загрузке пресета)
@@ -194,6 +195,22 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(autoExpandGraphRange = autoExpand) }
             }
         }
+        // Глобальные настройки перестановки каналов
+        viewModelScope.launch {
+            preferencesRepository.getChannelSwapSettings().collect { settings ->
+                _uiState.update { it.copy(channelSwapSettings = settings) }
+                // Обновляем конфиг аудио при изменении настроек каналов
+                updateAudioConfig()
+            }
+        }
+        // Глобальные настройки нормализации громкости
+        viewModelScope.launch {
+            preferencesRepository.getVolumeNormalizationSettings().collect { settings ->
+                _uiState.update { it.copy(volumeNormalizationSettings = settings) }
+                // Обновляем конфиг аудио при изменении настроек нормализации
+                updateAudioConfig()
+            }
+        }
     }
 
     private fun observePlaybackState() {
@@ -244,16 +261,16 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
-        // Формируем конфиг из настроек пресета
+        // Формируем конфиг из глобальных настроек каналов и нормализации
         val config = BinauralConfig(
             frequencyCurve = preset.frequencyCurve,
             volume = state.volume,
-            channelSwapEnabled = preset.channelSwapSettings.enabled,
-            channelSwapIntervalSeconds = preset.channelSwapSettings.intervalSeconds,
-            channelSwapFadeEnabled = preset.channelSwapSettings.fadeEnabled,
-            channelSwapFadeDurationMs = preset.channelSwapSettings.fadeDurationMs,
-            normalizationType = preset.volumeNormalizationSettings.type,
-            volumeNormalizationStrength = preset.volumeNormalizationSettings.strength
+            channelSwapEnabled = state.channelSwapSettings.enabled,
+            channelSwapIntervalSeconds = state.channelSwapSettings.intervalSeconds,
+            channelSwapFadeEnabled = state.channelSwapSettings.fadeEnabled,
+            channelSwapFadeDurationMs = state.channelSwapSettings.fadeDurationMs,
+            normalizationType = state.volumeNormalizationSettings.type,
+            volumeNormalizationStrength = state.volumeNormalizationSettings.strength
         )
         
         val relaxationSettings = preset.relaxationModeSettings
@@ -298,8 +315,6 @@ class BinauralViewModel @Inject constructor(
                 carrierRange = preset.frequencyCurve.carrierRange,
                 beatRange = preset.frequencyCurve.beatRange,
                 selectedPointIndex = null,  // Сбрасываем выбранную точку при начале редактирования
-                editingChannelSwapSettings = preset.channelSwapSettings,
-                editingVolumeNormalizationSettings = preset.volumeNormalizationSettings,
                 editingRelaxationModeSettings = preset.relaxationModeSettings
             )
         }
@@ -323,8 +338,6 @@ class BinauralViewModel @Inject constructor(
                 carrierRange = defaultCurve.carrierRange,
                 beatRange = defaultCurve.beatRange,
                 selectedPointIndex = null,
-                editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
                 editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
@@ -342,8 +355,6 @@ class BinauralViewModel @Inject constructor(
                 editingFrequencyCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
-                editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
                 editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
@@ -376,8 +387,6 @@ class BinauralViewModel @Inject constructor(
                 editingFrequencyCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
-                editingChannelSwapSettings = ChannelSwapSettings(),
-                editingVolumeNormalizationSettings = VolumeNormalizationSettings(),
                 editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
@@ -399,15 +408,11 @@ class BinauralViewModel @Inject constructor(
     fun createPreset(
         name: String, 
         curve: FrequencyCurve, 
-        channelSwapSettings: ChannelSwapSettings, 
-        volumeNormalizationSettings: VolumeNormalizationSettings,
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
-            channelSwapSettings = channelSwapSettings,
-            volumeNormalizationSettings = volumeNormalizationSettings,
             relaxationModeSettings = relaxationModeSettings
         )
         viewModelScope.launch {
@@ -422,16 +427,12 @@ class BinauralViewModel @Inject constructor(
         presetId: String, 
         name: String, 
         curve: FrequencyCurve, 
-        channelSwapSettings: ChannelSwapSettings, 
-        volumeNormalizationSettings: VolumeNormalizationSettings,
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
         val existingPreset = _uiState.value.presets.find { it.id == presetId } ?: return
         val updatedPreset = existingPreset.copy(
             name = name,
             frequencyCurve = curve,
-            channelSwapSettings = channelSwapSettings,
-            volumeNormalizationSettings = volumeNormalizationSettings,
             relaxationModeSettings = relaxationModeSettings,
             updatedAt = System.currentTimeMillis()
         )
@@ -864,110 +865,6 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    // ============= Методы для редактирования настроек пресета =============
-    
-    fun setEditingChannelSwapEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        _uiState.update { 
-            it.copy(
-                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(enabled = enabled)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingChannelSwapInterval(seconds: Int) {
-        val state = _uiState.value
-        val clampedSeconds = seconds.coerceIn(30, 3600)
-        _uiState.update { 
-            it.copy(
-                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(intervalSeconds = clampedSeconds)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingChannelSwapFadeEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        _uiState.update { 
-            it.copy(
-                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(fadeEnabled = enabled)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingChannelSwapFadeDuration(durationMs: Long) {
-        val state = _uiState.value
-        val clampedDuration = durationMs.coerceIn(100L, 10000L)
-        _uiState.update { 
-            it.copy(
-                editingChannelSwapSettings = state.editingChannelSwapSettings.copy(fadeDurationMs = clampedDuration)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingVolumeNormalizationEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        // При включении устанавливаем CHANNEL, при выключении - NONE
-        val newType = if (enabled) NormalizationType.CHANNEL else NormalizationType.NONE
-        _uiState.update { 
-            it.copy(
-                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = newType)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingVolumeNormalizationStrength(strength: Float) {
-        val state = _uiState.value
-        val clampedStrength = strength.coerceIn(0f, 2f)
-        _uiState.update {
-            it.copy(
-                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(strength = clampedStrength)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-
-    fun setEditingTemporalNormalizationEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        // При включении временной нормализации устанавливаем TEMPORAL
-        val newType = if (enabled) NormalizationType.TEMPORAL else NormalizationType.CHANNEL
-        _uiState.update {
-            it.copy(
-                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = newType)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-    
-    /**
-     * Установить тип нормализации напрямую
-     */
-    fun setEditingNormalizationType(type: NormalizationType) {
-        val state = _uiState.value
-        _uiState.update {
-            it.copy(
-                editingVolumeNormalizationSettings = state.editingVolumeNormalizationSettings.copy(type = type)
-            )
-        }
-        updateAudioConfigIfActivePresetEditing()
-    }
-    
-    /**
-     * Обновить конфиг аудио если редактируется активный пресет
-     */
-    private fun updateAudioConfigIfActivePresetEditing() {
-        val state = _uiState.value
-        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        
-        if (isActivePreset) {
-            updateAudioConfig()
-        }
-    }
-
     // ============= Методы для редактирования режима расслабления =============
     
     /**
@@ -1033,6 +930,101 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.saveAutoExpandGraphRange(enabled)
         }
     }
+    
+    // ============= Методы для управления глобальной нормализацией громкости =============
+    
+    /**
+     * Включить/выключить нормализацию громкости (глобальная настройка)
+     */
+    fun setVolumeNormalizationEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        // При включении устанавливаем CHANNEL, при выключении - NONE
+        val newType = if (enabled) NormalizationType.CHANNEL else NormalizationType.NONE
+        val newSettings = state.volumeNormalizationSettings.copy(type = newType)
+        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Установить силу нормализации громкости (глобальная настройка)
+     */
+    fun setVolumeNormalizationStrength(strength: Float) {
+        val state = _uiState.value
+        val clampedStrength = strength.coerceIn(0f, 2f)
+        val newSettings = state.volumeNormalizationSettings.copy(strength = clampedStrength)
+        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Включить/выключить временную нормализацию (глобальная настройка)
+     */
+    fun setTemporalNormalizationEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        // При включении временной нормализации устанавливаем TEMPORAL
+        val newType = if (enabled) NormalizationType.TEMPORAL else NormalizationType.CHANNEL
+        val newSettings = state.volumeNormalizationSettings.copy(type = newType)
+        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        }
+    }
+    
+    // ============= Методы для управления настройками перестановки каналов =============
+    
+    /**
+     * Включить/выключить перестановку каналов
+     */
+    fun setChannelSwapEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        val newSettings = state.channelSwapSettings.copy(enabled = enabled)
+        _uiState.update { it.copy(channelSwapSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Установить интервал перестановки каналов
+     */
+    fun setChannelSwapInterval(seconds: Int) {
+        val state = _uiState.value
+        val clampedSeconds = seconds.coerceIn(5, 3600)
+        val newSettings = state.channelSwapSettings.copy(intervalSeconds = clampedSeconds)
+        _uiState.update { it.copy(channelSwapSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Включить/выключить плавный переход при перестановке каналов
+     */
+    fun setChannelSwapFadeEnabled(enabled: Boolean) {
+        val state = _uiState.value
+        val newSettings = state.channelSwapSettings.copy(fadeEnabled = enabled)
+        _uiState.update { it.copy(channelSwapSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Установить длительность плавного перехода при перестановке каналов
+     */
+    fun setChannelSwapFadeDuration(ms: Long) {
+        val state = _uiState.value
+        val clampedMs = ms.coerceIn(100L, 5000L)
+        val newSettings = state.channelSwapSettings.copy(fadeDurationMs = clampedMs)
+        _uiState.update { it.copy(channelSwapSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
 
     private fun updateAudioConfig() {
         val state = _uiState.value
@@ -1040,18 +1032,18 @@ class BinauralViewModel @Inject constructor(
         // Используем настройки из редактируемого пресета если редактируется активный
         val isActivePresetEditing = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
         
-        val (frequencyCurve, channelSwapSettings, volumeNormalizationSettings, relaxationModeSettings) = if (isActivePresetEditing) {
-            Tuple4(
+        // Настройки каналов и нормализации всегда берём из глобального состояния
+        val channelSwapSettings = state.channelSwapSettings
+        val volumeNormalizationSettings = state.volumeNormalizationSettings
+        
+        val (frequencyCurve, relaxationModeSettings) = if (isActivePresetEditing) {
+            Pair(
                 state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
-                state.editingChannelSwapSettings,
-                state.editingVolumeNormalizationSettings,
                 state.editingRelaxationModeSettings
             )
         } else {
-            Tuple4(
+            Pair(
                 state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
-                state.activePreset?.channelSwapSettings ?: ChannelSwapSettings(),
-                state.activePreset?.volumeNormalizationSettings ?: VolumeNormalizationSettings(),
                 state.activePreset?.relaxationModeSettings ?: RelaxationModeSettings()
             )
         }
@@ -1070,22 +1062,13 @@ class BinauralViewModel @Inject constructor(
         android.util.Log.d("BinauralViewModel", "updateAudioConfig: activePreset=${state.activePreset?.name}, " +
             "channelSwapEnabled=${channelSwapSettings.enabled}, " +
             "channelSwapInterval=${channelSwapSettings.intervalSeconds}s, " +
+            "normalizationType=${volumeNormalizationSettings.type}, " +
             "relaxationEnabled=${relaxationModeSettings.enabled}, " +
             "isServiceConnected=${state.isServiceConnected}, " +
             "isActivePresetEditing=$isActivePresetEditing")
         
         playbackService?.updateConfig(config, relaxationModeSettings)
     }
-    
-    /**
-     * Вспомогательный класс для 4-элементного кортежа
-     */
-    private data class Tuple4<T1, T2, T3, T4>(
-        val first: T1,
-        val second: T2,
-        val third: T3,
-        val fourth: T4
-    )
 
     // ============= Методы для экспорта/импорта пресетов =============
     

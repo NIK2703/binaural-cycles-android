@@ -11,6 +11,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.ui.components.AppSettingsCard
+import com.binauralcycles.ui.components.ChannelSwapSettingsCard
+import com.binauralcycles.ui.components.VolumeNormalizationSettingsCard
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binauralcycles.R
 
@@ -47,6 +49,29 @@ fun SettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
             
+            // Глобальные настройки перестановки каналов
+            ChannelSwapSettingsCard(
+                channelSwapSettings = uiState.channelSwapSettings,
+                isChannelsSwapped = uiState.isChannelsSwapped,
+                onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
+                onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
+                onChannelSwapFadeEnabledChange = { viewModel.setChannelSwapFadeEnabled(it) },
+                onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) }
+            )
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            
+            // Глобальные настройки нормализации громкости
+            VolumeNormalizationSettingsCard(
+                volumeNormalizationSettings = uiState.volumeNormalizationSettings,
+                onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
+                onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
+                onTemporalNormalizationEnabledChange = { viewModel.setTemporalNormalizationEnabled(it) }
+            )
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            
+            // Общие настройки приложения
             AppSettingsCard(
                 sampleRate = uiState.sampleRate,
                 frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,

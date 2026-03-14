@@ -36,11 +36,22 @@ void BinauralEngine::setCallbacks(EngineCallbacks callbacks) {
 void BinauralEngine::setConfig(const BinauralConfig& config) {
     std::lock_guard<std::mutex> lock(m_configMutex);
     m_config = config;
-    m_config.curve.updateCache();
+    // Строим lookup table с текущим интервалом обновления частот
+    m_config.curve.buildLookupTable(m_frequencyUpdateIntervalMs);
 }
 
 void BinauralEngine::setSampleRate(int sampleRate) {
     m_generator.setSampleRate(sampleRate);
+}
+
+void BinauralEngine::setFrequencyUpdateInterval(int intervalMs) {
+    m_frequencyUpdateIntervalMs = intervalMs;
+    
+    // Перестраиваем lookup table с новым интервалом
+    std::lock_guard<std::mutex> lock(m_configMutex);
+    m_config.curve.buildLookupTable(intervalMs);
+    
+    LOGD("Frequency update interval set to %d ms, lookup table rebuilt", intervalMs);
 }
 
 void BinauralEngine::setPlaying(bool playing) {

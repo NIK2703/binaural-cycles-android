@@ -470,10 +470,6 @@ data class BinauralPreset(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val frequencyCurve: FrequencyCurve,
-    // Настройки перестановки каналов (для каждого пресета отдельно)
-    val channelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
-    // Настройки нормализации громкости (для каждого пресета отдельно)
-    val volumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
     // Настройки режима расслабления (для каждого пресета отдельно)
     val relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     val createdAt: Long = System.currentTimeMillis(),

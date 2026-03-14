@@ -131,7 +131,7 @@ class BinauralPreferencesRepository @Inject constructor(
         private val CHANNEL_SWAP_FADE_ENABLED_KEY = booleanPreferencesKey("channel_swap_fade_enabled")
         private val CHANNEL_SWAP_FADE_DURATION_KEY = intPreferencesKey("channel_swap_fade_duration")
         // Настройки нормализации громкости
-        private val VOLUME_NORMALIZATION_ENABLED_KEY = booleanPreferencesKey("volume_normalization_enabled")
+        private val VOLUME_NORMALIZATION_TYPE_KEY = stringPreferencesKey("volume_normalization_type")
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
         // Частота дискретизации
         private val SAMPLE_RATE_KEY = intPreferencesKey("sample_rate")
@@ -265,17 +265,48 @@ class BinauralPreferencesRepository @Inject constructor(
         }
     }
     
-    // Методы для нормализации громкости
-    
-    fun getVolumeNormalizationEnabled(): Flow<Boolean> {
+    /**
+     * Получить все настройки перестановки каналов одним Flow
+     */
+    fun getChannelSwapSettings(): Flow<ChannelSwapSettings> {
         return dataStore.data.map { preferences ->
-            preferences[VOLUME_NORMALIZATION_ENABLED_KEY] ?: true  // Включено по умолчанию
+            ChannelSwapSettings(
+                enabled = preferences[CHANNEL_SWAP_ENABLED_KEY] ?: false,
+                intervalSeconds = preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60,
+                fadeEnabled = preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true,
+                fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L
+            )
         }
     }
     
-    suspend fun saveVolumeNormalizationEnabled(enabled: Boolean) {
+    /**
+     * Сохранить все настройки перестановки каналов
+     */
+    suspend fun saveChannelSwapSettings(settings: ChannelSwapSettings) {
         dataStore.edit { preferences ->
-            preferences[VOLUME_NORMALIZATION_ENABLED_KEY] = enabled
+            preferences[CHANNEL_SWAP_ENABLED_KEY] = settings.enabled
+            preferences[CHANNEL_SWAP_INTERVAL_KEY] = settings.intervalSeconds
+            preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] = settings.fadeEnabled
+            preferences[CHANNEL_SWAP_FADE_DURATION_KEY] = settings.fadeDurationMs.toInt()
+        }
+    }
+    
+    // Методы для нормализации громкости
+    
+    /**
+     * Получить тип нормализации громкости
+     */
+    fun getVolumeNormalizationType(): Flow<NormalizationType> {
+        return dataStore.data.map { preferences ->
+            preferences[VOLUME_NORMALIZATION_TYPE_KEY]?.let {
+                try { NormalizationType.valueOf(it) } catch (e: Exception) { NormalizationType.TEMPORAL }
+            } ?: NormalizationType.TEMPORAL
+        }
+    }
+    
+    suspend fun saveVolumeNormalizationType(type: NormalizationType) {
+        dataStore.edit { preferences ->
+            preferences[VOLUME_NORMALIZATION_TYPE_KEY] = type.name
         }
     }
     
@@ -288,6 +319,30 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveVolumeNormalizationStrength(strength: Float) {
         dataStore.edit { preferences ->
             preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] = strength
+        }
+    }
+    
+    /**
+     * Получить все настройки нормализации громкости одним Flow
+     */
+    fun getVolumeNormalizationSettings(): Flow<VolumeNormalizationSettings> {
+        return dataStore.data.map { preferences ->
+            VolumeNormalizationSettings(
+                type = preferences[VOLUME_NORMALIZATION_TYPE_KEY]?.let {
+                    try { NormalizationType.valueOf(it) } catch (e: Exception) { NormalizationType.TEMPORAL }
+                } ?: NormalizationType.TEMPORAL,
+                strength = preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] ?: 1.0f
+            )
+        }
+    }
+    
+    /**
+     * Сохранить все настройки нормализации громкости
+     */
+    suspend fun saveVolumeNormalizationSettings(settings: VolumeNormalizationSettings) {
+        dataStore.edit { preferences ->
+            preferences[VOLUME_NORMALIZATION_TYPE_KEY] = settings.type.name
+            preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] = settings.strength
         }
     }
     
@@ -564,16 +619,6 @@ class BinauralPreferencesRepository @Inject constructor(
                     interpolationType = preset.frequencyCurve.interpolationType.name,
                     splineTension = preset.frequencyCurve.splineTension
                 ),
-                channelSwapSettings = SerializableChannelSwapSettings(
-                    enabled = preset.channelSwapSettings.enabled,
-                    intervalSeconds = preset.channelSwapSettings.intervalSeconds,
-                    fadeEnabled = preset.channelSwapSettings.fadeEnabled,
-                    fadeDurationMs = preset.channelSwapSettings.fadeDurationMs
-                ),
-                volumeNormalizationSettings = SerializableVolumeNormalizationSettings(
-                    type = preset.volumeNormalizationSettings.type.name,
-                    strength = preset.volumeNormalizationSettings.strength
-                ),
                 relaxationModeSettings = SerializableRelaxationModeSettings(
                     enabled = preset.relaxationModeSettings.enabled,
                     carrierReductionPercent = preset.relaxationModeSettings.carrierReductionPercent,
@@ -612,20 +657,6 @@ class BinauralPreferencesRepository @Inject constructor(
                         } ?: InterpolationType.LINEAR,
                         splineTension = serializable.curve.splineTension ?: 0.0f
                     ),
-                    channelSwapSettings = serializable.channelSwapSettings?.let {
-                        ChannelSwapSettings(
-                            enabled = it.enabled,
-                            intervalSeconds = it.intervalSeconds,
-                            fadeEnabled = it.fadeEnabled,
-                            fadeDurationMs = it.fadeDurationMs
-                        )
-                    } ?: ChannelSwapSettings(),
-                    volumeNormalizationSettings = serializable.volumeNormalizationSettings?.let {
-                        VolumeNormalizationSettings(
-                            type = try { NormalizationType.valueOf(it.type) } catch (e: Exception) { NormalizationType.CHANNEL },
-                            strength = it.strength
-                        )
-                    } ?: VolumeNormalizationSettings(),
                     relaxationModeSettings = serializable.relaxationModeSettings?.let {
                         RelaxationModeSettings(
                             enabled = it.enabled,

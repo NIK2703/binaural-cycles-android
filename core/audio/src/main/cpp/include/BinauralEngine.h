@@ -57,10 +57,9 @@ public:
      * Установить интервал обновления частот в мс
      * Этот параметр определяет размер порции генерации буфера
      * Больший интервал = меньше прерываний = лучше энергоэффективность
+     * Также перестраивает lookup table для оптимального размера
      */
-    void setFrequencyUpdateInterval(int intervalMs) { 
-        m_frequencyUpdateIntervalMs = intervalMs; 
-    }
+    void setFrequencyUpdateInterval(int intervalMs);
     
     /**
      * Получить интервал обновления частот

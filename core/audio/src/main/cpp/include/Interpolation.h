@@ -147,6 +147,126 @@ inline double interpolate(
 /**
  * Реализация методов FrequencyCurve
  */
+
+/**
+ * Внутренняя реализация построения таблицы
+ * @param intervalSeconds интервал между значениями таблицы в секундах
+ */
+inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
+    if (points.size() < 2) {
+        // Минимальный размер таблицы
+        lowerFreqTable.assign(1, 200.0);
+        upperFreqTable.assign(1, 210.0);
+        return;
+    }
+    
+    // Размер таблицы = 86400 / intervalSeconds
+    // При intervalSeconds = 1 → 86400 значений
+    // При intervalSeconds = 10 → 8640 значений
+    // При intervalSeconds = 60 → 1440 значений
+    const int tableSize = SECONDS_PER_DAY / intervalSeconds;
+    
+    // Сортированные точки (предполагаем, что уже отсортированы по времени)
+    const auto& sortedPoints = points;
+    const int numPoints = static_cast<int>(sortedPoints.size());
+    
+    // Выделяем память
+    lowerFreqTable.resize(tableSize);
+    upperFreqTable.resize(tableSize);
+    
+    // Селекторы для частот каналов
+    auto getLowerFreq = [](const FrequencyPoint& p) {
+        return p.carrierFrequency - p.beatFrequency / 2.0;
+    };
+    auto getUpperFreq = [](const FrequencyPoint& p) {
+        return p.carrierFrequency + p.beatFrequency / 2.0;
+    };
+    
+    // Предвычисляем частоты для каждого интервала
+    for (int tableIndex = 0; tableIndex < tableSize; ++tableIndex) {
+        // Конвертируем индекс таблицы в секунды суток
+        const int timeSeconds = tableIndex * intervalSeconds;
+        
+        // Находим интервал (линейный поиск - выполняется только при построении таблицы)
+        int leftIndex = -1;
+        for (int j = 0; j < numPoints - 1; ++j) {
+            if (sortedPoints[j].timeSeconds <= timeSeconds && timeSeconds < sortedPoints[j + 1].timeSeconds) {
+                leftIndex = j;
+                break;
+            }
+        }
+        
+        // Если не нашли - переход через полночь
+        if (leftIndex < 0) {
+            leftIndex = numPoints - 1;
+        }
+        
+        const int rightIndex = (leftIndex + 1) % numPoints;
+        
+        const auto& leftPoint = sortedPoints[leftIndex];
+        const auto& rightPoint = sortedPoints[rightIndex];
+        
+        // Вычисляем нормализованную позицию t в интервале [0, 1]
+        int t1 = leftPoint.timeSeconds;
+        int t2 = rightPoint.timeSeconds;
+        
+        // Обработка перехода через полночь
+        const bool isWrapping = (leftIndex == numPoints - 1);
+        if (isWrapping) {
+            t2 += SECONDS_PER_DAY;
+        }
+        
+        int t = timeSeconds;
+        if (isWrapping && t < t1) {
+            t += SECONDS_PER_DAY;
+        }
+        
+        double ratio = 0.0;
+        if (t2 != t1) {
+            ratio = static_cast<double>(t - t1) / (t2 - t1);
+        }
+        
+        // Получаем 4 точки для сплайна
+        const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
+        const int nextNextIndex = (rightIndex + 1) % numPoints;
+        
+        // Интерполируем нижнюю частоту
+        double lowerP0 = getLowerFreq(sortedPoints[prevIndex]);
+        double lowerP1 = getLowerFreq(leftPoint);
+        double lowerP2 = getLowerFreq(rightPoint);
+        double lowerP3 = getLowerFreq(sortedPoints[nextNextIndex]);
+        lowerFreqTable[tableIndex] = std::max(0.0, Interpolation::interpolate(
+            interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, splineTension
+        ));
+        
+        // Интерполируем верхнюю частоту
+        double upperP0 = getUpperFreq(sortedPoints[prevIndex]);
+        double upperP1 = getUpperFreq(leftPoint);
+        double upperP2 = getUpperFreq(rightPoint);
+        double upperP3 = getUpperFreq(sortedPoints[nextNextIndex]);
+        upperFreqTable[tableIndex] = std::max(0.0, Interpolation::interpolate(
+            interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, splineTension
+        ));
+    }
+}
+
+/**
+ * Построить lookup table для заданного интервала обновления частот
+ * @param intervalMs интервал обновления частот в миллисекундах
+ */
+inline void FrequencyCurve::buildLookupTable(int intervalMs) {
+    // Сохраняем интервал для которого построена таблица
+    tableIntervalMs = intervalMs;
+    
+    // Конвертируем в секунды (минимум 1 секунда)
+    const int intervalSeconds = std::max(1, intervalMs / 1000);
+    
+    buildLookupTableInternal(intervalSeconds);
+}
+
+/**
+ * Обновить кэш min/max частот
+ */
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
     
@@ -164,6 +284,34 @@ inline void FrequencyCurve::updateCache() {
         minUpperFreq = std::min(minUpperFreq, std::max(0.0, upperFreq));
         maxUpperFreq = std::max(maxUpperFreq, upperFreq);
     }
+    
+    // Строим lookup table с текущим интервалом (или значением по умолчанию)
+    const int intervalSeconds = std::max(1, tableIntervalMs / 1000);
+    buildLookupTableInternal(intervalSeconds);
+}
+
+/**
+ * Получить частоты каналов для заданного времени через lookup table
+ * СЛОЖНОСТЬ: O(1) - прямой доступ по индексу
+ */
+inline std::pair<double, double> FrequencyCurve::getChannelFrequenciesAt(int32_t timeSeconds) const {
+    // Если lookup table не построена, возвращаем значения по умолчанию
+    if (lowerFreqTable.empty() || upperFreqTable.empty()) {
+        return {200.0, 210.0};
+    }
+    
+    // Нормализуем время в пределах суток
+    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    
+    // Вычисляем индекс в таблице
+    // Каждый элемент таблицы соответствует интервалу в tableIntervalMs миллисекунд
+    const int intervalSeconds = std::max(1, tableIntervalMs / 1000);
+    const int tableSize = static_cast<int>(lowerFreqTable.size());
+    
+    // Индекс = timeSeconds / intervalSeconds
+    const int index = std::min(timeSeconds / intervalSeconds, tableSize - 1);
+    
+    return {lowerFreqTable[index], upperFreqTable[index]};
 }
 
 } // namespace binaural
