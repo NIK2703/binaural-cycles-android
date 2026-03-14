@@ -21,24 +21,13 @@ import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binauralcycles.R
 
 /**
- * Блок настроек пресета (перестановка каналов, нормализация, интерполяция)
+ * Блок настроек интерполяции для пресета
+ * Нормализация громкости вынесена в глобальные настройки приложения
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PresetSettingsCard(
-    channelSwapSettings: ChannelSwapSettings,
-    volumeNormalizationSettings: VolumeNormalizationSettings,
     interpolationType: InterpolationType,
-    isChannelsSwapped: Boolean,
-    currentLeftFreq: Double,
-    currentRightFreq: Double,
-    onChannelSwapEnabledChange: (Boolean) -> Unit,
-    onChannelSwapIntervalChange: (Int) -> Unit,
-    onChannelSwapFadeEnabledChange: (Boolean) -> Unit,
-    onChannelSwapFadeDurationChange: (Long) -> Unit,
-    onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
-    onVolumeNormalizationStrengthChange: (Float) -> Unit,
-    onTemporalNormalizationEnabledChange: (Boolean) -> Unit,
     onInterpolationTypeChange: (InterpolationType) -> Unit
 ) {
     Column(
@@ -128,9 +117,24 @@ fun PresetSettingsCard(
                 }
             }
         }
-        
-        HorizontalDivider()
-        
+    }
+}
+
+/**
+ * Блок глобальных настроек нормализации громкости
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun VolumeNormalizationSettingsCard(
+    volumeNormalizationSettings: VolumeNormalizationSettings,
+    onVolumeNormalizationEnabledChange: (Boolean) -> Unit,
+    onVolumeNormalizationStrengthChange: (Float) -> Unit,
+    onTemporalNormalizationEnabledChange: (Boolean) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         // Нормализация громкости
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -235,9 +239,26 @@ fun PresetSettingsCard(
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
         }
-        
-        HorizontalDivider()
-        
+    }
+}
+
+/**
+ * Блок глобальных настроек перестановки каналов
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ChannelSwapSettingsCard(
+    channelSwapSettings: ChannelSwapSettings,
+    isChannelsSwapped: Boolean,
+    onChannelSwapEnabledChange: (Boolean) -> Unit,
+    onChannelSwapIntervalChange: (Int) -> Unit,
+    onChannelSwapFadeEnabledChange: (Boolean) -> Unit,
+    onChannelSwapFadeDurationChange: (Long) -> Unit
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
         // Авто-перестановка каналов
         ListItem(
             headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
@@ -282,7 +303,7 @@ fun PresetSettingsCard(
                 DiscreteSliderLong(
                     label = stringResource(R.string.fade_duration),
                     value = channelSwapSettings.fadeDurationMs,
-                    values = listOf(250, 500, 1000, 1500, 2000, 3000, 5000),
+                    values = listOf(250L, 500L, 1000L, 1500L, 2000L, 3000L, 5000L),
                     valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
                     onValueChange = onChannelSwapFadeDurationChange,
                     modifier = Modifier.padding(horizontal = 16.dp)

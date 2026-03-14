@@ -28,128 +28,21 @@ void AudioGenerator::resetState(GeneratorState& state) {
     state.fadeStartSample = 0;
 }
 
-int AudioGenerator::findIntervalIndex(const std::vector<FrequencyPoint>& sortedPoints, int32_t targetSeconds) const {
-    if (sortedPoints.empty()) return -1;
-    
-    // Быстрая проверка границ
-    const int32_t firstSeconds = sortedPoints.front().timeSeconds;
-    const int32_t lastSeconds = sortedPoints.back().timeSeconds;
-    
-    if (targetSeconds < firstSeconds || targetSeconds >= lastSeconds) {
-        return -1; // Переход через полночь
-    }
-    
-    // Бинарный поиск
-    int left = 0;
-    int right = static_cast<int>(sortedPoints.size()) - 1;
-    
-    while (left < right - 1) {
-        const int mid = (left + right) >> 1;
-        if (sortedPoints[mid].timeSeconds <= targetSeconds) {
-            left = mid;
-        } else {
-            right = mid;
-        }
-    }
-    
-    return left;
-}
-
+/**
+ * Получить частоты каналов через lookup table
+ * СЛОЖНОСТЬ: O(1) - прямой доступ к предвычисленным значениям
+ * Энергопотребление НЕ зависит от количества точек на графике
+ */
 void AudioGenerator::interpolateChannelFrequencies(
     const FrequencyCurve& curve,
     int32_t timeSeconds,
     double& lowerFreq,
     double& upperFreq
 ) const {
-    if (curve.points.size() < 2) {
-        lowerFreq = 200.0;
-        upperFreq = 210.0;
-        return;
-    }
-    
-    // Сортированные точки (предполагаем, что уже отсортированы по времени)
-    const auto& points = curve.points;
-    
-    // Находим интервал
-    const int intervalIndex = findIntervalIndex(points, timeSeconds);
-    
-    int leftIndex, rightIndex;
-    bool isWrapping = false;
-    
-    if (intervalIndex == -1) {
-        // Переход через полночь
-        leftIndex = static_cast<int>(points.size()) - 1;
-        rightIndex = 0;
-        isWrapping = true;
-    } else {
-        leftIndex = intervalIndex;
-        rightIndex = intervalIndex + 1;
-    }
-    
-    const auto& leftPoint = points[leftIndex];
-    const auto& rightPoint = points[rightIndex];
-    
-    // Вычисляем нормализованную позицию t в интервале [0, 1]
-    int32_t t1 = leftPoint.timeSeconds;
-    int32_t t2 = isWrapping ? rightPoint.timeSeconds + SECONDS_PER_DAY : rightPoint.timeSeconds;
-    int32_t t = timeSeconds;
-    
-    if (isWrapping && t < t1) {
-        t += SECONDS_PER_DAY;
-    }
-    
-    if (t2 == t1) {
-        lowerFreq = leftPoint.carrierFrequency - leftPoint.beatFrequency / 2.0;
-        upperFreq = leftPoint.carrierFrequency + leftPoint.beatFrequency / 2.0;
-        return;
-    }
-    
-    const double ratio = static_cast<double>(t - t1) / (t2 - t1);
-    
-    // Вычисляем значения частот каналов в точках
-    auto getLowerFreq = [](const FrequencyPoint& p) {
-        return p.carrierFrequency - p.beatFrequency / 2.0;
-    };
-    auto getUpperFreq = [](const FrequencyPoint& p) {
-        return p.carrierFrequency + p.beatFrequency / 2.0;
-    };
-    
-    // Получаем 4 соседние точки для сплайна
-    const int size = static_cast<int>(points.size());
-    auto getNeighbor = [&](int index, int offset) -> const FrequencyPoint* {
-        int neighborIndex = index + offset;
-        if (neighborIndex < 0) {
-            return isWrapping ? &points.back() : &points.front();
-        } else if (neighborIndex >= size) {
-            return isWrapping ? &points.front() : &points.back();
-        }
-        return &points[neighborIndex];
-    };
-    
-    const auto* p0Ptr = getNeighbor(leftIndex, -1);
-    const auto* p3Ptr = getNeighbor(rightIndex, 1);
-    
-    // Интерполируем нижнюю частоту
-    double lowerP0 = getLowerFreq(*p0Ptr);
-    double lowerP1 = getLowerFreq(leftPoint);
-    double lowerP2 = getLowerFreq(rightPoint);
-    double lowerP3 = getLowerFreq(*p3Ptr);
-    lowerFreq = Interpolation::interpolate(
-        curve.interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, curve.splineTension
-    );
-    
-    // Интерполируем верхнюю частоту
-    double upperP0 = getUpperFreq(*p0Ptr);
-    double upperP1 = getUpperFreq(leftPoint);
-    double upperP2 = getUpperFreq(rightPoint);
-    double upperP3 = getUpperFreq(*p3Ptr);
-    upperFreq = Interpolation::interpolate(
-        curve.interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, curve.splineTension
-    );
-    
-    // Гарантируем неотрицательные частоты
-    lowerFreq = std::max(0.0, lowerFreq);
-    upperFreq = std::max(0.0, upperFreq);
+    // Используем O(1) lookup table вместо бинарного поиска
+    auto [lower, upper] = curve.getChannelFrequenciesAt(timeSeconds);
+    lowerFreq = lower;
+    upperFreq = upper;
 }
 
 std::pair<double, double> AudioGenerator::getChannelFrequenciesAtTime(

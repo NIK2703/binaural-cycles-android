@@ -64,8 +64,6 @@ fun PresetEditScreen(
     hasChanges = editingPreset?.let { preset ->
         preset.name != presetName || 
         uiState.editingFrequencyCurve != preset.frequencyCurve ||
-        uiState.editingChannelSwapSettings != preset.channelSwapSettings ||
-        uiState.editingVolumeNormalizationSettings != preset.volumeNormalizationSettings ||
         uiState.editingRelaxationModeSettings != preset.relaxationModeSettings
     } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
     
@@ -80,8 +78,6 @@ fun PresetEditScreen(
             viewModel.createPreset(
                 name = presetName,
                 curve = curve,
-                channelSwapSettings = uiState.editingChannelSwapSettings,
-                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
                 relaxationModeSettings = uiState.editingRelaxationModeSettings
             )
         } else {
@@ -90,8 +86,6 @@ fun PresetEditScreen(
                 presetId = presetId,
                 name = presetName,
                 curve = curve,
-                channelSwapSettings = uiState.editingChannelSwapSettings,
-                volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
                 relaxationModeSettings = uiState.editingRelaxationModeSettings
             )
         }
@@ -261,21 +255,9 @@ fun PresetEditScreen(
                     Spacer(modifier = Modifier.height(8.dp))
                 }
                 
-                // Настройки пресета
+                // Настройки интерполяции пресета
                 PresetSettingsCard(
-                    channelSwapSettings = uiState.editingChannelSwapSettings,
-                    volumeNormalizationSettings = uiState.editingVolumeNormalizationSettings,
                     interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
-                    isChannelsSwapped = uiState.isChannelsSwapped,
-                    currentLeftFreq = uiState.currentCarrierFrequency - uiState.currentBeatFrequency / 2.0,
-                    currentRightFreq = uiState.currentCarrierFrequency + uiState.currentBeatFrequency / 2.0,
-                    onChannelSwapEnabledChange = { viewModel.setEditingChannelSwapEnabled(it) },
-                    onChannelSwapIntervalChange = { viewModel.setEditingChannelSwapInterval(it) },
-                    onChannelSwapFadeEnabledChange = { viewModel.setEditingChannelSwapFadeEnabled(it) },
-                    onChannelSwapFadeDurationChange = { viewModel.setEditingChannelSwapFadeDuration(it) },
-                    onVolumeNormalizationEnabledChange = { viewModel.setEditingVolumeNormalizationEnabled(it) },
-                    onVolumeNormalizationStrengthChange = { viewModel.setEditingVolumeNormalizationStrength(it) },
-                    onTemporalNormalizationEnabledChange = { viewModel.setEditingTemporalNormalizationEnabled(it) },
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
                 )
                 

@@ -6,6 +6,11 @@
 namespace binaural {
 
 /**
+ * Количество секунд в сутках
+ */
+constexpr int SECONDS_PER_DAY = 86400;
+
+/**
  * Тип интерполяции между точками
  */
 enum class InterpolationType : int8_t {
@@ -48,17 +53,40 @@ struct FrequencyCurve {
     double maxUpperFreq = 0.0;
     int32_t cachedHash = -1;
     
+    // Lookup table для O(1) доступа к частотам
+    // Размер определяется интервалом обновления частот из настроек
+    // При интервале 1 сек: 86400 значений
+    // При интервале 10 сек: 8640 значений
+    // При интервале 60 сек: 1440 значений
+    std::vector<double> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
+    std::vector<double> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
+    int32_t tableIntervalMs = 10000;     // Интервал в мс, для которого построена таблица
+    
     /**
-     * Получить частоты каналов для заданного времени
-     * @param timeSeconds секунды с начала суток
+     * Получить частоты каналов для заданного времени через lookup table
+     * СЛОЖНОСТЬ: O(1) - один индекс + линейная интерполяция между двумя значениями
+     * @param timeSeconds секунды с начала суток (0-86399)
      * @return (нижняя частота, верхняя частота)
      */
     std::pair<double, double> getChannelFrequenciesAt(int32_t timeSeconds) const;
     
     /**
      * Обновить кэш min/max частот
+     * Вызывается при изменении точек графика
      */
     void updateCache();
+    
+    /**
+     * Построить lookup table для заданного интервала обновления частот
+     * @param intervalMs интервал обновления частот в миллисекундах
+     */
+    void buildLookupTable(int intervalMs);
+
+private:
+    /**
+     * Внутренняя реализация построения таблицы
+     */
+    void buildLookupTableInternal(int intervalSeconds);
 };
 
 /**

@@ -183,7 +183,8 @@ private:
     }
     
     /**
-     * Интерполяция частот каналов напрямую
+     * Интерполяция частот каналов через lookup table
+     * СЛОЖНОСТЬ: O(1) - прямой доступ к предвычисленным значениям
      */
     void interpolateChannelFrequencies(
         const FrequencyCurve& curve,
@@ -191,11 +192,6 @@ private:
         double& lowerFreq,
         double& upperFreq
     ) const;
-    
-    /**
-     * Найти индекс интервала для времени (бинарный поиск)
-     */
-    int findIntervalIndex(const std::vector<FrequencyPoint>& sortedPoints, int32_t targetSeconds) const;
 };
 
 } // namespace binaural
