@@ -30,12 +30,21 @@ enum class NormalizationType : int8_t {
 };
 
 /**
+ * Результат запроса частот из lookup table
+ * Содержит интерполированные частоты для конкретного момента времени
+ */
+struct FrequencyTableResult {
+    float lowerFreq;   // Нижняя частота (левый канал)
+    float upperFreq;   // Верхняя частота (правый канал)
+};
+
+/**
  * Точка на графике частот
  */
 struct FrequencyPoint {
     int32_t timeSeconds;      // Секунды с начала суток (0-86399)
-    double carrierFrequency;  // Несущая частота (Гц)
-    double beatFrequency;     // Частота биений (Гц)
+    float carrierFrequency;   // Несущая частота (Гц)
+    float beatFrequency;      // Частота биений (Гц)
 };
 
 /**
@@ -47,10 +56,10 @@ struct FrequencyCurve {
     float splineTension = 0.0f;  // 0.0 = Catmull-Rom, 1.0 = почти линейный
     
     // Кэш для оптимизации
-    double minLowerFreq = 0.0;
-    double maxLowerFreq = 0.0;
-    double minUpperFreq = 0.0;
-    double maxUpperFreq = 0.0;
+    float minLowerFreq = 0.0;
+    float maxLowerFreq = 0.0;
+    float minUpperFreq = 0.0;
+    float maxUpperFreq = 0.0;
     int32_t cachedHash = -1;
     
     // Lookup table для O(1) доступа к частотам
@@ -58,17 +67,17 @@ struct FrequencyCurve {
     // При интервале 1 сек: 86400 значений
     // При интервале 10 сек: 8640 значений
     // При интервале 60 сек: 1440 значений
-    std::vector<double> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
-    std::vector<double> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
+    std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
+    std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
     int32_t tableIntervalMs = 10000;     // Интервал в мс, для которого построена таблица
     
     /**
      * Получить частоты каналов для заданного времени через lookup table
-     * СЛОЖНОСТЬ: O(1) - один индекс + линейная интерполяция между двумя значениями
-     * @param timeSeconds секунды с начала суток (0-86399)
-     * @return (нижняя частота, верхняя частота)
+     * Возвращает интерполированные частоты для конкретного момента времени
+     * @param timeSeconds секунды с начала суток (0-86399.999...), поддерживает дробные значения
+     * @return структура с частотами для обоих каналов
      */
-    std::pair<double, double> getChannelFrequenciesAt(int32_t timeSeconds) const;
+    FrequencyTableResult getChannelFrequenciesAt(float timeSeconds) const;
     
     /**
      * Обновить кэш min/max частот
@@ -109,10 +118,11 @@ struct BinauralConfig {
 
 /**
  * Состояние генератора
+ * Используем float для фаз - совместимость с NEON SIMD и достаточная точность
  */
 struct GeneratorState {
-    double leftPhase = 0.0;
-    double rightPhase = 0.0;
+    float leftPhase = 0.0f;
+    float rightPhase = 0.0f;
     bool channelsSwapped = false;
     int64_t lastSwapElapsedMs = 0;
     int64_t totalSamplesGenerated = 0;

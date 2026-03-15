@@ -63,8 +63,12 @@ void BinauralEngine::setPlaying(bool playing) {
         m_state.lastSwapElapsedMs = 0;
         m_state.channelsSwapped = false;
         m_elapsedSeconds.store(0);
+        // Инициализируем базовое время для точной интерполяции
+        m_baseTimeSeconds = getCurrentTimeSeconds();
+        m_totalBufferTimeSeconds = 0.0;
         __android_log_print(ANDROID_LOG_DEBUG, "BinauralEngine", 
-            "setPlaying(true): reset lastSwapElapsedMs to 0, channelsSwapped to false");
+            "setPlaying(true): reset lastSwapElapsedMs to 0, channelsSwapped to false, baseTime=%d", 
+            m_baseTimeSeconds);
     }
 }
 
@@ -131,8 +135,21 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         return false;
     }
     
-    // Получаем текущее время
-    int32_t timeSeconds = getCurrentTimeSeconds();
+    // Вычисляем ТОЧНОЕ время для интерполяции
+    // Используем накопленное время буферов вместо системного времени (избегаем jitter)
+    int sampleRate = m_generator.getSampleRate();
+    float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / sampleRate;
+    
+    // Точное время для начала буфера
+    int32_t timeSeconds = static_cast<int32_t>(m_baseTimeSeconds + m_totalBufferTimeSeconds);
+    
+    // Нормализация в пределах суток
+    constexpr int32_t SECONDS_PER_DAY = 86400;
+    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    
+    // Накапливаем время для следующего буфера
+    m_totalBufferTimeSeconds += bufferDurationSeconds;
+    
     int64_t elapsedMs = static_cast<int64_t>(m_elapsedSeconds.load()) * 1000;
     
     // Обновляем прошедшее время
@@ -170,7 +187,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
     
     // Обновляем атомарные значения для Java
     // ОПТИМИЗАЦИЯ: callback вызываем только при реальном изменении
-    const double prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq);
+    const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq);
     m_currentCarrierFreq.store(result.currentCarrierFreq);
     
     // Callback только при значительном изменении частоты (> 0.1 Hz)

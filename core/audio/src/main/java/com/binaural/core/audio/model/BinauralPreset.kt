@@ -33,20 +33,20 @@ object LocalTimeSerializer : KSerializer<LocalTime> {
  */
 @Serializable
 data class FrequencyRange(
-    val min: Double,
-    val max: Double
+    val min: Float,
+    val max: Float
 ) {
     init {
         require(max > min) { "Максимальная частота должна быть больше минимальной" }
     }
     
-    fun contains(value: Double): Boolean = value in min..max
+    fun contains(value: Float): Boolean = value in min..max
     
-    fun clamp(value: Double): Double = value.coerceIn(min, max)
+    fun clamp(value: Float): Float = value.coerceIn(min, max)
     
     companion object {
-        val DEFAULT_CARRIER = FrequencyRange(50.0, 500.0)
-        val DEFAULT_BEAT = FrequencyRange(0.0, 1000.0)
+        val DEFAULT_CARRIER = FrequencyRange(50.0f, 500.0f)
+        val DEFAULT_BEAT = FrequencyRange(0.0f, 1000.0f)
     }
 }
 
@@ -79,14 +79,14 @@ enum class NormalizationType {
 data class FrequencyPoint(
     @Serializable(with = LocalTimeSerializer::class)
     val time: LocalTime,           // Время суток
-    val carrierFrequency: Double,  // Несущая частота (Гц)
-    val beatFrequency: Double      // Частота биений (Гц)
+    val carrierFrequency: Float,  // Несущая частота (Гц)
+    val beatFrequency: Float      // Частота биений (Гц)
 ) {
     companion object {
         /**
          * Создаёт точку из часов и минут
          */
-        fun fromHours(hours: Int, minutes: Int = 0, carrierFrequency: Double, beatFrequency: Double): FrequencyPoint {
+        fun fromHours(hours: Int, minutes: Int = 0, carrierFrequency: Float, beatFrequency: Float): FrequencyPoint {
             return FrequencyPoint(LocalTime(hours, minutes), carrierFrequency, beatFrequency)
         }
     }
@@ -118,16 +118,16 @@ data class FrequencyCurve(
      * Получить несущую частоту для заданного времени путём интерполяции
      * Не ограничиваем результат - кубический сплайн может давать значения за пределами точек
      */
-    fun getCarrierFrequencyAt(time: LocalTime): Double {
-        return interpolate(time) { it.carrierFrequency }.coerceAtLeast(0.0)
+    fun getCarrierFrequencyAt(time: LocalTime): Float {
+        return interpolate(time) { it.carrierFrequency }.coerceAtLeast(0.0f)
     }
 
     /**
      * Получить частоту биений для заданного времени путём интерполяции
      * Не ограничиваем результат - кубический сплайн может давать значения за пределами точек
      */
-    fun getBeatFrequencyAt(time: LocalTime): Double {
-        return interpolate(time) { it.beatFrequency }.coerceAtLeast(0.0)
+    fun getBeatFrequencyAt(time: LocalTime): Float {
+        return interpolate(time) { it.beatFrequency }.coerceAtLeast(0.0f)
     }
     
     /**
@@ -135,10 +135,10 @@ data class FrequencyCurve(
      * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier + beat/2)
      * Каждая точка кривой канала: carrier + beat/2
      */
-    fun getUpperChannelFrequencyAt(time: LocalTime): Double {
+    fun getUpperChannelFrequencyAt(time: LocalTime): Float {
         return interpolate(time) { point ->
-            point.carrierFrequency + point.beatFrequency / 2.0
-        }.coerceAtLeast(0.0)
+            point.carrierFrequency + point.beatFrequency / 2.0f
+        }.coerceAtLeast(0.0f)
     }
     
     /**
@@ -146,13 +146,13 @@ data class FrequencyCurve(
      * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier - beat/2)
      * Каждая точка кривой канала: carrier - beat/2
      */
-    fun getLowerChannelFrequencyAt(time: LocalTime): Double {
+    fun getLowerChannelFrequencyAt(time: LocalTime): Float {
         return interpolate(time) { point ->
-            point.carrierFrequency - point.beatFrequency / 2.0
-        }.coerceAtLeast(0.0)
+            point.carrierFrequency - point.beatFrequency / 2.0f
+        }.coerceAtLeast(0.0f)
     }
     
-    private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Double): Double {
+    private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Float): Float {
         val targetSeconds = time.toSecondOfDay()
         
         // Бинарный поиск для быстрого нахождения интервала
@@ -215,9 +215,9 @@ data class FrequencyCurve(
         leftIndex: Int,
         rightIndex: Int,
         time: LocalTime,
-        frequencySelector: (FrequencyPoint) -> Double,
+        frequencySelector: (FrequencyPoint) -> Float,
         isWrapping: Boolean
-    ): Double {
+    ): Float {
         val leftPoint = sortedPoints[leftIndex]
         val rightPoint = sortedPoints[rightIndex]
         
@@ -236,7 +236,7 @@ data class FrequencyCurve(
         
         if (t2 == t1) return frequencySelector(leftPoint)
         
-        val ratio = (t - t1).toDouble() / (t2 - t1)
+        val ratio = ((t - t1).toFloat() / (t2 - t1))
         
         // Получаем 4 точки для интерполяции
         val p0 = getNeighborPoint(leftIndex, -1, frequencySelector, isWrapping)
@@ -255,9 +255,9 @@ data class FrequencyCurve(
     private fun getNeighborPoint(
         currentIndex: Int,
         offset: Int,
-        frequencySelector: (FrequencyPoint) -> Double,
+        frequencySelector: (FrequencyPoint) -> Float,
         isWrapping: Boolean = false
-    ): Double {
+    ): Float {
         val neighborIndex = currentIndex + offset
         val size = sortedPoints.size
 
@@ -282,8 +282,8 @@ data class FrequencyCurve(
      */
     fun getInterpolatedValues(
         numSamples: Int = 100,
-        frequencySelector: (FrequencyPoint) -> Double
-    ): List<Pair<Int, Double>> {
+        frequencySelector: (FrequencyPoint) -> Float
+    ): List<Pair<Int, Float>> {
         return (0..numSamples).map { i ->
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
@@ -300,16 +300,16 @@ data class FrequencyCurve(
         fun defaultCurve(): FrequencyCurve {
             return FrequencyCurve(
                 points = listOf(
-                    FrequencyPoint.fromHours(0, 0, carrierFrequency = 174.0, beatFrequency = 3.0),    // Глубокий сон - дельта
-                    FrequencyPoint.fromHours(3, 0, carrierFrequency = 210.0, beatFrequency = 6.0),    // Лёгкий сон - тета
-                    FrequencyPoint.fromHours(6, 0, carrierFrequency = 220.0, beatFrequency = 8.0),    // Пробуждение - альфа/тета
-                    FrequencyPoint.fromHours(9, 0, carrierFrequency = 440.0, beatFrequency = 20.0),   // Пик активности - бета
-                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 440.0, beatFrequency = 25.0),  // Продуктивность - высокий бета
-                    FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 18.0),  // Вторая половина дня - бета
-                    FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0, beatFrequency = 12.0),  // Вечерний спад - альфа
-                    FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 10.0),  // Подготовка ко сну - альфа
+                    FrequencyPoint.fromHours(0, 0, carrierFrequency = 174.0f, beatFrequency = 3.0f),    // Глубокий сон - дельта
+                    FrequencyPoint.fromHours(3, 0, carrierFrequency = 210.0f, beatFrequency = 6.0f),    // Лёгкий сон - тета
+                    FrequencyPoint.fromHours(6, 0, carrierFrequency = 220.0f, beatFrequency = 8.0f),    // Пробуждение - альфа/тета
+                    FrequencyPoint.fromHours(9, 0, carrierFrequency = 440.0f, beatFrequency = 20.0f),   // Пик активности - бета
+                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 440.0f, beatFrequency = 25.0f),  // Продуктивность - высокий бета
+                    FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0f, beatFrequency = 18.0f),  // Вторая половина дня - бета
+                    FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0f, beatFrequency = 12.0f),  // Вечерний спад - альфа
+                    FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 10.0f),  // Подготовка ко сну - альфа
                 ),
-                carrierRange = FrequencyRange(100.0, 500.0),
+                carrierRange = FrequencyRange(100.0f, 500.0f),
                 interpolationType = InterpolationType.MONOTONE
             )
         }
@@ -340,7 +340,7 @@ data class BinauralConfig(
      * Получить текущие частоты для заданного времени
      * Возвращает (частота_биений, несущая_частота)
      */
-    fun getFrequenciesAt(time: LocalTime): Pair<Double, Double> {
+    fun getFrequenciesAt(time: LocalTime): Pair<Float, Float> {
         val beatFreq = frequencyCurve.getBeatFrequencyAt(time)
         val carrierFreq = frequencyCurve.getCarrierFrequencyAt(time)
         return Pair(beatFreq, carrierFreq)
@@ -353,7 +353,7 @@ data class BinauralConfig(
      * 
      * ВАЖНО: Каждая кривая канала интерполируется отдельно через свои точки!
      */
-    fun getChannelFrequenciesAt(time: LocalTime): Pair<Double, Double> {
+    fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
         val lowerFreq = frequencyCurve.getLowerChannelFrequencyAt(time)
         val upperFreq = frequencyCurve.getUpperChannelFrequencyAt(time)
         return Pair(lowerFreq, upperFreq)
@@ -408,8 +408,8 @@ data class RelaxationModeSettings(
         val sortedPoints = curve.points.sortedBy { it.time.toSecondOfDay() }
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
-        val carrierReduction = carrierReductionPercent / 100.0
-        val beatReduction = beatReductionPercent / 100.0
+        val carrierReduction = carrierReductionPercent / 100.0f
+        val beatReduction = beatReductionPercent / 100.0f
         
         for (i in 0 until sortedPoints.size) {
             val currentPoint = sortedPoints[i]
@@ -432,8 +432,8 @@ data class RelaxationModeSettings(
             val midBeat = curve.getBeatFrequencyAt(midTime)
             
             // Применяем снижение частот для режима расслабления
-            val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
-            val relaxedBeat = midBeat * (1.0 - beatReduction)
+            val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
+            val relaxedBeat = midBeat * (1.0f - beatReduction)
             
             virtualPoints.add(
                 FrequencyPoint(
@@ -499,14 +499,14 @@ data class BinauralPreset(
     /**
      * Получить несущую частоту для заданного времени с учётом режима расслабления
      */
-    fun getCarrierFrequencyAt(time: LocalTime): Double {
+    fun getCarrierFrequencyAt(time: LocalTime): Float {
         return curveWithRelaxation.getCarrierFrequencyAt(time)
     }
     
     /**
      * Получить частоту биений для заданного времени с учётом режима расслабления
      */
-    fun getBeatFrequencyAt(time: LocalTime): Double {
+    fun getBeatFrequencyAt(time: LocalTime): Float {
         return curveWithRelaxation.getBeatFrequencyAt(time)
     }
     companion object {
@@ -537,16 +537,16 @@ data class BinauralPreset(
                 name = "Гамма-продуктивность",
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0, beatFrequency = 1.5),   // Глубокий сон - дельта
-                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0, beatFrequency = 5.0),   // Лёгкий сон - тета
-                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0, beatFrequency = 9.0),   // Пробуждение - альфа
-                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),  // Пик активности - бета
-                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0, beatFrequency = 14.0), // Поддержание внимания - бета/альфа
-                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 40.0), // Второй пик - гамма
-                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 7.5),  // Расслабление - альфа/тета
-                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 4.0),  // Подготовка ко сну - тета
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0f, beatFrequency = 1.5f),   // Глубокий сон - дельта
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),   // Лёгкий сон - тета
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0f, beatFrequency = 9.0f),   // Пробуждение - альфа
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),  // Пик активности - бета
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0f, beatFrequency = 14.0f), // Поддержание внимания - бета/альфа
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0f, beatFrequency = 40.0f), // Второй пик - гамма
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),  // Расслабление - альфа/тета
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),  // Подготовка ко сну - тета
                     ),
-                    carrierRange = FrequencyRange(100.0, 500.0),
+                    carrierRange = FrequencyRange(100.0f, 500.0f),
                     interpolationType = InterpolationType.CARDINAL
                 )
             )
@@ -562,16 +562,16 @@ data class BinauralPreset(
                 name = "Суточный цикл",
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 2.0),   // Глубокий сон - дельта
-                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0, beatFrequency = 3.0),   // Подготовка к пробуждению - дельта-тета
-                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0, beatFrequency = 10.0),  // Спокойное пробуждение - альфа
-                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),  // Пик концентрации - бета
-                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0, beatFrequency = 6.0),  // Креативная перезагрузка - тета
-                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0, beatFrequency = 25.0), // Максимальная продуктивность - верхний бета
-                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 9.0),  // Вечернее расслабление - нижняя альфа
-                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0, beatFrequency = 5.0),  // Подготовка ко сну - тета
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0f, beatFrequency = 2.0f),   // Глубокий сон - дельта
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0f, beatFrequency = 3.0f),   // Подготовка к пробуждению - дельта-тета
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0f, beatFrequency = 10.0f),  // Спокойное пробуждение - альфа
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),  // Пик концентрации - бета
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0f, beatFrequency = 6.0f),  // Креативная перезагрузка - тета
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0f, beatFrequency = 25.0f), // Максимальная продуктивность - верхний бета
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),  // Вечернее расслабление - нижняя альфа
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),  // Подготовка ко сну - тета
                     ),
-                    carrierRange = FrequencyRange(100.0, 500.0),
+                    carrierRange = FrequencyRange(100.0f, 500.0f),
                     interpolationType = InterpolationType.CARDINAL
                 )
             )

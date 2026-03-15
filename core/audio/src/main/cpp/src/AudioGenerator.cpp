@@ -6,6 +6,10 @@
 #include <arm_neon.h>
 #endif
 
+#include <android/log.h>
+#define LOG_TAG "AudioGenerator"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+
 namespace binaural {
 
 AudioGenerator::AudioGenerator() {
@@ -18,8 +22,8 @@ void AudioGenerator::setSampleRate(int sampleRate) {
 }
 
 void AudioGenerator::resetState(GeneratorState& state) {
-    state.leftPhase = 0.0;
-    state.rightPhase = 0.0;
+    state.leftPhase = 0.0f;
+    state.rightPhase = 0.0f;
     state.channelsSwapped = false;
     state.lastSwapElapsedMs = 0;
     state.totalSamplesGenerated = 0;
@@ -31,48 +35,42 @@ void AudioGenerator::resetState(GeneratorState& state) {
 /**
  * Получить частоты каналов через lookup table
  * СЛОЖНОСТЬ: O(1) - прямой доступ к предвычисленным значениям
- * Энергопотребление НЕ зависит от количества точек на графике
+ * Возвращает текущие и следующие значения для интерполяции внутри буфера
  */
-void AudioGenerator::interpolateChannelFrequencies(
+FrequencyTableResult AudioGenerator::getChannelFrequenciesAt(
     const FrequencyCurve& curve,
-    int32_t timeSeconds,
-    double& lowerFreq,
-    double& upperFreq
+    float timeSeconds
 ) const {
-    // Используем O(1) lookup table вместо бинарного поиска
-    auto [lower, upper] = curve.getChannelFrequenciesAt(timeSeconds);
-    lowerFreq = lower;
-    upperFreq = upper;
+    return curve.getChannelFrequenciesAt(timeSeconds);
 }
 
-std::pair<double, double> AudioGenerator::getChannelFrequenciesAtTime(
+std::pair<float, float> AudioGenerator::getChannelFrequenciesAtTime(
     const BinauralConfig& config,
     int32_t baseTimeSeconds,
     int64_t offsetMs
 ) const {
     // Вычисляем время с учётом смещения
-    double offsetSeconds = offsetMs / 1000.0;
+    float offsetSeconds = offsetMs / 1000.0;
     int32_t totalSeconds = static_cast<int32_t>(baseTimeSeconds + offsetSeconds);
     
     // Нормализуем в пределах суток
     totalSeconds = ((totalSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
     
-    double lowerFreq, upperFreq;
-    interpolateChannelFrequencies(config.curve, totalSeconds, lowerFreq, upperFreq);
+    FrequencyTableResult freqResult = getChannelFrequenciesAt(config.curve, totalSeconds);
     
-    return {lowerFreq, upperFreq};
+    return {freqResult.lowerFreq, freqResult.upperFreq};
 }
 
-std::pair<double, double> AudioGenerator::calculateNormalizedAmplitudes(
-    double leftFreq,
-    double rightFreq,
+std::pair<float, float> AudioGenerator::calculateNormalizedAmplitudes(
+    float leftFreq,
+    float rightFreq,
     const BinauralConfig& config,
     const FrequencyCurve& curve
 ) const {
-    double leftAmplitude = 1.0;
-    double rightAmplitude = 1.0;
+    float leftAmplitude = 1.0;
+    float rightAmplitude = 1.0;
     
-    const double strength = std::clamp(config.volumeNormalizationStrength, 0.0f, 2.0f);
+    const float strength = std::clamp(config.volumeNormalizationStrength, 0.0f, 2.0f);
     
     switch (config.normalizationType) {
         case NormalizationType::NONE:
@@ -81,9 +79,9 @@ std::pair<double, double> AudioGenerator::calculateNormalizedAmplitudes(
             
         case NormalizationType::CHANNEL: {
             // Канальная нормализация (уравнивание между левым и правым каналом)
-            const double minFreq = std::min(leftFreq, rightFreq);
-            const double leftNormalized = minFreq / leftFreq;
-            const double rightNormalized = minFreq / rightFreq;
+            const float minFreq = std::min(leftFreq, rightFreq);
+            const float leftNormalized = minFreq / leftFreq;
+            const float rightNormalized = minFreq / rightFreq;
             leftAmplitude = fastPow(leftNormalized, strength);
             rightAmplitude = fastPow(rightNormalized, strength);
             break;
@@ -91,8 +89,8 @@ std::pair<double, double> AudioGenerator::calculateNormalizedAmplitudes(
         
         case NormalizationType::TEMPORAL: {
             // Временная нормализация
-            const double leftNormalized = leftFreq > 0 ? curve.minLowerFreq / leftFreq : 1.0;
-            const double rightNormalized = rightFreq > 0 ? curve.minUpperFreq / rightFreq : 1.0;
+            const float leftNormalized = leftFreq > 0 ? curve.minLowerFreq / leftFreq : 1.0;
+            const float rightNormalized = rightFreq > 0 ? curve.minUpperFreq / rightFreq : 1.0;
             leftAmplitude = fastPow(leftNormalized, strength);
             rightAmplitude = fastPow(rightNormalized, strength);
             break;
@@ -113,19 +111,44 @@ GenerateResult AudioGenerator::generateBuffer(
 ) {
     GenerateResult result;
     
-    // Используем переданный интервал обновления частот для интерполяции
-    // Это обеспечивает точное соответствие настройкам пользователя
-    const int32_t intervalSeconds = frequencyUpdateIntervalMs / 1000;
+    // Длительность буфера в секундах (для вычисления конечных частот)
+    const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / m_sampleRate;
     
-    // Начальные частоты (точка графика для текущего момента)
-    double startLeftFreq, startRightFreq;
-    interpolateChannelFrequencies(config.curve, timeSeconds, startLeftFreq, startRightFreq);
+    // Логируем каждый 10-й буфер для диагностики
+    static int bufferCounter = 0;
+    const bool shouldLog = (bufferCounter % 10 == 0);
+    bufferCounter++;
     
-    // Конечные частоты (точка графика, отстоящая на интервал обновления)
-    double endLeftFreq, endRightFreq;
-    int32_t endTimeSeconds = timeSeconds + intervalSeconds;
-    endTimeSeconds = ((endTimeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
-    interpolateChannelFrequencies(config.curve, endTimeSeconds, endLeftFreq, endRightFreq);
+    if (shouldLog) {
+        LOGD("=== Buffer #%d ===", bufferCounter);
+        LOGD("  timeSeconds=%d, bufferDuration=%.6f sec, endTime=%.6f",
+             timeSeconds, bufferDurationSeconds, timeSeconds + bufferDurationSeconds);
+    }
+    
+    // Получаем частоты в начале буфера
+    FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, timeSeconds);
+    float startLeftFreq = startFreqResult.lowerFreq;
+    float startRightFreq = startFreqResult.upperFreq;
+    
+    // Получаем частоты в конце буфера (для плавной интерполяции внутри буфера)
+    // Это также гарантирует совпадение частот на стыках буферов:
+    // endFreq буфера N = startFreq буфера N+1
+    FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
+        config.curve,
+        static_cast<float>(timeSeconds + bufferDurationSeconds)
+    );
+    float endLeftFreq = endFreqResult.lowerFreq;
+    float endRightFreq = endFreqResult.upperFreq;
+    
+    if (shouldLog) {
+        LOGD("  START: left=%.4f Hz, right=%.4f Hz", startLeftFreq, startRightFreq);
+        LOGD("  END:   left=%.4f Hz, right=%.4f Hz", endLeftFreq, endRightFreq);
+        LOGD("  DELTA: left=%.6f Hz, right=%.6f Hz per buffer",
+             endLeftFreq - startLeftFreq, endRightFreq - startRightFreq);
+        LOGD("  STEP:  left=%.9f Hz, right=%.9f Hz per sample",
+             (endLeftFreq - startLeftFreq) / samplesPerChannel,
+             (endRightFreq - startRightFreq) / samplesPerChannel);
+    }
     
     // Начальные амплитуды
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
@@ -138,26 +161,26 @@ GenerateResult AudioGenerator::generateBuffer(
     );
     
     // Предвычисление констант
-    const double twoPiOverSampleRate = TWO_PI / m_sampleRate;
+    const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
     const float baseVolumeFactor = 0.5f * config.volume;
     
     // Фазовые инкременты
-    double leftOmega = twoPiOverSampleRate * startLeftFreq;
-    double rightOmega = twoPiOverSampleRate * startRightFreq;
-    const double endLeftOmega = twoPiOverSampleRate * endLeftFreq;
-    const double endRightOmega = twoPiOverSampleRate * endRightFreq;
+    float leftOmega = twoPiOverSampleRate * startLeftFreq;
+    float rightOmega = twoPiOverSampleRate * startRightFreq;
+    const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
+    const float endRightOmega = twoPiOverSampleRate * endRightFreq;
     
     // Шаги изменения фазовых инкрементов
-    const double omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel;
-    const double omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel;
+    const float omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel;
+    const float omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel;
     
     // Текущие амплитуды
-    double leftAmplitude = startLeftAmplitude;
-    double rightAmplitude = startRightAmplitude;
+    float leftAmplitude = startLeftAmplitude;
+    float rightAmplitude = startRightAmplitude;
     
     // Шаги изменения амплитуд
-    const double ampStepLeft = (endLeftAmplitude - startLeftAmplitude) / samplesPerChannel;
-    const double ampStepRight = (endRightAmplitude - startRightAmplitude) / samplesPerChannel;
+    const float ampStepLeft = (endLeftAmplitude - startLeftAmplitude) / samplesPerChannel;
+    const float ampStepRight = (endRightAmplitude - startRightAmplitude) / samplesPerChannel;
     
     // Параметры fade
     const int channelSwapFadeDurationSamples = static_cast<int>(
@@ -194,13 +217,13 @@ GenerateResult AudioGenerator::generateBuffer(
     // Основной цикл генерации
     for (int i = 0; i < samplesPerChannel; ++i) {
         const int64_t currentSample = state.totalSamplesGenerated + i;
-        double fadeMultiplier = 1.0;
+        float fadeMultiplier = 1.0;
         
         // Обработка fade
         if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
             const int fadeDurationSamples = channelSwapFadeDurationSamples;
             const int64_t elapsedSamples = currentSample - localFadeStartSample;
-            const double progress = static_cast<double>(elapsedSamples) / fadeDurationSamples;
+            const float progress = static_cast<float>(elapsedSamples) / fadeDurationSamples;
             
             if (localIsFadingOut) {
                 if (progress >= 1.0) {
@@ -293,15 +316,44 @@ GenerateResult AudioGenerator::generateBufferNeon(
 ) {
     GenerateResult result;
     
-    const int32_t intervalSeconds = frequencyUpdateIntervalMs / 1000;
+    // Длительность буфера в секундах (для вычисления конечных частот)
+    const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / m_sampleRate;
     
-    // Начальные и конечные частоты
-    double startLeftFreq, startRightFreq, endLeftFreq, endRightFreq;
-    interpolateChannelFrequencies(config.curve, timeSeconds, startLeftFreq, startRightFreq);
+    // Логируем каждый 10-й буфер для диагностики
+    static int bufferCounter = 0;
+    const bool shouldLog = (bufferCounter % 10 == 0);
+    bufferCounter++;
     
-    int32_t endTimeSeconds = timeSeconds + intervalSeconds;
-    endTimeSeconds = ((endTimeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
-    interpolateChannelFrequencies(config.curve, endTimeSeconds, endLeftFreq, endRightFreq);
+    if (shouldLog) {
+        LOGD("=== Buffer #%d (NEON) ===", bufferCounter);
+        LOGD("  timeSeconds=%d, bufferDuration=%.6f sec, endTime=%.6f",
+             timeSeconds, bufferDurationSeconds, timeSeconds + bufferDurationSeconds);
+    }
+    
+    // Получаем частоты в начале буфера
+    FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, timeSeconds);
+    float startLeftFreq = startFreqResult.lowerFreq;
+    float startRightFreq = startFreqResult.upperFreq;
+    
+    // Получаем частоты в конце буфера (для плавной интерполяции внутри буфера)
+    // Это также гарантирует совпадение частот на стыках буферов:
+    // endFreq буфера N = startFreq буфера N+1
+    FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
+        config.curve,
+        static_cast<float>(timeSeconds + bufferDurationSeconds)
+    );
+    float endLeftFreq = endFreqResult.lowerFreq;
+    float endRightFreq = endFreqResult.upperFreq;
+    
+    if (shouldLog) {
+        LOGD("  START: left=%.4f Hz, right=%.4f Hz", startLeftFreq, startRightFreq);
+        LOGD("  END:   left=%.4f Hz, right=%.4f Hz", endLeftFreq, endRightFreq);
+        LOGD("  DELTA: left=%.6f Hz, right=%.6f Hz per buffer",
+             endLeftFreq - startLeftFreq, endRightFreq - startRightFreq);
+        LOGD("  STEP:  left=%.9f Hz, right=%.9f Hz per sample",
+             (endLeftFreq - startLeftFreq) / samplesPerChannel,
+             (endRightFreq - startRightFreq) / samplesPerChannel);
+    }
     
     // Амплитуды
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
@@ -369,9 +421,9 @@ GenerateResult AudioGenerator::generateBufferNeon(
     float32x4_t vAmpStepLeft = vdupq_n_f32(ampStepLeft * 4.0f);
     float32x4_t vAmpStepRight = vdupq_n_f32(ampStepRight * 4.0f);
     
-    // Фазы для 4 сэмплов
-    float leftPhaseBase = static_cast<float>(state.leftPhase);
-    float rightPhaseBase = static_cast<float>(state.rightPhase);
+    // Фазы для 4 сэмплов (уже float)
+    float leftPhaseBase = state.leftPhase;
+    float rightPhaseBase = state.rightPhase;
     
     // Основной цикл - обрабатываем по 4 сэмпла
     int i = 0;
@@ -399,11 +451,11 @@ GenerateResult AudioGenerator::generateBufferNeon(
         float fadeMultipliers[4];
         for (int j = 0; j < 4; ++j) {
             const int64_t currentSample = currentSampleBase + j;
-            double fadeMultiplier = 1.0;
+            float fadeMultiplier = 1.0;
             
             if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
                 const int64_t elapsedSamples = currentSample - localFadeStartSample;
-                const double progress = static_cast<double>(elapsedSamples) / channelSwapFadeDurationSamples;
+                const float progress = static_cast<float>(elapsedSamples) / channelSwapFadeDurationSamples;
                 
                 if (localIsFadingOut) {
                     if (progress >= 1.0) {
@@ -479,18 +531,18 @@ GenerateResult AudioGenerator::generateBufferNeon(
         }
     }
     
-    // Обновляем фазы в состоянии (конвертируем обратно в double)
-    state.leftPhase = static_cast<double>(leftPhaseBase);
-    state.rightPhase = static_cast<double>(rightPhaseBase);
+    // Обновляем фазы в состоянии (уже float)
+    state.leftPhase = leftPhaseBase;
+    state.rightPhase = rightPhaseBase;
     
     // Обрабатываем оставшиеся сэмплы (0-3) скалярным способом
     for (; i < samplesPerChannel; ++i) {
         const int64_t currentSample = state.totalSamplesGenerated + i;
-        double fadeMultiplier = 1.0;
+        float fadeMultiplier = 1.0;
         
         if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
             const int64_t elapsedSamples = currentSample - localFadeStartSample;
-            const double progress = static_cast<double>(elapsedSamples) / channelSwapFadeDurationSamples;
+            const float progress = static_cast<float>(elapsedSamples) / channelSwapFadeDurationSamples;
             
             if (localIsFadingOut) {
                 if (progress >= 1.0) {

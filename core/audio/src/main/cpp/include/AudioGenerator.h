@@ -15,8 +15,8 @@ namespace binaural {
 struct GenerateResult {
     bool fadePhaseCompleted = false;
     bool channelsSwapped = false;
-    double currentBeatFreq = 0.0;
-    double currentCarrierFreq = 0.0;
+    float currentBeatFreq = 0.0;
+    float currentCarrierFreq = 0.0;
 };
 
 /**
@@ -25,7 +25,7 @@ struct GenerateResult {
  */
 class AudioGenerator {
 public:
-    static constexpr double TWO_PI = 2.0 * M_PI;
+    static constexpr float TWO_PI = 2.0 * M_PI;
     static constexpr int SECONDS_PER_DAY = 86400;
     
     AudioGenerator();
@@ -99,7 +99,7 @@ private:
     /**
      * Получить частоты каналов для заданного времени с учётом смещения
      */
-    std::pair<double, double> getChannelFrequenciesAtTime(
+    std::pair<float, float> getChannelFrequenciesAtTime(
         const BinauralConfig& config,
         int32_t baseTimeSeconds,
         int64_t offsetMs
@@ -108,9 +108,9 @@ private:
     /**
      * Вычислить нормализованные амплитуды
      */
-    std::pair<double, double> calculateNormalizedAmplitudes(
-        double leftFreq,
-        double rightFreq,
+    std::pair<float, float> calculateNormalizedAmplitudes(
+        float leftFreq,
+        float rightFreq,
         const BinauralConfig& config,
         const FrequencyCurve& curve
     ) const;
@@ -120,16 +120,16 @@ private:
      * Кэширует значения x^n для типичных x в диапазоне [0.1, 2.0]
      */
     static constexpr int POW_TABLE_SIZE = 256;
-    static constexpr double POW_TABLE_MIN = 0.1;
-    static constexpr double POW_TABLE_MAX = 2.0;
-    static constexpr double POW_TABLE_STEP = (POW_TABLE_MAX - POW_TABLE_MIN) / POW_TABLE_SIZE;
+    static constexpr float POW_TABLE_MIN = 0.1;
+    static constexpr float POW_TABLE_MAX = 2.0;
+    static constexpr float POW_TABLE_STEP = (POW_TABLE_MAX - POW_TABLE_MIN) / POW_TABLE_SIZE;
     
     /**
      * Быстрая аппроксимация pow с использованием таблицы для типичных значений
      * Оптимизация: для x в диапазоне [0.1, 2.0] используем таблицу
      * Для значений вне диапазона используем точный расчёт
      */
-    static inline double fastPow(double x, double n) {
+    static inline float fastPow(float x, float n) {
         if (n == 0.0) return 1.0;
         if (n == 1.0) return x;
         if (x <= 0.0) return 0.0;
@@ -138,14 +138,14 @@ private:
         // используем быструю таблицу если n около 0.5-1.0
         if (x >= POW_TABLE_MIN && x <= POW_TABLE_MAX && n >= 0.3 && n <= 2.0) {
             // Линейная интерполяция в таблице
-            const double normalizedX = (x - POW_TABLE_MIN) / POW_TABLE_STEP;
+            const float normalizedX = (x - POW_TABLE_MIN) / POW_TABLE_STEP;
             const int index = static_cast<int>(normalizedX);
             
             if (index >= 0 && index < POW_TABLE_SIZE - 1) {
                 // Для простоты используем точный расчёт с кэшированием ln(x)
                 // Это всё равно быстрее чем полный pow т.к. ln(x) константен для данного x
-                static thread_local double cachedLnX = 0.0;
-                static thread_local double cachedX = -1.0;
+                static thread_local float cachedLnX = 0.0;
+                static thread_local float cachedX = -1.0;
                 
                 if (cachedX != x) {
                     cachedLnX = std::log(x);
@@ -164,7 +164,7 @@ private:
      * Использует приближённую формулу: x^n ≈ 1 + n*(x-1) для x близких к 1
      * Точность: ~1% для x в [0.8, 1.2] и n в [0.5, 1.5]
      */
-    static inline double fastPowApprox(double x, double n) {
+    static inline float fastPowApprox(float x, float n) {
         if (x <= 0.0) return 0.0;
         if (n == 0.0) return 1.0;
         if (n == 1.0) return x;
@@ -174,7 +174,7 @@ private:
         if (x >= 0.8 && x <= 1.2) {
             // x^n ≈ 1 + n*ln(x) для x≈1
             // Более точно: используем разложение Тейлора
-            const double lnX = (x - 1.0) - (x - 1.0) * (x - 1.0) / 2.0 + (x - 1.0) * (x - 1.0) * (x - 1.0) / 3.0;
+            const float lnX = (x - 1.0) - (x - 1.0) * (x - 1.0) / 2.0 + (x - 1.0) * (x - 1.0) * (x - 1.0) / 3.0;
             return 1.0 + n * lnX + n * n * lnX * lnX / 2.0;
         }
         
@@ -183,14 +183,14 @@ private:
     }
     
     /**
-     * Интерполяция частот каналов через lookup table
+     * Получить частоты каналов через lookup table
+     * Возвращает интерполированные частоты для конкретного момента времени
      * СЛОЖНОСТЬ: O(1) - прямой доступ к предвычисленным значениям
+     * @param timeSeconds секунды с начала суток (поддерживает дробные значения)
      */
-    void interpolateChannelFrequencies(
+    FrequencyTableResult getChannelFrequenciesAt(
         const FrequencyCurve& curve,
-        int32_t timeSeconds,
-        double& lowerFreq,
-        double& upperFreq
+        float timeSeconds
     ) const;
 };
 

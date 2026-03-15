@@ -14,7 +14,7 @@ namespace binaural {
  */
 struct EngineCallbacks {
     std::function<void(bool isPlaying)> onPlayingChanged;
-    std::function<void(double beatFreq, double carrierFreq)> onFrequencyChanged;
+    std::function<void(float beatFreq, float carrierFreq)> onFrequencyChanged;
     std::function<void(bool channelsSwapped)> onChannelsSwapped;
     std::function<void(int elapsedSeconds)> onElapsedChanged;
 };
@@ -102,12 +102,12 @@ public:
     /**
      * Получить текущую частоту биений
      */
-    double getCurrentBeatFrequency() const { return m_currentBeatFreq.load(); }
+    float getCurrentBeatFrequency() const { return m_currentBeatFreq.load(); }
     
     /**
      * Получить текущую несущую частоту
      */
-    double getCurrentCarrierFrequency() const { return m_currentCarrierFreq.load(); }
+    float getCurrentCarrierFrequency() const { return m_currentCarrierFreq.load(); }
     
     /**
      * Получить прошедшее время в секундах
@@ -137,14 +137,18 @@ private:
     
     std::mutex m_configMutex;
     std::atomic<bool> m_isPlaying{false};
-    std::atomic<double> m_currentBeatFreq{0.0};
-    std::atomic<double> m_currentCarrierFreq{0.0};
+    std::atomic<float> m_currentBeatFreq{0.0};
+    std::atomic<float> m_currentCarrierFreq{0.0};
     std::atomic<int> m_elapsedSeconds{0};
     std::atomic<int64_t> m_playbackStartTimeMs{0};
     
     // Начальное значение до получения из настроек через JNI
     // Должно соответствовать значению по умолчанию в BinauralPreferencesRepository
     int m_frequencyUpdateIntervalMs = 10000;
+    
+    // Точная интерполяция времени между буферами
+    int32_t m_baseTimeSeconds = 0;          // Время начала воспроизведения
+    float m_totalBufferTimeSeconds = 0.0;  // Накопленное время буферов
     
     /**
      * Получить текущее время суток в секундах

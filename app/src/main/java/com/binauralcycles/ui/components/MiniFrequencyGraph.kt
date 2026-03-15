@@ -26,19 +26,16 @@ import android.graphics.Paint
 
 /**
  * Кэшированные данные графика для оптимизации отрисовки
- * Вычисляется один раз при изменении данных пресета
  */
 private data class CachedGraphPaths(
     val carrierPath: Path,
     val upperBeatPath: Path,
     val lowerBeatPath: Path,
     val combinedBeatPath: Path,
-    val gridLines: FloatArray,  // Горизонтальные линии (только Y координаты)
-    val verticalLines: FloatArray,  // Вертикальные линии (только X координаты)
-    // Предвычисленные позиции точек и меток
-    val pointPositions: FloatArray,  // [x0, y0, x1, y1, ...] для каждой точки
-    val labeltexts: List<String>,  // Тексты меток
-    // Флаг: используется ли режим расслабления
+    val gridLines: FloatArray,
+    val verticalLines: FloatArray,
+    val pointPositions: FloatArray,
+    val labeltexts: List<String>,
     val isRelaxationMode: Boolean
 )
 
@@ -49,101 +46,32 @@ private data class MiniGraphParams(
     val widthPx: Int,
     val heightPx: Int,
     val carrierRange: FrequencyRange,
-    val maxBeat: Double
+    val maxBeat: Float
 ) {
-    val carrierRangeSize: Double get() = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0)
+    val carrierRangeSize: Float get() = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
     
     fun timeToX(time: LocalTime): Float {
         val seconds = time.toSecondOfDay()
-        return (seconds / (24.0 * 3600) * widthPx).toFloat()
+        return (seconds / (24.0f * 3600f) * widthPx)
     }
     
-    fun carrierToY(carrier: Double): Float {
-        return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx).toFloat()
+    fun carrierToY(carrier: Float): Float {
+        return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx)
     }
     
-    /**
-     * Вычисляет Y-координату верхней границы области биений
-     * Верхняя граница соответствует частоте канала: carrier + beat/2
-     */
-    fun beatUpperY(carrier: Double, beat: Double): Float {
-        val upperFrequency = carrier + beat / 2
+    fun beatUpperY(carrier: Float, beat: Float): Float {
+        val upperFrequency = carrier + beat / 2.0f
         return carrierToY(upperFrequency)
     }
     
-    /**
-     * Вычисляет Y-координату нижней границы области биений
-     * Нижняя граница соответствует частоте канала: carrier - beat/2
-     */
-    fun beatLowerY(carrier: Double, beat: Double): Float {
-        val lowerFrequency = carrier - beat / 2
+    fun beatLowerY(carrier: Float, beat: Float): Float {
+        val lowerFrequency = carrier - beat / 2.0f
         return carrierToY(lowerFrequency)
     }
 }
 
 /**
- * Генерирует виртуальные точки режима расслабления между реальными точками.
- * Виртуальные точки создаются посередине между каждой парой соседних точек.
- * Частоты берутся с интерполированной кривой для корректного отображения.
- * Локальная функция для использования в MiniFrequencyGraph.
- */
-private fun createRelaxationVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
-    
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0
-    
-    for (i in 0 until sortedPoints.size) {
-        val currentPoint = sortedPoints[i]
-        val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
-        
-        // Вычисляем время посередине между точками
-        val currentTimeSeconds = currentPoint.time.toSecondOfDay()
-        var nextTimeSeconds = nextPoint.time.toSecondOfDay()
-        
-        // Обработка перехода через полночь
-        if (nextTimeSeconds <= currentTimeSeconds) {
-            nextTimeSeconds += 24 * 3600
-        }
-        
-        val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
-        val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
-        
-        // Интерполируем значения по кривой (учитывает тип интерполяции)
-        val midCarrier = interpolateCarrierFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
-        val midBeat = interpolateBeatFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
-        
-        // Применяем снижение частот для режима расслабления
-        val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
-        val relaxedBeat = midBeat * (1.0 - beatReduction)
-        
-        virtualPoints.add(
-            FrequencyPoint(
-                time = midTime,
-                carrierFrequency = relaxedCarrier,
-                beatFrequency = relaxedBeat
-            )
-        )
-    }
-    
-    return virtualPoints
-}
-
-/**
  * Мини-график частот для отображения в списке пресетов
- * Показывает кривую несущей частоты и область биений
- * 
- * ОПТИМИЗАЦИЯ: Все элементы отрисовываются через Canvas без лишних Composable.
- * Пути графика кэшируются и пересчитываются только при изменении данных пресета.
- * При прокрутке списка используется кэшированные пути, что устраняет лаги.
  */
 @Composable
 fun MiniFrequencyGraph(
@@ -154,18 +82,16 @@ fun MiniFrequencyGraph(
     relaxationColor: Color = MaterialTheme.colorScheme.tertiary,
     isPlaying: Boolean = false,
     currentTime: LocalTime = LocalTime(12, 0),
-    currentCarrierFrequency: Double = 0.0,
-    currentBeatFrequency: Double = 0.0,
+    currentCarrierFrequency: Float = 0.0f,
+    currentBeatFrequency: Float = 0.0f,
     relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
 ) {
     val density = LocalDensity.current
     
-    // Мемоизированные данные - пересчитываются только при изменении пресета
     val sortedPoints = remember(frequencyCurve.points) {
         frequencyCurve.points.sortedBy { it.time.toSecondOfDay() }
     }
     
-    // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции
     val virtualPoints = remember(frequencyCurve.points, relaxationModeSettings, frequencyCurve.interpolationType, frequencyCurve.splineTension) {
         createRelaxationVirtualPoints(frequencyCurve.points, relaxationModeSettings, frequencyCurve.interpolationType, frequencyCurve.splineTension)
     }
@@ -173,37 +99,33 @@ fun MiniFrequencyGraph(
     val carrierRange = frequencyCurve.carrierRange
     
     val maxBeat = remember(frequencyCurve.points, virtualPoints, relaxationModeSettings) {
-        val maxFromPoints = frequencyCurve.points.maxOfOrNull { it.beatFrequency } ?: 20.0
+        val maxFromPoints = frequencyCurve.points.maxOfOrNull { it.beatFrequency } ?: 20.0f
         val maxFromVirtual = if (relaxationModeSettings.enabled && virtualPoints.isNotEmpty()) {
-            virtualPoints.maxOfOrNull { it.beatFrequency } ?: 0.0
+            virtualPoints.maxOfOrNull { it.beatFrequency } ?: 0.0f
         } else {
-            0.0
+            0.0f
         }
-        maxOf(maxFromPoints, maxFromVirtual).coerceAtLeast(1.0)
+        maxOf(maxFromPoints, maxFromVirtual).coerceAtLeast(1.0f)
     }
     
-    // Размеры графика - вычисляем один раз
     var widthPx by remember { mutableIntStateOf(0) }
     var heightPx by remember { mutableIntStateOf(0) }
     
-    // Предвычисленный Paint для меток (переиспользуется)
     val labelPaint = remember {
         Paint().apply {
-            textSize = 18f  // ~7sp
+            textSize = 18f
             isAntiAlias = true
         }
     }
     
-    // Предвычисленный Paint для меток оси Y
     val axisPaint = remember {
         Paint().apply {
-            textSize = 24f  // ~9sp
+            textSize = 24f
             isAntiAlias = true
             isFakeBoldText = true
         }
     }
     
-    // Параметры графика (пересчитываются при изменении размеров)
     val graphParams = remember(widthPx, heightPx, carrierRange, maxBeat) {
         if (widthPx > 0 && heightPx > 0) {
             MiniGraphParams(widthPx, heightPx, carrierRange, maxBeat)
@@ -212,8 +134,6 @@ fun MiniFrequencyGraph(
         }
     }
     
-    // КЭШИРОВАНИЕ ПУТЕЙ - ключевая оптимизация!
-    // Пути вычисляются только при изменении данных пресета или размера графика
     val cachedPaths = remember(
         sortedPoints,
         virtualPoints,
@@ -247,7 +167,6 @@ fun MiniFrequencyGraph(
                 val paths = cachedPaths ?: return@drawBehind
                 val params = graphParams ?: return@drawBehind
                 
-                // Отрисовка кэшированных путей (быстро, без вычислений)
                 drawCachedGraph(
                     cachedPaths = paths,
                     primaryColor = primaryColor,
@@ -270,10 +189,52 @@ fun MiniFrequencyGraph(
     )
 }
 
-/**
- * Предвычисляет все пути графика один раз при изменении данных
- * Это ключевая оптимизация - тяжёлые вычисления делаются только при изменении пресета
- */
+private fun createRelaxationVirtualPoints(
+    points: List<FrequencyPoint>,
+    relaxationModeSettings: RelaxationModeSettings,
+    interpolationType: InterpolationType,
+    splineTension: Float
+): List<FrequencyPoint> {
+    if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
+    
+    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+    val virtualPoints = mutableListOf<FrequencyPoint>()
+    
+    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
+    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
+    
+    for (i in 0 until sortedPoints.size) {
+        val currentPoint = sortedPoints[i]
+        val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
+        
+        val currentTimeSeconds = currentPoint.time.toSecondOfDay()
+        var nextTimeSeconds = nextPoint.time.toSecondOfDay()
+        
+        if (nextTimeSeconds <= currentTimeSeconds) {
+            nextTimeSeconds += 24 * 3600
+        }
+        
+        val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
+        val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
+        
+        val midCarrier = interpolateCarrierFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
+        val midBeat = interpolateBeatFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
+        
+        val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
+        val relaxedBeat = midBeat * (1.0f - beatReduction)
+        
+        virtualPoints.add(
+            FrequencyPoint(
+                time = midTime,
+                carrierFrequency = relaxedCarrier,
+                beatFrequency = relaxedBeat
+            )
+        )
+    }
+    
+    return virtualPoints
+}
+
 private fun computeGraphPaths(
     sortedPoints: List<FrequencyPoint>,
     params: MiniGraphParams,
@@ -285,13 +246,9 @@ private fun computeGraphPaths(
     val width = params.widthPx.toFloat()
     val height = params.heightPx.toFloat()
     
-    // Сетка - горизонтальные линии (только Y координаты для экономии памяти)
-    val gridLines = FloatArray(3) { (height * (it + 1) / 4).toFloat() }
+    val gridLines = FloatArray(3) { (height * (it + 1) / 4) }
+    val verticalLines = FloatArray(7) { (width * (it + 1) * 3 / 24) }
     
-    // Вертикальные линии каждые 3 часа (только X координаты)
-    val verticalLines = FloatArray(7) { (width * (it + 1) * 3 / 24).toFloat() }
-    
-    // Предвычисляем позиции точек и тексты меток
     val pointPositions = FloatArray(sortedPoints.size * 2)
     val labelTexts = mutableListOf<String>()
     
@@ -301,8 +258,7 @@ private fun computeGraphPaths(
         pointPositions[index * 2] = x
         pointPositions[index * 2 + 1] = y
         
-        // Форматируем текст метки
-        val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toDouble()) {
+        val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toFloat()) {
             point.beatFrequency.toLong().toString()
         } else {
             point.beatFrequency.toString()
@@ -310,7 +266,6 @@ private fun computeGraphPaths(
         labelTexts.add("%.0f(%s)".format(point.carrierFrequency, beatStr))
     }
     
-    // Вычисляем пути только если есть минимум 2 точки
     if (sortedPoints.size < 2) {
         return CachedGraphPaths(
             carrierPath = Path(),
@@ -325,15 +280,12 @@ private fun computeGraphPaths(
         )
     }
     
-    // Определяем точки для интерполяции в зависимости от режима
     val pointsForInterpolation = if (relaxationModeSettings.enabled && virtualPoints.isNotEmpty()) {
-        // В режиме расслабления объединяем основные и виртуальные точки
         (sortedPoints + virtualPoints).sortedBy { it.time.toSecondOfDay() }
     } else {
         sortedPoints
     }
     
-    // Вычисляем пути на основе выбранных точек
     val carrierPath = computeCarrierPath(pointsForInterpolation, params, interpolationType, splineTension)
     val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, params, interpolationType, splineTension)
     
@@ -350,9 +302,6 @@ private fun computeGraphPaths(
     )
 }
 
-/**
- * Вычисляет путь несущей частоты
- */
 private fun computeCarrierPath(
     sortedPoints: List<FrequencyPoint>,
     params: MiniGraphParams,
@@ -362,14 +311,12 @@ private fun computeCarrierPath(
     val carrierPath = Path()
     val width = params.widthPx.toFloat()
     
-    // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
+    val startCarrier = interpolateCarrierFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
     if (interpolationType == InterpolationType.STEP) {
-        // Ступенчатая интерполяция
         val firstPointX = params.timeToX(sortedPoints.first().time)
         val lastCarrierY = params.carrierToY(sortedPoints.last().carrierFrequency)
         
@@ -388,14 +335,13 @@ private fun computeCarrierPath(
             carrierPath.lineTo(nextX, currentCarrierY)
         }
     } else {
-        // Обычная интерполяция
         val numSamples = 100
         for (i in 1..numSamples) {
-            val t = i.toDouble() / numSamples
+            val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
+            val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
             val y = params.carrierToY(carrier)
-            val x = (t * width).toFloat()
+            val x = t * width
             carrierPath.lineTo(x, y)
         }
     }
@@ -403,9 +349,6 @@ private fun computeCarrierPath(
     return carrierPath
 }
 
-/**
- * Вычисляет пути области биений
- */
 private fun computeBeatPaths(
     sortedPoints: List<FrequencyPoint>,
     params: MiniGraphParams,
@@ -418,10 +361,9 @@ private fun computeBeatPaths(
     val upperPath = Path()
     val lowerPath = Path()
     
-    // Начинаем с левой границы
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
-    val startBeat = interpolateBeatFrequency(sortedPoints, startTime, interpolationType, splineTension)
+    val startCarrier = interpolateCarrierFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
+    val startBeat = interpolateBeatFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
     
     upperPath.moveTo(0f, params.beatUpperY(startCarrier, startBeat))
     lowerPath.moveTo(0f, params.beatLowerY(startCarrier, startBeat))
@@ -450,27 +392,25 @@ private fun computeBeatPaths(
         }
     } else {
         for (i in 1..numSamples) {
-            val t = i.toDouble() / numSamples
+            val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-            val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
-            val x = (t * width).toFloat()
+            val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+            val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+            val x = t * width
             upperPath.lineTo(x, params.beatUpperY(carrier, beat))
             lowerPath.lineTo(x, params.beatLowerY(carrier, beat))
         }
     }
     
-    // Создаём замкнутый путь для заливки
     val combinedPath = Path()
     combinedPath.addPath(upperPath)
     
-    // Обратный путь по нижней границе
     for (i in numSamples downTo 0) {
-        val t = i.toDouble() / numSamples
+        val t = i.toFloat() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-        val beat = interpolateBeatFrequency(sortedPoints, time, interpolationType, splineTension)
-        val x = (t * width).toFloat()
+        val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+        val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+        val x = t * width
         combinedPath.lineTo(x, params.beatLowerY(carrier, beat))
     }
     combinedPath.close()
@@ -478,10 +418,6 @@ private fun computeBeatPaths(
     return Triple(upperPath, lowerPath, combinedPath)
 }
 
-/**
- * Быстрая отрисовка кэшированного графика
- * Все тяжёлые вычисления уже сделаны в computeGraphPaths
- */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
     cachedPaths: CachedGraphPaths,
     primaryColor: Color,
@@ -490,11 +426,11 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
     sortedPoints: List<FrequencyPoint>,
     virtualPoints: List<FrequencyPoint>,
     graphParams: MiniGraphParams,
-    maxBeat: Double,
+    maxBeat: Float,
     isPlaying: Boolean,
     currentTime: LocalTime,
-    currentCarrierFrequency: Double,
-    currentBeatFrequency: Double,
+    currentCarrierFrequency: Float,
+    currentBeatFrequency: Float,
     relaxationModeSettings: RelaxationModeSettings,
     labelPaint: Paint,
     axisPaint: Paint,
@@ -504,7 +440,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
     val height = size.height
     val gridColor = primaryColor.copy(alpha = 0.1f)
     
-    // Отрисовка сетки (горизонтальные линии)
     for (y in cachedPaths.gridLines) {
         drawLine(
             color = gridColor,
@@ -514,7 +449,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         )
     }
     
-    // Вертикальные линии
     for (x in cachedPaths.verticalLines) {
         drawLine(
             color = gridColor,
@@ -524,10 +458,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         )
     }
     
-    // Выбираем цвет в зависимости от режима
     val graphColor = if (cachedPaths.isRelaxationMode) relaxationColor else primaryColor
     
-    // Отрисовка области биений (кэшированные пути)
     drawPath(
         path = cachedPaths.combinedBeatPath,
         color = graphColor.copy(alpha = 0.15f),
@@ -544,14 +476,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         style = Stroke(width = 0.5f)
     )
     
-    // Отрисовка несущей частоты (кэшированный путь)
     drawPath(
         path = cachedPaths.carrierPath,
         color = graphColor.copy(alpha = 0.6f),
         style = Stroke(width = 1.5f)
     )
     
-    // Рисуем виртуальные точки режима расслабления - простые кружки без обводки
     if (relaxationModeSettings.enabled) {
         for (point in virtualPoints) {
             val x = graphParams.timeToX(point.time)
@@ -566,7 +496,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         }
     }
     
-    // Рисуем основные точки и метки
     val pointPositions = cachedPaths.pointPositions
     val labelTexts = cachedPaths.labeltexts
     
@@ -582,8 +511,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
             style = Fill
         )
         
-        val beatRatio = (point.beatFrequency / maxBeat).coerceIn(0.0, 1.0)
-        val innerRadius = (2f + beatRatio * 2f).toFloat()
+        val beatRatio = (point.beatFrequency / maxBeat).coerceIn(0.0f, 1.0f)
+        val innerRadius = 2f + beatRatio * 2f
         drawCircle(
             color = Color.White,
             radius = innerRadius,
@@ -591,7 +520,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
             style = Fill
         )
         
-        // Отрисовка метки через nativeCanvas (без Composable)
         val label = labelTexts[i]
         labelPaint.color = android.graphics.Color.argb(
             (0.8f * 255).toInt(),
@@ -600,7 +528,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
             (primaryColor.blue * 255).toInt()
         )
         
-        // Позиционируем метку над точкой (с clamp к границам)
         val labelX = (x - 25f).coerceAtLeast(0f)
         val labelY = (y - 8f).coerceAtLeast(15f)
         
@@ -612,19 +539,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         )
     }
     
-    // Ось Y - мин/макс частоты (справа поверх графика, с отступом от скругления карточки)
     axisPaint.color = android.graphics.Color.argb(
         255,
         (primaryColor.red * 255).toInt(),
         (primaryColor.green * 255).toInt(),
         (primaryColor.blue * 255).toInt()
     )
-    axisPaint.textAlign = Paint.Align.RIGHT  // Выравнивание по правому краю
+    axisPaint.textAlign = Paint.Align.RIGHT
     
     val maxLabel = "%.0f".format(carrierRange.max)
     val minLabel = "%.0f".format(carrierRange.min)
-    val axisX = width - 20f  // Отступ от правого края с учётом скругления карточки
-    val axisPadding = 20f    // Одинаковый отступ сверху и снизу для меток
+    val axisX = width - 20f
+    val axisPadding = 20f
     
     drawContext.canvas.nativeCanvas.drawText(
         maxLabel,
@@ -640,7 +566,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
         axisPaint
     )
     
-    // Индикатор текущего воспроизведения (вычисляется динамически, но это минимальные затраты)
     if (isPlaying) {
         val currentX = graphParams.timeToX(currentTime)
         val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
@@ -669,45 +594,35 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGraph(
     }
 }
 
-// Локальные функции интерполяции для MiniFrequencyGraph
+// Локальные функции интерполяции для MiniFrequencyGraph - все используют Float
 
-/**
- * Интерполяция несущей частоты
- */
 private fun interpolateCarrierFrequencyMini(
     points: List<FrequencyPoint>,
     time: LocalTime,
     interpolationType: InterpolationType,
     splineTension: Float
-): Double = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.carrierFrequency }
+): Float = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.carrierFrequency }
 
-/**
- * Интерполяция частоты биений
- */
 private fun interpolateBeatFrequencyMini(
     points: List<FrequencyPoint>,
     time: LocalTime,
     interpolationType: InterpolationType,
     splineTension: Float
-): Double = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.beatFrequency }
+): Float = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.beatFrequency }
 
-/**
- * Общая функция интерполяции частоты
- */
 private fun interpolateFrequencyMini(
     points: List<FrequencyPoint>,
     time: LocalTime,
     interpolationType: InterpolationType,
     splineTension: Float,
-    frequencySelector: (FrequencyPoint) -> Double
-): Double {
+    frequencySelector: (FrequencyPoint) -> Float
+): Float {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    if (sortedPoints.isEmpty()) return 0.0
+    if (sortedPoints.isEmpty()) return 0.0f
     if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
     
     val targetSeconds = time.toSecondOfDay()
     
-    // Находим интервал, в который попадает время
     var intervalIndex = -1
     for (i in 0 until sortedPoints.size - 1) {
         val current = sortedPoints[i].time.toSecondOfDay()
@@ -718,7 +633,6 @@ private fun interpolateFrequencyMini(
         }
     }
     
-    // Если не нашли в обычных интервалах - это переход через полночь
     if (intervalIndex == -1) {
         return interpolateBetweenPointsMini(
             sortedPoints,
@@ -744,23 +658,19 @@ private fun interpolateFrequencyMini(
     )
 }
 
-/**
- * Интерполяция между двумя точками с учётом соседних для кубического сплайна
- */
 private fun interpolateBetweenPointsMini(
     sortedPoints: List<FrequencyPoint>,
     leftIndex: Int,
     rightIndex: Int,
     time: LocalTime,
-    frequencySelector: (FrequencyPoint) -> Double,
+    frequencySelector: (FrequencyPoint) -> Float,
     interpolationType: InterpolationType,
     splineTension: Float,
     isWrapping: Boolean
-): Double {
+): Float {
     val leftPoint = sortedPoints[leftIndex]
     val rightPoint = sortedPoints[rightIndex]
     
-    // Вычисляем нормализованную позицию t в интервале [0, 1]
     val t1 = leftPoint.time.toSecondOfDay()
     val t2 = if (isWrapping) {
         rightPoint.time.toSecondOfDay() + 24 * 3600
@@ -775,28 +685,23 @@ private fun interpolateBetweenPointsMini(
     
     if (t2 == t1) return frequencySelector(leftPoint)
     
-    val ratio = (t - t1).toDouble() / (t2 - t1)
+    val ratio = (t - t1).toFloat() / (t2 - t1)
     
-    // Получаем 4 точки для интерполяции
     val p0 = getNeighborPointMini(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
     val p1 = frequencySelector(leftPoint)
     val p2 = frequencySelector(rightPoint)
     val p3 = getNeighborPointMini(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
     
-    // Используем общий объект интерполяции с параметром tension
     return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
 }
 
-/**
- * Получить соседнюю точку с учётом цикличности графика и перехода через полночь
- */
 private fun getNeighborPointMini(
     points: List<FrequencyPoint>,
     currentIndex: Int,
     offset: Int,
-    frequencySelector: (FrequencyPoint) -> Double,
+    frequencySelector: (FrequencyPoint) -> Float,
     isWrapping: Boolean
-): Double {
+): Float {
     val neighborIndex = currentIndex + offset
     
     return when {
