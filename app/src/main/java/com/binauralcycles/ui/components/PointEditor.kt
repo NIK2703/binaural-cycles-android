@@ -33,13 +33,13 @@ import com.binauralcycles.R
 import kotlinx.datetime.LocalTime
 import java.util.Locale
 
-private const val MIN_AUDIBLE_FREQUENCY = 20.0
+private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 /**
- * Парсит строку в Double, принимая как точку, так и запятую как разделитель
+ * Парсит строку в Float, принимая как точку, так и запятую как разделитель
  */
-private fun parseFrequency(value: String): Double? {
-    return value.replace(',', '.').toDoubleOrNull()
+private fun parseFrequency(value: String): Float? {
+    return value.replace(',', '.').toFloatOrNull()
 }
 
 /**
@@ -97,15 +97,15 @@ fun PointEditor(
     carrierRange: FrequencyRange,
     beatRange: FrequencyRange,
     autoExpandGraphRange: Boolean,
-    onCarrierFrequencyChange: (Double) -> Unit,
-    onBeatFrequencyChange: (Double) -> Unit,
+    onCarrierFrequencyChange: (Float) -> Unit,
+    onBeatFrequencyChange: (Float) -> Unit,
     onTimeChange: (LocalTime) -> Unit,
     onRemove: () -> Unit,
     onDeselect: () -> Unit
 ) {
     // Функция форматирования: показывает до 2-х ненулевых знаков после запятой
     // Всегда использует точку как разделитель (Locale.US)
-    fun formatFrequency(value: Double): String {
+    fun formatFrequency(value: Float): String {
         return if (value == kotlin.math.floor(value)) {
             value.toInt().toString()
         } else {
@@ -125,7 +125,7 @@ fun PointEditor(
     val carrierValue = parseFrequency(tempCarrierFrequency.text)
     val beatValue = parseFrequency(tempBeatFrequency.text)
     
-    val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0
+    val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0f
     
     // Максимальная частота биений для слайдера ограничена условиями:
     // 1. Нижняя боковая частота >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
@@ -139,47 +139,47 @@ fun PointEditor(
     val maxBeatFrequencyForValidation = if (carrierValue != null && isCarrierValid) {
         val globalMax = minOf(
             (carrierValue - MIN_AUDIBLE_FREQUENCY) * 2,  // нижняя боковая >= 20 Гц
-            (2000.0 - carrierValue) * 2  // верхняя боковая <= 2000 Гц
+            (2000.0f - carrierValue) * 2  // верхняя боковая <= 2000 Гц
         )
         if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0)
+            globalMax.coerceAtLeast(1.0f)
         } else {
             // Дополнительно ограничиваем границами графика
             val rangeMax = minOf(
                 (carrierValue - carrierRange.min) * 2,  // нижняя боковая >= carrierRange.min
                 (carrierRange.max - carrierValue) * 2   // верхняя боковая <= carrierRange.max
             )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
         }
     } else {
         val globalMax = minOf(
             (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0 - point.carrierFrequency) * 2
+            (2000.0f - point.carrierFrequency) * 2
         )
         if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0)
+            globalMax.coerceAtLeast(1.0f)
         } else {
             val rangeMax = minOf(
                 (point.carrierFrequency - carrierRange.min) * 2,
                 (carrierRange.max - point.carrierFrequency) * 2
             )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
         }
     }
     
     val maxBeatFrequencyForSlider = run {
         val globalMax = minOf(
             (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0 - point.carrierFrequency) * 2
+            (2000.0f - point.carrierFrequency) * 2
         )
         if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0)
+            globalMax.coerceAtLeast(1.0f)
         } else {
             val rangeMax = minOf(
                 (point.carrierFrequency - carrierRange.min) * 2,
                 (carrierRange.max - point.carrierFrequency) * 2
             )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0)
+            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
         }
     }
     
@@ -422,7 +422,7 @@ fun PointEditor(
                         onDone = {
                             // Сохраняем значение при нажатии Done
                             val value = parseFrequency(tempCarrierFrequency.text)
-                            if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0) {
+                            if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
                                 sliderCarrier = value.toFloat()
                                 onCarrierFrequencyChange(value)
                             } else {
@@ -444,7 +444,7 @@ fun PointEditor(
                                 // Фокус был потерян после того как был получен - сохраняем
                                 carrierWasFocused = false
                                 val value = parseFrequency(tempCarrierFrequency.text)
-                                if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0) {
+                                if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
                                     sliderCarrier = value.toFloat()
                                     onCarrierFrequencyChange(value)
                                 } else {
@@ -486,9 +486,9 @@ fun PointEditor(
                     onValueChange = {
                         val rounded = kotlin.math.round(it)
                         sliderCarrier = rounded
-                        tempCarrierFrequency = TextFieldValue(formatFrequency(rounded.toDouble()))
+                        tempCarrierFrequency = TextFieldValue(formatFrequency(rounded.toFloat()))
                     },
-                    onValueChangeFinished = { onCarrierFrequencyChange(kotlin.math.round(sliderCarrier).toDouble()) },
+                    onValueChangeFinished = { onCarrierFrequencyChange(kotlin.math.round(sliderCarrier).toFloat()) },
                     valueRange = carrierRange.min.toFloat()..carrierRange.max.toFloat(),
                     modifier = Modifier.weight(1f).padding(start = 4.dp).height(24.dp),
                     colors = SliderDefaults.colors(
@@ -602,9 +602,9 @@ fun PointEditor(
                     onValueChange = {
                         val rounded = kotlin.math.round(it).coerceIn(minBeatForSlider, maxBeatForSlider)
                         sliderBeat = rounded
-                        tempBeatFrequency = TextFieldValue(formatFrequency(rounded.toDouble()))
+                        tempBeatFrequency = TextFieldValue(formatFrequency(rounded.toFloat()))
                     },
-                    onValueChangeFinished = { onBeatFrequencyChange(kotlin.math.round(sliderBeat).toDouble()) },
+                    onValueChangeFinished = { onBeatFrequencyChange(kotlin.math.round(sliderBeat).toFloat()) },
                     valueRange = minBeatForSlider..maxBeatForSlider,
                     modifier = Modifier.weight(1f).padding(start = 4.dp).height(24.dp),
                     colors = SliderDefaults.colors(

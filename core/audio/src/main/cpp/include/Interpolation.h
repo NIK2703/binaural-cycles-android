@@ -20,7 +20,7 @@ namespace Interpolation {
 /**
  * Линейная интерполяция
  */
-inline double linear(double y1, double y2, double t) {
+inline float linear(float y1, float y2, float t) {
     return y1 + t * (y2 - y1);
 }
 
@@ -33,19 +33,19 @@ inline double linear(double y1, double y2, double t) {
  * - tension > 0 -> более "тугая" кривая, меньше overshoot
  * - Проходит через все контрольные точки
  */
-inline double cardinal(double p0, double p1, double p2, double p3, double t, double tension = 0.0) {
-    const double t2 = t * t;
-    const double t3 = t2 * t;
+inline float cardinal(float p0, float p1, float p2, float p3, float t, float tension = 0.0) {
+    const float t2 = t * t;
+    const float t3 = t2 * t;
     
     // Вычисляем касательные с учётом натяжения
-    const double s = (1.0 - tension) / 2.0;
-    const double m1 = (p2 - p0) * s;
-    const double m2 = (p3 - p1) * s;
+    const float s = (1.0 - tension) / 2.0;
+    const float m1 = (p2 - p0) * s;
+    const float m2 = (p3 - p1) * s;
     
-    const double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-    const double h10 = t3 - 2.0 * t2 + t;
-    const double h01 = -2.0 * t3 + 3.0 * t2;
-    const double h11 = t3 - t2;
+    const float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    const float h10 = t3 - 2.0 * t2 + t;
+    const float h01 = -2.0 * t3 + 3.0 * t2;
+    const float h11 = t3 - t2;
     
     return h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2;
 }
@@ -54,7 +54,7 @@ inline double cardinal(double p0, double p1, double p2, double p3, double t, dou
  * Вычисляет наклон для монотонного сплайна
  * Использует алгоритм Fritsch-Carlson для сохранения монотонности
  */
-inline double computeMonotoneSlope(double d1, double d2) {
+inline float computeMonotoneSlope(float d1, float d2) {
     // Если наклоны имеют разные знаки или один из них нулевой - касательная = 0
     if (d1 * d2 <= 0) return 0.0;
     
@@ -70,30 +70,30 @@ inline double computeMonotoneSlope(double d1, double d2) {
  * - Сохраняет монотонность данных - если p1 < p2, то кривая монотонно возрастает
  * - Проходит через все контрольные точки
  */
-inline double monotone(double p0, double p1, double p2, double p3, double t) {
+inline float monotone(float p0, float p1, float p2, float p3, float t) {
     // Вычисляем наклоны (разности) между соседними точками
-    const double d0 = p1 - p0;  // наклон слева от p1
-    const double d1 = p2 - p1;  // наклон между p1 и p2 (основной интервал)
-    const double d2 = p3 - p2;  // наклон справа от p2
+    const float d0 = p1 - p0;  // наклон слева от p1
+    const float d1 = p2 - p1;  // наклон между p1 и p2 (основной интервал)
+    const float d2 = p3 - p2;  // наклон справа от p2
     
     // Вычисляем касательные в точках p1 и p2 используя гармоническое среднее
-    const double m1 = computeMonotoneSlope(d0, d1);
-    const double m2 = computeMonotoneSlope(d1, d2);
+    const float m1 = computeMonotoneSlope(d0, d1);
+    const float m2 = computeMonotoneSlope(d1, d2);
     
     // Кубическая интерполяция Эрмита
-    const double t2 = t * t;
-    const double t3 = t2 * t;
+    const float t2 = t * t;
+    const float t3 = t2 * t;
     
-    const double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-    const double h10 = t3 - 2.0 * t2 + t;
-    const double h01 = -2.0 * t3 + 3.0 * t2;
-    const double h11 = t3 - t2;
+    const float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    const float h10 = t3 - 2.0 * t2 + t;
+    const float h01 = -2.0 * t3 + 3.0 * t2;
+    const float h11 = t3 - t2;
     
-    const double result = h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2;
+    const float result = h00 * p1 + h10 * m1 + h01 * p2 + h11 * m2;
     
     // Гарантируем отсутствие overshoot
-    const double minVal = std::min(p1, p2);
-    const double maxVal = std::max(p1, p2);
+    const float minVal = std::min(p1, p2);
+    const float maxVal = std::max(p1, p2);
     return std::clamp(result, minVal, maxVal);
 }
 
@@ -101,7 +101,7 @@ inline double monotone(double p0, double p1, double p2, double p3, double t) {
  * Ступенчатая интерполяция
  * Значение остаётся постоянным (равным левой точке) до следующей точки
  */
-inline double step(double p1) {
+inline float step(float p1) {
     return p1;
 }
 
@@ -116,13 +116,13 @@ inline double step(double p1) {
  * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom, 1.0=почти линейный)
  * @return интерполированное значение
  */
-inline double interpolate(
+inline float interpolate(
     InterpolationType type,
-    double p0, double p1, double p2, double p3,
-    double t,
+    float p0, float p1, float p2, float p3,
+    float t,
     float tension = 0.0f
 ) {
-    double result;
+    float result;
     switch (type) {
         case InterpolationType::LINEAR:
             result = linear(p1, p2, t);
@@ -139,7 +139,7 @@ inline double interpolate(
         default:
             result = linear(p1, p2, t);
     }
-    return std::max(0.0, result);
+    return std::max(0.0f, result);
 }
 
 } // namespace Interpolation
@@ -221,9 +221,9 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
             t += SECONDS_PER_DAY;
         }
         
-        double ratio = 0.0;
+        float ratio = 0.0;
         if (t2 != t1) {
-            ratio = static_cast<double>(t - t1) / (t2 - t1);
+            ratio = static_cast<float>(t - t1) / (t2 - t1);
         }
         
         // Получаем 4 точки для сплайна
@@ -231,20 +231,20 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
         const int nextNextIndex = (rightIndex + 1) % numPoints;
         
         // Интерполируем нижнюю частоту
-        double lowerP0 = getLowerFreq(sortedPoints[prevIndex]);
-        double lowerP1 = getLowerFreq(leftPoint);
-        double lowerP2 = getLowerFreq(rightPoint);
-        double lowerP3 = getLowerFreq(sortedPoints[nextNextIndex]);
-        lowerFreqTable[tableIndex] = std::max(0.0, Interpolation::interpolate(
+        float lowerP0 = getLowerFreq(sortedPoints[prevIndex]);
+        float lowerP1 = getLowerFreq(leftPoint);
+        float lowerP2 = getLowerFreq(rightPoint);
+        float lowerP3 = getLowerFreq(sortedPoints[nextNextIndex]);
+        lowerFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
             interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, splineTension
         ));
         
         // Интерполируем верхнюю частоту
-        double upperP0 = getUpperFreq(sortedPoints[prevIndex]);
-        double upperP1 = getUpperFreq(leftPoint);
-        double upperP2 = getUpperFreq(rightPoint);
-        double upperP3 = getUpperFreq(sortedPoints[nextNextIndex]);
-        upperFreqTable[tableIndex] = std::max(0.0, Interpolation::interpolate(
+        float upperP0 = getUpperFreq(sortedPoints[prevIndex]);
+        float upperP1 = getUpperFreq(leftPoint);
+        float upperP2 = getUpperFreq(rightPoint);
+        float upperP3 = getUpperFreq(sortedPoints[nextNextIndex]);
+        upperFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
             interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, splineTension
         ));
     }
@@ -270,18 +270,18 @@ inline void FrequencyCurve::buildLookupTable(int intervalMs) {
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
     
-    minLowerFreq = std::numeric_limits<double>::max();
-    maxLowerFreq = std::numeric_limits<double>::lowest();
-    minUpperFreq = std::numeric_limits<double>::max();
-    maxUpperFreq = std::numeric_limits<double>::lowest();
+    minLowerFreq = std::numeric_limits<float>::max();
+    maxLowerFreq = std::numeric_limits<float>::lowest();
+    minUpperFreq = std::numeric_limits<float>::max();
+    maxUpperFreq = std::numeric_limits<float>::lowest();
     
     for (const auto& point : points) {
-        double lowerFreq = point.carrierFrequency - point.beatFrequency / 2.0;
-        double upperFreq = point.carrierFrequency + point.beatFrequency / 2.0;
+        float lowerFreq = point.carrierFrequency - point.beatFrequency / 2.0;
+        float upperFreq = point.carrierFrequency + point.beatFrequency / 2.0;
         
-        minLowerFreq = std::min(minLowerFreq, std::max(0.0, lowerFreq));
+        minLowerFreq = std::min(minLowerFreq, std::max(0.0f, lowerFreq));
         maxLowerFreq = std::max(maxLowerFreq, lowerFreq);
-        minUpperFreq = std::min(minUpperFreq, std::max(0.0, upperFreq));
+        minUpperFreq = std::min(minUpperFreq, std::max(0.0f, upperFreq));
         maxUpperFreq = std::max(maxUpperFreq, upperFreq);
     }
     
@@ -292,26 +292,66 @@ inline void FrequencyCurve::updateCache() {
 
 /**
  * Получить частоты каналов для заданного времени через lookup table
- * СЛОЖНОСТЬ: O(1) - прямой доступ по индексу
+ * Возвращает интерполированные частоты для конкретного момента времени
+ * 
+ * СЛОЖНОСТЬ: O(1) - прямой доступ по индексу + линейная интерполяция
+ * 
+ * ИНТЕРПОЛЯЦИЯ ВНУТРИ ТАБЛИЦЫ:
+ * Использует линейную интерполяцию между соседними значениями таблицы,
+ * что обеспечивает плавные переходы при любом разрешении таблицы.
+ * 
+ * ДРОБНОЕ ВРЕМЯ:
+ * Поддерживает дробные секунды для корректной интерполяции внутри буфера.
+ * Например: 0.186 сек позволяет вычислить частоты в середине буфера.
  */
-inline std::pair<double, double> FrequencyCurve::getChannelFrequenciesAt(int32_t timeSeconds) const {
+inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSeconds) const {
+    FrequencyTableResult result = {200.0, 210.0};
+    
     // Если lookup table не построена, возвращаем значения по умолчанию
     if (lowerFreqTable.empty() || upperFreqTable.empty()) {
-        return {200.0, 210.0};
+        return result;
     }
     
     // Нормализуем время в пределах суток
-    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    // Используем fmod для корректной работы с отрицательными дробными значениями
+    timeSeconds = std::fmod(timeSeconds, static_cast<float>(SECONDS_PER_DAY));
+    if (timeSeconds < 0.0f) {
+        timeSeconds += static_cast<float>(SECONDS_PER_DAY);
+    }
     
     // Вычисляем индекс в таблице
-    // Каждый элемент таблицы соответствует интервалу в tableIntervalMs миллисекунд
     const int intervalSeconds = std::max(1, tableIntervalMs / 1000);
     const int tableSize = static_cast<int>(lowerFreqTable.size());
     
-    // Индекс = timeSeconds / intervalSeconds
-    const int index = std::min(timeSeconds / intervalSeconds, tableSize - 1);
+    // Вычисляем непрерывную позицию в таблице (дробная)
+    const float continuousIndex = timeSeconds / static_cast<float>(intervalSeconds);
     
-    return {lowerFreqTable[index], upperFreqTable[index]};
+    // Индекс текущей точки
+    const int currentIndex = static_cast<int>(continuousIndex);
+    
+    // Позиция внутри текущего интервала [0, 1)
+    const float t = continuousIndex - static_cast<float>(currentIndex);
+    
+    // Индекс следующей точки (с циклическим переходом через полночь)
+    const int nextIndex = (currentIndex + 1) % tableSize;
+    
+    // Безопасные индексы (clamping)
+    const int safeCurrentIndex = std::min(currentIndex, tableSize - 1);
+    const int safeNextIndex = std::min(nextIndex, tableSize - 1);
+    
+    // Линейная интерполяция между соседними значениями таблицы
+    result.lowerFreq = Interpolation::linear(
+        lowerFreqTable[safeCurrentIndex],
+        lowerFreqTable[safeNextIndex],
+        t
+    );
+    result.upperFreq = Interpolation::linear(
+        upperFreqTable[safeCurrentIndex],
+        upperFreqTable[safeNextIndex],
+        t
+    );
+    
+    return result;
 }
 
 } // namespace binaural

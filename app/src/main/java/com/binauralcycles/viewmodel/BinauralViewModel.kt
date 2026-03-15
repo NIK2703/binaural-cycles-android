@@ -40,8 +40,8 @@ data class BinauralUiState(
     val activePreset: BinauralPreset? = null,
     // Состояние воспроизведения
     val isPlaying: Boolean = false,
-    val currentBeatFrequency: Double = 0.0,
-    val currentCarrierFrequency: Double = 0.0,
+    val currentBeatFrequency: Float = 0.0f,
+    val currentCarrierFrequency: Float = 0.0f,
     val volume: Float = 0.7f,
     val selectedPointIndex: Int? = null,
     val currentTime: LocalTime = LocalTime(12, 0),
@@ -510,8 +510,8 @@ class BinauralViewModel @Inject constructor(
     // ============= Методы для редактирования точек (редактируемая кривая) =============
     
     companion object {
-        private const val MIN_AUDIBLE_FREQUENCY = 20.0
-        private const val MAX_FREQUENCY = 2000.0
+        private const val MIN_AUDIBLE_FREQUENCY = 20.0f
+        private const val MAX_FREQUENCY = 2000.0f
         
         /**
          * Вычисляет скорректированную частоту биения для заданной несущей частоты.
@@ -519,9 +519,9 @@ class BinauralViewModel @Inject constructor(
          * Нижняя граница: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
          * Верхняя граница: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
          */
-        private fun adjustBeatForCarrier(carrier: Double, currentBeat: Double): Double {
-            val maxBeatForLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0)
-            val maxBeatForUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0)
+        private fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
+            val maxBeatForLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
+            val maxBeatForUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0f)
             val maxBeat = minOf(maxBeatForLower, maxBeatForUpper)
             return currentBeat.coerceAtMost(maxBeat)
         }
@@ -530,14 +530,14 @@ class BinauralViewModel @Inject constructor(
          * Вычисляет скорректированную частоту биения с учётом границ графика.
          * Дополнительно учитывает, что боковые частоты не должны выходить за границы графика.
          */
-        private fun adjustBeatForCarrierWithRange(carrier: Double, currentBeat: Double, carrierRange: FrequencyRange): Double {
+        private fun adjustBeatForCarrierWithRange(carrier: Float, currentBeat: Float, carrierRange: FrequencyRange): Float {
             // Глобальные ограничения (20-2000 Гц)
-            val maxBeatForGlobalLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0)
-            val maxBeatForGlobalUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0)
+            val maxBeatForGlobalLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
+            val maxBeatForGlobalUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0f)
             
             // Ограничения границ графика
-            val maxBeatForRangeLower = ((carrier - carrierRange.min) * 2).coerceAtLeast(0.0)
-            val maxBeatForRangeUpper = ((carrierRange.max - carrier) * 2).coerceAtLeast(0.0)
+            val maxBeatForRangeLower = ((carrier - carrierRange.min) * 2).coerceAtLeast(0.0f)
+            val maxBeatForRangeUpper = ((carrierRange.max - carrier) * 2).coerceAtLeast(0.0f)
             
             // Берём минимум из всех ограничений
             val maxBeat = minOf(maxBeatForGlobalLower, maxBeatForGlobalUpper, maxBeatForRangeLower, maxBeatForRangeUpper)
@@ -545,7 +545,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
-    fun updateEditingPointCarrierFrequency(frequency: Double) {
+    fun updateEditingPointCarrierFrequency(frequency: Float) {
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         val index = state.selectedPointIndex ?: return
@@ -556,19 +556,19 @@ class BinauralViewModel @Inject constructor(
             
             val (newCarrier, adjustedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val carrier = frequency.coerceIn(20.0, 2000.0)
+                val carrier = frequency.coerceIn(20.0f, 2000.0f)
                 val beat = adjustBeatForCarrier(carrier, oldPoint.beatFrequency)
                 
-                val upperFrequency = carrier + beat / 2
-                val lowerFrequency = carrier - beat / 2
+                val upperFrequency = carrier + beat / 2.0f
+                val lowerFrequency = carrier - beat / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9).coerceAtMost(lowerFrequency - 10).coerceAtLeast(20.0)
+                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
                 } else {
                     curve.carrierRange.min
                 }
                 val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10).coerceAtMost(2000.0)
+                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
                 } else {
                     curve.carrierRange.max
                 }
@@ -591,7 +591,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    fun updateEditingPointBeatFrequency(frequency: Double) {
+    fun updateEditingPointBeatFrequency(frequency: Float) {
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         val index = state.selectedPointIndex ?: return
@@ -603,21 +603,21 @@ class BinauralViewModel @Inject constructor(
             val (newBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
                 val maxBeat = minOf(
-                    (oldPoint.carrierFrequency - 20.0) * 2,
-                    (2000.0 - oldPoint.carrierFrequency) * 2
-                ).coerceAtLeast(1.0)
+                    (oldPoint.carrierFrequency - 20.0f) * 2.0f,
+                    (2000.0f - oldPoint.carrierFrequency) * 2.0f
+                ).coerceAtLeast(1.0f)
                 val beat = frequency.coerceIn(curve.beatRange.min, maxBeat)
                 
-                val upperFrequency = oldPoint.carrierFrequency + beat / 2
-                val lowerFrequency = oldPoint.carrierFrequency - beat / 2
+                val upperFrequency = oldPoint.carrierFrequency + beat / 2.0f
+                val lowerFrequency = oldPoint.carrierFrequency - beat / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9).coerceAtMost(lowerFrequency - 10).coerceAtLeast(20.0)
+                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
                 } else {
                     curve.carrierRange.min
                 }
                 val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10).coerceAtMost(2000.0)
+                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
                 } else {
                     curve.carrierRange.max
                 }
@@ -654,7 +654,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
-    fun updateEditingPointCarrierFrequencyDirect(index: Int, newCarrier: Double) {
+    fun updateEditingPointCarrierFrequencyDirect(index: Int, newCarrier: Float) {
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         val points = curve.points.toMutableList()
@@ -663,19 +663,19 @@ class BinauralViewModel @Inject constructor(
             
             val (carrier, adjustedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val clampedCarrier = newCarrier.coerceIn(20.0, 2000.0)
+                val clampedCarrier = newCarrier.coerceIn(20.0f, 2000.0f)
                 val beat = adjustBeatForCarrier(clampedCarrier, oldPoint.beatFrequency)
                 
-                val upperFrequency = clampedCarrier + beat / 2
-                val lowerFrequency = clampedCarrier - beat / 2
+                val upperFrequency = clampedCarrier + beat / 2.0f
+                val lowerFrequency = clampedCarrier - beat / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9).coerceAtMost(lowerFrequency - 10).coerceAtLeast(20.0)
+                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
                 } else {
                     curve.carrierRange.min
                 }
                 val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10).coerceAtMost(2000.0)
+                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
                 } else {
                     curve.carrierRange.max
                 }
@@ -696,7 +696,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
-    fun updateEditingPointBeatFrequencyDirect(index: Int, newBeat: Double) {
+    fun updateEditingPointBeatFrequencyDirect(index: Int, newBeat: Float) {
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         val points = curve.points.toMutableList()
@@ -706,21 +706,21 @@ class BinauralViewModel @Inject constructor(
             val (clampedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
                 val maxBeat = minOf(
-                    (oldPoint.carrierFrequency - 20.0) * 2,
-                    (2000.0 - oldPoint.carrierFrequency) * 2
-                ).coerceAtLeast(1.0)
+                    (oldPoint.carrierFrequency - 20.0f) * 2.0f,
+                    (2000.0f - oldPoint.carrierFrequency) * 2.0f
+                ).coerceAtLeast(1.0f)
                 val beat = newBeat.coerceIn(curve.beatRange.min, maxBeat)
                 
-                val upperFrequency = oldPoint.carrierFrequency + beat / 2
-                val lowerFrequency = oldPoint.carrierFrequency - beat / 2
+                val upperFrequency = oldPoint.carrierFrequency + beat / 2.0f
+                val lowerFrequency = oldPoint.carrierFrequency - beat / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9).coerceAtMost(lowerFrequency - 10).coerceAtLeast(20.0)
+                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
                 } else {
                     curve.carrierRange.min
                 }
                 val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1).coerceAtLeast(upperFrequency + 10).coerceAtMost(2000.0)
+                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
                 } else {
                     curve.carrierRange.max
                 }
@@ -741,7 +741,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    fun addEditingPoint(time: LocalTime, carrierFrequency: Double, beatFrequency: Double) {
+    fun addEditingPoint(time: LocalTime, carrierFrequency: Float, beatFrequency: Float) {
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         
@@ -750,9 +750,9 @@ class BinauralViewModel @Inject constructor(
         // 1. Нижняя боковая >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
         // 2. Верхняя боковая <= 2000 Гц: carrier + beat/2 <= 2000 → beat <= 2*(2000 - carrier)
         val maxBeat = minOf(
-            (clampedCarrier - 20.0) * 2,
-            (2000.0 - clampedCarrier) * 2
-        ).coerceAtLeast(1.0)
+            (clampedCarrier - 20.0f) * 2.0f,
+            (2000.0f - clampedCarrier) * 2.0f
+        ).coerceAtLeast(1.0f)
         val clampedBeat = beatFrequency.coerceIn(curve.beatRange.min, maxBeat)
         
         val points = curve.points.toMutableList()
@@ -776,7 +776,7 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
-    fun updateEditingCarrierRange(min: Double, max: Double) {
+    fun updateEditingCarrierRange(min: Float, max: Float) {
         if (max <= min) return
         
         val state = _uiState.value

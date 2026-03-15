@@ -50,11 +50,11 @@ class BinauralPlaybackService : Service() {
         private val _isPlaying = MutableStateFlow(false)
         val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
         
-        private val _currentBeatFrequency = MutableStateFlow(0.0)
-        val currentBeatFrequency: StateFlow<Double> = _currentBeatFrequency.asStateFlow()
+        private val _currentBeatFrequency = MutableStateFlow(0.0f)
+        val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
         
-        private val _currentCarrierFrequency = MutableStateFlow(0.0)
-        val currentCarrierFrequency: StateFlow<Double> = _currentCarrierFrequency.asStateFlow()
+        private val _currentCarrierFrequency = MutableStateFlow(0.0f)
+        val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
         
         private val _isChannelsSwapped = MutableStateFlow(false)
         val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
@@ -529,8 +529,8 @@ class BinauralPlaybackService : Service() {
         serviceScope.cancel()
         
         _isPlaying.value = false
-        _currentBeatFrequency.value = 0.0
-        _currentCarrierFrequency.value = 0.0
+        _currentBeatFrequency.value = 0.0f
+        _currentCarrierFrequency.value = 0.0f
         _isChannelsSwapped.value = false
         _elapsedSeconds.value = 0
         

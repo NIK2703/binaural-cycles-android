@@ -206,8 +206,8 @@ private fun PresetCard(
     relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     isActive: Boolean,
     isPlaying: Boolean,
-    currentCarrierFrequency: Double,
-    currentBeatFrequency: Double,
+    currentCarrierFrequency: Float,
+    currentBeatFrequency: Float,
     currentTime: LocalTime, // Получаем от родителя
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,

@@ -14,7 +14,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.R
 
-private const val MIN_AUDIBLE_FREQUENCY = 20.0
+private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 /**
  * Компактная нижняя панель с информацией о текущих частотах и управлением воспроизведением.
@@ -24,15 +24,15 @@ private const val MIN_AUDIBLE_FREQUENCY = 20.0
 @Composable
 fun BottomPlaybackPanel(
     presetName: String?,
-    beatFrequency: Double,
-    carrierFrequency: Double,
+    beatFrequency: Float,
+    carrierFrequency: Float,
     isPlaying: Boolean,
     volume: Float,
     onPlayClick: () -> Unit,
     onVolumeChange: (Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
+    val leftChannelFreq = carrierFrequency - beatFrequency / 2.0f
     val isLeftChannelTooLow = leftChannelFreq < MIN_AUDIBLE_FREQUENCY
     
     // Локальное состояние для мгновенного отклика слайдера

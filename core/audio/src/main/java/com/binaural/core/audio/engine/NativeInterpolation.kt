@@ -25,19 +25,19 @@ object NativeInterpolation {
     
     // Нативные методы (статические, не требуют экземпляра движка)
     private external fun nativeInterpolate(
-        p0: Double, p1: Double, p2: Double, p3: Double,
-        t: Double,
+        p0: Float, p1: Float, p2: Float, p3: Float,
+        t: Float,
         interpolationType: Int,
         tension: Float
-    ): Double
+    ): Float
     
     private external fun nativeGenerateInterpolatedCurve(
         timePoints: IntArray,
-        values: DoubleArray,
+        values: FloatArray,
         numOutputPoints: Int,
         interpolationType: Int,
         tension: Float
-    ): DoubleArray?
+    ): FloatArray?
     
     /**
      * Выполнить интерполяцию одного значения через C++
@@ -52,11 +52,11 @@ object NativeInterpolation {
      * @return интерполированное значение
      */
     fun interpolate(
-        p0: Double, p1: Double, p2: Double, p3: Double,
-        t: Double,
+        p0: Float, p1: Float, p2: Float, p3: Float,
+        t: Float,
         interpolationType: InterpolationType,
         tension: Float = 0.0f
-    ): Double {
+    ): Float {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
@@ -80,11 +80,11 @@ object NativeInterpolation {
      */
     fun generateInterpolatedCurve(
         timePoints: IntArray,
-        values: DoubleArray,
+        values: FloatArray,
         numOutputPoints: Int,
         interpolationType: InterpolationType,
         tension: Float = 0.0f
-    ): DoubleArray? {
+    ): FloatArray? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1

@@ -24,7 +24,7 @@ class Wavetable {
 public:
     // Размер таблицы кратный 4 для NEON выравнивания
     static constexpr int DEFAULT_TABLE_SIZE = 2048;
-    static constexpr double TWO_PI = 2.0 * M_PI;
+    static constexpr float TWO_PI = 2.0 * M_PI;
     
     /**
      * Инициализировать таблицу заданного размера
@@ -44,16 +44,16 @@ public:
     /**
      * Получить масштабный коэффициент
      */
-    static double getScaleFactor() { return s_scaleFactor; }
+    static float getScaleFactor() { return s_scaleFactor; }
     
     /**
      * Быстрый синус с линейной интерполяцией
      * @param phase фаза в радианах [0, 2π)
      * @return значение синуса [-1, 1]
      */
-    static inline float fastSin(double phase) {
+    static inline float fastSin(float phase) {
         // Масштабируем фазу в индекс таблицы
-        const double phaseScaled = phase * s_scaleFactor;
+        const float phaseScaled = phase * s_scaleFactor;
         const int index = static_cast<int>(phaseScaled) & s_tableSizeMask;
         const float fraction = static_cast<float>(phaseScaled - static_cast<int>(phaseScaled));
         const int indexNext = (index + 1) & s_tableSizeMask;
@@ -163,7 +163,7 @@ private:
     static std::vector<float> s_sineTable;
     static int s_tableSize;
     static int s_tableSizeMask;
-    static double s_scaleFactor;
+    static float s_scaleFactor;
     static float s_scaleFactorFloat;
 };
 

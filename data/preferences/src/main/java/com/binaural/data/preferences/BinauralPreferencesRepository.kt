@@ -35,8 +35,8 @@ import javax.inject.Singleton
 data class SerializableFrequencyPoint(
     val hour: Int,
     val minute: Int,
-    val carrierFrequency: Double,
-    val beatFrequency: Double
+    val carrierFrequency: Float,
+    val beatFrequency: Float
 )
 
 /**
@@ -44,8 +44,8 @@ data class SerializableFrequencyPoint(
  */
 @Serializable
 data class SerializableFrequencyRange(
-    val min: Double,
-    val max: Double
+    val min: Float,
+    val max: Float
 )
 
 /**
@@ -499,16 +499,16 @@ class BinauralPreferencesRepository @Inject constructor(
                 name = context.getString(R.string.preset_gamma_productivity),
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0, beatFrequency = 1.5),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0, beatFrequency = 5.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0, beatFrequency = 9.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0, beatFrequency = 14.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0, beatFrequency = 40.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 7.5),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0, beatFrequency = 4.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0f, beatFrequency = 1.5f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0f, beatFrequency = 9.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0f, beatFrequency = 14.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0f, beatFrequency = 40.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),
                     ),
-                    carrierRange = FrequencyRange(100.0, 500.0),
+                    carrierRange = FrequencyRange(100.0f, 500.0f),
                     interpolationType = InterpolationType.CARDINAL
                 )
             ),
@@ -517,16 +517,16 @@ class BinauralPreferencesRepository @Inject constructor(
                 name = context.getString(R.string.preset_daily_cycle),
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0, beatFrequency = 2.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0, beatFrequency = 3.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0, beatFrequency = 10.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0, beatFrequency = 18.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0, beatFrequency = 6.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0, beatFrequency = 25.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0, beatFrequency = 9.0),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0, beatFrequency = 5.0),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0f, beatFrequency = 2.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0f, beatFrequency = 3.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0f, beatFrequency = 10.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0f, beatFrequency = 6.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0f, beatFrequency = 25.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),
+                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
                     ),
-                    carrierRange = FrequencyRange(100.0, 500.0),
+                    carrierRange = FrequencyRange(100.0f, 500.0f),
                     interpolationType = InterpolationType.CARDINAL
                 )
             )

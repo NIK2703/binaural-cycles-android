@@ -32,11 +32,11 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     }
     
     // StateFlows для UI (аналогично BinauralAudioEngine)
-    private val _currentBeatFrequency = MutableStateFlow(0.0)
-    val currentBeatFrequency: StateFlow<Double> = _currentBeatFrequency.asStateFlow()
+    private val _currentBeatFrequency = MutableStateFlow(0.0f)
+    val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
     
-    private val _currentCarrierFrequency = MutableStateFlow(0.0)
-    val currentCarrierFrequency: StateFlow<Double> = _currentCarrierFrequency.asStateFlow()
+    private val _currentCarrierFrequency = MutableStateFlow(0.0f)
+    val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
     
     private val _elapsedSeconds = MutableStateFlow(0)
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
@@ -56,8 +56,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     private external fun nativeRelease()
     private external fun nativeSetConfig(
         timePoints: IntArray,
-        carrierFreqs: DoubleArray,
-        beatFreqs: DoubleArray,
+        carrierFreqs: FloatArray,
+        beatFreqs: FloatArray,
         interpolationType: Int,
         splineTension: Float,
         volume: Float,
@@ -82,8 +82,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     // Zero-copy версия через DirectByteBuffer - ОПТИМИЗИРОВАНО
     private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
     
-    private external fun nativeGetCurrentBeatFrequency(): Double
-    private external fun nativeGetCurrentCarrierFrequency(): Double
+    private external fun nativeGetCurrentBeatFrequency(): Float
+    private external fun nativeGetCurrentCarrierFrequency(): Float
     private external fun nativeGetElapsedSeconds(): Int
     private external fun nativeIsChannelsSwapped(): Boolean
     private external fun nativeUpdateElapsedTime()
@@ -91,28 +91,28 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     // === Нативные методы для интерполяции (используются в UI для графика) ===
     
     private external fun nativeInterpolate(
-        p0: Double, p1: Double, p2: Double, p3: Double,
-        t: Double,
+        p0: Float, p1: Float, p2: Float, p3: Float,
+        t: Float,
         interpolationType: Int,
         tension: Float
-    ): Double
+    ): Float
     
     private external fun nativeGenerateInterpolatedCurve(
         timePoints: IntArray,
-        values: DoubleArray,
+        values: FloatArray,
         numOutputPoints: Int,
         interpolationType: Int,
         tension: Float
-    ): DoubleArray?
+    ): FloatArray?
     
     private external fun nativeGetChannelFrequencies(
         timePoints: IntArray,
-        carrierFreqs: DoubleArray,
-        beatFreqs: DoubleArray,
+        carrierFreqs: FloatArray,
+        beatFreqs: FloatArray,
         targetTimeSeconds: Int,
         interpolationType: Int,
         tension: Float
-    ): DoubleArray?
+    ): FloatArray?
     
     /**
      * Инициализация движка
@@ -156,8 +156,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         val numPoints = allPoints.size
         
         val timePoints = IntArray(numPoints) { allPoints[it].time.toSecondOfDay() }
-        val carrierFreqs = DoubleArray(numPoints) { allPoints[it].carrierFrequency }
-        val beatFreqs = DoubleArray(numPoints) { allPoints[it].beatFrequency }
+        val carrierFreqs = FloatArray(numPoints) { allPoints[it].carrierFrequency }
+        val beatFreqs = FloatArray(numPoints) { allPoints[it].beatFrequency }
         
         val interpolationType = when (curve.interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -204,8 +204,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
-        val carrierReduction = settings.carrierReductionPercent / 100.0
-        val beatReduction = settings.beatReductionPercent / 100.0
+        val carrierReduction = settings.carrierReductionPercent / 100.0f
+        val beatReduction = settings.beatReductionPercent / 100.0f
         
         for (i in 0 until sortedPoints.size) {
             val currentPoint = sortedPoints[i]
@@ -224,13 +224,13 @@ class NativeAudioEngine : NativeAudioEngineCallback {
             val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
             
             // Интерполируем значения на середине
-            val ratio = 0.5
+            val ratio = 0.5f
             val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
             val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
             
             // Применяем снижение частот для режима расслабления
-            val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
-            val relaxedBeat = midBeat * (1.0 - beatReduction)
+            val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
+            val relaxedBeat = midBeat * (1.0f - beatReduction)
             
             virtualPoints.add(
                 FrequencyPoint(
@@ -271,8 +271,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     fun resetState() {
         nativeResetState()
         _elapsedSeconds.value = 0
-        _currentBeatFrequency.value = 0.0
-        _currentCarrierFrequency.value = 0.0
+        _currentBeatFrequency.value = 0.0f
+        _currentCarrierFrequency.value = 0.0f
         _isChannelsSwapped.value = false
     }
     
@@ -310,8 +310,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         return nativeGenerateBufferDirect(directBuffer, samplesPerChannel, frequencyUpdateIntervalMs)
     }
     
-    fun getCurrentBeatFrequency(): Double = nativeGetCurrentBeatFrequency()
-    fun getCurrentCarrierFrequency(): Double = nativeGetCurrentCarrierFrequency()
+    fun getCurrentBeatFrequency(): Float = nativeGetCurrentBeatFrequency()
+    fun getCurrentCarrierFrequency(): Float = nativeGetCurrentCarrierFrequency()
     fun getElapsedSeconds(): Int = nativeGetElapsedSeconds()
     fun isChannelsSwapped(): Boolean = nativeIsChannelsSwapped()
     
@@ -329,11 +329,11 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      * Выполнить интерполяцию одного значения через C++
      */
     fun interpolate(
-        p0: Double, p1: Double, p2: Double, p3: Double,
-        t: Double,
+        p0: Float, p1: Float, p2: Float, p3: Float,
+        t: Float,
         interpolationType: InterpolationType,
         tension: Float = 0.0f
-    ): Double {
+    ): Float {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
@@ -354,11 +354,11 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      */
     fun generateInterpolatedCurve(
         timePoints: IntArray,
-        values: DoubleArray,
+        values: FloatArray,
         numOutputPoints: Int,
         interpolationType: InterpolationType,
         tension: Float = 0.0f
-    ): DoubleArray? {
+    ): FloatArray? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
@@ -374,12 +374,12 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      */
     fun getChannelFrequenciesAt(
         timePoints: IntArray,
-        carrierFreqs: DoubleArray,
-        beatFreqs: DoubleArray,
+        carrierFreqs: FloatArray,
+        beatFreqs: FloatArray,
         targetTimeSeconds: Int,
         interpolationType: InterpolationType,
         tension: Float = 0.0f
-    ): Pair<Double, Double>? {
+    ): Pair<Float, Float>? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
@@ -395,7 +395,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     
     // === Callback'и из C++ ===
     
-    override fun onFrequencyChanged(beatFreq: Double, carrierFreq: Double) {
+    override fun onFrequencyChanged(beatFreq: Float, carrierFreq: Float) {
         _currentBeatFrequency.value = beatFreq
         _currentCarrierFrequency.value = carrierFreq
     }
@@ -414,7 +414,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
  * Интерфейс для callback'ов из C++
  */
 interface NativeAudioEngineCallback {
-    fun onFrequencyChanged(beatFreq: Double, carrierFreq: Double)
+    fun onFrequencyChanged(beatFreq: Float, carrierFreq: Float)
     fun onChannelsSwapped(swapped: Boolean)
     fun onElapsedChanged(elapsedSeconds: Int)
 }

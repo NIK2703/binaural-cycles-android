@@ -62,13 +62,13 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInitialize(
     
     // Получаем method ID для callback'ов
     jclass callbackClass = env->GetObjectClass(callback);
-    g_onFrequencyChangedMethod = env->GetMethodID(callbackClass, "onFrequencyChanged", "(DD)V");
+    g_onFrequencyChangedMethod = env->GetMethodID(callbackClass, "onFrequencyChanged", "(FF)V");
     g_onChannelsSwappedMethod = env->GetMethodID(callbackClass, "onChannelsSwapped", "(Z)V");
     g_onElapsedChangedMethod = env->GetMethodID(callbackClass, "onElapsedChanged", "(I)V");
     
     // Устанавливаем callbacks
     binaural::EngineCallbacks callbacks;
-    callbacks.onFrequencyChanged = [](double beatFreq, double carrierFreq) {
+    callbacks.onFrequencyChanged = [](float beatFreq, float carrierFreq) {
         if (g_javaVM && g_callbackObj && g_onFrequencyChangedMethod) {
             JNIEnv* env = nullptr;
             bool needsDetach = false;
@@ -83,8 +83,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInitialize(
             
             if (env) {
                 env->CallVoidMethod(g_callbackObj, g_onFrequencyChangedMethod, 
-                                   static_cast<jdouble>(beatFreq), 
-                                   static_cast<jdouble>(carrierFreq));
+                                   static_cast<jfloat>(beatFreq), 
+                                   static_cast<jfloat>(carrierFreq));
             }
             
             if (needsDetach) {
@@ -167,8 +167,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     JNIEnv* env,
     jobject thiz,
     jintArray timePoints,
-    jdoubleArray carrierFreqs,
-    jdoubleArray beatFreqs,
+    jfloatArray carrierFreqs,
+    jfloatArray beatFreqs,
     jint interpolationType,
     jfloat splineTension,
     jfloat volume,
@@ -186,8 +186,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     // Получаем массивы точек
     jint numPoints = env->GetArrayLength(timePoints);
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
-    jdouble* carriers = env->GetDoubleArrayElements(carrierFreqs, nullptr);
-    jdouble* beats = env->GetDoubleArrayElements(beatFreqs, nullptr);
+    jfloat* carriers = env->GetFloatArrayElements(carrierFreqs, nullptr);
+    jfloat* beats = env->GetFloatArrayElements(beatFreqs, nullptr);
     
     config.curve.points.reserve(numPoints);
     for (int i = 0; i < numPoints; ++i) {
@@ -199,8 +199,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     }
     
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(carrierFreqs, carriers, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(beatFreqs, beats, JNI_ABORT);
+    env->ReleaseFloatArrayElements(carrierFreqs, carriers, JNI_ABORT);
+    env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
     
     // Устанавливаем параметры
     config.curve.interpolationType = static_cast<binaural::InterpolationType>(interpolationType);
@@ -384,7 +384,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect
 /**
  * Получение текущей частоты биений
  */
-JNIEXPORT jdouble JNICALL
+JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentBeatFrequency(
     JNIEnv* env,
     jobject thiz
@@ -395,7 +395,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentBeatFreque
 /**
  * Получение текущей несущей частоты
  */
-JNIEXPORT jdouble JNICALL
+JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentCarrierFrequency(
     JNIEnv* env,
     jobject thiz
@@ -453,15 +453,15 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeUpdateElapsedTime(
  * @param tension параметр натяжения для CARDINAL
  * @return интерполированное значение
  */
-JNIEXPORT jdouble JNICALL
+JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInterpolate(
     JNIEnv* env,
     jobject thiz,
-    jdouble p0,
-    jdouble p1,
-    jdouble p2,
-    jdouble p3,
-    jdouble t,
+    jfloat p0,
+    jfloat p1,
+    jfloat p2,
+    jfloat p3,
+    jfloat t,
     jint interpolationType,
     jfloat tension
 ) {
@@ -480,12 +480,12 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInterpolate(
  * @param tension параметр натяжения
  * @return массив интерполированных значений
  */
-JNIEXPORT jdoubleArray JNICALL
+JNIEXPORT jfloatArray JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolatedCurve(
     JNIEnv* env,
     jobject thiz,
     jintArray timePoints,
-    jdoubleArray values,
+    jfloatArray values,
     jint numOutputPoints,
     jint interpolationType,
     jfloat tension
@@ -501,17 +501,17 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     
     // Получаем входные данные
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
-    jdouble* vals = env->GetDoubleArrayElements(values, nullptr);
+    jfloat* vals = env->GetFloatArrayElements(values, nullptr);
     
     // Создаём выходной массив
-    jdoubleArray result = env->NewDoubleArray(numOutputPoints);
+    jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
         env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-        env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+        env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
     
-    std::vector<double> outputValues(numOutputPoints);
+    std::vector<jfloat> outputValues(numOutputPoints);
     
     // Константы для времени суток
     constexpr int SECONDS_PER_DAY = 86400;
@@ -519,7 +519,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     // Генерируем интерполированные значения
     for (int i = 0; i < numOutputPoints; ++i) {
         // Равномерно распределяем точки по суткам
-        const double t = static_cast<double>(i) / (numOutputPoints - 1);
+        const float t = static_cast<float>(i) / (numOutputPoints - 1);
         const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
         
         // Находим интервал (бинарный поиск)
@@ -555,8 +555,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
             t2 += SECONDS_PER_DAY;
             if (targetSeconds < t1) {
                 // targetSeconds после полуночи
-                const double ratio = static_cast<double>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
-                const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+                const float ratio = static_cast<float>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+                const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
                 
                 // Получаем 4 точки для сплайна
                 const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
@@ -572,8 +572,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
             }
         }
         
-        const double ratio = static_cast<double>(targetSeconds - t1) / (t2 - t1);
-        const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+        const float ratio = static_cast<float>(targetSeconds - t1) / (t2 - t1);
+        const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
         
         // Получаем 4 точки для сплайна
         const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
@@ -587,11 +587,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     }
     
     // Копируем результат
-    env->SetDoubleArrayRegion(result, 0, numOutputPoints, outputValues.data());
+    env->SetFloatArrayRegion(result, 0, numOutputPoints, outputValues.data());
     
     // Освобождаем ресурсы
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+    env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
     
     return result;
 }
@@ -604,15 +604,15 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
  * @param targetTimeSeconds целевое время в секундах с начала суток
  * @param interpolationType тип интерполяции
  * @param tension параметр натяжения
- * @return double[2]: [0] = нижняя частота канала, [1] = верхняя частота канала
+ * @return float[2]: [0] = нижняя частота канала, [1] = верхняя частота канала
  */
-JNIEXPORT jdoubleArray JNICALL
+JNIEXPORT jfloatArray JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencies(
     JNIEnv* env,
     jobject thiz,
     jintArray timePoints,
-    jdoubleArray carrierFreqs,
-    jdoubleArray beatFreqs,
+    jfloatArray carrierFreqs,
+    jfloatArray beatFreqs,
     jint targetTimeSeconds,
     jint interpolationType,
     jfloat tension
@@ -628,16 +628,16 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
     
     // Получаем входные данные
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
-    jdouble* carriers = env->GetDoubleArrayElements(carrierFreqs, nullptr);
-    jdouble* beats = env->GetDoubleArrayElements(beatFreqs, nullptr);
+    jfloat* carriers = env->GetFloatArrayElements(carrierFreqs, nullptr);
+    jfloat* beats = env->GetFloatArrayElements(beatFreqs, nullptr);
     
     // Вычисляем частоты каналов для каждой точки
-    std::vector<double> lowerFreqs(numPoints);
-    std::vector<double> upperFreqs(numPoints);
+    std::vector<float> lowerFreqs(numPoints);
+    std::vector<float> upperFreqs(numPoints);
     
     for (int i = 0; i < numPoints; ++i) {
-        lowerFreqs[i] = carriers[i] - beats[i] / 2.0;
-        upperFreqs[i] = carriers[i] + beats[i] / 2.0;
+        lowerFreqs[i] = static_cast<float>(carriers[i] - beats[i] / 2.0);
+        upperFreqs[i] = static_cast<float>(carriers[i] + beats[i] / 2.0);
     }
     
     // Находим интервал
@@ -666,52 +666,52 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
     int t1 = times[leftIndex];
     int t2 = times[rightIndex];
     
-    double ratio;
+    float ratio;
     bool isWrapping = (leftIndex == numPoints - 1);
     
     if (isWrapping) {
         t2 += SECONDS_PER_DAY;
         if (targetTimeSeconds < t1) {
-            ratio = static_cast<double>(targetTimeSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+            ratio = static_cast<float>(targetTimeSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
         } else {
-            ratio = static_cast<double>(targetTimeSeconds - t1) / (t2 - t1);
+            ratio = static_cast<float>(targetTimeSeconds - t1) / (t2 - t1);
         }
     } else {
-        ratio = static_cast<double>(targetTimeSeconds - t1) / (t2 - t1);
+        ratio = static_cast<float>(targetTimeSeconds - t1) / (t2 - t1);
     }
     
-    ratio = std::clamp(ratio, 0.0, 1.0);
+    ratio = std::clamp(ratio, 0.0f, 1.0f);
     
     // Получаем 4 точки для сплайна
     const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
     const int nextNextIndex = (rightIndex + 1) % numPoints;
     
-    double lowerFreq = binaural::Interpolation::interpolate(
+    float lowerFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         lowerFreqs[prevIndex], lowerFreqs[leftIndex], lowerFreqs[rightIndex], lowerFreqs[nextNextIndex],
         ratio, tension
     );
     
-    double upperFreq = binaural::Interpolation::interpolate(
+    float upperFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         upperFreqs[prevIndex], upperFreqs[leftIndex], upperFreqs[rightIndex], upperFreqs[nextNextIndex],
         ratio, tension
     );
     
     // Гарантируем неотрицательные частоты
-    lowerFreq = std::max(0.0, lowerFreq);
-    upperFreq = std::max(0.0, upperFreq);
+    lowerFreq = std::max(0.0f, lowerFreq);
+    upperFreq = std::max(0.0f, upperFreq);
     
     // Освобождаем ресурсы
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(carrierFreqs, carriers, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(beatFreqs, beats, JNI_ABORT);
+    env->ReleaseFloatArrayElements(carrierFreqs, carriers, JNI_ABORT);
+    env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
     
     // Возвращаем результат
-    jdoubleArray result = env->NewDoubleArray(2);
+    jfloatArray result = env->NewFloatArray(2);
     if (result) {
-        const double resultData[2] = { lowerFreq, upperFreq };
-        env->SetDoubleArrayRegion(result, 0, 2, resultData);
+        const jfloat resultData[2] = { lowerFreq, upperFreq };
+        env->SetFloatArrayRegion(result, 0, 2, resultData);
     }
     
     return result;
@@ -724,15 +724,15 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
 /**
  * Статическая интерполяция одного значения (не требует экземпляра движка)
  */
-JNIEXPORT jdouble JNICALL
+JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeInterpolation_nativeInterpolate(
     JNIEnv* env,
     jobject thiz,
-    jdouble p0,
-    jdouble p1,
-    jdouble p2,
-    jdouble p3,
-    jdouble t,
+    jfloat p0,
+    jfloat p1,
+    jfloat p2,
+    jfloat p3,
+    jfloat t,
     jint interpolationType,
     jfloat tension
 ) {
@@ -745,12 +745,12 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeInterpolate(
 /**
  * Статическая генерация интерполированной кривой (не требует экземпляра движка)
  */
-JNIEXPORT jdoubleArray JNICALL
+JNIEXPORT jfloatArray JNICALL
 Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolatedCurve(
     JNIEnv* env,
     jobject thiz,
     jintArray timePoints,
-    jdoubleArray values,
+    jfloatArray values,
     jint numOutputPoints,
     jint interpolationType,
     jfloat tension
@@ -766,17 +766,17 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     
     // Получаем входные данные
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
-    jdouble* vals = env->GetDoubleArrayElements(values, nullptr);
+    jfloat* vals = env->GetFloatArrayElements(values, nullptr);
     
     // Создаём выходной массив
-    jdoubleArray result = env->NewDoubleArray(numOutputPoints);
+    jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
         env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-        env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+        env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
     
-    std::vector<double> outputValues(numOutputPoints);
+    std::vector<jfloat> outputValues(numOutputPoints);
     
     // Константы для времени суток
     constexpr int SECONDS_PER_DAY = 86400;
@@ -784,7 +784,7 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     // Генерируем интерполированные значения
     for (int i = 0; i < numOutputPoints; ++i) {
         // Равномерно распределяем точки по суткам
-        const double t = static_cast<double>(i) / (numOutputPoints - 1);
+        const float t = static_cast<float>(i) / (numOutputPoints - 1);
         const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
         
         // Находим интервал (бинарный поиск)
@@ -820,8 +820,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
             t2 += SECONDS_PER_DAY;
             if (targetSeconds < t1) {
                 // targetSeconds после полуночи
-                const double ratio = static_cast<double>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
-                const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+                const float ratio = static_cast<float>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
+                const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
                 
                 // Получаем 4 точки для сплайна
                 const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
@@ -837,8 +837,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
             }
         }
         
-        const double ratio = static_cast<double>(targetSeconds - t1) / (t2 - t1);
-        const double clampedRatio = std::clamp(ratio, 0.0, 1.0);
+        const float ratio = static_cast<float>(targetSeconds - t1) / (t2 - t1);
+        const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
         
         // Получаем 4 точки для сплайна
         const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
@@ -852,11 +852,11 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     }
     
     // Копируем результат
-    env->SetDoubleArrayRegion(result, 0, numOutputPoints, outputValues.data());
+    env->SetFloatArrayRegion(result, 0, numOutputPoints, outputValues.data());
     
     // Освобождаем ресурсы
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
-    env->ReleaseDoubleArrayElements(values, vals, JNI_ABORT);
+    env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
     
     return result;
 }

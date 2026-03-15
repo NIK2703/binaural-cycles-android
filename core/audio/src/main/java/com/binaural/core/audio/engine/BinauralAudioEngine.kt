@@ -123,11 +123,11 @@ class BinauralAudioEngine(private val context: Context) {
     private val _currentConfig = MutableStateFlow(BinauralConfig())
     val currentConfig: StateFlow<BinauralConfig> = _currentConfig.asStateFlow()
 
-    private val _currentBeatFrequency = MutableStateFlow(0.0)
-    val currentBeatFrequency: StateFlow<Double> = _currentBeatFrequency.asStateFlow()
+    private val _currentBeatFrequency = MutableStateFlow(0.0f)
+    val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
 
-    private val _currentCarrierFrequency = MutableStateFlow(0.0)
-    val currentCarrierFrequency: StateFlow<Double> = _currentCarrierFrequency.asStateFlow()
+    private val _currentCarrierFrequency = MutableStateFlow(0.0f)
+    val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
 
     private val _elapsedSeconds = MutableStateFlow(0)
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()

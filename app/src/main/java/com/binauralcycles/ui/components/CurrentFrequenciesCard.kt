@@ -14,8 +14,8 @@ private const val MIN_AUDIBLE_FREQUENCY = 20.0
 
 @Composable
 fun CurrentFrequenciesCard(
-    beatFrequency: Double,
-    carrierFrequency: Double,
+    beatFrequency: Float,
+    carrierFrequency: Float,
     isPlaying: Boolean
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0

@@ -42,10 +42,10 @@ import kotlin.math.cos
 private const val DRAG_DIRECTION_THRESHOLD = 10f
 
 // Минимальная слышимая частота
-private const val MIN_AUDIBLE_FREQUENCY = 20.0
+private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 // Максимальная частота для графика
-private const val MAX_FREQUENCY = 2000.0
+private const val MAX_FREQUENCY = 2000.0f
 
 /**
  * Направление перетаскивания
@@ -61,19 +61,19 @@ private data class PointDragState(
     val direction: DragDirection = DragDirection.NONE,
     val startIndex: Int = -1,
     val startTime: LocalTime? = null,
-    val startCarrier: Double = 0.0,
-    val startBeat: Double = 0.0,
+    val startCarrier: Float = 0.0f,
+    val startBeat: Float = 0.0f,
     val currentTime: LocalTime? = null,
-    val currentCarrier: Double = 0.0,
-    val currentBeat: Double = 0.0
+    val currentCarrier: Float = 0.0f,
+    val currentBeat: Float = 0.0f
 )
 
 /**
  * Вычисляет максимальную частоту биений для заданной несущей частоты
  * Формула: (carrierFrequency - 20) * 2 (гарантирует, что нижняя боковая частота останется >= 20 Гц)
  */
-fun maxBeatForCarrier(carrierFrequency: Double): Double {
-    return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0)
+fun maxBeatForCarrier(carrierFrequency: Float): Float {
+    return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
 }
 
 /**
@@ -85,16 +85,16 @@ private data class GraphParams(
     val carrierRange: FrequencyRange,
     val beatRange: FrequencyRange
 ) {
-    val carrierRangeSize: Double get() = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0)
-    val maxBeat: Double get() = beatRange.max
+    val carrierRangeSize: Float get() = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
+    val maxBeat: Float get() = beatRange.max
     
     fun timeToX(time: LocalTime): Float {
         val seconds = time.toSecondOfDay()
         return (seconds / (24.0 * 3600) * widthPx).toFloat()
     }
     
-    fun carrierToY(carrier: Double): Float {
-        return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx).toFloat()
+    fun carrierToY(carrier: Float): Float {
+        return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx)
     }
     
     fun xToTime(x: Float): LocalTime {
@@ -102,8 +102,8 @@ private data class GraphParams(
         return LocalTime.fromSecondOfDay(seconds)
     }
     
-    fun yToCarrier(y: Float): Double {
-        val carrier = carrierRange.min + (1.0 - y / heightPx) * carrierRangeSize
+    fun yToCarrier(y: Float): Float {
+        val carrier = carrierRange.min + (1.0f - y / heightPx) * carrierRangeSize
         return carrierRange.clamp(kotlin.math.round(carrier))
     }
     
@@ -111,8 +111,8 @@ private data class GraphParams(
      * Вычисляет Y-координату верхней границы области биений
      * Верхняя граница соответствует частоте канала: carrier + beat/2
      */
-    fun beatUpperY(carrier: Double, beat: Double): Float {
-        val upperFrequency = carrier + beat / 2
+    fun beatUpperY(carrier: Float, beat: Float): Float {
+        val upperFrequency = carrier + beat / 2.0f
         return carrierToY(upperFrequency)
     }
     
@@ -120,8 +120,8 @@ private data class GraphParams(
      * Вычисляет Y-координату нижней границы области биений
      * Нижняя граница соответствует частоте канала: carrier - beat/2
      */
-    fun beatLowerY(carrier: Double, beat: Double): Float {
-        val lowerFrequency = carrier - beat / 2
+    fun beatLowerY(carrier: Float, beat: Float): Float {
+        val lowerFrequency = carrier - beat / 2.0f
         return carrierToY(lowerFrequency)
     }
 }
@@ -142,8 +142,8 @@ fun generateRelaxationVirtualPoints(
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
     val virtualPoints = mutableListOf<FrequencyPoint>()
     
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0
+    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
+    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
     
     for (i in 0 until sortedPoints.size) {
         val currentPoint = sortedPoints[i]
@@ -166,8 +166,8 @@ fun generateRelaxationVirtualPoints(
         val midBeat = interpolateBeatFrequency(sortedPoints, midTime, interpolationType, splineTension)
         
         // Применяем снижение частот для режима расслабления
-        val relaxedCarrier = midCarrier * (1.0 - carrierReduction)
-        val relaxedBeat = midBeat * (1.0 - beatReduction)
+        val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
+        val relaxedBeat = midBeat * (1.0f - beatReduction)
         
         virtualPoints.add(
             FrequencyPoint(
@@ -185,8 +185,8 @@ fun generateRelaxationVirtualPoints(
 fun FrequencyGraph(
     points: List<FrequencyPoint>,
     selectedPointIndex: Int?,
-    currentCarrierFrequency: Double,
-    currentBeatFrequency: Double,
+    currentCarrierFrequency: Float,
+    currentBeatFrequency: Float,
     carrierRange: FrequencyRange,
     beatRange: FrequencyRange,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
@@ -195,10 +195,10 @@ fun FrequencyGraph(
     relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     onPointSelected: (Int) -> Unit,
     onPointTimeChanged: (Int, LocalTime) -> Unit,
-    onPointCarrierChanged: (Int, Double) -> Unit,
-    onPointBeatChanged: (Int, Double) -> Unit = { _, _ -> },
-    onAddPoint: (LocalTime, Double, Double) -> Unit,
-    onCarrierRangeChange: (Double, Double) -> Unit,
+    onPointCarrierChanged: (Int, Float) -> Unit,
+    onPointBeatChanged: (Int, Float) -> Unit = { _, _ -> },
+    onAddPoint: (LocalTime, Float, Float) -> Unit,
+    onCarrierRangeChange: (Float, Float) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
@@ -461,11 +461,11 @@ fun FrequencyGraph(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val value = tempRangeValue.toDoubleOrNull()
+                    val value = tempRangeValue.toFloatOrNull()
                     if (value != null && value >= MIN_AUDIBLE_FREQUENCY) {
                         val newMin = if (editingRangeType == RangeType.MIN) value else carrierRange.min
                         // Ограничиваем максимум значением 2000 Гц
-                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(2000.0) else carrierRange.max
+                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(MAX_FREQUENCY) else carrierRange.max
                         if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
                     }
                     showRangeDialog = false
@@ -481,8 +481,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     realPoints: List<FrequencyPoint>,
     graphParams: GraphParams,
     currentLocalTime: LocalTime,
-    currentCarrierFrequency: Double,
-    currentBeatFrequency: Double,
+    currentCarrierFrequency: Float,
+    currentBeatFrequency: Float,
     primaryColor: Color,
     indicatorColor: Color,
     relaxationColor: Color,
@@ -556,8 +556,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
         
         // Находим значение на левой границе (до первой точки)
         val firstPointX = params.timeToX(sortedPoints.first().time)
-        val firstUpperY = params.carrierToY(sortedPoints.last().carrierFrequency + sortedPoints.last().beatFrequency / 2.0)
-        val firstLowerY = params.carrierToY(sortedPoints.last().carrierFrequency - sortedPoints.last().beatFrequency / 2.0)
+        val firstUpperY = params.carrierToY(sortedPoints.last().carrierFrequency + sortedPoints.last().beatFrequency / 2.0f)
+        val firstLowerY = params.carrierToY(sortedPoints.last().carrierFrequency - sortedPoints.last().beatFrequency / 2.0f)
         
         // От левой границы до первой точки - значение последней точки (переход через полночь)
         upperPath.lineTo(firstPointX, firstUpperY)
@@ -575,8 +575,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
                 params.timeToX(nextPoint.time)
             }
             
-            val currentUpperY = params.carrierToY(currentPoint.carrierFrequency + currentPoint.beatFrequency / 2.0)
-            val currentLowerY = params.carrierToY(currentPoint.carrierFrequency - currentPoint.beatFrequency / 2.0)
+            val currentUpperY = params.carrierToY(currentPoint.carrierFrequency + currentPoint.beatFrequency / 2.0f)
+            val currentLowerY = params.carrierToY(currentPoint.carrierFrequency - currentPoint.beatFrequency / 2.0f)
             
             // Вертикальный переход в точке (если не первая точка)
             if (i > 0 || currentUpperY != firstUpperY) {
@@ -695,8 +695,8 @@ private enum class RangeType { MIN, MAX }
  * Вычисляет максимальную частоту биений для верхней границы (2000 Гц).
  * Формула: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
  */
-fun maxBeatForUpperLimit(carrierFrequency: Double): Double {
-    return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0)
+fun maxBeatForUpperLimit(carrierFrequency: Float): Float {
+    return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0f)
 }
 
 /**
@@ -705,7 +705,7 @@ fun maxBeatForUpperLimit(carrierFrequency: Double): Double {
  * Нижняя граница: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
  * Верхняя граница: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
  */
-fun adjustBeatForCarrier(carrier: Double, currentBeat: Double): Double {
+fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
     val maxBeatForLower = maxBeatForCarrier(carrier)  // для нижней границы (20 Гц)
     val maxBeatForUpper = maxBeatForUpperLimit(carrier)  // для верхней границы (2000 Гц)
     val maxBeat = minOf(maxBeatForLower, maxBeatForUpper)
@@ -718,7 +718,7 @@ fun DraggablePoint(
     yPx: Float,
     isSelected: Boolean,
     point: FrequencyPoint,
-    maxBeat: Double,
+    maxBeat: Float,
     originalIndex: Int,
     carrierRange: FrequencyRange,
     minTimeSeconds: Int,
@@ -727,9 +727,9 @@ fun DraggablePoint(
     graphHeightPx: Int,
     primaryColor: Color,
     onPointSelected: (Int) -> Unit,
-    onDragStart: (Int, LocalTime, Double, Double) -> Unit,
-    onDragUpdate: (Int, LocalTime, Double, Double, DragDirection) -> Unit,
-    onDragEnd: (Int, LocalTime, Double, Double, DragDirection) -> Unit
+    onDragStart: (Int, LocalTime, Float, Float) -> Unit,
+    onDragUpdate: (Int, LocalTime, Float, Float, DragDirection) -> Unit,
+    onDragEnd: (Int, LocalTime, Float, Float, DragDirection) -> Unit
 ) {
     val density = LocalDensity.current
     
@@ -738,8 +738,8 @@ fun DraggablePoint(
     var currentDragDirection by remember { mutableStateOf(DragDirection.NONE) }
     var hasDirectionDetermined by remember { mutableStateOf(false) }
     var startSeconds by remember { mutableStateOf(0) }
-    var startCarrier by remember { mutableStateOf(0.0) }
-    var startBeat by remember { mutableStateOf(0.0) }
+    var startCarrier by remember { mutableStateOf(0.0f) }
+    var startBeat by remember { mutableStateOf(0.0f) }
     
     val pointSize = if (isSelected) 30.dp else 24.dp
     val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
@@ -816,7 +816,7 @@ private fun calculateTimeFromDrag(startSeconds: Int, dragX: Float, minSeconds: I
     return LocalTime.fromSecondOfDay(finalSeconds)
 }
 
-private fun calculateCarrierFromDrag(startCarrier: Double, dragY: Float, carrierRange: FrequencyRange, graphHeight: Float): Double {
+private fun calculateCarrierFromDrag(startCarrier: Float, dragY: Float, carrierRange: FrequencyRange, graphHeight: Float): Float {
     return carrierRange.clamp(kotlin.math.round(startCarrier - dragY * (carrierRange.max - carrierRange.min) / graphHeight))
 }
 
@@ -826,14 +826,14 @@ fun interpolateCarrierFrequency(
     time: LocalTime, 
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f
-): Double = interpolateFrequency(points, time, interpolationType, splineTension) { it.carrierFrequency }
+): Float = interpolateFrequency(points, time, interpolationType, splineTension) { it.carrierFrequency }
 
 fun interpolateBeatFrequency(
     points: List<FrequencyPoint>, 
     time: LocalTime, 
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f
-): Double = interpolateFrequency(points, time, interpolationType, splineTension) { it.beatFrequency }
+): Float = interpolateFrequency(points, time, interpolationType, splineTension) { it.beatFrequency }
 
 /**
  * Интерполяция частоты канала (верхнего или нижнего)
@@ -848,13 +848,13 @@ fun interpolateChannelFrequency(
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f,
     isUpper: Boolean
-): Double {
+): Float {
     // Селектор, который вычисляет частоту канала для каждой точки
-    val channelSelector: (FrequencyPoint) -> Double = { point ->
+    val channelSelector: (FrequencyPoint) -> Float = { point ->
         if (isUpper) {
-            point.carrierFrequency + point.beatFrequency / 2.0
+            point.carrierFrequency + point.beatFrequency / 2.0f
         } else {
-            point.carrierFrequency - point.beatFrequency / 2.0
+            point.carrierFrequency - point.beatFrequency / 2.0f
         }
     }
     return interpolateFrequency(points, time, interpolationType, splineTension, channelSelector)
@@ -865,10 +865,10 @@ fun interpolateFrequency(
     time: LocalTime, 
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f,
-    frequencySelector: (FrequencyPoint) -> Double
-): Double {
+    frequencySelector: (FrequencyPoint) -> Float
+): Float {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    if (sortedPoints.isEmpty()) return 0.0
+    if (sortedPoints.isEmpty()) return 0.0f
     if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
     
     val targetSeconds = time.toSecondOfDay()
@@ -918,11 +918,11 @@ private fun interpolateBetweenPoints(
     leftIndex: Int,
     rightIndex: Int,
     time: LocalTime,
-    frequencySelector: (FrequencyPoint) -> Double,
+    frequencySelector: (FrequencyPoint) -> Float,
     interpolationType: InterpolationType,
     splineTension: Float,
     isWrapping: Boolean
-): Double {
+): Float {
     val leftPoint = sortedPoints[leftIndex]
     val rightPoint = sortedPoints[rightIndex]
     
@@ -941,7 +941,7 @@ private fun interpolateBetweenPoints(
     
     if (t2 == t1) return frequencySelector(leftPoint)
     
-    val ratio = (t - t1).toDouble() / (t2 - t1)
+    val ratio = (t - t1).toFloat() / (t2 - t1)
     
     // Получаем 4 точки для интерполяции
     val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
@@ -961,9 +961,9 @@ private fun getNeighborPoint(
     points: List<FrequencyPoint>,
     currentIndex: Int,
     offset: Int,
-    frequencySelector: (FrequencyPoint) -> Double,
+    frequencySelector: (FrequencyPoint) -> Float,
     isWrapping: Boolean = false
-): Double {
+): Float {
     val neighborIndex = currentIndex + offset
     
     // Обработка границ массива
