@@ -102,6 +102,11 @@ class BinauralViewModel @Inject constructor(
             // (в этом случае будет использован дефолтный конфиг, который потом заменится при загрузке пресета)
             updateAudioConfig()
             
+            // Устанавливаем настройки, которые могли быть загружены до подключения сервиса
+            playbackService?.setFrequencyUpdateInterval(state.frequencyUpdateIntervalMs)
+            playbackService?.setVolume(state.volume)
+            playbackService?.setSampleRate(state.sampleRate)
+            
             // Наблюдаем за состоянием воспроизведения из сервиса
             observeServiceState()
         }
