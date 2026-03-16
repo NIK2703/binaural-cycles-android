@@ -4,8 +4,8 @@
 #include "AudioGenerator.h"
 #include <memory>
 #include <functional>
-#include <mutex>
 #include <atomic>
+#include <shared_mutex>
 
 namespace binaural {
 
@@ -135,7 +135,7 @@ private:
     GeneratorState m_state;
     EngineCallbacks m_callbacks;
     
-    std::mutex m_configMutex;
+    mutable std::shared_mutex m_configMutex;  // Reader-writer lock для оптимизации
     std::atomic<bool> m_isPlaying{false};
     std::atomic<float> m_currentBeatFreq{0.0};
     std::atomic<float> m_currentCarrierFreq{0.0};

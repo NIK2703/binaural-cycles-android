@@ -6,11 +6,19 @@
 #include <arm_neon.h>
 #endif
 
+// Логирование только в DEBUG сборках
+#ifdef AUDIO_DEBUG
 #include <android/log.h>
 #define LOG_TAG "AudioGenerator"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGD(...) ((void)0)
+#endif
 
 namespace binaural {
+
+// Предвычисленные константы для оптимизации
+static constexpr float ONE_OVER_TWO_PI = 1.0f / AudioGenerator::TWO_PI;
 
 AudioGenerator::AudioGenerator() {
     // Инициализация wavetable при создании генератора
@@ -109,21 +117,11 @@ GenerateResult AudioGenerator::generateBuffer(
     int64_t elapsedMs,
     int frequencyUpdateIntervalMs
 ) {
+    (void)frequencyUpdateIntervalMs; // Не используется в скалярной версии
     GenerateResult result;
     
     // Длительность буфера в секундах (для вычисления конечных частот)
     const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / m_sampleRate;
-    
-    // Логируем каждый 10-й буфер для диагностики
-    static int bufferCounter = 0;
-    const bool shouldLog = (bufferCounter % 10 == 0);
-    bufferCounter++;
-    
-    if (shouldLog) {
-        LOGD("=== Buffer #%d ===", bufferCounter);
-        LOGD("  timeSeconds=%d, bufferDuration=%.6f sec, endTime=%.6f",
-             timeSeconds, bufferDurationSeconds, timeSeconds + bufferDurationSeconds);
-    }
     
     // Получаем частоты в начале буфера
     FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, timeSeconds);
@@ -131,24 +129,12 @@ GenerateResult AudioGenerator::generateBuffer(
     float startRightFreq = startFreqResult.upperFreq;
     
     // Получаем частоты в конце буфера (для плавной интерполяции внутри буфера)
-    // Это также гарантирует совпадение частот на стыках буферов:
-    // endFreq буфера N = startFreq буфера N+1
     FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
         config.curve,
         static_cast<float>(timeSeconds + bufferDurationSeconds)
     );
     float endLeftFreq = endFreqResult.lowerFreq;
     float endRightFreq = endFreqResult.upperFreq;
-    
-    if (shouldLog) {
-        LOGD("  START: left=%.4f Hz, right=%.4f Hz", startLeftFreq, startRightFreq);
-        LOGD("  END:   left=%.4f Hz, right=%.4f Hz", endLeftFreq, endRightFreq);
-        LOGD("  DELTA: left=%.6f Hz, right=%.6f Hz per buffer",
-             endLeftFreq - startLeftFreq, endRightFreq - startRightFreq);
-        LOGD("  STEP:  left=%.9f Hz, right=%.9f Hz per sample",
-             (endLeftFreq - startLeftFreq) / samplesPerChannel,
-             (endRightFreq - startRightFreq) / samplesPerChannel);
-    }
     
     // Начальные амплитуды
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
@@ -214,16 +200,84 @@ GenerateResult AudioGenerator::generateBuffer(
         }
     }
     
-    // Основной цикл генерации
-    for (int i = 0; i < samplesPerChannel; ++i) {
-        const int64_t currentSample = state.totalSamplesGenerated + i;
-        float fadeMultiplier = 1.0;
+    // ========================================================================
+    // ОПТИМИЗИРОВАННЫЙ ГОРЯЧИЙ ПУТЬ: без fade - наиболее частый случай
+    // ========================================================================
+    
+    const bool hasFade = localFadeOperation != GeneratorState::FadeOperation::NONE;
+    
+    // Предвычисление констант для оптимизации горячего пути
+    const float invSamples = 1.0f / samplesPerChannel;
+    const float leftAmpIncrement = (endLeftAmplitude - startLeftAmplitude) * invSamples;
+    const float rightAmpIncrement = (endRightAmplitude - startRightAmplitude) * invSamples;
+    
+    // Предвычисляем начальные амплитуды с volume factor (избегаем умножения в цикле)
+    float currentLeftAmp = baseVolumeFactor * leftAmplitude;
+    float currentRightAmp = baseVolumeFactor * rightAmplitude;
+    const float ampIncrementLeft = baseVolumeFactor * leftAmpIncrement;
+    const float ampIncrementRight = baseVolumeFactor * rightAmpIncrement;
+    
+    if (!hasFade) {
+        // Быстрый путь: нет fade, нет перестановки в середине буфера
+        const bool swapActive = channelSwapEnabled && channelsSwappedAtStart;
         
-        // Обработка fade
-        if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
-            const int fadeDurationSamples = channelSwapFadeDurationSamples;
+        if (!swapActive) {
+            // Самый быстрый путь: нет fade, нет swap
+            for (int i = 0; i < samplesPerChannel; ++i) {
+                // Генерация синусов через wavetable
+                const float leftSample = Wavetable::fastSin(state.leftPhase);
+                const float rightSample = Wavetable::fastSin(state.rightPhase);
+                
+                // Обновление фаз (оптимизированный wrap)
+                state.leftPhase += leftOmega;
+                if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+                
+                state.rightPhase += rightOmega;
+                if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+                
+                // Запись в буфер (interleaved stereo) - амплитуды предвычислены
+                buffer[i * 2] = leftSample * currentLeftAmp;
+                buffer[i * 2 + 1] = rightSample * currentRightAmp;
+                
+                // Обновление инкрементов
+                leftOmega += omegaStepLeft;
+                rightOmega += omegaStepRight;
+                currentLeftAmp += ampIncrementLeft;
+                currentRightAmp += ampIncrementRight;
+            }
+        } else {
+            // Быстрый путь: нет fade, но swap активен
+            for (int i = 0; i < samplesPerChannel; ++i) {
+                const float leftSample = Wavetable::fastSin(state.leftPhase);
+                const float rightSample = Wavetable::fastSin(state.rightPhase);
+                
+                state.leftPhase += leftOmega;
+                if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+                
+                state.rightPhase += rightOmega;
+                if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+                
+                // Swap: левый канал -> правый, правый -> левый
+                buffer[i * 2] = rightSample * currentRightAmp;
+                buffer[i * 2 + 1] = leftSample * currentLeftAmp;
+                
+                leftOmega += omegaStepLeft;
+                rightOmega += omegaStepRight;
+                currentLeftAmp += ampIncrementLeft;
+                currentRightAmp += ampIncrementRight;
+            }
+        }
+    } else {
+        // Медленный путь: есть fade (редкое событие)
+        const float invFadeDuration = 1.0f / channelSwapFadeDurationSamples;
+        
+        for (int i = 0; i < samplesPerChannel; ++i) {
+            const int64_t currentSample = state.totalSamplesGenerated + i;
+            float fadeMultiplier = 1.0;
+            
+            // Обработка fade
             const int64_t elapsedSamples = currentSample - localFadeStartSample;
-            const float progress = static_cast<float>(elapsedSamples) / fadeDurationSamples;
+            const float progress = elapsedSamples * invFadeDuration;
             
             if (localIsFadingOut) {
                 if (progress >= 1.0) {
@@ -247,42 +301,42 @@ GenerateResult AudioGenerator::generateBuffer(
                     fadeMultiplier = progress;
                 }
             }
-        }
-        
-        // Генерация синусов через wavetable
-        const float leftSample = Wavetable::fastSin(state.leftPhase);
-        const float rightSample = Wavetable::fastSin(state.rightPhase);
-        
-        // Обновление фаз (branch-free)
-        state.leftPhase += leftOmega;
-        while (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
-        
-        state.rightPhase += rightOmega;
-        while (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
-        
-        // Вычисление амплитуд
-        const float baseAmplitude = baseVolumeFactor * static_cast<float>(fadeMultiplier);
-        const float leftAmp = baseAmplitude * static_cast<float>(leftAmplitude);
-        const float rightAmp = baseAmplitude * static_cast<float>(rightAmplitude);
-        
-        // Обновление инкрементов
-        leftOmega += omegaStepLeft;
-        rightOmega += omegaStepRight;
-        leftAmplitude += ampStepLeft;
-        rightAmplitude += ampStepRight;
-        
-        // Определение перестановки каналов для текущего сэмпла
-        const bool swapForSample = channelSwapEnabled && 
-            ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
-             localChannelsSwapped : channelsSwappedAtStart);
-        
-        // Запись в буфер (interleaved stereo)
-        if (swapForSample) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
+            
+            // Генерация синусов через wavetable
+            const float leftSample = Wavetable::fastSin(state.leftPhase);
+            const float rightSample = Wavetable::fastSin(state.rightPhase);
+            
+            // Обновление фаз (branchless)
+            state.leftPhase += leftOmega;
+            state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+            
+            state.rightPhase += rightOmega;
+            state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+            
+            // Вычисление амплитуд
+            const float baseAmplitude = baseVolumeFactor * fadeMultiplier;
+            const float leftAmp = baseAmplitude * leftAmplitude;
+            const float rightAmp = baseAmplitude * rightAmplitude;
+            
+            // Обновление инкрементов
+            leftOmega += omegaStepLeft;
+            rightOmega += omegaStepRight;
+            leftAmplitude += ampStepLeft;
+            rightAmplitude += ampStepRight;
+            
+            // Определение перестановки каналов для текущего сэмпла
+            const bool swapForSample = channelSwapEnabled && 
+                ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
+                 localChannelsSwapped : channelsSwappedAtStart);
+            
+            // Запись в буфер (interleaved stereo)
+            if (swapForSample) {
+                buffer[i * 2] = rightSample * rightAmp;
+                buffer[i * 2 + 1] = leftSample * leftAmp;
+            } else {
+                buffer[i * 2] = leftSample * leftAmp;
+                buffer[i * 2 + 1] = rightSample * rightAmp;
+            }
         }
     }
     
@@ -303,7 +357,7 @@ GenerateResult AudioGenerator::generateBuffer(
 #ifdef USE_NEON
 /**
  * NEON-оптимизированная генерация буфера
- * Обрабатывает 4 сэмпла одновременно используя SIMD инструкции
+ * Полностью векторизованная версия с использованием FMA и vst2 для interleaved output
  */
 GenerateResult AudioGenerator::generateBufferNeon(
     float* buffer,
@@ -314,46 +368,23 @@ GenerateResult AudioGenerator::generateBufferNeon(
     int64_t elapsedMs,
     int frequencyUpdateIntervalMs
 ) {
+    (void)frequencyUpdateIntervalMs; // Не используется в NEON версии
     GenerateResult result;
     
-    // Длительность буфера в секундах (для вычисления конечных частот)
+    // Длительность буфера в секундах
     const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / m_sampleRate;
     
-    // Логируем каждый 10-й буфер для диагностики
-    static int bufferCounter = 0;
-    const bool shouldLog = (bufferCounter % 10 == 0);
-    bufferCounter++;
-    
-    if (shouldLog) {
-        LOGD("=== Buffer #%d (NEON) ===", bufferCounter);
-        LOGD("  timeSeconds=%d, bufferDuration=%.6f sec, endTime=%.6f",
-             timeSeconds, bufferDurationSeconds, timeSeconds + bufferDurationSeconds);
-    }
-    
-    // Получаем частоты в начале буфера
+    // Получаем частоты в начале и конце буфера
     FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, timeSeconds);
     float startLeftFreq = startFreqResult.lowerFreq;
     float startRightFreq = startFreqResult.upperFreq;
     
-    // Получаем частоты в конце буфера (для плавной интерполяции внутри буфера)
-    // Это также гарантирует совпадение частот на стыках буферов:
-    // endFreq буфера N = startFreq буфера N+1
     FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
         config.curve,
         static_cast<float>(timeSeconds + bufferDurationSeconds)
     );
     float endLeftFreq = endFreqResult.lowerFreq;
     float endRightFreq = endFreqResult.upperFreq;
-    
-    if (shouldLog) {
-        LOGD("  START: left=%.4f Hz, right=%.4f Hz", startLeftFreq, startRightFreq);
-        LOGD("  END:   left=%.4f Hz, right=%.4f Hz", endLeftFreq, endRightFreq);
-        LOGD("  DELTA: left=%.6f Hz, right=%.6f Hz per buffer",
-             endLeftFreq - startLeftFreq, endRightFreq - startRightFreq);
-        LOGD("  STEP:  left=%.9f Hz, right=%.9f Hz per sample",
-             (endLeftFreq - startLeftFreq) / samplesPerChannel,
-             (endRightFreq - startRightFreq) / samplesPerChannel);
-    }
     
     // Амплитуды
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
@@ -368,13 +399,13 @@ GenerateResult AudioGenerator::generateBufferNeon(
     const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
     const float baseVolumeFactor = 0.5f * config.volume;
     
-    // Фазовые инкременты (float для NEON)
-    float leftOmega = twoPiOverSampleRate * static_cast<float>(startLeftFreq);
-    float rightOmega = twoPiOverSampleRate * static_cast<float>(startRightFreq);
-    const float endLeftOmega = twoPiOverSampleRate * static_cast<float>(endLeftFreq);
-    const float endRightOmega = twoPiOverSampleRate * static_cast<float>(endRightFreq);
+    // Фазовые инкременты
+    float leftOmega = twoPiOverSampleRate * startLeftFreq;
+    float rightOmega = twoPiOverSampleRate * startRightFreq;
+    const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
+    const float endRightOmega = twoPiOverSampleRate * endRightFreq;
     
-    // Шаги изменения (float)
+    // Шаги изменения
     const float omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel;
     const float omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel;
     const float ampStepLeft = static_cast<float>((endLeftAmplitude - startLeftAmplitude) / samplesPerChannel);
@@ -415,47 +446,166 @@ GenerateResult AudioGenerator::generateBufferNeon(
         }
     }
     
-    // NEON векторы
-    float32x4_t vOmegaStepLeft = vdupq_n_f32(omegaStepLeft * 4.0f);
-    float32x4_t vOmegaStepRight = vdupq_n_f32(omegaStepRight * 4.0f);
-    float32x4_t vAmpStepLeft = vdupq_n_f32(ampStepLeft * 4.0f);
-    float32x4_t vAmpStepRight = vdupq_n_f32(ampStepRight * 4.0f);
+    // ========================================================================
+    // ОПТИМИЗИРОВАННЫЙ NEON ПУТЬ
+    // ========================================================================
     
-    // Фазы для 4 сэмплов (уже float)
+    const bool hasFade = localFadeOperation != GeneratorState::FadeOperation::NONE;
+    const bool swapActive = channelSwapEnabled && channelsSwappedAtStart;
+    
+    // Предвычисленные NEON константы
+    const float32x4_t vScaleFactor = vdupq_n_f32(scaleFactor);
+    const float32x4_t vBaseVol = vdupq_n_f32(baseVolumeFactor);
+    const float32x4_t vOffsets = {0.0f, 1.0f, 2.0f, 3.0f};
+    
+    // Фазы
     float leftPhaseBase = state.leftPhase;
     float rightPhaseBase = state.rightPhase;
     
-    // Основной цикл - обрабатываем по 4 сэмпла
     int i = 0;
     const int neonEnd = samplesPerChannel - 3;
     
-    for (; i < neonEnd; i += 4) {
-        const int64_t currentSampleBase = state.totalSamplesGenerated + i;
-        
-        // Вычисляем фазы для 4 сэмплов
-        float leftPhases[4], rightPhases[4];
-        for (int j = 0; j < 4; ++j) {
-            leftPhases[j] = leftPhaseBase + leftOmega * j;
-            rightPhases[j] = rightPhaseBase + rightOmega * j;
+    // БЫСТРЫЙ ПУТЬ: нет fade (наиболее частый случай)
+    if (!hasFade) {
+        if (!swapActive) {
+            // Самый быстрый путь: нет fade, нет swap
+            for (; i < neonEnd; i += 4) {
+                // ВЕКТОРИЗОВАННОЕ вычисление фаз для 4 сэмплов
+                // phases = basePhase + omega * offsets
+                float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
+                float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+                
+                // phases = base + omega * [0,1,2,3]
+                float32x4_t vLeftPhases = vaddq_f32(
+                    vdupq_n_f32(leftPhaseBase),
+                    vmulq_f32(vOmegaL, vOffsets)
+                );
+                float32x4_t vRightPhases = vaddq_f32(
+                    vdupq_n_f32(rightPhaseBase),
+                    vmulq_f32(vOmegaR, vOffsets)
+                );
+                
+                // Масштабируем фазы для wavetable
+                float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
+                float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
+                
+                // Получаем синусы через NEON wavetable
+                float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
+                float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
+                
+                // Векторные амплитуды
+                float32x4_t vLeftAmps = vmulq_n_f32(vBaseVol, leftAmplitude);
+                float32x4_t vRightAmps = vmulq_n_f32(vBaseVol, rightAmplitude);
+                
+                // Применяем амплитуды с FMA если доступно
+                #ifdef __ARM_FEATURE_FMA
+                    vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
+                    vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
+                #else
+                    vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
+                    vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
+                #endif
+                
+                // Обновляем фазы (branchless)
+                leftPhaseBase += leftOmega * 4;
+                leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+                rightPhaseBase += rightOmega * 4;
+                rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+                
+                // Обновляем omega и амплитуды
+                leftOmega += omegaStepLeft * 4;
+                rightOmega += omegaStepRight * 4;
+                leftAmplitude += ampStepLeft * 4;
+                rightAmplitude += ampStepRight * 4;
+                
+                // Записываем в буфер (interleaved stereo)
+                // Используем vst2 для interleaved записи: L R L R L R L R
+                float32x4x2_t vInterleaved = {vLeftSamples, vRightSamples};
+                vst2q_f32(buffer + i * 2, vInterleaved);
+            }
+        } else {
+            // Быстрый путь: нет fade, но swap активен
+            for (; i < neonEnd; i += 4) {
+                float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
+                float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+                
+                float32x4_t vLeftPhases = vaddq_f32(
+                    vdupq_n_f32(leftPhaseBase),
+                    vmulq_f32(vOmegaL, vOffsets)
+                );
+                float32x4_t vRightPhases = vaddq_f32(
+                    vdupq_n_f32(rightPhaseBase),
+                    vmulq_f32(vOmegaR, vOffsets)
+                );
+                
+                float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
+                float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
+                
+                float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
+                float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
+                
+                float32x4_t vLeftAmps = vmulq_n_f32(vBaseVol, leftAmplitude);
+                float32x4_t vRightAmps = vmulq_n_f32(vBaseVol, rightAmplitude);
+                
+                #ifdef __ARM_FEATURE_FMA
+                    vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
+                    vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
+                #else
+                    vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
+                    vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
+                #endif
+                
+                leftPhaseBase += leftOmega * 4;
+                leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+                rightPhaseBase += rightOmega * 4;
+                rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+                
+                leftOmega += omegaStepLeft * 4;
+                rightOmega += omegaStepRight * 4;
+                leftAmplitude += ampStepLeft * 4;
+                rightAmplitude += ampStepRight * 4;
+                
+                // Записываем в буфер с swap (R L вместо L R)
+                float32x4x2_t vInterleaved = {vRightSamples, vLeftSamples};
+                vst2q_f32(buffer + i * 2, vInterleaved);
+            }
         }
+    } else {
+        // Медленный путь: есть fade
+        const float invFadeDuration = 1.0f / channelSwapFadeDurationSamples;
         
-        // Масштабируем фазы для wavetable
-        float32x4_t vLeftPhasesScaled = vmulq_n_f32(vld1q_f32(leftPhases), scaleFactor);
-        float32x4_t vRightPhasesScaled = vmulq_n_f32(vld1q_f32(rightPhases), scaleFactor);
-        
-        // Получаем синусы через NEON wavetable
-        float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
-        float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
-        
-        // Обработка fade для 4 сэмплов
-        float fadeMultipliers[4];
-        for (int j = 0; j < 4; ++j) {
-            const int64_t currentSample = currentSampleBase + j;
-            float fadeMultiplier = 1.0;
+        for (; i < neonEnd; i += 4) {
+            const int64_t currentSampleBase = state.totalSamplesGenerated + i;
             
-            if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
+            // Векторизованное вычисление фаз
+            float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
+            float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+            
+            float32x4_t vLeftPhases = vaddq_f32(
+                vdupq_n_f32(leftPhaseBase),
+                vmulq_f32(vOmegaL, vOffsets)
+            );
+            float32x4_t vRightPhases = vaddq_f32(
+                vdupq_n_f32(rightPhaseBase),
+                vmulq_f32(vOmegaR, vOffsets)
+            );
+            
+            float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
+            float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
+            
+            float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
+            float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
+            
+            // Обработка fade для 4 сэмплов
+            float fadeMultipliers[4] __attribute__((aligned(16)));
+            bool swapFlags[4] = {false, false, false, false};
+            
+            for (int j = 0; j < 4; ++j) {
+                const int64_t currentSample = currentSampleBase + j;
+                float fadeMultiplier = 1.0;
+                
                 const int64_t elapsedSamples = currentSample - localFadeStartSample;
-                const float progress = static_cast<float>(elapsedSamples) / channelSwapFadeDurationSamples;
+                const float progress = elapsedSamples * invFadeDuration;
                 
                 if (localIsFadingOut) {
                     if (progress >= 1.0) {
@@ -479,59 +629,64 @@ GenerateResult AudioGenerator::generateBufferNeon(
                         fadeMultiplier = progress;
                     }
                 }
+                fadeMultipliers[j] = fadeMultiplier;
+                
+                // Определяем swap для каждого сэмпла
+                const bool swapForSample = channelSwapEnabled && 
+                    ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
+                     localChannelsSwapped : channelsSwappedAtStart);
+                swapFlags[j] = swapForSample;
             }
-            fadeMultipliers[j] = static_cast<float>(fadeMultiplier);
-        }
-        
-        // Амплитуды для 4 сэмплов
-        float leftAmps[4], rightAmps[4];
-        for (int j = 0; j < 4; ++j) {
-            leftAmps[j] = baseVolumeFactor * fadeMultipliers[j] * leftAmplitude;
-            rightAmps[j] = baseVolumeFactor * fadeMultipliers[j] * rightAmplitude;
-        }
-        
-        float32x4_t vLeftAmps = vld1q_f32(leftAmps);
-        float32x4_t vRightAmps = vld1q_f32(rightAmps);
-        
-        // Применяем амплитуды
-        vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
-        vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
-        
-        // Обновляем фазы
-        leftPhaseBase += leftOmega * 4;
-        rightPhaseBase += rightOmega * 4;
-        while (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-        while (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-        
-        // Обновляем omega и амплитуды
-        leftOmega += omegaStepLeft * 4;
-        rightOmega += omegaStepRight * 4;
-        leftAmplitude += ampStepLeft * 4;
-        rightAmplitude += ampStepRight * 4;
-        
-        // Записываем в буфер с учётом перестановки каналов
-        float leftResult[4], rightResult[4];
-        vst1q_f32(leftResult, vLeftSamples);
-        vst1q_f32(rightResult, vRightSamples);
-        
-        for (int j = 0; j < 4; ++j) {
-            const int64_t currentSample = currentSampleBase + j;
-            const bool swapForSample = channelSwapEnabled && 
-                ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
-                 localChannelsSwapped : channelsSwappedAtStart);
             
-            const int idx = (i + j) * 2;
-            if (swapForSample) {
-                buffer[idx] = rightResult[j];
-                buffer[idx + 1] = leftResult[j];
-            } else {
-                buffer[idx] = leftResult[j];
-                buffer[idx + 1] = rightResult[j];
+            // Амплитуды для 4 сэмплов
+            float leftAmps[4] __attribute__((aligned(16)));
+            float rightAmps[4] __attribute__((aligned(16)));
+            for (int j = 0; j < 4; ++j) {
+                leftAmps[j] = baseVolumeFactor * fadeMultipliers[j] * leftAmplitude;
+                rightAmps[j] = baseVolumeFactor * fadeMultipliers[j] * rightAmplitude;
+            }
+            
+            float32x4_t vLeftAmps = vld1q_f32(leftAmps);
+            float32x4_t vRightAmps = vld1q_f32(rightAmps);
+            
+            #ifdef __ARM_FEATURE_FMA
+                vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
+                vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
+            #else
+                vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
+                vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
+            #endif
+            
+            leftPhaseBase += leftOmega * 4;
+            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            rightPhaseBase += rightOmega * 4;
+            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            
+            leftOmega += omegaStepLeft * 4;
+            rightOmega += omegaStepRight * 4;
+            leftAmplitude += ampStepLeft * 4;
+            rightAmplitude += ampStepRight * 4;
+            
+            // Записываем в буфер с учётом swap
+            float leftResult[4] __attribute__((aligned(16)));
+            float rightResult[4] __attribute__((aligned(16)));
+            vst1q_f32(leftResult, vLeftSamples);
+            vst1q_f32(rightResult, vRightSamples);
+            
+            for (int j = 0; j < 4; ++j) {
+                const int idx = (i + j) * 2;
+                if (swapFlags[j]) {
+                    buffer[idx] = rightResult[j];
+                    buffer[idx + 1] = leftResult[j];
+                } else {
+                    buffer[idx] = leftResult[j];
+                    buffer[idx + 1] = rightResult[j];
+                }
             }
         }
     }
     
-    // Обновляем фазы в состоянии (уже float)
+    // Обновляем фазы в состоянии
     state.leftPhase = leftPhaseBase;
     state.rightPhase = rightPhaseBase;
     
@@ -572,12 +727,12 @@ GenerateResult AudioGenerator::generateBufferNeon(
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
         state.leftPhase += leftOmega;
-        while (state.leftPhase >= TWO_PI) state.leftPhase -= static_cast<float>(TWO_PI);
+        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
         
         state.rightPhase += rightOmega;
-        while (state.rightPhase >= TWO_PI) state.rightPhase -= static_cast<float>(TWO_PI);
+        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
         
-        const float baseAmplitude = baseVolumeFactor * static_cast<float>(fadeMultiplier);
+        const float baseAmplitude = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmplitude * leftAmplitude;
         const float rightAmp = baseAmplitude * rightAmplitude;
         

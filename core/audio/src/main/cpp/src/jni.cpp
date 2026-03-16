@@ -5,9 +5,17 @@
 #include <memory>
 #include <vector>
 #include <algorithm>
+#include <pthread.h>
+#include <atomic>
 
 #define LOG_TAG "NativeAudioEngine"
+
+// Логирование только в DEBUG сборках
+#ifdef AUDIO_DEBUG
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGD(...) ((void)0)
+#endif
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -17,6 +25,64 @@ namespace {
     jmethodID g_onFrequencyChangedMethod = nullptr;
     jmethodID g_onChannelsSwappedMethod = nullptr;
     jmethodID g_onElapsedChangedMethod = nullptr;
+    
+    // Кэширование JNIEnv для callback-потока
+    // Избегает Attach/Detach на каждом вызове
+    pthread_key_t g_envKey = 0;
+    pthread_once_t g_keyOnce = PTHREAD_ONCE_INIT;
+    
+    // Адаптивный throttling для callbacks
+    // Увеличиваем интервал при стабильной работе, уменьшаем при изменениях
+    std::atomic<int> g_callbackCounter{0};
+    std::atomic<int> g_callbackInterval{20};  // Начальный интервал (каждый 20-й буфер)
+    constexpr int MIN_CALLBACK_INTERVAL = 5;   // Минимум при активных изменениях
+    constexpr int MAX_CALLBACK_INTERVAL = 50;  // Максимум при стабильной работе
+    
+    void createEnvKey() {
+        pthread_key_create(&g_envKey, nullptr);
+    }
+    
+    // Быстрое получение JNIEnv для callback-потока
+    inline JNIEnv* getCallbackEnv() {
+        pthread_once(&g_keyOnce, createEnvKey);
+        
+        JNIEnv* env = static_cast<JNIEnv*>(pthread_getspecific(g_envKey));
+        if (env) return env;
+        
+        // Первый вызов - инициализируем
+        if (g_javaVM->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+            JavaVMAttachArgs args = {JNI_VERSION_1_6, "NativeCallback", nullptr};
+            g_javaVM->AttachCurrentThread(&env, &args);
+        }
+        
+        if (env) {
+            pthread_setspecific(g_envKey, env);
+        }
+        return env;
+    }
+    
+    // Проверка необходимости callback с адаптивным throttling
+    inline bool shouldCallCallback() {
+        const int interval = g_callbackInterval.load(std::memory_order_relaxed);
+        return (g_callbackCounter.fetch_add(1, std::memory_order_relaxed) % interval) == 0;
+    }
+    
+    // Адаптация интервала callback на основе активности
+    inline void adaptCallbackInterval(bool hasSignificantChange) {
+        if (hasSignificantChange) {
+            // При значимых изменениях уменьшаем интервал для более отзывчивого UI
+            int current = g_callbackInterval.load(std::memory_order_relaxed);
+            if (current > MIN_CALLBACK_INTERVAL) {
+                g_callbackInterval.store(current - 5, std::memory_order_relaxed);
+            }
+        } else {
+            // При стабильной работе увеличиваем интервал для экономии ресурсов
+            int current = g_callbackInterval.load(std::memory_order_relaxed);
+            if (current < MAX_CALLBACK_INTERVAL) {
+                g_callbackInterval.store(current + 1, std::memory_order_relaxed);
+            }
+        }
+    }
 }
 
 extern "C" {
@@ -66,75 +132,33 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInitialize(
     g_onChannelsSwappedMethod = env->GetMethodID(callbackClass, "onChannelsSwapped", "(Z)V");
     g_onElapsedChangedMethod = env->GetMethodID(callbackClass, "onElapsedChanged", "(I)V");
     
-    // Устанавливаем callbacks
+    // Устанавливаем callbacks с оптимизированным получением JNIEnv
     binaural::EngineCallbacks callbacks;
     callbacks.onFrequencyChanged = [](float beatFreq, float carrierFreq) {
-        if (g_javaVM && g_callbackObj && g_onFrequencyChangedMethod) {
-            JNIEnv* env = nullptr;
-            bool needsDetach = false;
-            
-            JavaVMAttachArgs args = {JNI_VERSION_1_6, "NativeCallback", nullptr};
-            jint result = g_javaVM->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-            
-            if (result == JNI_EDETACHED) {
-                g_javaVM->AttachCurrentThread(&env, &args);
-                needsDetach = true;
-            }
-            
+        if (g_callbackObj && g_onFrequencyChangedMethod) {
+            JNIEnv* env = getCallbackEnv();
             if (env) {
                 env->CallVoidMethod(g_callbackObj, g_onFrequencyChangedMethod, 
                                    static_cast<jfloat>(beatFreq), 
                                    static_cast<jfloat>(carrierFreq));
             }
-            
-            if (needsDetach) {
-                g_javaVM->DetachCurrentThread();
-            }
         }
     };
     
     callbacks.onChannelsSwapped = [](bool channelsSwapped) {
-        if (g_javaVM && g_callbackObj && g_onChannelsSwappedMethod) {
-            JNIEnv* env = nullptr;
-            bool needsDetach = false;
-            
-            JavaVMAttachArgs args = {JNI_VERSION_1_6, "NativeCallback", nullptr};
-            jint result = g_javaVM->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-            
-            if (result == JNI_EDETACHED) {
-                g_javaVM->AttachCurrentThread(&env, &args);
-                needsDetach = true;
-            }
-            
+        if (g_callbackObj && g_onChannelsSwappedMethod) {
+            JNIEnv* env = getCallbackEnv();
             if (env) {
                 env->CallVoidMethod(g_callbackObj, g_onChannelsSwappedMethod, channelsSwapped);
-            }
-            
-            if (needsDetach) {
-                g_javaVM->DetachCurrentThread();
             }
         }
     };
     
     callbacks.onElapsedChanged = [](int elapsedSeconds) {
-        if (g_javaVM && g_callbackObj && g_onElapsedChangedMethod) {
-            JNIEnv* env = nullptr;
-            bool needsDetach = false;
-            
-            JavaVMAttachArgs args = {JNI_VERSION_1_6, "NativeCallback", nullptr};
-            jint result = g_javaVM->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
-            
-            if (result == JNI_EDETACHED) {
-                g_javaVM->AttachCurrentThread(&env, &args);
-                needsDetach = true;
-            }
-            
+        if (g_callbackObj && g_onElapsedChangedMethod) {
+            JNIEnv* env = getCallbackEnv();
             if (env) {
                 env->CallVoidMethod(g_callbackObj, g_onElapsedChangedMethod, elapsedSeconds);
-            }
-            
-            if (needsDetach) {
-                g_javaVM->DetachCurrentThread();
             }
         }
     };
