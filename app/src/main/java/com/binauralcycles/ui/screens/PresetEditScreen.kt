@@ -269,8 +269,12 @@ fun PresetEditScreen(
                 RelaxationModeCard(
                     relaxationModeSettings = uiState.editingRelaxationModeSettings,
                     onRelaxationModeEnabledChange = { viewModel.setEditingRelaxationModeEnabled(it) },
+                    onRelaxationModeChange = { viewModel.setEditingRelaxationMode(it) },
                     onCarrierReductionChange = { viewModel.setEditingCarrierReductionPercent(it) },
-                    onBeatReductionChange = { viewModel.setEditingBeatReductionPercent(it) }
+                    onBeatReductionChange = { viewModel.setEditingBeatReductionPercent(it) },
+                    onRelaxationGapChange = { viewModel.setEditingRelaxationGapMinutes(it) },
+                    onTransitionPeriodChange = { viewModel.setEditingTransitionPeriodMinutes(it) },
+                    onRelaxationDurationChange = { viewModel.setEditingRelaxationDurationMinutes(it) }
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))

@@ -16,6 +16,7 @@ import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binauralcycles.R
@@ -651,37 +652,140 @@ fun formatWavetableSize(size: Int): String {
 /**
  * Блок настроек режима расслабления
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RelaxationModeCard(
     relaxationModeSettings: RelaxationModeSettings,
     onRelaxationModeEnabledChange: (Boolean) -> Unit,
+    onRelaxationModeChange: (RelaxationMode) -> Unit,
     onCarrierReductionChange: (Int) -> Unit,
-    onBeatReductionChange: (Int) -> Unit
+    onBeatReductionChange: (Int) -> Unit,
+    onRelaxationGapChange: (Int) -> Unit,
+    onTransitionPeriodChange: (Int) -> Unit,
+    onRelaxationDurationChange: (Int) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Включение режима расслабления
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.relaxation_mode)) },
-            supportingContent = { 
-                Text(
-                    if (relaxationModeSettings.enabled) stringResource(R.string.relaxation_mode_enabled_desc)
-                    else stringResource(R.string.relaxation_mode_disabled_desc)
+        // Выбор режима расслабления: 3 чипа в строке
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.relaxation_mode),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            // Описание текущего режима под заголовком
+            Text(
+                text = if (!relaxationModeSettings.enabled) {
+                    stringResource(R.string.relaxation_mode_disabled_desc)
+                } else if (relaxationModeSettings.mode == RelaxationMode.SIMPLE) {
+                    stringResource(R.string.relaxation_mode_simple_desc)
+                } else {
+                    stringResource(R.string.relaxation_mode_advanced_desc)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+            ) {
+                FilterChip(
+                    selected = !relaxationModeSettings.enabled,
+                    onClick = { onRelaxationModeEnabledChange(false) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.relaxation_mode_disabled),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
                 )
-            },
-            trailingContent = {
-                Switch(
-                    checked = relaxationModeSettings.enabled,
-                    onCheckedChange = onRelaxationModeEnabledChange
+                FilterChip(
+                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SIMPLE,
+                    onClick = { 
+                        onRelaxationModeEnabledChange(true)
+                        onRelaxationModeChange(RelaxationMode.SIMPLE)
+                    },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.relaxation_mode_simple),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.ADVANCED,
+                    onClick = { 
+                        onRelaxationModeEnabledChange(true)
+                        onRelaxationModeChange(RelaxationMode.ADVANCED)
+                    },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.relaxation_mode_advanced),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
                 )
             }
-        )
+        }
         
-        // Настройки снижения частот (показываем только когда режим включен)
+        // Настройки режима (показываем только когда режим включен)
         if (relaxationModeSettings.enabled) {
             HorizontalDivider()
+            
+            // Настройки расширенного режима
+            if (relaxationModeSettings.mode == RelaxationMode.ADVANCED) {
+                
+                // Интервал между периодами расслабления
+                DiscreteSlider(
+                    label = stringResource(R.string.gap_between_relaxation),
+                    value = relaxationModeSettings.gapBetweenRelaxationMinutes,
+                    values = listOf(10, 15, 20, 30, 45, 60, 90, 120),
+                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.gapBetweenRelaxationMinutes),
+                    onValueChange = onRelaxationGapChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                
+                // Длительность расслабления
+                DiscreteSlider(
+                    label = stringResource(R.string.relaxation_duration),
+                    value = relaxationModeSettings.relaxationDurationMinutes,
+                    values = listOf(10, 15, 20, 30, 45, 60),
+                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.relaxationDurationMinutes),
+                    onValueChange = onRelaxationDurationChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                
+                // Период перехода
+                DiscreteSlider(
+                    label = stringResource(R.string.transition_period),
+                    value = relaxationModeSettings.transitionPeriodMinutes,
+                    values = listOf(1, 2, 3, 5, 7, 10),
+                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.transitionPeriodMinutes),
+                    onValueChange = onTransitionPeriodChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                
+                Text(
+                    text = stringResource(R.string.transition_period_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                
+                HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
+            }
             
             // Слайдер снижения несущей частоты
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -703,8 +807,7 @@ fun RelaxationModeCard(
                     value = relaxationModeSettings.carrierReductionPercent.toFloat(),
                     onValueChange = { onCarrierReductionChange(it.toInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..50f,
-                    steps = 9  // 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                    valueRange = 0f..50f
                 )
                 Text(
                     text = stringResource(R.string.carrier_reduction_description),
@@ -735,8 +838,7 @@ fun RelaxationModeCard(
                     value = relaxationModeSettings.beatReductionPercent.toFloat(),
                     onValueChange = { onBeatReductionChange(it.toInt()) },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..50f,
-                    steps = 9  // 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50
+                    valueRange = 0f..100f
                 )
                 Text(
                     text = stringResource(R.string.beat_reduction_description),

@@ -86,8 +86,14 @@ data class SerializableVolumeNormalizationSettings(
 @Serializable
 data class SerializableRelaxationModeSettings(
     val enabled: Boolean = false,
+    val mode: String = "SIMPLE",  // SIMPLE или ADVANCED
     val carrierReductionPercent: Int = 20,
-    val beatReductionPercent: Int = 20
+    val beatReductionPercent: Int = 20,
+    val gapBetweenRelaxationMinutes: Int = 24,
+    val transitionPeriodMinutes: Int = 3,
+    val relaxationDurationMinutes: Int = 15,
+    // Для обратной совместимости со старыми пресетами
+    val relaxationIntervalMinutes: Int? = null
 )
 
 /**
@@ -621,8 +627,12 @@ class BinauralPreferencesRepository @Inject constructor(
                 ),
                 relaxationModeSettings = SerializableRelaxationModeSettings(
                     enabled = preset.relaxationModeSettings.enabled,
+                    mode = preset.relaxationModeSettings.mode.name,
                     carrierReductionPercent = preset.relaxationModeSettings.carrierReductionPercent,
-                    beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent
+                    beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent,
+                    gapBetweenRelaxationMinutes = preset.relaxationModeSettings.gapBetweenRelaxationMinutes,
+                    transitionPeriodMinutes = preset.relaxationModeSettings.transitionPeriodMinutes,
+                    relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes
                 ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
@@ -658,10 +668,28 @@ class BinauralPreferencesRepository @Inject constructor(
                         splineTension = serializable.curve.splineTension ?: 0.0f
                     ),
                     relaxationModeSettings = serializable.relaxationModeSettings?.let {
+                        // Обратная совместимость: если есть старый relaxationIntervalMinutes, 
+                        // вычисляем gapBetweenRelaxationMinutes из него
+                        val gapMinutes = it.gapBetweenRelaxationMinutes ?: 
+                            (it.relaxationIntervalMinutes?.let { interval ->
+                                // Старая логика: interval = полный цикл
+                                // Новый gap = interval - (2*transition + duration)
+                                val fullPeriod = 2 * it.transitionPeriodMinutes + it.relaxationDurationMinutes
+                                (interval - fullPeriod).coerceAtLeast(0)
+                            } ?: 24)
+                        
                         RelaxationModeSettings(
                             enabled = it.enabled,
+                            mode = try { 
+                                com.binaural.core.audio.model.RelaxationMode.valueOf(it.mode) 
+                            } catch (e: Exception) { 
+                                com.binaural.core.audio.model.RelaxationMode.SIMPLE 
+                            },
                             carrierReductionPercent = it.carrierReductionPercent,
-                            beatReductionPercent = it.beatReductionPercent
+                            beatReductionPercent = it.beatReductionPercent,
+                            gapBetweenRelaxationMinutes = gapMinutes,
+                            transitionPeriodMinutes = it.transitionPeriodMinutes,
+                            relaxationDurationMinutes = it.relaxationDurationMinutes
                         )
                     } ?: RelaxationModeSettings(),
                     createdAt = serializable.createdAt,
