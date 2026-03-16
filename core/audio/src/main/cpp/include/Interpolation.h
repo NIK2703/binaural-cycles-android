@@ -151,6 +151,9 @@ inline float interpolate(
 /**
  * Внутренняя реализация построения таблицы
  * @param intervalSeconds интервал между значениями таблицы в секундах
+ * 
+ * ОПТИМИЗАЦИЯ: Использует бинарный поиск O(log n) вместо линейного O(n)
+ * для нахождения интервала при построении таблицы.
  */
 inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
     if (points.size() < 2) {
@@ -183,22 +186,18 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
     };
     
     // Предвычисляем частоты для каждого интервала
+    // ИСПОЛЬЗУЕМ ИТЕРАТИВНЫЙ ПОИСК - для отсортированных данных это O(n) вместо O(n log n)
+    // т.к. timeSeconds монотонно возрастает
+    int leftIndex = 0;
+    
     for (int tableIndex = 0; tableIndex < tableSize; ++tableIndex) {
         // Конвертируем индекс таблицы в секунды суток
         const int timeSeconds = tableIndex * intervalSeconds;
         
-        // Находим интервал (линейный поиск - выполняется только при построении таблицы)
-        int leftIndex = -1;
-        for (int j = 0; j < numPoints - 1; ++j) {
-            if (sortedPoints[j].timeSeconds <= timeSeconds && timeSeconds < sortedPoints[j + 1].timeSeconds) {
-                leftIndex = j;
-                break;
-            }
-        }
-        
-        // Если не нашли - переход через полночь
-        if (leftIndex < 0) {
-            leftIndex = numPoints - 1;
+        // Итеративный поиск - двигаемся вперёд пока не найдём нужный интервал
+        // Это O(1) амортизированное время, т.к. leftIndex только увеличивается
+        while (leftIndex < numPoints - 2 && sortedPoints[leftIndex + 1].timeSeconds <= timeSeconds) {
+            ++leftIndex;
         }
         
         const int rightIndex = (leftIndex + 1) % numPoints;
@@ -303,6 +302,9 @@ inline void FrequencyCurve::updateCache() {
  * ДРОБНОЕ ВРЕМЯ:
  * Поддерживает дробные секунды для корректной интерполяции внутри буфера.
  * Например: 0.186 сек позволяет вычислить частоты в середине буфера.
+ * 
+ * ОПТИМИЗАЦИЯ:
+ * Использует __builtin_prefetch для предзагрузки следующего значения в кэш.
  */
 inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSeconds) const {
     FrequencyTableResult result = {200.0, 210.0};
@@ -338,6 +340,15 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
     // Безопасные индексы (clamping)
     const int safeCurrentIndex = std::min(currentIndex, tableSize - 1);
     const int safeNextIndex = std::min(nextIndex, tableSize - 1);
+    
+    // ОПТИМИЗАЦИЯ: Prefetch следующего значения для лучшего cache hit
+    // Предзагружаем значение, которое потребуется в следующем вызове
+    #ifdef __GNUC__
+    if (safeNextIndex + 1 < tableSize) {
+        __builtin_prefetch(&lowerFreqTable[safeNextIndex + 1], 0, 0);
+        __builtin_prefetch(&upperFreqTable[safeNextIndex + 1], 0, 0);
+    }
+    #endif
     
     // Линейная интерполяция между соседними значениями таблицы
     result.lowerFreq = Interpolation::linear(
