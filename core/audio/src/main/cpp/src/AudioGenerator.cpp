@@ -6,6 +6,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifdef USE_SSE
+#include <immintrin.h>
+#endif
+
 // Логирование только в DEBUG сборках
 #ifdef AUDIO_DEBUG
 #include <android/log.h>
@@ -750,6 +754,377 @@ GenerateResult AudioGenerator::generateBufferNeon(
     }
     
     // Обновление состояния
+    state.channelsSwapped = localChannelsSwapped;
+    state.isFadingOut = localIsFadingOut;
+    state.fadeStartSample = localFadeStartSample;
+    state.currentFadeOperation = localFadeOperation;
+    state.totalSamplesGenerated += samplesPerChannel;
+    
+    result.currentBeatFreq = (startRightFreq + endRightFreq) / 2.0 - (startLeftFreq + endLeftFreq) / 2.0;
+    result.currentCarrierFreq = ((startLeftFreq + endLeftFreq) / 2.0 + (startRightFreq + endRightFreq) / 2.0) / 2.0;
+    
+    return result;
+}
+#endif
+
+#ifdef USE_SSE
+/**
+ * SSE-оптимизированная генерация буфера для x86/x86_64
+ */
+GenerateResult AudioGenerator::generateBufferSse(
+    float* buffer,
+    int samplesPerChannel,
+    const BinauralConfig& config,
+    GeneratorState& state,
+    int32_t timeSeconds,
+    int64_t elapsedMs,
+    int frequencyUpdateIntervalMs
+) {
+    (void)frequencyUpdateIntervalMs;
+    GenerateResult result;
+    
+    const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / m_sampleRate;
+    
+    FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, timeSeconds);
+    float startLeftFreq = startFreqResult.lowerFreq;
+    float startRightFreq = startFreqResult.upperFreq;
+    
+    FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
+        config.curve,
+        static_cast<float>(timeSeconds + bufferDurationSeconds)
+    );
+    float endLeftFreq = endFreqResult.lowerFreq;
+    float endRightFreq = endFreqResult.upperFreq;
+    
+    auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
+        startLeftFreq, startRightFreq, config, config.curve
+    );
+    auto [endLeftAmplitude, endRightAmplitude] = calculateNormalizedAmplitudes(
+        endLeftFreq, endRightFreq, config, config.curve
+    );
+    
+    const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
+    const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
+    const float baseVolumeFactor = 0.5f * config.volume;
+    
+    float leftOmega = twoPiOverSampleRate * startLeftFreq;
+    float rightOmega = twoPiOverSampleRate * startRightFreq;
+    const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
+    const float endRightOmega = twoPiOverSampleRate * endRightFreq;
+    
+    const float omegaStepLeft = (endLeftOmega - leftOmega) / samplesPerChannel;
+    const float omegaStepRight = (endRightOmega - rightOmega) / samplesPerChannel;
+    const float ampStepLeft = static_cast<float>((endLeftAmplitude - startLeftAmplitude) / samplesPerChannel);
+    const float ampStepRight = static_cast<float>((endRightAmplitude - startRightAmplitude) / samplesPerChannel);
+    
+    float leftAmplitude = static_cast<float>(startLeftAmplitude);
+    float rightAmplitude = static_cast<float>(startRightAmplitude);
+    
+    const int channelSwapFadeDurationSamples = static_cast<int>(
+        std::max<int64_t>(config.channelSwapFadeDurationMs, 100LL) * m_sampleRate / 1000
+    );
+    
+    bool localIsFadingOut = state.isFadingOut;
+    int64_t localFadeStartSample = state.fadeStartSample;
+    bool localChannelsSwapped = state.channelsSwapped;
+    GeneratorState::FadeOperation localFadeOperation = state.currentFadeOperation;
+    int64_t swapExecutedAtSample = -1;
+    
+    const bool channelSwapEnabled = config.channelSwapEnabled;
+    const bool channelsSwappedAtStart = state.channelsSwapped;
+    
+    if (localFadeOperation == GeneratorState::FadeOperation::NONE && channelSwapEnabled) {
+        const int64_t swapIntervalMs = config.channelSwapIntervalSec * 1000LL;
+        if (elapsedMs - state.lastSwapElapsedMs >= swapIntervalMs) {
+            if (config.channelSwapFadeEnabled) {
+                localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+                localIsFadingOut = true;
+                localFadeStartSample = state.totalSamplesGenerated;
+                state.lastSwapElapsedMs = elapsedMs;
+            } else {
+                localChannelsSwapped = !localChannelsSwapped;
+                state.lastSwapElapsedMs = elapsedMs;
+                result.channelsSwapped = true;
+            }
+        }
+    }
+    
+    const bool hasFade = localFadeOperation != GeneratorState::FadeOperation::NONE;
+    const bool swapActive = channelSwapEnabled && channelsSwappedAtStart;
+    
+    // SSE константы
+    const __m128 vScaleFactor = _mm_set1_ps(scaleFactor);
+    const __m128 vBaseVol = _mm_set1_ps(baseVolumeFactor);
+    const __m128 vOffsets = _mm_set_ps(3.0f, 2.0f, 1.0f, 0.0f);
+    
+    float leftPhaseBase = state.leftPhase;
+    float rightPhaseBase = state.rightPhase;
+    
+    int i = 0;
+    const int sseEnd = samplesPerChannel - 3;
+    
+    if (!hasFade) {
+        if (!swapActive) {
+            for (; i < sseEnd; i += 4) {
+                __m128 vOmegaL = _mm_set1_ps(leftOmega);
+                __m128 vOmegaR = _mm_set1_ps(rightOmega);
+                
+                __m128 vLeftPhases = _mm_add_ps(
+                    _mm_set1_ps(leftPhaseBase),
+                    _mm_mul_ps(vOmegaL, vOffsets)
+                );
+                __m128 vRightPhases = _mm_add_ps(
+                    _mm_set1_ps(rightPhaseBase),
+                    _mm_mul_ps(vOmegaR, vOffsets)
+                );
+                
+                __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
+                __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
+                
+                __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
+                __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+                
+                __m128 vLeftAmps = _mm_mul_ps(vBaseVol, _mm_set1_ps(leftAmplitude));
+                __m128 vRightAmps = _mm_mul_ps(vBaseVol, _mm_set1_ps(rightAmplitude));
+                
+                vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
+                vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
+                
+                leftPhaseBase += leftOmega * 4;
+                leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+                rightPhaseBase += rightOmega * 4;
+                rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+                
+                leftOmega += omegaStepLeft * 4;
+                rightOmega += omegaStepRight * 4;
+                leftAmplitude += ampStepLeft * 4;
+                rightAmplitude += ampStepRight * 4;
+                
+                // Interleaved store: L R L R L R L R
+                float leftResult[4] __attribute__((aligned(16)));
+                float rightResult[4] __attribute__((aligned(16)));
+                _mm_store_ps(leftResult, vLeftSamples);
+                _mm_store_ps(rightResult, vRightSamples);
+                
+                for (int j = 0; j < 4; ++j) {
+                    buffer[(i + j) * 2] = leftResult[j];
+                    buffer[(i + j) * 2 + 1] = rightResult[j];
+                }
+            }
+        } else {
+            for (; i < sseEnd; i += 4) {
+                __m128 vOmegaL = _mm_set1_ps(leftOmega);
+                __m128 vOmegaR = _mm_set1_ps(rightOmega);
+                
+                __m128 vLeftPhases = _mm_add_ps(
+                    _mm_set1_ps(leftPhaseBase),
+                    _mm_mul_ps(vOmegaL, vOffsets)
+                );
+                __m128 vRightPhases = _mm_add_ps(
+                    _mm_set1_ps(rightPhaseBase),
+                    _mm_mul_ps(vOmegaR, vOffsets)
+                );
+                
+                __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
+                __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
+                
+                __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
+                __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+                
+                __m128 vLeftAmps = _mm_mul_ps(vBaseVol, _mm_set1_ps(leftAmplitude));
+                __m128 vRightAmps = _mm_mul_ps(vBaseVol, _mm_set1_ps(rightAmplitude));
+                
+                vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
+                vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
+                
+                leftPhaseBase += leftOmega * 4;
+                leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+                rightPhaseBase += rightOmega * 4;
+                rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+                
+                leftOmega += omegaStepLeft * 4;
+                rightOmega += omegaStepRight * 4;
+                leftAmplitude += ampStepLeft * 4;
+                rightAmplitude += ampStepRight * 4;
+                
+                // Swap: R L вместо L R
+                float leftResult[4] __attribute__((aligned(16)));
+                float rightResult[4] __attribute__((aligned(16)));
+                _mm_store_ps(leftResult, vLeftSamples);
+                _mm_store_ps(rightResult, vRightSamples);
+                
+                for (int j = 0; j < 4; ++j) {
+                    buffer[(i + j) * 2] = rightResult[j];
+                    buffer[(i + j) * 2 + 1] = leftResult[j];
+                }
+            }
+        }
+    } else {
+        const float invFadeDuration = 1.0f / channelSwapFadeDurationSamples;
+        
+        for (; i < sseEnd; i += 4) {
+            const int64_t currentSampleBase = state.totalSamplesGenerated + i;
+            
+            __m128 vOmegaL = _mm_set1_ps(leftOmega);
+            __m128 vOmegaR = _mm_set1_ps(rightOmega);
+            
+            __m128 vLeftPhases = _mm_add_ps(
+                _mm_set1_ps(leftPhaseBase),
+                _mm_mul_ps(vOmegaL, vOffsets)
+            );
+            __m128 vRightPhases = _mm_add_ps(
+                _mm_set1_ps(rightPhaseBase),
+                _mm_mul_ps(vOmegaR, vOffsets)
+            );
+            
+            __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
+            __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
+            
+            __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
+            __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+            
+            float fadeMultipliers[4] __attribute__((aligned(16)));
+            bool swapFlags[4] = {false, false, false, false};
+            
+            for (int j = 0; j < 4; ++j) {
+                const int64_t currentSample = currentSampleBase + j;
+                float fadeMultiplier = 1.0;
+                
+                const int64_t elapsedSamples = currentSample - localFadeStartSample;
+                const float progress = elapsedSamples * invFadeDuration;
+                
+                if (localIsFadingOut) {
+                    if (progress >= 1.0) {
+                        fadeMultiplier = 0.0;
+                        if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                            swapExecutedAtSample = currentSample;
+                            localChannelsSwapped = !localChannelsSwapped;
+                            result.channelsSwapped = true;
+                            localIsFadingOut = false;
+                            localFadeStartSample = currentSample;
+                        }
+                    } else if (progress >= 0.0) {
+                        fadeMultiplier = 1.0 - progress;
+                    }
+                } else {
+                    if (progress >= 1.0) {
+                        fadeMultiplier = 1.0;
+                        result.fadePhaseCompleted = true;
+                        localFadeOperation = GeneratorState::FadeOperation::NONE;
+                    } else if (progress >= 0.0) {
+                        fadeMultiplier = progress;
+                    }
+                }
+                fadeMultipliers[j] = fadeMultiplier;
+                
+                const bool swapForSample = channelSwapEnabled && 
+                    ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
+                     localChannelsSwapped : channelsSwappedAtStart);
+                swapFlags[j] = swapForSample;
+            }
+            
+            float leftAmps[4] __attribute__((aligned(16)));
+            float rightAmps[4] __attribute__((aligned(16)));
+            for (int j = 0; j < 4; ++j) {
+                leftAmps[j] = baseVolumeFactor * fadeMultipliers[j] * leftAmplitude;
+                rightAmps[j] = baseVolumeFactor * fadeMultipliers[j] * rightAmplitude;
+            }
+            
+            __m128 vLeftAmps = _mm_load_ps(leftAmps);
+            __m128 vRightAmps = _mm_load_ps(rightAmps);
+            
+            vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
+            vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
+            
+            leftPhaseBase += leftOmega * 4;
+            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            rightPhaseBase += rightOmega * 4;
+            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            
+            leftOmega += omegaStepLeft * 4;
+            rightOmega += omegaStepRight * 4;
+            leftAmplitude += ampStepLeft * 4;
+            rightAmplitude += ampStepRight * 4;
+            
+            float leftResult[4] __attribute__((aligned(16)));
+            float rightResult[4] __attribute__((aligned(16)));
+            _mm_store_ps(leftResult, vLeftSamples);
+            _mm_store_ps(rightResult, vRightSamples);
+            
+            for (int j = 0; j < 4; ++j) {
+                const int idx = (i + j) * 2;
+                if (swapFlags[j]) {
+                    buffer[idx] = rightResult[j];
+                    buffer[idx + 1] = leftResult[j];
+                } else {
+                    buffer[idx] = leftResult[j];
+                    buffer[idx + 1] = rightResult[j];
+                }
+            }
+        }
+    }
+    
+    state.leftPhase = leftPhaseBase;
+    state.rightPhase = rightPhaseBase;
+    
+    for (; i < samplesPerChannel; ++i) {
+        const int64_t currentSample = state.totalSamplesGenerated + i;
+        float fadeMultiplier = 1.0;
+        
+        if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
+            const int64_t elapsedSamples = currentSample - localFadeStartSample;
+            const float progress = static_cast<float>(elapsedSamples) / channelSwapFadeDurationSamples;
+            
+            if (localIsFadingOut) {
+                if (progress >= 1.0) {
+                    fadeMultiplier = 0.0;
+                    if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                        swapExecutedAtSample = currentSample;
+                        localChannelsSwapped = !localChannelsSwapped;
+                        result.channelsSwapped = true;
+                        localIsFadingOut = false;
+                        localFadeStartSample = currentSample;
+                    }
+                } else if (progress >= 0.0) {
+                    fadeMultiplier = 1.0 - progress;
+                }
+            } else {
+                if (progress >= 1.0) {
+                    fadeMultiplier = 1.0;
+                    result.fadePhaseCompleted = true;
+                    localFadeOperation = GeneratorState::FadeOperation::NONE;
+                } else if (progress >= 0.0) {
+                    fadeMultiplier = progress;
+                }
+            }
+        }
+        
+        const float leftSample = Wavetable::fastSin(state.leftPhase);
+        const float rightSample = Wavetable::fastSin(state.rightPhase);
+        
+        state.leftPhase += leftOmega;
+        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        
+        state.rightPhase += rightOmega;
+        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        
+        const float baseAmplitude = baseVolumeFactor * fadeMultiplier;
+        const float leftAmp = baseAmplitude * leftAmplitude;
+        const float rightAmp = baseAmplitude * rightAmplitude;
+        
+        const bool swapForSample = channelSwapEnabled && 
+            ((swapExecutedAtSample >= 0 && currentSample >= swapExecutedAtSample) ? 
+             localChannelsSwapped : channelsSwappedAtStart);
+        
+        if (swapForSample) {
+            buffer[i * 2] = rightSample * rightAmp;
+            buffer[i * 2 + 1] = leftSample * leftAmp;
+        } else {
+            buffer[i * 2] = leftSample * leftAmp;
+            buffer[i * 2 + 1] = rightSample * rightAmp;
+        }
+    }
+    
     state.channelsSwapped = localChannelsSwapped;
     state.isFadingOut = localIsFadingOut;
     state.fadeStartSample = localFadeStartSample;

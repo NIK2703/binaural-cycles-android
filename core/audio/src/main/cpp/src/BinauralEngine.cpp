@@ -9,6 +9,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifdef USE_SSE
+#include <immintrin.h>
+#endif
+
 #define LOG_TAG "BinauralEngine"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
@@ -22,6 +26,8 @@ BinauralEngine::BinauralEngine() {
     
 #ifdef USE_NEON
     LOGD("BinauralEngine initialized with NEON SIMD + FMA optimization");
+#elif defined(USE_SSE)
+    LOGD("BinauralEngine initialized with SSE SIMD optimization");
 #else
     LOGD("BinauralEngine initialized (scalar mode)");
 #endif
@@ -154,9 +160,19 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         config = m_config;
     }
     
-    // Используем NEON-оптимизированную версию если доступна
-#ifdef USE_NEON
+    // Используем SIMD-оптимизированную версию если доступна
+#if defined(USE_NEON)
     GenerateResult result = m_generator.generateBufferNeon(
+        buffer,
+        samplesPerChannel,
+        config,
+        m_state,
+        timeSeconds,
+        elapsedMs,
+        frequencyUpdateIntervalMs
+    );
+#elif defined(USE_SSE)
+    GenerateResult result = m_generator.generateBufferSse(
         buffer,
         samplesPerChannel,
         config,

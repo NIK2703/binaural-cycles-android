@@ -12,6 +12,10 @@
 #include <arm_neon.h>
 #endif
 
+#ifdef USE_SSE
+#include <immintrin.h>
+#endif
+
 namespace binaural {
 
 /**
@@ -170,6 +174,47 @@ public:
         
         vst1q_f32(results, res1);
         vst1q_f32(results + 4, res2);
+    }
+#endif
+
+#ifdef USE_SSE
+    /**
+     * SSE-оптимизированная генерация 4 синусов одновременно
+     * Использует SSSE3 для векторизованной интерполяции
+     * 
+     * @param phasesScaled масштабированные фазы (phase * scaleFactor)
+     * @return 4 значения синуса в SSE регистре
+     */
+    static inline __m128 fastSinSse(__m128 phasesScaled) {
+        // Получаем целые части как индексы
+        __m128i indices = _mm_cvttps_epi32(phasesScaled);
+        
+        // Применяем маску для wraparound
+        indices = _mm_and_si128(indices, _mm_set1_epi32(s_tableSizeMask));
+        
+        // Дробные части: frac = scaled - floor(scaled)
+        __m128 floored = _mm_cvtepi32_ps(_mm_cvttps_epi32(phasesScaled));
+        __m128 fractions = _mm_sub_ps(phasesScaled, floored);
+        
+        // Извлекаем индексы для загрузки
+        int idx[4] __attribute__((aligned(16)));
+        _mm_store_si128((__m128i*)idx, indices);
+        
+        // Загружаем y0 и y1 для каждого индекса
+        float y0[4] __attribute__((aligned(16)));
+        float y1[4] __attribute__((aligned(16)));
+        
+        for (int i = 0; i < 4; ++i) {
+            y0[i] = s_sineTable[idx[i]];
+            y1[i] = s_sineTable[idx[i] + 1];
+        }
+        
+        __m128 vy0 = _mm_load_ps(y0);
+        __m128 vy1 = _mm_load_ps(y1);
+        
+        // Интерполяция: result = y0 + fraction * (y1 - y0)
+        __m128 diff = _mm_sub_ps(vy1, vy0);
+        return _mm_add_ps(vy0, _mm_mul_ps(fractions, diff));
     }
 #endif
 

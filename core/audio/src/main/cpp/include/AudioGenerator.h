@@ -87,6 +87,31 @@ public:
         int frequencyUpdateIntervalMs
     );
 #endif
+
+#ifdef USE_SSE
+    /**
+     * SSE-оптимизированная генерация буфера для x86/x86_64
+     * Обрабатывает 4 сэмпла одновременно используя SSE инструкции.
+     * 
+     * @param buffer выходной буфер (interleaved stereo)
+     * @param samplesPerChannel количество сэмплов на канал
+     * @param config конфигурация
+     * @param state состояние генератора
+     * @param timeSeconds текущее время в секундах с начала суток
+     * @param elapsedMs прошедшее время воспроизведения в мс
+     * @param frequencyUpdateIntervalMs интервал обновления частот в мс
+     * @return результат генерации
+     */
+    GenerateResult generateBufferSse(
+        float* buffer,
+        int samplesPerChannel,
+        const BinauralConfig& config,
+        GeneratorState& state,
+        int32_t timeSeconds,
+        int64_t elapsedMs,
+        int frequencyUpdateIntervalMs
+    );
+#endif
     
     /**
      * Сбросить состояние генератора

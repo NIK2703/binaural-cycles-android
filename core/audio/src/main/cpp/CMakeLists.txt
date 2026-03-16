@@ -54,6 +54,14 @@ elseif(ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_options(binaural-engine PRIVATE -ftree-vectorize)
     add_definitions(-DUSE_NEON)
     add_definitions(-DUSE_NEON_ARMV8)
+elseif(ANDROID_ABI STREQUAL "x86")
+    # x86: SSE оптимизация
+    target_compile_options(binaural-engine PRIVATE -mssse3 -ftree-vectorize)
+    add_definitions(-DUSE_SSE)
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    # x86_64: SSE3+ оптимизация
+    target_compile_options(binaural-engine PRIVATE -mssse3 -ftree-vectorize)
+    add_definitions(-DUSE_SSE)
 endif()
 
 # Определения для отладки
