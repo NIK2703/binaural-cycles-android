@@ -74,15 +74,26 @@
     <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Периоды расслабления</string>
-    <string name="relaxation_mode_description">Снижение частот в серединах интервалов между точками</string>
+    <string name="relaxation_mode">Режимы периодов расслабления</string>
+    <string name="relaxation_mode_description">Периодическое снижение частот для отдыха мозга</string>
+    <string name="relaxation_mode_disabled">Отключены</string>
     <string name="relaxation_mode_enabled_desc">Снижение частот в серединах интервалов между точками</string>
     <string name="relaxation_mode_disabled_desc">Частоты следуют графику без снижения</string>
     <string name="carrier_reduction">Снижение несущей частоты</string>
-    <string name="carrier_reduction_description">Процент снижения несущей частоты в середине интервала</string>
+    <string name="carrier_reduction_description">Процент снижения несущей частоты в периоды расслабления</string>
     <string name="beat_reduction">Снижение частоты биений</string>
-    <string name="beat_reduction_description">Процент снижения частоты биений в середине интервала</string>
+    <string name="beat_reduction_description">Процент снижения частоты биений в периоды расслабления</string>
     <string name="reduction_percent_format">%d%%</string>
+    <string name="relaxation_mode_type">Режим</string>
+    <string name="relaxation_mode_simple">Простой</string>
+    <string name="relaxation_mode_advanced">Расширенный</string>
+    <string name="relaxation_mode_simple_desc">Снижение частот в серединах интервалов между точками</string>
+    <string name="relaxation_mode_advanced_desc">Периодическое снижение по расписанию с плавными переходами</string>
+    <string name="gap_between_relaxation">Интервал между периодами</string>
+    <string name="relaxation_duration">Длительность расслабления</string>
+    <string name="transition_period">Период перехода</string>
+    <string name="transition_period_description">Время плавного перехода к сниженным частотам и обратно</string>
+    <string name="minutes_format">%d мин</string>
     
     <!-- App Settings -->
     <string name="update_interval">Интервал обновления частоты</string>

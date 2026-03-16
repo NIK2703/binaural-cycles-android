@@ -18,6 +18,7 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
@@ -902,10 +903,61 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingBeatReductionPercent(percent: Int) {
         val state = _uiState.value
-        val clampedPercent = percent.coerceIn(0, 50)
+        val clampedPercent = percent.coerceIn(0, 100)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)
+            )
+        }
+    }
+    
+    /**
+     * Установить режим расслабления (SIMPLE или ADVANCED)
+     */
+    fun setEditingRelaxationMode(mode: RelaxationMode) {
+        val state = _uiState.value
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(mode = mode)
+            )
+        }
+    }
+    
+    /**
+     * Установить паузу между периодами расслабления (в минутах)
+     */
+    fun setEditingRelaxationGapMinutes(minutes: Int) {
+        val state = _uiState.value
+        val clampedMinutes = minutes.coerceIn(0, 120)
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(gapBetweenRelaxationMinutes = clampedMinutes)
+            )
+        }
+    }
+    
+    /**
+     * Установить длительность расслабления (в минутах)
+     */
+    fun setEditingRelaxationDurationMinutes(minutes: Int) {
+        val state = _uiState.value
+        val clampedMinutes = minutes.coerceIn(10, 60)
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(relaxationDurationMinutes = clampedMinutes)
+            )
+        }
+    }
+    
+    /**
+     * Установить период перехода (в минутах)
+     */
+    fun setEditingTransitionPeriodMinutes(minutes: Int) {
+        val state = _uiState.value
+        val clampedMinutes = minutes.coerceIn(1, 15)
+        _uiState.update { 
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(transitionPeriodMinutes = clampedMinutes)
             )
         }
     }

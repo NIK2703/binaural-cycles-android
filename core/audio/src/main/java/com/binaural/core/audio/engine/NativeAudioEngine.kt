@@ -5,6 +5,7 @@ import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -145,19 +146,28 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         
         val curve = config.frequencyCurve
         
-        // Генерируем виртуальные точки расслабления и объединяем с реальными
-        val allPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
-            val virtualPoints = generateRelaxationVirtualPoints(curve.points, relaxationSettings)
-            (curve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
+        // Генерируем точки для воспроизведения в зависимости от режима расслабления
+        val playbackPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
+            when (relaxationSettings.mode) {
+                RelaxationMode.ADVANCED -> {
+                    // В ADVANCED режиме используем ТОЛЬКО виртуальные точки
+                    generateAdvancedVirtualPoints(curve.points, relaxationSettings)
+                }
+                RelaxationMode.SIMPLE -> {
+                    // В SIMPLE режиме объединяем основные и виртуальные точки
+                    val virtualPoints = generateSimpleVirtualPoints(curve.points, relaxationSettings)
+                    (curve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
+                }
+            }
         } else {
             curve.points
         }
         
-        val numPoints = allPoints.size
+        val numPoints = playbackPoints.size
         
-        val timePoints = IntArray(numPoints) { allPoints[it].time.toSecondOfDay() }
-        val carrierFreqs = FloatArray(numPoints) { allPoints[it].carrierFrequency }
-        val beatFreqs = FloatArray(numPoints) { allPoints[it].beatFrequency }
+        val timePoints = IntArray(numPoints) { playbackPoints[it].time.toSecondOfDay() }
+        val carrierFreqs = FloatArray(numPoints) { playbackPoints[it].carrierFrequency }
+        val beatFreqs = FloatArray(numPoints) { playbackPoints[it].beatFrequency }
         
         val interpolationType = when (curve.interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -192,10 +202,10 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     }
     
     /**
-     * Генерирует виртуальные точки режима расслабления между реальными точками.
+     * Генерирует виртуальные точки для SIMPLE режима расслабления.
      * Виртуальные точки создаются посередине между каждой парой соседних точек.
      */
-    private fun generateRelaxationVirtualPoints(
+    private fun generateSimpleVirtualPoints(
         points: List<FrequencyPoint>,
         settings: RelaxationModeSettings
     ): List<FrequencyPoint> {
@@ -242,6 +252,159 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         }
         
         return virtualPoints
+    }
+    
+    /**
+     * Генерирует виртуальные точки для ADVANCED режима расслабления.
+     * Создаёт группы из 4 точек для каждого периода расслабления, образующие трапецию.
+     * Итоговая кривая проходит ТОЛЬКО через эти виртуальные точки.
+     */
+    private fun generateAdvancedVirtualPoints(
+        points: List<FrequencyPoint>,
+        settings: RelaxationModeSettings
+    ): List<FrequencyPoint> {
+        if (!settings.enabled || points.size < 2) return emptyList()
+        
+        val virtualPoints = mutableListOf<FrequencyPoint>()
+        
+        val carrierReduction = settings.carrierReductionPercent / 100.0f
+        val beatReduction = settings.beatReductionPercent / 100.0f
+        
+        val gapSeconds = settings.gapBetweenRelaxationMinutes * 60L
+        val transitionSeconds = settings.transitionPeriodMinutes * 60L
+        val durationSeconds = settings.relaxationDurationMinutes * 60L
+        
+        // Полный период расслабления = 2 * переход + длительность
+        val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
+        
+        // Генерируем периоды расслабления от 00:00
+        val daySeconds = 24 * 3600L
+        
+        var periodStartSeconds = 0L
+        
+        while (periodStartSeconds < daySeconds) {
+            // Точка 1: начало периода (на базовой кривой)
+            val t1 = periodStartSeconds
+            val time1 = LocalTime.fromSecondOfDay((t1 % daySeconds).toInt())
+            val carrier1 = interpolateCarrierAtTime(points, time1)
+            val beat1 = interpolateBeatAtTime(points, time1)
+            virtualPoints.add(FrequencyPoint(time1, carrier1, beat1))
+            
+            // Точка 2: после перехода (сниженные частоты)
+            val t2 = periodStartSeconds + transitionSeconds
+            if (t2 < daySeconds) {
+                val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
+                val baseCarrier2 = interpolateCarrierAtTime(points, time2)
+                val baseBeat2 = interpolateBeatAtTime(points, time2)
+                virtualPoints.add(FrequencyPoint(
+                    time2,
+                    baseCarrier2 * (1.0f - carrierReduction),
+                    baseBeat2 * (1.0f - beatReduction)
+                ))
+            }
+            
+            // Точка 3: конец расслабления (сниженные частоты)
+            val t3 = periodStartSeconds + transitionSeconds + durationSeconds
+            if (t3 < daySeconds) {
+                val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
+                val baseCarrier3 = interpolateCarrierAtTime(points, time3)
+                val baseBeat3 = interpolateBeatAtTime(points, time3)
+                virtualPoints.add(FrequencyPoint(
+                    time3,
+                    baseCarrier3 * (1.0f - carrierReduction),
+                    baseBeat3 * (1.0f - beatReduction)
+                ))
+            }
+            
+            // Точка 4: после выхода (на базовой кривой)
+            val t4 = periodStartSeconds + fullPeriodSeconds
+            if (t4 < daySeconds) {
+                val time4 = LocalTime.fromSecondOfDay((t4 % daySeconds).toInt())
+                val carrier4 = interpolateCarrierAtTime(points, time4)
+                val beat4 = interpolateBeatAtTime(points, time4)
+                virtualPoints.add(FrequencyPoint(time4, carrier4, beat4))
+            }
+            
+            // Переходим к следующему периоду: полный период + пауза между периодами
+            periodStartSeconds += fullPeriodSeconds + gapSeconds
+        }
+        
+        // Сортируем по времени
+        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+    }
+    
+    /**
+     * Интерполирует несущую частоту для заданного времени.
+     */
+    private fun interpolateCarrierAtTime(points: List<FrequencyPoint>, time: LocalTime): Float {
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val targetSeconds = time.toSecondOfDay()
+        
+        // Находим интервал
+        for (i in 0 until sortedPoints.size) {
+            val current = sortedPoints[i]
+            val next = sortedPoints[(i + 1) % sortedPoints.size]
+            
+            val currentSeconds = current.time.toSecondOfDay()
+            var nextSeconds = next.time.toSecondOfDay()
+            
+            // Обработка перехода через полночь
+            if (nextSeconds <= currentSeconds) {
+                nextSeconds += 24 * 3600
+            }
+            
+            val adjustedTarget = if (targetSeconds < currentSeconds && i == sortedPoints.size - 1) {
+                targetSeconds + 24 * 3600
+            } else {
+                targetSeconds
+            }
+            
+            if (adjustedTarget in currentSeconds..nextSeconds) {
+                val ratio = if (nextSeconds == currentSeconds) 0f else {
+                    (adjustedTarget - currentSeconds).toFloat() / (nextSeconds - currentSeconds)
+                }
+                return current.carrierFrequency + (next.carrierFrequency - current.carrierFrequency) * ratio
+            }
+        }
+        
+        return sortedPoints.first().carrierFrequency
+    }
+    
+    /**
+     * Интерполирует частоту биения для заданного времени.
+     */
+    private fun interpolateBeatAtTime(points: List<FrequencyPoint>, time: LocalTime): Float {
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val targetSeconds = time.toSecondOfDay()
+        
+        // Находим интервал
+        for (i in 0 until sortedPoints.size) {
+            val current = sortedPoints[i]
+            val next = sortedPoints[(i + 1) % sortedPoints.size]
+            
+            val currentSeconds = current.time.toSecondOfDay()
+            var nextSeconds = next.time.toSecondOfDay()
+            
+            // Обработка перехода через полночь
+            if (nextSeconds <= currentSeconds) {
+                nextSeconds += 24 * 3600
+            }
+            
+            val adjustedTarget = if (targetSeconds < currentSeconds && i == sortedPoints.size - 1) {
+                targetSeconds + 24 * 3600
+            } else {
+                targetSeconds
+            }
+            
+            if (adjustedTarget in currentSeconds..nextSeconds) {
+                val ratio = if (nextSeconds == currentSeconds) 0f else {
+                    (adjustedTarget - currentSeconds).toFloat() / (nextSeconds - currentSeconds)
+                }
+                return current.beatFrequency + (next.beatFrequency - current.beatFrequency) * ratio
+            }
+        }
+        
+        return sortedPoints.first().beatFrequency
     }
     
     /**

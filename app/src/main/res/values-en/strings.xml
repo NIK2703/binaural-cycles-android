@@ -74,15 +74,26 @@
     <string name="temporal_normalization_description">Balance volume between graph points for consistent sound throughout the rhythm</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Relaxation periods</string>
-    <string name="relaxation_mode_description">Frequency reduction in the middle of intervals between points</string>
+    <string name="relaxation_mode">Relaxation period modes</string>
+    <string name="relaxation_mode_description">Periodic frequency reduction for brain rest</string>
+    <string name="relaxation_mode_disabled">Disabled</string>
     <string name="relaxation_mode_enabled_desc">Frequency reduction in the middle of intervals between points</string>
     <string name="relaxation_mode_disabled_desc">Frequencies follow the graph without reduction</string>
     <string name="carrier_reduction">Carrier frequency reduction</string>
-    <string name="carrier_reduction_description">Percentage of carrier frequency reduction in the middle of interval</string>
+    <string name="carrier_reduction_description">Percentage of carrier frequency reduction during relaxation periods</string>
     <string name="beat_reduction">Beat frequency reduction</string>
-    <string name="beat_reduction_description">Percentage of beat frequency reduction in the middle of interval</string>
+    <string name="beat_reduction_description">Percentage of beat frequency reduction during relaxation periods</string>
     <string name="reduction_percent_format">%d%%</string>
+    <string name="relaxation_mode_type">Mode</string>
+    <string name="relaxation_mode_simple">Simple</string>
+    <string name="relaxation_mode_advanced">Advanced</string>
+    <string name="relaxation_mode_simple_desc">Frequency reduction in the middle of intervals between points</string>
+    <string name="relaxation_mode_advanced_desc">Periodic reduction on schedule with smooth transitions</string>
+    <string name="gap_between_relaxation">Gap between periods</string>
+    <string name="relaxation_duration">Relaxation duration</string>
+    <string name="transition_period">Transition period</string>
+    <string name="transition_period_description">Time for smooth transition to reduced frequencies and back</string>
+    <string name="minutes_format">%d min</string>
     
     <!-- App Settings -->
     <string name="update_interval">Frequency update interval</string>
