@@ -66,6 +66,7 @@
     <string name="normalization_none">Disabled</string>
     <string name="normalization_channel">Channel</string>
     <string name="normalization_temporal">Temporal</string>
+    <string name="normalization_none_description">Volume is not balanced</string>
     <string name="normalization_channel_description">Balance volume between left and right channels based on their tone frequency ratio</string>
     <string name="normalization_temporal_description">Balance volume between graph points for consistent sound throughout the day</string>
     
@@ -99,7 +100,7 @@
     <string name="update_interval">Frequency update interval</string>
     <string name="update_interval_description">How often playback frequencies are recalculated</string>
     <string name="audio_quality">Sample rate</string>
-    <string name="audio_quality_description">Lower values save battery life</string>
+    <string name="audio_quality_description">Lower values reduce power consumption</string>
     <string name="quality_ultra_low">8 kHz — maximum battery saving</string>
     <string name="quality_very_low">16 kHz</string>
     <string name="quality_low">22 kHz — battery saving</string>
@@ -113,10 +114,9 @@
     <string name="wavetable_size">Synthesis precision</string>
     <string name="wavetable_size_description">Higher value = more precise sound, slightly more memory usage</string>
     
-    <!-- Graph Range Settings -->
-    <string name="auto_expand_graph_range">Auto-expand graph range</string>
-    <string name="auto_expand_graph_range_enabled_desc">Graph boundaries expand when points go beyond limits</string>
-    <string name="auto_expand_graph_range_disabled_desc">Frequencies are limited to the specified graph boundaries</string>
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Listening Comfort</string>
+    <string name="settings_section_power">Power Consumption</string>
     
     <!-- Time units -->
     <string name="seconds_short">sec</string>
