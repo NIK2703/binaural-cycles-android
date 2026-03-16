@@ -143,13 +143,17 @@ fun VolumeNormalizationSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            // Подсказка в зависимости от выбранного типа
             Text(
-                text = stringResource(R.string.volume_normalization_description),
+                text = when (volumeNormalizationSettings.type) {
+                    NormalizationType.NONE -> stringResource(R.string.normalization_none_description)
+                    NormalizationType.CHANNEL -> stringResource(R.string.normalization_channel_description)
+                    NormalizationType.TEMPORAL -> stringResource(R.string.normalization_temporal_description)
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp)
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
             )
-            Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -227,18 +231,6 @@ fun VolumeNormalizationSettingsCard(
                     valueRange = 0f..2f
                 )
             }
-            
-            // Описание типа нормализации
-            Text(
-                text = when (volumeNormalizationSettings.type) {
-                    NormalizationType.CHANNEL -> stringResource(R.string.normalization_channel_description)
-                    NormalizationType.TEMPORAL -> stringResource(R.string.normalization_temporal_description)
-                    NormalizationType.NONE -> ""
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
         }
     }
 }
@@ -315,41 +307,20 @@ fun ChannelSwapSettingsCard(
 }
 
 /**
- * Блок общих настроек приложения (качество звука, интервал обновления)
+ * Блок настроек энергопотребления (интервал обновления, частота дискретизации)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppSettingsCard(
+fun PowerSettingsCard(
     sampleRate: SampleRate,
     frequencyUpdateIntervalMs: Int,
-    autoExpandGraphRange: Boolean,
     onSampleRateChange: (SampleRate) -> Unit,
-    onFrequencyUpdateIntervalChange: (Int) -> Unit,
-    onAutoExpandGraphRangeChange: (Boolean) -> Unit
+    onFrequencyUpdateIntervalChange: (Int) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Автоматическое расширение границ графика
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.auto_expand_graph_range)) },
-            supportingContent = {
-                Text(
-                    if (autoExpandGraphRange) stringResource(R.string.auto_expand_graph_range_enabled_desc)
-                    else stringResource(R.string.auto_expand_graph_range_disabled_desc)
-                )
-            },
-            trailingContent = {
-                Switch(
-                    checked = autoExpandGraphRange,
-                    onCheckedChange = onAutoExpandGraphRangeChange
-                )
-            }
-        )
-        
-        HorizontalDivider()
-
         // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
             Text(
@@ -372,84 +343,87 @@ fun AppSettingsCard(
             )
         }
         
-        // Качество аудио - раскрывающийся список
-        var sampleRateExpanded by remember { mutableStateOf(false) }
+        HorizontalDivider()
         
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.audio_quality)) },
-            supportingContent = {
-                Text(stringResource(R.string.audio_quality_description))
-            }
-        )
-        
-        ExposedDropdownMenuBox(
-            expanded = sampleRateExpanded,
-            onExpandedChange = { sampleRateExpanded = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-        ) {
-            OutlinedTextField(
-                value = when (sampleRate) {
-                    SampleRate.ULTRA_LOW -> stringResource(R.string.quality_ultra_low)
-                    SampleRate.VERY_LOW -> stringResource(R.string.quality_very_low)
-                    SampleRate.LOW -> stringResource(R.string.quality_low)
-                    SampleRate.MEDIUM -> stringResource(R.string.quality_standard)
-                    SampleRate.HIGH -> stringResource(R.string.quality_high)
-                },
-                onValueChange = {},
-                readOnly = true,
-                trailingIcon = {
-                    ExposedDropdownMenuDefaults.TrailingIcon(expanded = sampleRateExpanded)
-                },
-                modifier = Modifier
-                    .menuAnchor()
-                    .fillMaxWidth()
+        // Качество аудио - строка чипов
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.audio_quality),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
-            
-            ExposedDropdownMenu(
-                expanded = sampleRateExpanded,
-                onDismissRequest = { sampleRateExpanded = false }
+            Text(
+                text = stringResource(R.string.audio_quality_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.quality_ultra_low)) },
-                    onClick = {
-                        onSampleRateChange(SampleRate.ULTRA_LOW)
-                        sampleRateExpanded = false
+                FilterChip(
+                    selected = sampleRate == SampleRate.ULTRA_LOW,
+                    onClick = { onSampleRateChange(SampleRate.ULTRA_LOW) },
+                    label = { 
+                        Text(
+                            "8kHz", 
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        ) 
                     },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    modifier = Modifier.weight(1f)
                 )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.quality_very_low)) },
-                    onClick = {
-                        onSampleRateChange(SampleRate.VERY_LOW)
-                        sampleRateExpanded = false
+                FilterChip(
+                    selected = sampleRate == SampleRate.VERY_LOW,
+                    onClick = { onSampleRateChange(SampleRate.VERY_LOW) },
+                    label = { 
+                        Text(
+                            "16kHz", 
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        ) 
                     },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    modifier = Modifier.weight(1f)
                 )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.quality_low)) },
-                    onClick = {
-                        onSampleRateChange(SampleRate.LOW)
-                        sampleRateExpanded = false
+                FilterChip(
+                    selected = sampleRate == SampleRate.LOW,
+                    onClick = { onSampleRateChange(SampleRate.LOW) },
+                    label = { 
+                        Text(
+                            "22kHz", 
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        ) 
                     },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    modifier = Modifier.weight(1f)
                 )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.quality_standard)) },
-                    onClick = {
-                        onSampleRateChange(SampleRate.MEDIUM)
-                        sampleRateExpanded = false
+                FilterChip(
+                    selected = sampleRate == SampleRate.MEDIUM,
+                    onClick = { onSampleRateChange(SampleRate.MEDIUM) },
+                    label = { 
+                        Text(
+                            "44kHz", 
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        ) 
                     },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    modifier = Modifier.weight(1f)
                 )
-                DropdownMenuItem(
-                    text = { Text(stringResource(R.string.quality_high)) },
-                    onClick = {
-                        onSampleRateChange(SampleRate.HIGH)
-                        sampleRateExpanded = false
+                FilterChip(
+                    selected = sampleRate == SampleRate.HIGH,
+                    onClick = { onSampleRateChange(SampleRate.HIGH) },
+                    label = { 
+                        Text(
+                            "48kHz", 
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall
+                        ) 
                     },
-                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding
+                    modifier = Modifier.weight(1f)
                 )
             }
         }
@@ -777,13 +751,6 @@ fun RelaxationModeCard(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
                 
-                Text(
-                    text = stringResource(R.string.transition_period_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                
                 HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
             }
             
@@ -809,14 +776,7 @@ fun RelaxationModeCard(
                     modifier = Modifier.fillMaxWidth(),
                     valueRange = 0f..50f
                 )
-                Text(
-                    text = stringResource(R.string.carrier_reduction_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
             }
-            
-            Spacer(modifier = Modifier.height(8.dp))
             
             // Слайдер снижения частоты биений
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -839,11 +799,6 @@ fun RelaxationModeCard(
                     onValueChange = { onBeatReductionChange(it.toInt()) },
                     modifier = Modifier.fillMaxWidth(),
                     valueRange = 0f..100f
-                )
-                Text(
-                    text = stringResource(R.string.beat_reduction_description),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

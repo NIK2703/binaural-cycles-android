@@ -61,6 +61,9 @@ class BinauralPlaybackService : Service() {
         
         private val _elapsedSeconds = MutableStateFlow(0)
         val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
+        
+        private val _currentPresetName = MutableStateFlow<String?>(null)
+        val currentPresetName: StateFlow<String?> = _currentPresetName.asStateFlow()
     }
 
     // Аудио-движок создаётся только в сервисе
@@ -233,17 +236,17 @@ class BinauralPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = if (_isPlaying.value) {
-            getString(R.string.notification_playing)
+        val title = _currentPresetName.value ?: getString(R.string.notification_playing)
+
+        val content = if (_isPlaying.value) {
+            getString(
+                R.string.notification_content,
+                _currentBeatFrequency.value,
+                _currentCarrierFrequency.value
+            )
         } else {
             getString(R.string.notification_paused)
         }
-
-        val content = getString(
-            R.string.notification_content,
-            _currentBeatFrequency.value,
-            _currentCarrierFrequency.value
-        )
 
         val playPauseIcon = if (_isPlaying.value) R.drawable.ic_pause else R.drawable.ic_play
         val playPauseText = if (_isPlaying.value) getString(R.string.action_pause) else getString(R.string.action_play)
@@ -514,6 +517,11 @@ class BinauralPlaybackService : Service() {
     
     fun switchPresetWithFade(config: BinauralConfig) {
         audioEngine?.switchPresetWithFade(config)
+    }
+    
+    fun setCurrentPresetName(name: String?) {
+        _currentPresetName.value = name
+        updateNotificationImmediately()
     }
 
     override fun onDestroy() {

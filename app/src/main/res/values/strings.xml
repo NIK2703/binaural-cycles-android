@@ -66,6 +66,7 @@
     <string name="normalization_none">Отключена</string>
     <string name="normalization_channel">Канальная</string>
     <string name="normalization_temporal">Временная</string>
+    <string name="normalization_none_description">Громкость не выравнивается</string>
     <string name="normalization_channel_description">Выравнивание громкости между левым и правым каналом по соотношению частот их тонов</string>
     <string name="normalization_temporal_description">Выравнивание громкости между точками графика для равномерного звучания в течение дня</string>
     
@@ -74,7 +75,7 @@
     <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Режимы периодов расслабления</string>
+    <string name="relaxation_mode">Режим периодов расслабления</string>
     <string name="relaxation_mode_description">Периодическое снижение частот для отдыха мозга</string>
     <string name="relaxation_mode_disabled">Отключены</string>
     <string name="relaxation_mode_enabled_desc">Снижение частот в серединах интервалов между точками</string>
@@ -99,7 +100,7 @@
     <string name="update_interval">Интервал обновления частоты</string>
     <string name="update_interval_description">Как часто пересчитываются частоты воспроизведения</string>
     <string name="audio_quality">Частота дискретизации</string>
-    <string name="audio_quality_description">Низкие значения экономят заряд батареи</string>
+    <string name="audio_quality_description">Низкие значения снижают энергопотребление</string>
     <string name="quality_ultra_low">8 кГц — максимальная экономия</string>
     <string name="quality_very_low">16 кГц</string>
     <string name="quality_low">22 кГц — экономия батареи</string>
@@ -113,10 +114,9 @@
     <string name="wavetable_size">Точность синтеза</string>
     <string name="wavetable_size_description">Больше значение — точнее звук, но чуть больше потребление памяти</string>
     
-    <!-- Graph Range Settings -->
-    <string name="auto_expand_graph_range">Авторасширение границ графика</string>
-    <string name="auto_expand_graph_range_enabled_desc">Границы графика расширяются при выходе точек за пределы</string>
-    <string name="auto_expand_graph_range_disabled_desc">Частоты ограничиваются заданными границами графика</string>
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Комфорт прослушивания</string>
+    <string name="settings_section_power">Энергопотребление</string>
     
     <!-- Time units -->
     <string name="seconds_short">сек</string>

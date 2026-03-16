@@ -10,7 +10,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import com.binauralcycles.ui.components.AppSettingsCard
+import com.binauralcycles.ui.components.PowerSettingsCard
 import com.binauralcycles.ui.components.ChannelSwapSettingsCard
 import com.binauralcycles.ui.components.VolumeNormalizationSettingsCard
 import com.binauralcycles.viewmodel.BinauralViewModel
@@ -49,6 +49,14 @@ fun SettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
             
+            // Раздел: Комфорт прослушивания
+            Text(
+                text = stringResource(R.string.settings_section_comfort),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            
             // Глобальные настройки перестановки каналов
             ChannelSwapSettingsCard(
                 channelSwapSettings = uiState.channelSwapSettings,
@@ -59,7 +67,7 @@ fun SettingsScreen(
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) }
             )
             
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
             
             // Глобальные настройки нормализации громкости
             VolumeNormalizationSettingsCard(
@@ -71,14 +79,20 @@ fun SettingsScreen(
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             
-            // Общие настройки приложения
-            AppSettingsCard(
+            // Раздел: Энергопотребление
+            Text(
+                text = stringResource(R.string.settings_section_power),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            
+            // Настройки энергопотребления
+            PowerSettingsCard(
                 sampleRate = uiState.sampleRate,
                 frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
-                autoExpandGraphRange = uiState.autoExpandGraphRange,
                 onSampleRateChange = { viewModel.setSampleRate(it) },
-                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) },
-                onAutoExpandGraphRangeChange = { viewModel.setAutoExpandGraphRange(it) }
+                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) }
             )
             
             Spacer(modifier = Modifier.height(16.dp))

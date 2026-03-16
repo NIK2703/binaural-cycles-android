@@ -397,10 +397,10 @@ enum class RelaxationMode {
 data class RelaxationModeSettings(
     val enabled: Boolean = false,
     val mode: RelaxationMode = RelaxationMode.SIMPLE,
-    val carrierReductionPercent: Int = 20,  // 0-50%
-    val beatReductionPercent: Int = 20,      // 0-100%
+    val carrierReductionPercent: Int = 25,  // 0-50%
+    val beatReductionPercent: Int = 50,      // 0-100%
     // Параметры для расширенного режима
-    val gapBetweenRelaxationMinutes: Int = 24,  // Интервал МЕЖДУ периодами расслабления: 0-120 минут
+    val gapBetweenRelaxationMinutes: Int = 45,  // Интервал МЕЖДУ периодами расслабления: 0-120 минут
     val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 1-10 минут
     val relaxationDurationMinutes: Int = 15     // Длительность периода расслабления: 10-60 минут
 ) {

@@ -64,7 +64,7 @@ data class BinauralUiState(
     // Общие настройки приложения
     val sampleRate: SampleRate = SampleRate.LOW,
     val frequencyUpdateIntervalMs: Int = 10000,
-    // Автоматическое расширение границ графика при редактировании
+    // Автоматическое расширение границ графика при редактировании (по умолчанию выключено)
     val autoExpandGraphRange: Boolean = false,
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false,
@@ -158,6 +158,8 @@ class BinauralViewModel @Inject constructor(
                                 beatRange = activePreset.frequencyCurve.beatRange
                             )
                         }
+                        // Устанавливаем название пресета для уведомления
+                        playbackService?.setCurrentPresetName(activePreset.name)
                         // Обновляем весь конфиг в сервисе, а не только кривую
                         // Это важно для корректного воспроизведения при старте
                         updateAudioConfig()
@@ -193,12 +195,6 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.getVolume().collect { volume ->
                 _uiState.update { it.copy(volume = volume) }
                 playbackService?.setVolume(volume)
-            }
-        }
-        // Автоматическое расширение границ графика
-        viewModelScope.launch {
-            preferencesRepository.getAutoExpandGraphRange().collect { autoExpand ->
-                _uiState.update { it.copy(autoExpandGraphRange = autoExpand) }
             }
         }
         // Глобальные настройки перестановки каналов
@@ -266,6 +262,9 @@ class BinauralViewModel @Inject constructor(
                 beatRange = preset.frequencyCurve.beatRange
             )
         }
+        
+        // Устанавливаем название пресета для уведомления
+        playbackService?.setCurrentPresetName(preset.name)
         
         // Формируем конфиг из глобальных настроек каналов и нормализации
         val config = BinauralConfig(
@@ -978,13 +977,6 @@ class BinauralViewModel @Inject constructor(
         playbackService?.setFrequencyUpdateInterval(clampedInterval)
         viewModelScope.launch {
             preferencesRepository.saveFrequencyUpdateInterval(clampedInterval)
-        }
-    }
-
-    fun setAutoExpandGraphRange(enabled: Boolean) {
-        _uiState.update { it.copy(autoExpandGraphRange = enabled) }
-        viewModelScope.launch {
-            preferencesRepository.saveAutoExpandGraphRange(enabled)
         }
     }
     
