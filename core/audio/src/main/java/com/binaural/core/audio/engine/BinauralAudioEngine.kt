@@ -630,17 +630,19 @@ class BinauralAudioEngine(private val context: Context) {
         
         currentFadeVolume = getVolumeFromShaper()
         _isPlaying.value = false
-        startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS)
+        startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
+            isActive.set(false)
+            stopPlayback()
+        }
     }
     
-    private fun startFadeOutImmediate(durationMs: Long) {
+    private fun startFadeOutImmediate(durationMs: Long, onComplete: () -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
                 val startVolume = currentFadeVolume.coerceIn(MIN_VOLUME, 1.0f)
                 
                 if (startVolume <= MIN_VOLUME) {
-                    isActive.set(false)
-                    audioHandler?.post(::stopPlayback)
+                    onComplete()
                     return
                 }
                 
@@ -667,23 +669,17 @@ class BinauralAudioEngine(private val context: Context) {
                     isFadeInProgress = true
                     
                     audioHandler?.postDelayed({
-                        if (isActive.get()) {
-                            isActive.set(false)
-                            stopPlayback()
-                        }
+                        onComplete()
                     }, adjustedDuration + 50)
                 } else {
-                    isActive.set(false)
-                    audioHandler?.post(::stopPlayback)
+                    onComplete()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "startFadeOutImmediate error: ${e.message}")
-                isActive.set(false)
-                audioHandler?.post(::stopPlayback)
+                onComplete()
             }
         } else {
-            isActive.set(false)
-            audioHandler?.post(::stopPlayback)
+            onComplete()
         }
     }
     
@@ -741,8 +737,13 @@ class BinauralAudioEngine(private val context: Context) {
         
         if (!_isPlaying.value) return
         
+        // Немедленно запускаем fade-out, не дожидаясь цикла генерации
         currentFadeVolume = getVolumeFromShaper()
-        pauseWithFadeRequested.set(true)
+        _isPlaying.value = false
+        
+        startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
+            executePause()
+        }
     }
 
     /**

@@ -159,7 +159,7 @@
     <string name="notification_channel_description">Управление воспроизведением бинауральных ритмов</string>
     <string name="notification_playing">Воспроизведение</string>
     <string name="notification_paused">Пауза</string>
-    <string name="notification_content">Биения: %.1f Гц | Несущая: %.0f Гц</string>
+    <string name="notification_title">Биения: %.1f Гц | Несущая: %.0f Гц</string>
     <string name="action_play">Воспроизвести</string>
     <string name="action_pause">Пауза</string>
     <string name="action_stop">Стоп</string>

@@ -159,7 +159,7 @@
     <string name="notification_channel_description">Binaural beats playback control</string>
     <string name="notification_playing">Playing</string>
     <string name="notification_paused">Paused</string>
-    <string name="notification_content">Beat: %.1f Hz | Carrier: %.0f Hz</string>
+    <string name="notification_title">Beat: %.1f Hz | Carrier: %.0f Hz</string>
     <string name="action_play">Play</string>
     <string name="action_pause">Pause</string>
     <string name="action_stop">Stop</string>

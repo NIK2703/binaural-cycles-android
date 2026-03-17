@@ -17,7 +17,11 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
+import androidx.media.app.NotificationCompat.MediaStyle
 import android.content.BroadcastReceiver
+import android.support.v4.media.MediaMetadataCompat
+import android.support.v4.media.session.MediaSessionCompat
+import android.support.v4.media.session.PlaybackStateCompat
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
@@ -68,6 +72,16 @@ class BinauralPlaybackService : Service() {
 
     // Аудио-движок создаётся только в сервисе
     private var audioEngine: BinauralAudioEngine? = null
+    
+    // MediaSession для обработки кнопок гарнитуры
+    private var mediaSession: MediaSessionCompat? = null
+    
+    // Список ID пресетов для переключения (next/previous)
+    private var presetIds: List<String> = emptyList()
+    private var currentPresetId: String? = null
+    
+    // Callback для уведомления о переключении пресета
+    var onPresetSwitch: ((String) -> Unit)? = null
     
     private val binder = LocalBinder()
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
@@ -135,21 +149,36 @@ class BinauralPlaybackService : Service() {
         serviceScope.launch {
             audioEngine?.isPlaying?.collectLatest { playing ->
                 _isPlaying.value = playing
+                // Обновляем PlaybackState MediaSession
+                updatePlaybackState(playing)
+                // Обновляем метаданные (подзаголовок меняется при паузе/воспроизведении)
+                updateMediaMetadata()
                 // Обновляем notification при изменении состояния воспроизведения
                 updateNotificationImmediately()
             }
         }
         
         // Частоты обновляем в UI напрямую из audioEngine
+        // Также обновляем уведомление и метаданные при изменении частот
         serviceScope.launch {
             audioEngine?.currentBeatFrequency?.collectLatest { freq ->
                 _currentBeatFrequency.value = freq
+                // Обновляем уведомление и метаданные при изменении частоты
+                if (_isPlaying.value && freq > 0) {
+                    updateMediaMetadata()
+                    updateNotificationSilently()
+                }
             }
         }
         
         serviceScope.launch {
             audioEngine?.currentCarrierFrequency?.collectLatest { freq ->
                 _currentCarrierFrequency.value = freq
+                // Обновляем уведомление и метаданные при изменении частоты
+                if (_isPlaying.value && freq > 0) {
+                    updateMediaMetadata()
+                    updateNotificationSilently()
+                }
             }
         }
         
@@ -170,6 +199,9 @@ class BinauralPlaybackService : Service() {
         
         // Регистрируем приёмник для режима энергосбережения
         registerPowerSaveReceiver()
+        
+        // Инициализируем MediaSession для обработки кнопок гарнитуры
+        initializeMediaSession()
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -239,11 +271,17 @@ class BinauralPlaybackService : Service() {
         val title = _currentPresetName.value ?: getString(R.string.notification_playing)
 
         val content = if (_isPlaying.value) {
-            getString(
-                R.string.notification_content,
-                _currentBeatFrequency.value,
-                _currentCarrierFrequency.value
-            )
+            // Показываем частоты только если они установлены (не 0)
+            if (_currentBeatFrequency.value > 0 && _currentCarrierFrequency.value > 0) {
+                getString(
+                    R.string.notification_title,
+                    _currentBeatFrequency.value,
+                    _currentCarrierFrequency.value
+                )
+            } else {
+                // Если частоты ещё не установлены - показываем название пресета
+                _currentPresetName.value ?: getString(R.string.notification_playing)
+            }
         } else {
             getString(R.string.notification_paused)
         }
@@ -261,6 +299,11 @@ class BinauralPlaybackService : Service() {
             .setOngoing(_isPlaying.value)
             .setOnlyAlertOnce(true) // Предотвращает мерцание иконки при обновлении
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setStyle(
+                MediaStyle()
+                    .setMediaSession(mediaSession?.sessionToken)
+                    .setShowActionsInCompactView(0, 1) // Показываем play/pause и выход в компактном виде
+            )
             .build()
     }
 
@@ -354,6 +397,145 @@ class BinauralPlaybackService : Service() {
                 }
             }
         }
+    }
+    
+    /**
+     * Инициализирует MediaSession для обработки кнопок гарнитуры
+     */
+    private fun initializeMediaSession() {
+        mediaSession = MediaSessionCompat(this, "BinauralPlaybackService").apply {
+            // Устанавливаем callback для обработки медиа-кнопок
+            setCallback(object : MediaSessionCompat.Callback() {
+                override fun onPlay() {
+                    // Toggle: если играет - пауза, если нет - воспроизведение
+                    android.util.Log.d("BinauralPlaybackService", "MediaSession: onPlay, isPlaying=${_isPlaying.value}")
+                    if (_isPlaying.value) {
+                        audioEngine?.pauseWithFade()
+                    } else {
+                        requestAudioFocus()
+                        audioEngine?.resumeWithFade()
+                    }
+                }
+                
+                override fun onPause() {
+                    // Toggle: если играет - пауза, если нет - воспроизведение
+                    android.util.Log.d("BinauralPlaybackService", "MediaSession: onPause, isPlaying=${_isPlaying.value}")
+                    if (_isPlaying.value) {
+                        audioEngine?.pauseWithFade()
+                    } else {
+                        requestAudioFocus()
+                        audioEngine?.resumeWithFade()
+                    }
+                }
+                
+                override fun onStop() {
+                    android.util.Log.d("BinauralPlaybackService", "MediaSession: onStop")
+                    audioEngine?.stopWithFade()
+                    abandonAudioFocus()
+                }
+                
+                override fun onSkipToNext() {
+                    // Переключение на следующий пресет
+                    android.util.Log.d("BinauralPlaybackService", "MediaSession: onSkipToNext")
+                    val currentIndex = presetIds.indexOf(currentPresetId)
+                    if (currentIndex >= 0 && currentIndex < presetIds.size - 1) {
+                        val nextId = presetIds[currentIndex + 1]
+                        onPresetSwitch?.invoke(nextId)
+                    } else if (presetIds.isNotEmpty()) {
+                        // Зацикливание: с последнего на первый
+                        onPresetSwitch?.invoke(presetIds[0])
+                    }
+                }
+                
+                override fun onSkipToPrevious() {
+                    // Переключение на предыдущий пресет
+                    android.util.Log.d("BinauralPlaybackService", "MediaSession: onSkipToPrevious")
+                    val currentIndex = presetIds.indexOf(currentPresetId)
+                    if (currentIndex > 0) {
+                        val prevId = presetIds[currentIndex - 1]
+                        onPresetSwitch?.invoke(prevId)
+                    } else if (presetIds.isNotEmpty()) {
+                        // Зацикливание: с первого на последний
+                        onPresetSwitch?.invoke(presetIds.last())
+                    }
+                }
+            })
+            
+            // Устанавливаем начальное состояние
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(
+                        PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_STOP
+                    )
+                    .setState(PlaybackStateCompat.STATE_PAUSED, 0, 0f)
+                    .build()
+            )
+            
+            // Устанавливаем метаданные (название пресета)
+            updateMediaMetadata()
+            
+            // Активируем сессию
+            isActive = true
+        }
+    }
+    
+    /**
+     * Обновляет PlaybackState MediaSession при изменении состояния воспроизведения
+     */
+    private fun updatePlaybackState(isPlaying: Boolean) {
+        // Базовые действия
+        var actions = PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_STOP
+        
+        // Добавляем переключение пресетов если есть список
+        if (presetIds.size > 1) {
+            actions = actions or PlaybackStateCompat.ACTION_SKIP_TO_NEXT or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        }
+        
+        mediaSession?.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(
+                    if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED,
+                    0,
+                    0f
+                )
+                .build()
+        )
+    }
+    
+    /**
+     * Обновляет метаданные MediaSession (название пресета и подзаголовок)
+     */
+    private fun updateMediaMetadata() {
+        val title = _currentPresetName.value ?: getString(R.string.notification_playing)
+        
+        // Подзаголовок: частоты при воспроизведении, "Пауза" при паузе
+        val subtitle = if (_isPlaying.value) {
+            if (_currentBeatFrequency.value > 0 && _currentCarrierFrequency.value > 0) {
+                getString(
+                    R.string.notification_title,
+                    _currentBeatFrequency.value,
+                    _currentCarrierFrequency.value
+                )
+            } else {
+                _currentPresetName.value ?: getString(R.string.notification_playing)
+            }
+        } else {
+            getString(R.string.notification_paused)
+        }
+        
+        mediaSession?.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
+                .build()
+        )
     }
 
     fun startPlayback() {
@@ -521,7 +703,24 @@ class BinauralPlaybackService : Service() {
     
     fun setCurrentPresetName(name: String?) {
         _currentPresetName.value = name
+        updateMediaMetadata()
         updateNotificationImmediately()
+    }
+    
+    /**
+     * Установить список ID пресетов для переключения (next/previous)
+     */
+    fun setPresetIds(ids: List<String>) {
+        presetIds = ids
+        // Обновляем PlaybackState для включения/отключения кнопок next/previous
+        updatePlaybackState(_isPlaying.value)
+    }
+    
+    /**
+     * Установить текущий активный пресет по ID
+     */
+    fun setCurrentPresetId(id: String?) {
+        currentPresetId = id
     }
 
     override fun onDestroy() {
@@ -529,6 +728,11 @@ class BinauralPlaybackService : Service() {
         
         notificationUpdateJob?.cancel()
         unregisterPowerSaveReceiver()
+        
+        // Освобождаем MediaSession
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
         
         audioEngine?.release()
         audioEngine = null
