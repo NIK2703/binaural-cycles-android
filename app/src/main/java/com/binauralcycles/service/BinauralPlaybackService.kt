@@ -19,6 +19,8 @@ import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.media.app.NotificationCompat.MediaStyle
 import android.content.BroadcastReceiver
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -200,6 +202,10 @@ class BinauralPlaybackService : Service() {
         // Регистрируем приёмник для режима энергосбережения
         registerPowerSaveReceiver()
         
+        // Регистрируем приёмники для отслеживания отключения гарнитуры
+        registerNoisyAudioReceiver()
+        registerAudioDeviceCallback()
+        
         // Инициализируем MediaSession для обработки кнопок гарнитуры
         initializeMediaSession()
     }
@@ -345,6 +351,104 @@ class BinauralPlaybackService : Service() {
     
     // BroadcastReceiver для режима энергосбережения
     private var powerSaveReceiver: BroadcastReceiver? = null
+    
+    // BroadcastReceiver для отключения гарнитуры (ACTION_AUDIO_BECOMING_NOISY)
+    private var noisyAudioReceiver: BroadcastReceiver? = null
+    
+    // AudioDeviceCallback для отслеживания отключения аудиоустройств (API 23+)
+    private var audioDeviceCallback: AudioDeviceCallback? = null
+    private var hasOutputDevices = false
+    
+    /**
+     * Регистрирует приёмник для отключения гарнитуры (AUDIO_BECOMING_NOISY)
+     */
+    private fun registerNoisyAudioReceiver() {
+        noisyAudioReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                    android.util.Log.d("BinauralPlaybackService", "Audio becoming noisy - stopping playback")
+                    // Останавливаем воспроизведение с затуханием
+                    audioEngine?.pauseWithFade()
+                    _isPlaying.value = false
+                    updateNotificationImmediately()
+                }
+            }
+        }
+        
+        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(noisyAudioReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(noisyAudioReceiver, filter)
+        }
+    }
+    
+    private fun unregisterNoisyAudioReceiver() {
+        noisyAudioReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                android.util.Log.e("BinauralPlaybackService", "Error unregistering noisy audio receiver", e)
+            }
+        }
+        noisyAudioReceiver = null
+    }
+    
+    /**
+     * Регистрирует AudioDeviceCallback для отслеживания отключения аудиоустройств
+     */
+    private fun registerAudioDeviceCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioDeviceCallback = object : AudioDeviceCallback() {
+                override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                    // Устройства добавлены - проверяем наличие выходных устройств
+                    checkOutputDevices()
+                }
+                
+                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                    // Устройства удалены - проверяем, остались ли выходные устройства
+                    val hadDevices = hasOutputDevices
+                    checkOutputDevices()
+                    
+                    // Если были устройства и они исчезли во время воспроизведения - останавливаем
+                    if (hadDevices && !hasOutputDevices && _isPlaying.value) {
+                        android.util.Log.d("BinauralPlaybackService", "All output devices removed - stopping playback")
+                        audioEngine?.pauseWithFade()
+                        _isPlaying.value = false
+                        updateNotificationImmediately()
+                    }
+                }
+                
+                private fun checkOutputDevices() {
+                    audioManager?.let { am ->
+                        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+                        hasOutputDevices = devices.isNotEmpty()
+                        android.util.Log.d("BinauralPlaybackService", "Output devices available: $hasOutputDevices (${devices.size} devices)")
+                    }
+                }
+            }
+            
+            // Регистрируем callback
+            audioManager?.registerAudioDeviceCallback(audioDeviceCallback, null)
+            
+            // Начальная проверка наличия устройств
+            audioDeviceCallback?.let { callback ->
+                audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.let { devices ->
+                    hasOutputDevices = devices.isNotEmpty()
+                }
+            }
+        }
+    }
+    
+    private fun unregisterAudioDeviceCallback() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioDeviceCallback?.let {
+                audioManager?.unregisterAudioDeviceCallback(it)
+            }
+        }
+        audioDeviceCallback = null
+    }
     
     /**
      * Регистрирует приёмник для отслеживания изменений режима энергосбережения
@@ -728,6 +832,8 @@ class BinauralPlaybackService : Service() {
         
         notificationUpdateJob?.cancel()
         unregisterPowerSaveReceiver()
+        unregisterNoisyAudioReceiver()
+        unregisterAudioDeviceCallback()
         
         // Освобождаем MediaSession
         mediaSession?.isActive = false
