@@ -16,24 +16,24 @@
                          Q60,40 66,54
                          Q72,68 78,54"/>
     
-    <!-- Верхняя дуга: часть окружности с центром (54,54), радиус 24 -->
-    <!-- От ~200° до ~340°, против часовой стрелки через верх (270°) -->
-    <!-- Угол дуги ~140° < 180°, поэтому large-arc=0 -->
+    <!-- Upper arc: from left end (180°) to 340° through TOP (270°) -->
+    <!-- sweep=1 (clockwise): 180° → 270° → 340° through TOP -->
+    <!-- arc=160° < 180°, large-arc=0 -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
         android:strokeLineCap="round"
         android:fillColor="@android:color/transparent"
-        android:pathData="M30,54 A24,24 0 0 0 76.56,45.79"/>
+        android:pathData="M30,54 A24,24 0 0 1 76.56,45.79"/>
     
-    <!-- Нижняя дуга: часть той же окружности -->
-    <!-- От 0° до 160°, против часовой стрелки через низ (90°) -->
-    <!-- Угол дуги ~140° < 180°, поэтому large-arc=0 -->
+    <!-- Lower arc: from right end (0°) to 160° through BOTTOM (90°) -->
+    <!-- sweep=1 (clockwise): 0° → 90° → 160° through BOTTOM -->
+    <!-- arc=160° < 180°, large-arc=0 -->
     <path
         android:strokeColor="#FFFFFF"
         android:strokeWidth="3.5"
         android:strokeLineCap="round"
         android:fillColor="@android:color/transparent"
-        android:pathData="M78,54 A24,24 0 0 0 31.44,62.21"/>
+        android:pathData="M78,54 A24,24 0 0 1 31.44,62.21"/>
     
 </vector>

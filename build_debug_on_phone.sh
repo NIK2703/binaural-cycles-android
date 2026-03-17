@@ -45,10 +45,37 @@ BUILD_TYPE="${2:-debug}"
 # Определяем package name в зависимости от типа сборки
 if [ "$BUILD_TYPE" = "release" ]; then
     APP_PACKAGE="$APP_PACKAGE_BASE"
-    APK_PATH="./app/build/outputs/apk/release/app-release.apk"
+    APK_DIR="./app/build/outputs/apk/release"
 else
     APP_PACKAGE="${APP_PACKAGE_BASE}.debug"
+    APK_DIR="./app/build/outputs/apk/debug"
 fi
+
+# Функция для поиска APK файла (учитывает split APK по архитектурам)
+find_apk() {
+    local apk_dir="$1"
+    local build_type="$2"
+    
+    # Сначала пробуем универсальное имя
+    if [ -f "$apk_dir/app-${build_type}.apk" ]; then
+        echo "$apk_dir/app-${build_type}.apk"
+        return
+    fi
+    
+    # Ищем split APK для архитектуры устройства или первый доступный
+    local found_apk=$(find "$apk_dir" -name "app-*-${build_type}.apk" -type f 2>/dev/null | head -1)
+    if [ -n "$found_apk" ]; then
+        echo "$found_apk"
+        return
+    fi
+    
+    # Если ничего не нашли, пробуем любой APK в директории
+    found_apk=$(find "$apk_dir" -name "*.apk" -type f 2>/dev/null | head -1)
+    if [ -n "$found_apk" ]; then
+        echo "$found_apk"
+        return
+    fi
+}
 
 # Проверяем наличие Gradle wrapper в RemoteCode3
 if [ ! -f "$REMOTE_CODE_DIR/gradlew" ]; then
@@ -141,11 +168,17 @@ build_app() {
         exit 1
     fi
     
-    if [ ! -f "$APK_PATH" ]; then
-        echo "❌ Ошибка: APK не найден по пути $APK_PATH"
+    # Ищем APK файл (учитывает split APK по архитектурам)
+    APK_PATH=$(find_apk "$APK_DIR" "$BUILD_TYPE")
+    
+    if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+        echo "❌ Ошибка: APK не найден в директории $APK_DIR"
+        echo "   Доступные файлы:"
+        ls -la "$APK_DIR" 2>/dev/null || echo "   Директория не существует"
         exit 1
     fi
     
+    echo "📦 Найден APK: $APK_PATH"
     echo "✅ Сборка завершена"
 }
 

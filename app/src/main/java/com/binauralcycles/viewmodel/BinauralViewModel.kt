@@ -98,6 +98,9 @@ class BinauralViewModel @Inject constructor(
             val state = _uiState.value
             if (state.activePreset != null) {
                 android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}, channelSwap=${state.channelSwapSettings.enabled}")
+                // Устанавливаем название активного пресета для уведомления
+                playbackService?.setCurrentPresetName(state.activePreset.name)
+                playbackService?.setCurrentPresetId(state.activePreset.id)
             }
             // Всегда вызываем updateAudioConfig - это обновит конфиг даже если activePreset ещё не загружен
             // (в этом случае будет использован дефолтный конфиг, который потом заменится при загрузке пресета)
@@ -107,6 +110,16 @@ class BinauralViewModel @Inject constructor(
             playbackService?.setFrequencyUpdateInterval(state.frequencyUpdateIntervalMs)
             playbackService?.setVolume(state.volume)
             playbackService?.setSampleRate(state.sampleRate)
+            
+            // Устанавливаем список ID пресетов для переключения с гарнитуры
+            val presetIdList = state.presets.map { it.id }
+            playbackService?.setPresetIds(presetIdList)
+            playbackService?.setCurrentPresetId(state.activePreset?.id)
+            
+            // Устанавливаем callback для переключения пресетов с гарнитуры
+            playbackService?.onPresetSwitch = { presetId ->
+                playPreset(presetId)
+            }
             
             // Наблюдаем за состоянием воспроизведения из сервиса
             observeServiceState()
@@ -144,6 +157,9 @@ class BinauralViewModel @Inject constructor(
             // Сначала загружаем пресеты
             preferencesRepository.getPresets().collect { presets ->
                 _uiState.update { it.copy(presets = presets) }
+                
+                // Обновляем список ID пресетов в сервисе для переключения с гарнитуры
+                playbackService?.setPresetIds(presets.map { it.id })
                 
                 // После обновления списка пресетов проверяем активный пресет
                 val activeId = preferencesRepository.getActivePresetId().first()
@@ -263,8 +279,11 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
-        // Устанавливаем название пресета для уведомления
-        playbackService?.setCurrentPresetName(preset.name)
+                // Устанавливаем название пресета для уведомления
+                playbackService?.setCurrentPresetName(preset.name)
+                
+                // Обновляем текущий ID пресета в сервисе
+                playbackService?.setCurrentPresetId(presetId)
         
         // Формируем конфиг из глобальных настроек каналов и нормализации
         val config = BinauralConfig(
