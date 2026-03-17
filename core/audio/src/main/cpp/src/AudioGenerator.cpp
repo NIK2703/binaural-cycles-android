@@ -152,7 +152,9 @@ GenerateResult AudioGenerator::generateBuffer(
     
     // Предвычисление констант
     const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
-    const float baseVolumeFactor = 0.5f * config.volume;
+    // baseVolumeFactor = 0.5: громкость всегда 1.0 в нативном движке,
+    // мастер-громкость управляется через AudioTrack.setVolume() в Java
+    constexpr float baseVolumeFactor = 0.5f;
     
     // Фазовые инкременты
     float leftOmega = twoPiOverSampleRate * startLeftFreq;
@@ -177,9 +179,15 @@ GenerateResult AudioGenerator::generateBuffer(
         std::max<int64_t>(config.channelSwapFadeDurationMs, 100LL) * m_sampleRate / 1000
     );
     
+    // Параметры паузы (в сэмплах)
+    const int pauseDurationSamples = static_cast<int>(
+        config.channelSwapPauseDurationMs * m_sampleRate / 1000
+    );
+    
     // Локальные переменные для состояния
     bool localIsFadingOut = state.isFadingOut;
     int64_t localFadeStartSample = state.fadeStartSample;
+    int64_t localPauseStartSample = state.pauseStartSample;
     bool localChannelsSwapped = state.channelsSwapped;
     GeneratorState::FadeOperation localFadeOperation = state.currentFadeOperation;
     int64_t swapExecutedAtSample = -1;
@@ -195,7 +203,7 @@ GenerateResult AudioGenerator::generateBuffer(
                 localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
                 localIsFadingOut = true;
                 localFadeStartSample = state.totalSamplesGenerated;
-                state.lastSwapElapsedMs = elapsedMs;
+                // lastSwapElapsedMs будет обновлён после завершения fade-in
             } else {
                 localChannelsSwapped = !localChannelsSwapped;
                 state.lastSwapElapsedMs = elapsedMs;
@@ -272,37 +280,67 @@ GenerateResult AudioGenerator::generateBuffer(
             }
         }
     } else {
-        // Медленный путь: есть fade (редкое событие)
+        // Медленный путь: есть fade или pause (редкое событие)
         const float invFadeDuration = 1.0f / channelSwapFadeDurationSamples;
         
         for (int i = 0; i < samplesPerChannel; ++i) {
             const int64_t currentSample = state.totalSamplesGenerated + i;
             float fadeMultiplier = 1.0;
             
-            // Обработка fade
-            const int64_t elapsedSamples = currentSample - localFadeStartSample;
-            const float progress = elapsedSamples * invFadeDuration;
-            
-            if (localIsFadingOut) {
-                if (progress >= 1.0) {
-                    fadeMultiplier = 0.0;
-                    if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+            // Обработка состояний: FADE_OUT -> PAUSE -> SWAP -> FADE_IN
+            if (localFadeOperation == GeneratorState::FadeOperation::PAUSE) {
+                // Состояние PAUSE: генерируем тишину
+                fadeMultiplier = 0.0;
+                
+                const int64_t elapsedPauseSamples = currentSample - localPauseStartSample;
+                if (elapsedPauseSamples >= pauseDurationSamples) {
+                    // Пауза завершена: выполняем swap и начинаем fade-in
+                    if (swapExecutedAtSample < 0) {
                         swapExecutedAtSample = currentSample;
                         localChannelsSwapped = !localChannelsSwapped;
                         result.channelsSwapped = true;
-                        localIsFadingOut = false;
-                        localFadeStartSample = currentSample;
                     }
-                } else if (progress >= 0.0) {
-                    fadeMultiplier = 1.0 - progress;
+                    localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+                    localIsFadingOut = false;
+                    localFadeStartSample = currentSample;
                 }
             } else {
-                if (progress >= 1.0) {
-                    fadeMultiplier = 1.0;
-                    result.fadePhaseCompleted = true;
-                    localFadeOperation = GeneratorState::FadeOperation::NONE;
-                } else if (progress >= 0.0) {
-                    fadeMultiplier = progress;
+                // Обработка fade
+                const int64_t elapsedSamples = currentSample - localFadeStartSample;
+                const float progress = elapsedSamples * invFadeDuration;
+                
+                if (localIsFadingOut) {
+                    if (progress >= 1.0) {
+                        fadeMultiplier = 0.0;
+                        if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                            // Fade-out завершён
+                            if (pauseDurationSamples > 0) {
+                                // Переходим в состояние PAUSE
+                                localFadeOperation = GeneratorState::FadeOperation::PAUSE;
+                                localPauseStartSample = currentSample;
+                            } else {
+                                // Без паузы: сразу swap и fade-in
+                                swapExecutedAtSample = currentSample;
+                                localChannelsSwapped = !localChannelsSwapped;
+                                result.channelsSwapped = true;
+                                localIsFadingOut = false;
+                                localFadeStartSample = currentSample;
+                            }
+                        }
+                    } else if (progress >= 0.0) {
+                        fadeMultiplier = 1.0 - progress;
+                    }
+                } else {
+                    if (progress >= 1.0) {
+                        fadeMultiplier = 1.0;
+                        result.fadePhaseCompleted = true;
+                        localFadeOperation = GeneratorState::FadeOperation::NONE;
+                        // Обновляем lastSwapElapsedMs только после завершения fade-in
+                        // Это гарантирует, что интервал не включает время fade и паузы
+                        state.lastSwapElapsedMs = elapsedMs;
+                    } else if (progress >= 0.0) {
+                        fadeMultiplier = progress;
+                    }
                 }
             }
             
@@ -348,6 +386,7 @@ GenerateResult AudioGenerator::generateBuffer(
     state.channelsSwapped = localChannelsSwapped;
     state.isFadingOut = localIsFadingOut;
     state.fadeStartSample = localFadeStartSample;
+    state.pauseStartSample = localPauseStartSample;
     state.currentFadeOperation = localFadeOperation;
     state.totalSamplesGenerated += samplesPerChannel;
     
@@ -401,7 +440,8 @@ GenerateResult AudioGenerator::generateBufferNeon(
     // Константы для NEON
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
-    const float baseVolumeFactor = 0.5f * config.volume;
+    // baseVolumeFactor = 0.5: громкость всегда 1.0 в нативном движке
+    constexpr float baseVolumeFactor = 0.5f;
     
     // Фазовые инкременты
     float leftOmega = twoPiOverSampleRate * startLeftFreq;
@@ -424,8 +464,14 @@ GenerateResult AudioGenerator::generateBufferNeon(
     );
     
     // Локальное состояние
+    // Параметры паузы (в сэмплах)
+    const int pauseDurationSamples = static_cast<int>(
+        config.channelSwapPauseDurationMs * m_sampleRate / 1000
+    );
+    
     bool localIsFadingOut = state.isFadingOut;
     int64_t localFadeStartSample = state.fadeStartSample;
+    int64_t localPauseStartSample = state.pauseStartSample;
     bool localChannelsSwapped = state.channelsSwapped;
     GeneratorState::FadeOperation localFadeOperation = state.currentFadeOperation;
     int64_t swapExecutedAtSample = -1;
@@ -441,7 +487,7 @@ GenerateResult AudioGenerator::generateBufferNeon(
                 localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
                 localIsFadingOut = true;
                 localFadeStartSample = state.totalSamplesGenerated;
-                state.lastSwapElapsedMs = elapsedMs;
+                // lastSwapElapsedMs будет обновлён после завершения fade-in
             } else {
                 localChannelsSwapped = !localChannelsSwapped;
                 state.lastSwapElapsedMs = elapsedMs;
@@ -608,29 +654,58 @@ GenerateResult AudioGenerator::generateBufferNeon(
                 const int64_t currentSample = currentSampleBase + j;
                 float fadeMultiplier = 1.0;
                 
-                const int64_t elapsedSamples = currentSample - localFadeStartSample;
-                const float progress = elapsedSamples * invFadeDuration;
-                
-                if (localIsFadingOut) {
-                    if (progress >= 1.0) {
-                        fadeMultiplier = 0.0;
-                        if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                // Обработка состояний: FADE_OUT -> PAUSE -> SWAP -> FADE_IN
+                if (localFadeOperation == GeneratorState::FadeOperation::PAUSE) {
+                    // Состояние PAUSE: генерируем тишину
+                    fadeMultiplier = 0.0;
+                    
+                    const int64_t elapsedPauseSamples = currentSample - localPauseStartSample;
+                    if (elapsedPauseSamples >= pauseDurationSamples) {
+                        // Пауза завершена: выполняем swap и начинаем fade-in
+                        if (swapExecutedAtSample < 0) {
                             swapExecutedAtSample = currentSample;
                             localChannelsSwapped = !localChannelsSwapped;
                             result.channelsSwapped = true;
-                            localIsFadingOut = false;
-                            localFadeStartSample = currentSample;
                         }
-                    } else if (progress >= 0.0) {
-                        fadeMultiplier = 1.0 - progress;
+                        localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+                        localIsFadingOut = false;
+                        localFadeStartSample = currentSample;
                     }
                 } else {
-                    if (progress >= 1.0) {
-                        fadeMultiplier = 1.0;
-                        result.fadePhaseCompleted = true;
-                        localFadeOperation = GeneratorState::FadeOperation::NONE;
-                    } else if (progress >= 0.0) {
-                        fadeMultiplier = progress;
+                    const int64_t elapsedSamples = currentSample - localFadeStartSample;
+                    const float progress = elapsedSamples * invFadeDuration;
+                    
+                    if (localIsFadingOut) {
+                        if (progress >= 1.0) {
+                            fadeMultiplier = 0.0;
+                            if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
+                                // Fade-out завершён
+                                if (pauseDurationSamples > 0) {
+                                    // Переходим в состояние PAUSE
+                                    localFadeOperation = GeneratorState::FadeOperation::PAUSE;
+                                    localPauseStartSample = currentSample;
+                                } else {
+                                    // Без паузы: сразу swap и fade-in
+                                    swapExecutedAtSample = currentSample;
+                                    localChannelsSwapped = !localChannelsSwapped;
+                                    result.channelsSwapped = true;
+                                    localIsFadingOut = false;
+                                    localFadeStartSample = currentSample;
+                                }
+                            }
+                        } else if (progress >= 0.0) {
+                            fadeMultiplier = 1.0 - progress;
+                        }
+                    } else {
+                        if (progress >= 1.0) {
+                            fadeMultiplier = 1.0;
+                            result.fadePhaseCompleted = true;
+                            localFadeOperation = GeneratorState::FadeOperation::NONE;
+                            // Обновляем lastSwapElapsedMs только после завершения fade-in
+                            state.lastSwapElapsedMs = elapsedMs;
+                        } else if (progress >= 0.0) {
+                            fadeMultiplier = progress;
+                        }
                     }
                 }
                 fadeMultipliers[j] = fadeMultiplier;
@@ -699,7 +774,24 @@ GenerateResult AudioGenerator::generateBufferNeon(
         const int64_t currentSample = state.totalSamplesGenerated + i;
         float fadeMultiplier = 1.0;
         
-        if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
+        // Обработка состояний: FADE_OUT -> PAUSE -> SWAP -> FADE_IN
+        if (localFadeOperation == GeneratorState::FadeOperation::PAUSE) {
+            // Состояние PAUSE: генерируем тишину
+            fadeMultiplier = 0.0;
+            
+            const int64_t elapsedPauseSamples = currentSample - localPauseStartSample;
+            if (elapsedPauseSamples >= pauseDurationSamples) {
+                // Пауза завершена: выполняем swap и начинаем fade-in
+                if (swapExecutedAtSample < 0) {
+                    swapExecutedAtSample = currentSample;
+                    localChannelsSwapped = !localChannelsSwapped;
+                    result.channelsSwapped = true;
+                }
+                localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+                localIsFadingOut = false;
+                localFadeStartSample = currentSample;
+            }
+        } else if (localFadeOperation != GeneratorState::FadeOperation::NONE) {
             const int64_t elapsedSamples = currentSample - localFadeStartSample;
             const float progress = static_cast<float>(elapsedSamples) / channelSwapFadeDurationSamples;
             
@@ -707,11 +799,19 @@ GenerateResult AudioGenerator::generateBufferNeon(
                 if (progress >= 1.0) {
                     fadeMultiplier = 0.0;
                     if (localFadeOperation == GeneratorState::FadeOperation::CHANNEL_SWAP && swapExecutedAtSample < 0) {
-                        swapExecutedAtSample = currentSample;
-                        localChannelsSwapped = !localChannelsSwapped;
-                        result.channelsSwapped = true;
-                        localIsFadingOut = false;
-                        localFadeStartSample = currentSample;
+                        // Fade-out завершён
+                        if (pauseDurationSamples > 0) {
+                            // Переходим в состояние PAUSE
+                            localFadeOperation = GeneratorState::FadeOperation::PAUSE;
+                            localPauseStartSample = currentSample;
+                        } else {
+                            // Без паузы: сразу swap и fade-in
+                            swapExecutedAtSample = currentSample;
+                            localChannelsSwapped = !localChannelsSwapped;
+                            result.channelsSwapped = true;
+                            localIsFadingOut = false;
+                            localFadeStartSample = currentSample;
+                        }
                     }
                 } else if (progress >= 0.0) {
                     fadeMultiplier = 1.0 - progress;
@@ -757,6 +857,7 @@ GenerateResult AudioGenerator::generateBufferNeon(
     state.channelsSwapped = localChannelsSwapped;
     state.isFadingOut = localIsFadingOut;
     state.fadeStartSample = localFadeStartSample;
+    state.pauseStartSample = localPauseStartSample;
     state.currentFadeOperation = localFadeOperation;
     state.totalSamplesGenerated += samplesPerChannel;
     
@@ -805,7 +906,8 @@ GenerateResult AudioGenerator::generateBufferSse(
     
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
-    const float baseVolumeFactor = 0.5f * config.volume;
+    // baseVolumeFactor = 0.5: громкость всегда 1.0 в нативном движке
+    constexpr float baseVolumeFactor = 0.5f;
     
     float leftOmega = twoPiOverSampleRate * startLeftFreq;
     float rightOmega = twoPiOverSampleRate * startRightFreq;
@@ -840,7 +942,7 @@ GenerateResult AudioGenerator::generateBufferSse(
                 localFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
                 localIsFadingOut = true;
                 localFadeStartSample = state.totalSamplesGenerated;
-                state.lastSwapElapsedMs = elapsedMs;
+                // lastSwapElapsedMs будет обновлён после завершения fade-in
             } else {
                 localChannelsSwapped = !localChannelsSwapped;
                 state.lastSwapElapsedMs = elapsedMs;
@@ -1011,6 +1113,8 @@ GenerateResult AudioGenerator::generateBufferSse(
                         fadeMultiplier = 1.0;
                         result.fadePhaseCompleted = true;
                         localFadeOperation = GeneratorState::FadeOperation::NONE;
+                        // Обновляем lastSwapElapsedMs только после завершения fade-in
+                        state.lastSwapElapsedMs = elapsedMs;
                     } else if (progress >= 0.0) {
                         fadeMultiplier = progress;
                     }

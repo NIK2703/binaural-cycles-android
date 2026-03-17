@@ -110,6 +110,7 @@ struct BinauralConfig {
     int32_t channelSwapIntervalSec = 300;  // 5 минут
     bool channelSwapFadeEnabled = true;
     int64_t channelSwapFadeDurationMs = 1000;
+    int64_t channelSwapPauseDurationMs = 0;  // Пауза между fade-out и fade-in (0 = без паузы)
     
     // Настройки нормализации
     NormalizationType normalizationType = NormalizationType::TEMPORAL;
@@ -131,12 +132,14 @@ struct GeneratorState {
     enum class FadeOperation : int8_t {
         NONE = 0,
         CHANNEL_SWAP = 1,
-        PRESET_SWITCH = 2
+        PRESET_SWITCH = 2,
+        PAUSE = 3  // Пауза между fade-out и fade-in
     };
     
     FadeOperation currentFadeOperation = FadeOperation::NONE;
     bool isFadingOut = true;
     int64_t fadeStartSample = 0;
+    int64_t pauseStartSample = 0;  // Начало паузы (в сэмплах)
 };
 
 } // namespace binaural

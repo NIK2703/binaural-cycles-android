@@ -17,7 +17,7 @@ import com.binauralcycles.R
 private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 /**
- * Компактная нижняя панель с информацией о текущих частотах и управлением воспроизведением.
+ * Компактная нижняя панель с информацией о текущих частотах и управлении воспроизведением.
  * Отображается поверх всех экранов приложения.
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -29,7 +29,8 @@ fun BottomPlaybackPanel(
     isPlaying: Boolean,
     volume: Float,
     onPlayClick: () -> Unit,
-    onVolumeChange: (Float) -> Unit,
+    onVolumeChange: (Float) -> Unit,  // Вызывается при движении для мгновенного применения
+    onVolumeSave: () -> Unit,  // Вызывается при отпускании для сохранения
     modifier: Modifier = Modifier
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0f
@@ -116,48 +117,40 @@ fun BottomPlaybackPanel(
                 }
             }
             
-            // Слайдер громкости (компактный)
+            // Слайдер громкости
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.widthIn(max = 120.dp)
+                modifier = Modifier.widthIn(max = 160.dp)
             ) {
                 Icon(
                     Icons.Default.VolumeDown,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp)
+                    modifier = Modifier.size(22.dp)
                 )
                 Slider(
                     value = localVolume,
                     onValueChange = { 
                         localVolume = it
-                        onVolumeChange(it) // Мгновенное применение громкости
+                        onVolumeChange(it) // Мгновенное применение к аудио-движку
+                    },
+                    onValueChangeFinished = {
+                        onVolumeSave() // Сохранение в preferences при отпускании
                     },
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 4.dp)
-                        .height(16.dp),
+                        .height(24.dp),
                     thumb = {
-                        Box(
-                            modifier = Modifier
-                                .size(14.dp)
-                                .padding(1.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(2.dp)
-                            )
-                            SliderDefaults.Thumb(
-                                interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
-                                modifier = Modifier.size(14.dp)
-                            )
-                        }
+                        SliderDefaults.Thumb(
+                            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                            modifier = Modifier.size(18.dp)
+                        )
                     },
                     track = { sliderState ->
                         SliderDefaults.Track(
                             sliderState = sliderState,
-                            modifier = Modifier.height(3.dp),
+                            modifier = Modifier.height(4.dp),
                             thumbTrackGapSize = 2.dp
                         )
                     }

@@ -56,6 +56,8 @@
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
     <string name="instant_switch">Мгновенное переключение</string>
     <string name="fade_duration">Время затухания</string>
+    <string name="pause_on_switch">Пауза при переключении</string>
+    <string name="no_pause">Без паузы</string>
     
     <!-- Volume Normalization -->
     <string name="volume_normalization">Нормализация громкости</string>

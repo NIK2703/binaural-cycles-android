@@ -136,6 +136,7 @@ class BinauralPreferencesRepository @Inject constructor(
         private val CHANNEL_SWAP_INTERVAL_KEY = intPreferencesKey("channel_swap_interval")
         private val CHANNEL_SWAP_FADE_ENABLED_KEY = booleanPreferencesKey("channel_swap_fade_enabled")
         private val CHANNEL_SWAP_FADE_DURATION_KEY = intPreferencesKey("channel_swap_fade_duration")
+        private val CHANNEL_SWAP_PAUSE_DURATION_KEY = intPreferencesKey("channel_swap_pause_duration")
         // Настройки нормализации громкости
         private val VOLUME_NORMALIZATION_TYPE_KEY = stringPreferencesKey("volume_normalization_type")
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
@@ -279,8 +280,9 @@ class BinauralPreferencesRepository @Inject constructor(
             ChannelSwapSettings(
                 enabled = preferences[CHANNEL_SWAP_ENABLED_KEY] ?: false,
                 intervalSeconds = preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60,
-                fadeEnabled = preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true,
-                fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L
+                fadeEnabled = true, // Всегда включено
+                fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L,
+                pauseDurationMs = preferences[CHANNEL_SWAP_PAUSE_DURATION_KEY]?.toLong() ?: 0L
             )
         }
     }
@@ -292,8 +294,9 @@ class BinauralPreferencesRepository @Inject constructor(
         dataStore.edit { preferences ->
             preferences[CHANNEL_SWAP_ENABLED_KEY] = settings.enabled
             preferences[CHANNEL_SWAP_INTERVAL_KEY] = settings.intervalSeconds
-            preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] = settings.fadeEnabled
+            // fadeEnabled всегда true, не сохраняем
             preferences[CHANNEL_SWAP_FADE_DURATION_KEY] = settings.fadeDurationMs.toInt()
+            preferences[CHANNEL_SWAP_PAUSE_DURATION_KEY] = settings.pauseDurationMs.toInt()
         }
     }
     

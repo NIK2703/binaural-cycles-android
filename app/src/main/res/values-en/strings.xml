@@ -56,6 +56,8 @@
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>
     <string name="fade_duration">Fade duration</string>
+    <string name="pause_on_switch">Pause on switch</string>
+    <string name="no_pause">No pause</string>
     
     <!-- Volume Normalization -->
     <string name="volume_normalization">Volume normalization</string>

@@ -200,6 +200,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jint channelSwapIntervalSec,
     jboolean channelSwapFadeEnabled,
     jlong channelSwapFadeDurationMs,
+    jlong channelSwapPauseDurationMs,
     jint normalizationType,
     jfloat volumeNormalizationStrength
 ) {
@@ -234,6 +235,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     config.channelSwapIntervalSec = channelSwapIntervalSec;
     config.channelSwapFadeEnabled = channelSwapFadeEnabled;
     config.channelSwapFadeDurationMs = channelSwapFadeDurationMs;
+    config.channelSwapPauseDurationMs = channelSwapPauseDurationMs;
     config.normalizationType = static_cast<binaural::NormalizationType>(normalizationType);
     config.volumeNormalizationStrength = volumeNormalizationStrength;
     

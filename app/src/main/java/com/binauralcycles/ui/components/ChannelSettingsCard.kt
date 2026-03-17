@@ -245,8 +245,8 @@ fun ChannelSwapSettingsCard(
     isChannelsSwapped: Boolean,
     onChannelSwapEnabledChange: (Boolean) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
-    onChannelSwapFadeEnabledChange: (Boolean) -> Unit,
-    onChannelSwapFadeDurationChange: (Long) -> Unit
+    onChannelSwapFadeDurationChange: (Long) -> Unit,
+    onChannelSwapPauseDurationChange: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -272,36 +272,30 @@ fun ChannelSwapSettingsCard(
                 label = stringResource(R.string.swap_interval),
                 value = channelSwapSettings.intervalSeconds,
                 values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
-                valueLabel = formatInterval(channelSwapSettings.intervalSeconds),
+                formatValue = { seconds -> formatInterval(seconds) },
                 onValueChange = onChannelSwapIntervalChange,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
             
-            // Затухание при смене каналов
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.smooth_fade)) },
-                supportingContent = { 
-                    Text(if (channelSwapSettings.fadeEnabled) stringResource(R.string.smooth_fade_description) else stringResource(R.string.instant_switch))
-                },
-                trailingContent = {
-                    Switch(
-                        checked = channelSwapSettings.fadeEnabled,
-                        onCheckedChange = onChannelSwapFadeEnabledChange
-                    )
-                }
+            // Слайдер длительности затухания (всегда показываем, т.к. fadeEnabled всегда true)
+            DiscreteSliderLong(
+                label = stringResource(R.string.fade_duration),
+                value = channelSwapSettings.fadeDurationMs,
+                values = listOf(1000L, 2000L, 3000L, 4000L, 5000L, 6000L, 7000L, 8000L, 9000L, 10000L, 11000L, 12000L, 13000L, 14000L, 15000L),
+                formatValue = { ms -> formatFadeDurationLabel(ms) },
+                onValueChange = onChannelSwapFadeDurationChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
             
-            // Слайдер длительности затухания
-            if (channelSwapSettings.fadeEnabled) {
-                DiscreteSliderLong(
-                    label = stringResource(R.string.fade_duration),
-                    value = channelSwapSettings.fadeDurationMs,
-                    values = listOf(250L, 500L, 1000L, 1500L, 2000L, 3000L, 5000L),
-                    valueLabel = formatFadeDurationLabel(channelSwapSettings.fadeDurationMs),
-                    onValueChange = onChannelSwapFadeDurationChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
+            // Слайдер длительности паузы при переключении (расширенный диапазон до 1 минуты)
+            DiscreteSliderLong(
+                label = stringResource(R.string.pause_on_switch),
+                value = channelSwapSettings.pauseDurationMs,
+                values = listOf(0L, 1000L, 2000L, 3000L, 5000L, 10000L, 20000L, 30000L, 60000L),
+                formatValue = { ms -> formatPauseDurationLabel(ms) },
+                onValueChange = onChannelSwapPauseDurationChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
         }
     }
 }
@@ -337,7 +331,7 @@ fun PowerSettingsCard(
                 label = "",
                 value = frequencyUpdateIntervalMs,
                 values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
-                valueLabel = formatUpdateInterval(frequencyUpdateIntervalMs),
+                formatValue = { ms -> formatUpdateInterval(ms) },
                 onValueChange = onFrequencyUpdateIntervalChange,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -432,16 +426,20 @@ fun PowerSettingsCard(
 
 /**
  * Дискретный слайдер для Int значений
+ * Использует локальное состояние для мгновенного отклика UI и сохраняет при отпускании
  */
 @Composable
 fun DiscreteSlider(
     label: String,
     value: Int,
     values: List<Int>,
-    valueLabel: String,
+    formatValue: @Composable (Int) -> String,
     onValueChange: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Локальное состояние для мгновенного отклика UI
+    var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -452,16 +450,18 @@ fun DiscreteSlider(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                valueLabel,
+                formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
         }
         Slider(
-            value = values.indexOf(value).toFloat(),
+            value = localIndex.toFloat(),
             onValueChange = { index ->
-                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
-                onValueChange(values[newIndex])
+                localIndex = index.toInt().coerceIn(0, values.lastIndex)
+            },
+            onValueChangeFinished = {
+                onValueChange(values[localIndex])
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
@@ -472,16 +472,20 @@ fun DiscreteSlider(
 
 /**
  * Дискретный слайдер для Long значений
+ * Использует локальное состояние для мгновенного отклика UI и сохраняет при отпускании
  */
 @Composable
 fun DiscreteSliderLong(
     label: String,
     value: Long,
     values: List<Long>,
-    valueLabel: String,
+    formatValue: @Composable (Long) -> String,
     onValueChange: (Long) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Локальное состояние для мгновенного отклика UI
+    var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -492,16 +496,18 @@ fun DiscreteSliderLong(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                valueLabel,
+                formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
         }
         Slider(
-            value = values.indexOf(value).toFloat(),
+            value = localIndex.toFloat(),
             onValueChange = { index ->
-                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
-                onValueChange(values[newIndex])
+                localIndex = index.toInt().coerceIn(0, values.lastIndex)
+            },
+            onValueChangeFinished = {
+                onValueChange(values[localIndex])
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
@@ -556,9 +562,33 @@ fun formatFadeDuration(ms: Long): String {
  */
 @Composable
 fun formatFadeDurationLabel(ms: Long): String {
-    val seconds = ms / 1000.0
+    val seconds = ms / 1000
     val secFull = stringResource(R.string.seconds_full)
-    return "${seconds} $secFull"
+    return "$seconds $secFull"
+}
+
+/**
+ * Форматирование длительности паузы для отображения в UI (до 1 минуты)
+ */
+@Composable
+fun formatPauseDurationLabel(ms: Long): String {
+    if (ms == 0L) {
+        return stringResource(R.string.no_pause)
+    }
+    val secFull = stringResource(R.string.seconds_full)
+    val minShort = stringResource(R.string.minutes_short)
+    
+    return when {
+        ms < 1000 -> "$ms ${stringResource(R.string.milliseconds_short)}"
+        ms < 60000 -> {
+            val seconds = ms / 1000
+            "$seconds $secFull"
+        }
+        else -> {
+            val minutes = ms / 60000
+            "$minutes $minShort"
+        }
+    }
 }
 
 /**
@@ -577,16 +607,20 @@ fun formatUpdateInterval(ms: Int): String {
 
 /**
  * Дискретный слайдер для размера таблицы волн
+ * Использует локальное состояние для мгновенного отклика UI и сохраняет при отпускании
  */
 @Composable
 fun DiscreteSliderWavetableSize(
     label: String,
     value: Int,
     values: List<Int>,
-    valueLabel: String,
+    formatValue: @Composable (Int) -> String,
     onValueChange: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    // Локальное состояние для мгновенного отклика UI
+    var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -597,16 +631,18 @@ fun DiscreteSliderWavetableSize(
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
-                valueLabel,
+                formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.primary
             )
         }
         Slider(
-            value = values.indexOf(value).toFloat(),
+            value = localIndex.toFloat(),
             onValueChange = { index ->
-                val newIndex = index.toInt().coerceIn(0, values.lastIndex)
-                onValueChange(values[newIndex])
+                localIndex = index.toInt().coerceIn(0, values.lastIndex)
+            },
+            onValueChangeFinished = {
+                onValueChange(values[localIndex])
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
@@ -726,7 +762,7 @@ fun RelaxationModeCard(
                     label = stringResource(R.string.gap_between_relaxation),
                     value = relaxationModeSettings.gapBetweenRelaxationMinutes,
                     values = listOf(10, 15, 20, 30, 45, 60, 90, 120),
-                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.gapBetweenRelaxationMinutes),
+                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationGapChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
@@ -736,7 +772,7 @@ fun RelaxationModeCard(
                     label = stringResource(R.string.relaxation_duration),
                     value = relaxationModeSettings.relaxationDurationMinutes,
                     values = listOf(10, 15, 20, 30, 45, 60),
-                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.relaxationDurationMinutes),
+                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationDurationChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
@@ -746,7 +782,7 @@ fun RelaxationModeCard(
                     label = stringResource(R.string.transition_period),
                     value = relaxationModeSettings.transitionPeriodMinutes,
                     values = listOf(1, 2, 3, 5, 7, 10),
-                    valueLabel = stringResource(R.string.minutes_format, relaxationModeSettings.transitionPeriodMinutes),
+                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onTransitionPeriodChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
@@ -755,6 +791,11 @@ fun RelaxationModeCard(
             }
             
             // Слайдер снижения несущей частоты
+            // Локальное состояние для мгновенного отклика UI
+            var localCarrierReduction by remember(relaxationModeSettings.carrierReductionPercent) {
+                mutableIntStateOf(relaxationModeSettings.carrierReductionPercent)
+            }
+            
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -765,20 +806,28 @@ fun RelaxationModeCard(
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
-                        stringResource(R.string.reduction_percent_format, relaxationModeSettings.carrierReductionPercent),
+                        stringResource(R.string.reduction_percent_format, localCarrierReduction),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Slider(
-                    value = relaxationModeSettings.carrierReductionPercent.toFloat(),
-                    onValueChange = { onCarrierReductionChange(it.toInt()) },
+                    value = localCarrierReduction.toFloat(),
+                    onValueChange = { localCarrierReduction = it.toInt() },
+                    onValueChangeFinished = {
+                        onCarrierReductionChange(localCarrierReduction)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     valueRange = 0f..50f
                 )
             }
             
             // Слайдер снижения частоты биений
+            // Локальное состояние для мгновенного отклика UI
+            var localBeatReduction by remember(relaxationModeSettings.beatReductionPercent) {
+                mutableIntStateOf(relaxationModeSettings.beatReductionPercent)
+            }
+            
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -789,14 +838,17 @@ fun RelaxationModeCard(
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
-                        stringResource(R.string.reduction_percent_format, relaxationModeSettings.beatReductionPercent),
+                        stringResource(R.string.reduction_percent_format, localBeatReduction),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Slider(
-                    value = relaxationModeSettings.beatReductionPercent.toFloat(),
-                    onValueChange = { onBeatReductionChange(it.toInt()) },
+                    value = localBeatReduction.toFloat(),
+                    onValueChange = { localBeatReduction = it.toInt() },
+                    onValueChangeFinished = {
+                        onBeatReductionChange(localBeatReduction)
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     valueRange = 0f..100f
                 )
