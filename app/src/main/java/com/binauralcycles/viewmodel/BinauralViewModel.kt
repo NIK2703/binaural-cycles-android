@@ -206,11 +206,12 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.setFrequencyUpdateInterval(interval)
             }
         }
-        // Громкость
+        // Громкость - загружаем только для UI
+        // Громкость в сервис устанавливается через setVolumeImmediate() при движении слайдера
+        // или при подключении сервиса в onServiceConnected
         viewModelScope.launch {
             preferencesRepository.getVolume().collect { volume ->
                 _uiState.update { it.copy(volume = volume) }
-                playbackService?.setVolume(volume)
             }
         }
         // Глобальные настройки перестановки каналов
@@ -293,6 +294,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapIntervalSeconds = state.channelSwapSettings.intervalSeconds,
             channelSwapFadeEnabled = state.channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = state.channelSwapSettings.fadeDurationMs,
+            channelSwapPauseDurationMs = state.channelSwapSettings.pauseDurationMs,
             normalizationType = state.volumeNormalizationSettings.type,
             volumeNormalizationStrength = state.volumeNormalizationSettings.strength
         )
@@ -514,12 +516,22 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
-    fun setVolume(volume: Float) {
+    /**
+     * Установить громкость мгновенно (без сохранения в preferences).
+     * Вызывается при движении слайдера для мгновенного применения к аудио-движку.
+     */
+    fun setVolumeImmediate(volume: Float) {
         _uiState.update { it.copy(volume = volume) }
         playbackService?.setVolume(volume)
-        // Сохраняем громкость в preferences для восстановления при следующем запуске
+    }
+    
+    /**
+     * Сохранить текущую громкость в preferences.
+     * Вызывается при отпускании слайдера.
+     */
+    fun saveVolume() {
         viewModelScope.launch {
-            preferencesRepository.saveVolume(volume)
+            preferencesRepository.saveVolume(_uiState.value.volume)
         }
     }
 
@@ -1086,8 +1098,21 @@ class BinauralViewModel @Inject constructor(
      */
     fun setChannelSwapFadeDuration(ms: Long) {
         val state = _uiState.value
-        val clampedMs = ms.coerceIn(100L, 5000L)
+        val clampedMs = ms.coerceIn(1000L, 15000L)
         val newSettings = state.channelSwapSettings.copy(fadeDurationMs = clampedMs)
+        _uiState.update { it.copy(channelSwapSettings = newSettings) }
+        viewModelScope.launch {
+            preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
+    
+    /**
+     * Установить длительность паузы при переключении каналов (до 1 минуты)
+     */
+    fun setChannelSwapPauseDuration(ms: Long) {
+        val state = _uiState.value
+        val clampedMs = ms.coerceIn(0L, 60000L)
+        val newSettings = state.channelSwapSettings.copy(pauseDurationMs = clampedMs)
         _uiState.update { it.copy(channelSwapSettings = newSettings) }
         viewModelScope.launch {
             preferencesRepository.saveChannelSwapSettings(newSettings)
@@ -1123,6 +1148,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
             channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
+            channelSwapPauseDurationMs = channelSwapSettings.pauseDurationMs,
             normalizationType = volumeNormalizationSettings.type,
             volumeNormalizationStrength = volumeNormalizationSettings.strength
         )

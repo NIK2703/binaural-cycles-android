@@ -99,7 +99,8 @@ fun BinauralNavigation(
                         isPlaying = uiState.isPlaying,
                         volume = uiState.volume,
                         onPlayClick = { viewModel.togglePlayback() },
-                        onVolumeChange = { viewModel.setVolume(it) }
+                        onVolumeChange = { viewModel.setVolumeImmediate(it) },
+                        onVolumeSave = { viewModel.saveVolume() }
                     )
                 }
             },

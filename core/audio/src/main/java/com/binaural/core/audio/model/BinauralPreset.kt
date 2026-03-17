@@ -327,6 +327,7 @@ data class BinauralConfig(
     val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию
     val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
     val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
+    val channelSwapPauseDurationMs: Long = 0L, // длительность паузы между fade-out и fade-in (0 = без паузы)
     // Настройки нормализации громкости
     val normalizationType: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
     val volumeNormalizationStrength: Float = 0.5f, // от 0 до 2.0
@@ -378,7 +379,8 @@ data class ChannelSwapSettings(
     val enabled: Boolean = false,
     val intervalSeconds: Int = 300,        // 5 минут по умолчанию
     val fadeEnabled: Boolean = true,       // затухание при смене каналов
-    val fadeDurationMs: Long = 1000L       // длительность затухания/нарастания в мс
+    val fadeDurationMs: Long = 1000L,      // длительность затухания/нарастания в мс
+    val pauseDurationMs: Long = 0L         // длительность паузы между fade-out и fade-in в мс (0 = без паузы)
 )
 
 /**

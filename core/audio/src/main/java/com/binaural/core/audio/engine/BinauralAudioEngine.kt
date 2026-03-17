@@ -41,7 +41,7 @@ enum class SampleRate(val value: Int) {
  * АРХИТЕКТУРА:
  * - Генерация аудио делегируется в NativeAudioEngine (C++)
  * - Этот класс управляет AudioTrack и VolumeShaper для воспроизведения
- * - VolumeShaper обеспечивает плавные переходы громкости
+ * - VolumeShaper обеспечивает плавные переходы при старте/остановке
  */
 class BinauralAudioEngine(private val context: Context) {
 
@@ -93,12 +93,12 @@ class BinauralAudioEngine(private val context: Context) {
     // WakeLock для предотвращения засыпания
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // VolumeShaper для плавного изменения громкости
+    // VolumeShaper для плавного изменения громкости при старте/остановке
     @Volatile
     private var volumeShaper: VolumeShaper? = null
     
-    // Текущая громкость fade (0.0 - 1.0)
-    private var currentFadeVolume: Float = 0.0f
+    // Текущая громкость (0.0 - 1.0)
+    private var currentVolume: Float = 1.0f
     
     // Трекинг параметров fade
     private var fadeStartTime: Long = 0L
@@ -197,17 +197,17 @@ class BinauralAudioEngine(private val context: Context) {
             stopWithFadeRequested.set(false)
             pauseWithFadeRequested.set(false)
             
-            val savedVolume = getVolumeFromShaper()
+            val savedVolume = currentVolume
             
             try {
                 volumeShaper?.close()
                 volumeShaper = null
-                audioTrack?.setVolume(0.0f)
+                audioTrack?.setVolume(savedVolume)
             } catch (e: Exception) {
-                Log.e(TAG, "Error setting volume to 0: ${e.message}")
+                Log.e(TAG, "Error setting volume: ${e.message}")
             }
             
-            currentFadeVolume = savedVolume
+            currentVolume = savedVolume
             isActive.set(false)
             isFadeInProgress = false
             try {
@@ -311,7 +311,7 @@ class BinauralAudioEngine(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        audioTrack?.setVolume(1.0f)
+        audioTrack?.setVolume(currentVolume)
         audioTrackBufferSize = bufferSize
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
     }
@@ -325,12 +325,12 @@ class BinauralAudioEngine(private val context: Context) {
         
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                volumeShaper?.volume ?: currentFadeVolume
+                volumeShaper?.volume ?: currentVolume
             } catch (e: Exception) {
-                currentFadeVolume
+                currentVolume
             }
         } else {
-            currentFadeVolume
+            currentVolume
         }
     }
     
@@ -340,11 +340,11 @@ class BinauralAudioEngine(private val context: Context) {
         try {
             volumeShaper?.close()
             
-            val startVolume = currentFadeVolume.coerceIn(MIN_VOLUME, 1.0f)
+            val startVolume = currentVolume.coerceIn(MIN_VOLUME, 1.0f)
             val clampedTarget = targetVolume.coerceIn(0.0f, 1.0f)
             
             if (kotlin.math.abs(startVolume - clampedTarget) < 0.01f) {
-                currentFadeVolume = clampedTarget
+                currentVolume = clampedTarget
                 isFadeInProgress = false
                 audioTrack?.setVolume(clampedTarget)
                 return
@@ -552,12 +552,12 @@ class BinauralAudioEngine(private val context: Context) {
     
     private fun startFadeOut(durationMs: Long, callback: () -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            currentFadeVolume = getVolumeFromShaper()
+            currentVolume = getVolumeFromShaper()
             
-            val adjustedDuration = if (currentFadeVolume <= MIN_VOLUME) {
+            val adjustedDuration = if (currentVolume <= MIN_VOLUME) {
                 0L
             } else {
-                (durationMs * currentFadeVolume).toLong().coerceAtLeast(50)
+                (durationMs * currentVolume).toLong().coerceAtLeast(50)
             }
             
             createVolumeShaper(durationMs, targetVolume = 0.0f)
@@ -628,7 +628,7 @@ class BinauralAudioEngine(private val context: Context) {
         
         if (!_isPlaying.value) return
         
-        currentFadeVolume = getVolumeFromShaper()
+        currentVolume = getVolumeFromShaper()
         _isPlaying.value = false
         startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
             isActive.set(false)
@@ -639,7 +639,7 @@ class BinauralAudioEngine(private val context: Context) {
     private fun startFadeOutImmediate(durationMs: Long, onComplete: () -> Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             try {
-                val startVolume = currentFadeVolume.coerceIn(MIN_VOLUME, 1.0f)
+                val startVolume = currentVolume.coerceIn(MIN_VOLUME, 1.0f)
                 
                 if (startVolume <= MIN_VOLUME) {
                     onComplete()
@@ -693,7 +693,7 @@ class BinauralAudioEngine(private val context: Context) {
         volumeShaper = null
         isFadeInProgress = false
         
-        currentFadeVolume = if (finalVolume < 0.05f) 0.0f else finalVolume
+        currentVolume = if (finalVolume < 0.05f) 0.0f else finalVolume
         
         releaseWakeLock()
         resetState()
@@ -705,7 +705,7 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun cleanupPlayback() {
-        currentFadeVolume = getVolumeFromShaper()
+        currentVolume = getVolumeFromShaper()
         
         audioTrack?.stop()
         audioTrack?.release()
@@ -738,7 +738,7 @@ class BinauralAudioEngine(private val context: Context) {
         if (!_isPlaying.value) return
         
         // Немедленно запускаем fade-out, не дожидаясь цикла генерации
-        currentFadeVolume = getVolumeFromShaper()
+        currentVolume = getVolumeFromShaper()
         _isPlaying.value = false
         
         startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
@@ -772,14 +772,30 @@ class BinauralAudioEngine(private val context: Context) {
     }
 
     /**
-     * Установить громкость
+     * Установить громкость в реальном времени.
+     * Использует прямую установку AudioTrack.setVolume() для мгновенного отклика.
+     * 
+     * ПРИМЕЧАНИЕ: VolumeShaper НЕ используется для слайдера громкости, потому что:
+     * - При быстрых движениях слайдера создаётся множество VolumeShaper
+     * - VolumeShaper работает асинхронно и не успевает завершиться
+     * - Это приводит к рассинхронизации реальной громкости с позицией слайдера
+     * 
+     * VolumeShaper используется только для плавных переходов при:
+     * - Старт воспроизведения (fade-in)
+     * - Остановка/пауза воспроизведения (fade-out)
      */
     fun setVolume(volume: Float) {
         val clampedVolume = volume.coerceIn(0f, 1f)
-        val currentConfig = configRef.get()
-        configRef.set(currentConfig.copy(volume = clampedVolume))
-        _currentConfig.value = configRef.get()
-        Log.d(TAG, "Volume set to $clampedVolume")
+        
+        val track = audioTrack
+        if (track != null && isActive.get()) {
+            // Прямая установка громкости - мгновенный отклик
+            // Мастер-громкость управляется только через AudioTrack;
+            // в нативном движке volume всегда 1.0 для корректной работы fade
+            track.setVolume(clampedVolume)
+            currentVolume = clampedVolume
+            Log.d(TAG, "Volume set to $clampedVolume")
+        }
     }
     
     /**
@@ -793,7 +809,7 @@ class BinauralAudioEngine(private val context: Context) {
         val wasPlaying = _isPlaying.value
         
         if (wasPlaying) {
-            currentFadeVolume = getVolumeFromShaper()
+            currentVolume = getVolumeFromShaper()
             
             isActive.set(false)
             _isPlaying.value = false

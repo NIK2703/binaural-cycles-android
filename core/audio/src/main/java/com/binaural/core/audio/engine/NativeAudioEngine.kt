@@ -66,6 +66,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         channelSwapIntervalSec: Int,
         channelSwapFadeEnabled: Boolean,
         channelSwapFadeDurationMs: Long,
+        channelSwapPauseDurationMs: Long,
         normalizationType: Int,
         volumeNormalizationStrength: Float
     )
@@ -188,11 +189,12 @@ class NativeAudioEngine : NativeAudioEngineCallback {
             beatFreqs = beatFreqs,
             interpolationType = interpolationType,
             splineTension = curve.splineTension,
-            volume = config.volume,
+            volume = 1.0f,  // Фиксированная громкость в нативном движке; мастер-громкость управляется через AudioTrack
             channelSwapEnabled = config.channelSwapEnabled,
             channelSwapIntervalSec = config.channelSwapIntervalSeconds,
             channelSwapFadeEnabled = config.channelSwapFadeEnabled,
             channelSwapFadeDurationMs = config.channelSwapFadeDurationMs,
+            channelSwapPauseDurationMs = config.channelSwapPauseDurationMs,
             normalizationType = normalizationType,
             volumeNormalizationStrength = config.volumeNormalizationStrength
         )

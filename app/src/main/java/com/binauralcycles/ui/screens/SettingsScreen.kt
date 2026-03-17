@@ -63,8 +63,8 @@ fun SettingsScreen(
                 isChannelsSwapped = uiState.isChannelsSwapped,
                 onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
-                onChannelSwapFadeEnabledChange = { viewModel.setChannelSwapFadeEnabled(it) },
-                onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) }
+                onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
+                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) }
             )
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))

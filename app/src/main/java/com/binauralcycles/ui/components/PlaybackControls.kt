@@ -14,10 +14,14 @@ import com.binauralcycles.R
 @Composable
 fun VolumeSlider(
     volume: Float,
-    onVolumeChange: (Float) -> Unit,
+    onVolumeChange: (Float) -> Unit,  // Вызывается при движении для мгновенного применения
+    onVolumeSave: () -> Unit,  // Вызывается при отпускании для сохранения
     modifier: Modifier = Modifier
 ) {
     val volumeLabel = stringResource(R.string.volume)
+    // Локальное состояние для мгновенного отклика UI
+    var localVolume by remember(volume) { mutableFloatStateOf(volume) }
+    
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically
@@ -29,8 +33,14 @@ fun VolumeSlider(
             modifier = Modifier.size(20.dp)
         )
         Slider(
-            value = volume,
-            onValueChange = onVolumeChange,
+            value = localVolume,
+            onValueChange = { 
+                localVolume = it
+                onVolumeChange(it) // Мгновенное применение к аудио-движку
+            },
+            onValueChangeFinished = {
+                onVolumeSave() // Сохранение в preferences при отпускании
+            },
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 8.dp)
