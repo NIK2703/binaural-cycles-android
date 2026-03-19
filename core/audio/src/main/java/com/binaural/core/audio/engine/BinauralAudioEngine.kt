@@ -439,10 +439,15 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            // Обновляем StateFlows из нативного движка
+            // PULL MODEL: Читаем данные из атомарных переменных C++ после генерации
+            // Это устраняет overhead JNI callbacks - вместо push из C++ мы pull из Kotlin
+            // Данные уже обновлены в C++ атомарных переменных после generateBufferDirect/generateBuffer
+            
             val beatFreq = engine.getCurrentBeatFrequency()
             val carrierFreq = engine.getCurrentCarrierFrequency()
             
+            // Обновляем StateFlows только при реальных изменениях (distinctUntilChanged pattern)
+            // Это избегает лишних recomposition в Compose UI
             if (_currentBeatFrequency.value != beatFreq) {
                 _currentBeatFrequency.value = beatFreq
             }
@@ -455,7 +460,10 @@ class BinauralAudioEngine(private val context: Context) {
                 _isChannelsSwapped.value = swapped
             }
             
-            _elapsedSeconds.value = engine.getElapsedSeconds()
+            val elapsed = engine.getElapsedSeconds()
+            if (_elapsedSeconds.value != elapsed) {
+                _elapsedSeconds.value = elapsed
+            }
 
             if (!isActive.get()) break
 

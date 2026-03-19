@@ -121,14 +121,6 @@
     <string name="settings_section_power">Power Consumption</string>
     <string name="settings_section_interface">Interface</string>
     
-    <!-- Notification Style -->
-    <string name="notification_style_description">Notification display settings</string>
-    <string name="notification_style_title">Notification mode</string>
-    <string name="notification_style_media">Media player</string>
-    <string name="notification_style_media_desc">Headset controls, preset switching. May conflict with other players</string>
-    <string name="notification_style_simple">Simple notification</string>
-    <string name="notification_style_simple_desc">No conflicts with other players. Control only from the app</string>
-    
     <!-- Resume on Headset Connect -->
     <string name="resume_on_headset_connect">Resume on connect</string>
     <string name="resume_on_headset_connect_desc">Automatically resume playback when headset is connected if it was stopped due to disconnection</string>

@@ -7,17 +7,22 @@ import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.datetime.LocalTime
 
 /**
  * JNI обёртка для C++ аудиодвижка.
- * Предоставляет тот же интерфейс, что и BinauralAudioEngine,
- * но использует нативный код для генерации аудио.
+ * 
+ * PULL MODEL ARCHITECTURE:
+ * - C++ обновляет атомарные переменные после каждой генерации буфера
+ * - Kotlin polling читает значения через JNI getters без callbacks
+ * - Это устраняет overhead JNI callbacks и context switching
+ * 
+ * ОПТИМИЗАЦИЯ ЭНЕРГОПОТРЕБЛЕНИЯ:
+ * - Убраны JNI callbacks из C++ в Java (push model)
+ * - Kotlin polling читает данные только когда нужно (pull model)
+ * - Нет лишних JNI calls и context switching
  */
-class NativeAudioEngine : NativeAudioEngineCallback {
+class NativeAudioEngine {
     
     companion object {
         private const val TAG = "NativeAudioEngine"
@@ -25,25 +30,12 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         init {
             try {
                 System.loadLibrary("binaural-engine")
-                Log.d(TAG, "Native library loaded successfully")
+                Log.d(TAG, "Native library loaded successfully (pull-model)")
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "Failed to load native library", e)
             }
         }
     }
-    
-    // StateFlows для UI (аналогично BinauralAudioEngine)
-    private val _currentBeatFrequency = MutableStateFlow(0.0f)
-    val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
-    
-    private val _currentCarrierFrequency = MutableStateFlow(0.0f)
-    val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
-    
-    private val _elapsedSeconds = MutableStateFlow(0)
-    val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
-    
-    private val _isChannelsSwapped = MutableStateFlow(false)
-    val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
     
     // Текущая конфигурация
     private var currentConfig: BinauralConfig? = null
@@ -52,8 +44,8 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     // Настройки режима расслабления
     private var relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     
-    // Нативные методы
-    private external fun nativeInitialize(callback: NativeAudioEngineCallback)
+    // Нативные методы (PULL MODEL - без callback параметра)
+    private external fun nativeInitialize()
     private external fun nativeRelease()
     private external fun nativeSetConfig(
         timePoints: IntArray,
@@ -84,6 +76,7 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     // Zero-copy версия через DirectByteBuffer - ОПТИМИЗИРОВАНО
     private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
     
+    // PULL MODEL: Геттеры читают из атомарных переменных в C++
     private external fun nativeGetCurrentBeatFrequency(): Float
     private external fun nativeGetCurrentCarrierFrequency(): Float
     private external fun nativeGetElapsedSeconds(): Int
@@ -121,9 +114,9 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      */
     fun initialize() {
         if (!isInitialized) {
-            nativeInitialize(this)
+            nativeInitialize()
             isInitialized = true
-            Log.d(TAG, "Native engine initialized")
+            Log.d(TAG, "Native engine initialized (pull-model)")
         }
     }
     
@@ -435,10 +428,6 @@ class NativeAudioEngine : NativeAudioEngineCallback {
      */
     fun resetState() {
         nativeResetState()
-        _elapsedSeconds.value = 0
-        _currentBeatFrequency.value = 0.0f
-        _currentCarrierFrequency.value = 0.0f
-        _isChannelsSwapped.value = false
     }
     
     /**
@@ -474,6 +463,10 @@ class NativeAudioEngine : NativeAudioEngineCallback {
     ): Boolean {
         return nativeGenerateBufferDirect(directBuffer, samplesPerChannel, frequencyUpdateIntervalMs)
     }
+    
+    // === PULL MODEL: Геттеры читают из атомарных переменных в C++ ===
+    // Эти методы вызываются из Kotlin после каждой генерации буфера
+    // вместо callbacks из C++
     
     fun getCurrentBeatFrequency(): Float = nativeGetCurrentBeatFrequency()
     fun getCurrentCarrierFrequency(): Float = nativeGetCurrentCarrierFrequency()
@@ -557,29 +550,4 @@ class NativeAudioEngine : NativeAudioEngineCallback {
         )
         return result?.let { Pair(it[0], it[1]) }
     }
-    
-    // === Callback'и из C++ ===
-    
-    override fun onFrequencyChanged(beatFreq: Float, carrierFreq: Float) {
-        _currentBeatFrequency.value = beatFreq
-        _currentCarrierFrequency.value = carrierFreq
-    }
-    
-    override fun onChannelsSwapped(swapped: Boolean) {
-        _isChannelsSwapped.value = swapped
-        Log.d(TAG, "Channels swapped: $swapped")
-    }
-    
-    override fun onElapsedChanged(elapsedSeconds: Int) {
-        _elapsedSeconds.value = elapsedSeconds
-    }
-}
-
-/**
- * Интерфейс для callback'ов из C++
- */
-interface NativeAudioEngineCallback {
-    fun onFrequencyChanged(beatFreq: Float, carrierFreq: Float)
-    fun onChannelsSwapped(swapped: Boolean)
-    fun onElapsedChanged(elapsedSeconds: Int)
 }
