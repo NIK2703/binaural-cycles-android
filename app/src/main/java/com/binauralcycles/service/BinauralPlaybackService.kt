@@ -31,7 +31,6 @@ import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.RelaxationModeSettings
-import com.binaural.data.preferences.NotificationStyle
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -85,9 +84,6 @@ class BinauralPlaybackService : Service() {
     
     // Callback для уведомления о переключении пресета
     var onPresetSwitch: ((String) -> Unit)? = null
-    
-    // Стиль уведомления
-    private var notificationStyle: NotificationStyle = NotificationStyle.MEDIA
     
     // Возобновление воспроизведения при подключении гарнитуры
     private var resumeOnHeadsetConnect: Boolean = false
@@ -305,7 +301,7 @@ class BinauralPlaybackService : Service() {
         val playPauseIcon = if (_isPlaying.value) R.drawable.ic_pause else R.drawable.ic_play
         val playPauseText = if (_isPlaying.value) getString(R.string.action_pause) else getString(R.string.action_play)
 
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
             .setContentText(content)
             .setSmallIcon(R.drawable.ic_notification)
@@ -313,26 +309,15 @@ class BinauralPlaybackService : Service() {
             .setOngoing(_isPlaying.value)
             .setOnlyAlertOnce(true) // Предотвращает мерцание иконки при обновлении
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-
-        when (notificationStyle) {
-            NotificationStyle.MEDIA -> {
-                // Мультимедиа стиль с кнопками управления
-                builder
-                    .addAction(playPauseIcon, playPauseText, togglePendingIntent)
-                    .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_exit), exitPendingIntent)
-                    .setStyle(
-                        MediaStyle()
-                            .setMediaSession(mediaSession?.sessionToken)
-                            .setShowActionsInCompactView(0, 1) // Показываем play/pause и выход в компактном виде
-                    )
-            }
-            NotificationStyle.SIMPLE -> {
-                // Простое уведомление без кнопок управления
-                // Только tapping открывает приложение
-            }
-        }
-
-        return builder.build()
+            // Мультимедиа стиль с кнопками управления
+            .addAction(playPauseIcon, playPauseText, togglePendingIntent)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, getString(R.string.action_exit), exitPendingIntent)
+            .setStyle(
+                MediaStyle()
+                    .setMediaSession(mediaSession?.sessionToken)
+                    .setShowActionsInCompactView(0, 1) // Показываем play/pause и выход в компактном виде
+            )
+            .build()
     }
 
     /**
@@ -388,13 +373,19 @@ class BinauralPlaybackService : Service() {
         noisyAudioReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
-                    android.util.Log.d("BinauralPlaybackService", "Audio becoming noisy - stopping playback")
-                    // Останавливаем воспроизведение с затуханием
-                    audioEngine?.pauseWithFade()
-                    _isPlaying.value = false
-                    updateNotificationImmediately()
-                    // Запоминаем, что воспроизведение было остановлено из-за отключения гарнитуры
-                    wasStoppedByHeadsetDisconnect = true
+                    android.util.Log.d("BinauralPlaybackService", "Audio becoming noisy - isPlaying=${_isPlaying.value}, resumeOnHeadsetConnect=$resumeOnHeadsetConnect")
+                    // Устанавливаем флаг только если воспроизведение было активным
+                    if (_isPlaying.value) {
+                        // Останавливаем воспроизведение с затуханием
+                        audioEngine?.pauseWithFade()
+                        _isPlaying.value = false
+                        updateNotificationImmediately()
+                        // Запоминаем, что воспроизведение было остановлено из-за отключения гарнитуры
+                        wasStoppedByHeadsetDisconnect = true
+                        android.util.Log.d("BinauralPlaybackService", "wasStoppedByHeadsetDisconnect set to true (was playing)")
+                    } else {
+                        android.util.Log.d("BinauralPlaybackService", "Not playing - ignoring noisy event")
+                    }
                 }
             }
         }
@@ -435,6 +426,8 @@ class BinauralPlaybackService : Service() {
                     
                     val hadNoHeadset = !hasHeadset
                     checkHeadsetDevices()
+                    
+                    android.util.Log.d("BinauralPlaybackService", "onAudioDevicesAdded: hadNoHeadset=$hadNoHeadset, hasHeadset=$hasHeadset, wasStoppedByHeadsetDisconnect=$wasStoppedByHeadsetDisconnect, resumeOnHeadsetConnect=$resumeOnHeadsetConnect")
                     
                     // Если гарнитуры не было и она появилась, и воспроизведение было остановлено из-за отключения
                     if (hadNoHeadset && hasHeadset && wasStoppedByHeadsetDisconnect && resumeOnHeadsetConnect) {
@@ -593,10 +586,10 @@ class BinauralPlaybackService : Service() {
                     // Toggle: если играет - пауза, если нет - воспроизведение
                     android.util.Log.d("BinauralPlaybackService", "MediaSession: onPlay, isPlaying=${_isPlaying.value}")
                     if (_isPlaying.value) {
-                        audioEngine?.pauseWithFade()
+                        this@BinauralPlaybackService.pauseWithFade()
                     } else {
                         requestAudioFocus()
-                        audioEngine?.resumeWithFade()
+                        this@BinauralPlaybackService.resumeWithFade()
                     }
                 }
                 
@@ -604,16 +597,16 @@ class BinauralPlaybackService : Service() {
                     // Toggle: если играет - пауза, если нет - воспроизведение
                     android.util.Log.d("BinauralPlaybackService", "MediaSession: onPause, isPlaying=${_isPlaying.value}")
                     if (_isPlaying.value) {
-                        audioEngine?.pauseWithFade()
+                        this@BinauralPlaybackService.pauseWithFade()
                     } else {
                         requestAudioFocus()
-                        audioEngine?.resumeWithFade()
+                        this@BinauralPlaybackService.resumeWithFade()
                     }
                 }
                 
                 override fun onStop() {
                     android.util.Log.d("BinauralPlaybackService", "MediaSession: onStop")
-                    audioEngine?.stopWithFade()
+                    this@BinauralPlaybackService.stopWithFade()
                     abandonAudioFocus()
                 }
                 
@@ -852,34 +845,51 @@ class BinauralPlaybackService : Service() {
     
     fun togglePlayback() {
         if (_isPlaying.value) {
+            // Сбрасываем флаг при ручной остановке
+            android.util.Log.d("BinauralPlaybackService", "togglePlayback() - stopping, wasStoppedByHeadsetDisconnect = false")
+            wasStoppedByHeadsetDisconnect = false
             audioEngine?.stopWithFade()
             abandonAudioFocus()
         } else {
             requestAudioFocus()
+            // Сбрасываем флаг при ручном возобновлении
+            android.util.Log.d("BinauralPlaybackService", "togglePlayback() - resuming, wasStoppedByHeadsetDisconnect = false")
+            wasStoppedByHeadsetDisconnect = false
             audioEngine?.resumeWithFade()
         }
     }
     
     fun play() {
         // Сбрасываем флаг при ручном запуске
+        android.util.Log.d("BinauralPlaybackService", "play() - wasStoppedByHeadsetDisconnect = false")
         wasStoppedByHeadsetDisconnect = false
         audioEngine?.play()
     }
     
     fun stop() {
+        // Сбрасываем флаг при ручной остановке
+        android.util.Log.d("BinauralPlaybackService", "stop() - wasStoppedByHeadsetDisconnect = false")
+        wasStoppedByHeadsetDisconnect = false
         audioEngine?.stop()
     }
     
     fun stopWithFade() {
+        // Сбрасываем флаг при ручной остановке
+        android.util.Log.d("BinauralPlaybackService", "stopWithFade() - wasStoppedByHeadsetDisconnect = false")
+        wasStoppedByHeadsetDisconnect = false
         audioEngine?.stopWithFade()
     }
     
     fun pauseWithFade() {
+        // Сбрасываем флаг при ручной паузе
+        android.util.Log.d("BinauralPlaybackService", "pauseWithFade() - wasStoppedByHeadsetDisconnect = false")
+        wasStoppedByHeadsetDisconnect = false
         audioEngine?.pauseWithFade()
     }
     
     fun resumeWithFade() {
         // Сбрасываем флаг при ручном возобновлении
+        android.util.Log.d("BinauralPlaybackService", "resumeWithFade() - wasStoppedByHeadsetDisconnect = false")
         wasStoppedByHeadsetDisconnect = false
         audioEngine?.resumeWithFade()
     }
@@ -911,17 +921,10 @@ class BinauralPlaybackService : Service() {
     }
     
     /**
-     * Установить стиль уведомления (мультимедиа или простое)
-     */
-    fun setNotificationStyle(style: NotificationStyle) {
-        notificationStyle = style
-        updateNotificationImmediately()
-    }
-    
-    /**
      * Включить/выключить возобновление воспроизведения при подключении гарнитуры
      */
     fun setResumeOnHeadsetConnect(enabled: Boolean) {
+        android.util.Log.d("BinauralPlaybackService", "setResumeOnHeadsetConnect($enabled)")
         resumeOnHeadsetConnect = enabled
         // Если опция выключена, сбрасываем флаг
         if (!enabled) {
