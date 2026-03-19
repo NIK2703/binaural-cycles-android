@@ -22,6 +22,7 @@ import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
+import com.binaural.data.preferences.NotificationStyle
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -69,7 +70,11 @@ data class BinauralUiState(
     // Флаг подключения к сервису
     val isServiceConnected: Boolean = false,
     // Флаг блокировки навигации во время SharedTransition анимации
-    val isSharedTransitionRunning: Boolean = false
+    val isSharedTransitionRunning: Boolean = false,
+    // Стиль уведомления (мультимедиа или простое)
+    val notificationStyle: NotificationStyle = NotificationStyle.MEDIA,
+    // Возобновление воспроизведения при подключении гарнитуры
+    val resumeOnHeadsetConnect: Boolean = false
 )
 
 @HiltViewModel
@@ -228,6 +233,22 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(volumeNormalizationSettings = settings) }
                 // Обновляем конфиг аудио при изменении настроек нормализации
                 updateAudioConfig()
+            }
+        }
+        // Стиль уведомления
+        viewModelScope.launch {
+            preferencesRepository.getNotificationStyle().collect { style ->
+                _uiState.update { it.copy(notificationStyle = style) }
+                // Уведомляем сервис об изменении стиля
+                playbackService?.setNotificationStyle(style)
+            }
+        }
+        // Возобновление воспроизведения при подключении гарнитуры
+        viewModelScope.launch {
+            preferencesRepository.getResumeOnHeadsetConnect().collect { enabled ->
+                _uiState.update { it.copy(resumeOnHeadsetConnect = enabled) }
+                // Уведомляем сервис об изменении настройки
+                playbackService?.setResumeOnHeadsetConnect(enabled)
             }
         }
     }
@@ -1116,6 +1137,30 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(channelSwapSettings = newSettings) }
         viewModelScope.launch {
             preferencesRepository.saveChannelSwapSettings(newSettings)
+        }
+    }
+    
+    // ============= Методы для управления стилем уведомления =============
+    
+    /**
+     * Установить стиль уведомления (мультимедиа плеер или простое)
+     */
+    fun setNotificationStyle(style: NotificationStyle) {
+        _uiState.update { it.copy(notificationStyle = style) }
+        playbackService?.setNotificationStyle(style)
+        viewModelScope.launch {
+            preferencesRepository.saveNotificationStyle(style)
+        }
+    }
+    
+    /**
+     * Включить/выключить возобновление воспроизведения при подключении гарнитуры
+     */
+    fun setResumeOnHeadsetConnect(enabled: Boolean) {
+        _uiState.update { it.copy(resumeOnHeadsetConnect = enabled) }
+        playbackService?.setResumeOnHeadsetConnect(enabled)
+        viewModelScope.launch {
+            preferencesRepository.saveResumeOnHeadsetConnect(enabled)
         }
     }
 

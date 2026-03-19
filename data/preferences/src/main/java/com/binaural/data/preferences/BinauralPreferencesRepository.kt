@@ -121,6 +121,25 @@ data class SerializablePresetList(
 )
 
 /**
+ * Стиль уведомления
+ */
+enum class NotificationStyle {
+    /**
+     * Мультимедиа плеер - с MediaSession и MediaStyle.
+     * Позволяет управлять воспроизведением с гарнитуры,
+     * но может конфликтовать с другими плеерами.
+     */
+    MEDIA,
+    
+    /**
+     * Простое уведомление - без MediaSession.
+     * Избегает конфликтов с другими плеерами,
+     * но не поддерживает кнопки гарнитуры.
+     */
+    SIMPLE
+}
+
+/**
  * Репозиторий для хранения настроек бинауральных ритмов
  */
 @Singleton
@@ -150,6 +169,10 @@ class BinauralPreferencesRepository @Inject constructor(
         private val WAVETABLE_SIZE_KEY = intPreferencesKey("wavetable_size")
         // Автоматическое расширение границ графика при редактировании
         private val AUTO_EXPAND_GRAPH_RANGE_KEY = booleanPreferencesKey("auto_expand_graph_range")
+        // Стиль уведомления: MEDIA (мультимедиа плеер) или SIMPLE (простое уведомление)
+        private val NOTIFICATION_STYLE_KEY = stringPreferencesKey("notification_style")
+        // Возобновление воспроизведения при подключении гарнитуры
+        private val RESUME_ON_HEADSET_CONNECT_KEY = booleanPreferencesKey("resume_on_headset_connect")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -477,6 +500,53 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveVolume(volume: Float) {
         dataStore.edit { preferences ->
             preferences[VOLUME_KEY] = volume.toString()
+        }
+    }
+    
+    // Методы для стиля уведомления
+    
+    /**
+     * Получить стиль уведомления
+     * @return MEDIA (мультимедиа плеер) или SIMPLE (простое уведомление)
+     * По умолчанию MEDIA для поддержки кнопок гарнитуры
+     */
+    fun getNotificationStyle(): Flow<NotificationStyle> {
+        return dataStore.data.map { preferences ->
+            preferences[NOTIFICATION_STYLE_KEY]?.let {
+                try { NotificationStyle.valueOf(it) } catch (e: Exception) { NotificationStyle.MEDIA }
+            } ?: NotificationStyle.MEDIA
+        }
+    }
+    
+    /**
+     * Сохранить стиль уведомления
+     * @param style MEDIA (мультимедиа плеер) или SIMPLE (простое уведомление)
+     */
+    suspend fun saveNotificationStyle(style: NotificationStyle) {
+        dataStore.edit { preferences ->
+            preferences[NOTIFICATION_STYLE_KEY] = style.name
+        }
+    }
+    
+    // Методы для возобновления воспроизведения при подключении гарнитуры
+    
+    /**
+     * Получить настройку возобновления воспроизведения при подключении гарнитуры
+     * @return true если воспроизведение должно возобновляться автоматически
+     */
+    fun getResumeOnHeadsetConnect(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[RESUME_ON_HEADSET_CONNECT_KEY] ?: false // По умолчанию выключено
+        }
+    }
+    
+    /**
+     * Сохранить настройку возобновления воспроизведения при подключении гарнитуры
+     * @param enabled true если воспроизведение должно возобновляться автоматически
+     */
+    suspend fun saveResumeOnHeadsetConnect(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[RESUME_ON_HEADSET_CONNECT_KEY] = enabled
         }
     }
     

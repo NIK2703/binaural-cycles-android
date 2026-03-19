@@ -119,6 +119,19 @@
     <!-- Settings Sections -->
     <string name="settings_section_comfort">Комфорт прослушивания</string>
     <string name="settings_section_power">Энергопотребление</string>
+    <string name="settings_section_interface">Интерфейс</string>
+    
+    <!-- Notification Style -->
+    <string name="notification_style_description">Настройка отображения уведомления</string>
+    <string name="notification_style_title">Режим уведомления</string>
+    <string name="notification_style_media">Мультимедиа плеер</string>
+    <string name="notification_style_media_desc">Управление с гарнитуры, переключение пресетов. Может конфликтовать с другими плеерами</string>
+    <string name="notification_style_simple">Простое уведомление</string>
+    <string name="notification_style_simple_desc">Без конфликтов с другими плеерами. Управление только из приложения</string>
+    
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Возобновление при подключении</string>
+    <string name="resume_on_headset_connect_desc">Автоматически возобновлять воспроизведение при подключении гарнитуры, если оно было остановлено из-за её отключения</string>
     
     <!-- Time units -->
     <string name="seconds_short">сек</string>
