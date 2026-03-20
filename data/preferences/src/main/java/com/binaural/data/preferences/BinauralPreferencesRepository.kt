@@ -86,12 +86,14 @@ data class SerializableVolumeNormalizationSettings(
 @Serializable
 data class SerializableRelaxationModeSettings(
     val enabled: Boolean = false,
-    val mode: String = "SIMPLE",  // SIMPLE или ADVANCED
+    val mode: String = "SMOOTH",  // SMOOTH или ADVANCED
     val carrierReductionPercent: Int = 20,
     val beatReductionPercent: Int = 20,
     val gapBetweenRelaxationMinutes: Int = 24,
     val transitionPeriodMinutes: Int = 3,
     val relaxationDurationMinutes: Int = 15,
+    // Интервал между точками для SMOOTH режима
+    val smoothIntervalMinutes: Int = 30,
     // Для обратной совместимости со старыми пресетами
     val relaxationIntervalMinutes: Int? = null
 )
@@ -659,7 +661,8 @@ class BinauralPreferencesRepository @Inject constructor(
                     beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent,
                     gapBetweenRelaxationMinutes = preset.relaxationModeSettings.gapBetweenRelaxationMinutes,
                     transitionPeriodMinutes = preset.relaxationModeSettings.transitionPeriodMinutes,
-                    relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes
+                    relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes,
+                    smoothIntervalMinutes = preset.relaxationModeSettings.smoothIntervalMinutes
                 ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
@@ -710,13 +713,14 @@ class BinauralPreferencesRepository @Inject constructor(
                             mode = try { 
                                 com.binaural.core.audio.model.RelaxationMode.valueOf(it.mode) 
                             } catch (e: Exception) { 
-                                com.binaural.core.audio.model.RelaxationMode.SIMPLE 
+                                com.binaural.core.audio.model.RelaxationMode.SMOOTH 
                             },
                             carrierReductionPercent = it.carrierReductionPercent,
                             beatReductionPercent = it.beatReductionPercent,
                             gapBetweenRelaxationMinutes = gapMinutes,
                             transitionPeriodMinutes = it.transitionPeriodMinutes,
-                            relaxationDurationMinutes = it.relaxationDurationMinutes
+                            relaxationDurationMinutes = it.relaxationDurationMinutes,
+                            smoothIntervalMinutes = it.smoothIntervalMinutes
                         )
                     } ?: RelaxationModeSettings(),
                     createdAt = serializable.createdAt,

@@ -58,7 +58,7 @@ public:
         int samplesPerChannel,
         const BinauralConfig& config,
         GeneratorState& state,
-        int32_t timeSeconds,
+        float timeSeconds,
         int64_t elapsedMs,
         int frequencyUpdateIntervalMs
     );
@@ -82,7 +82,7 @@ public:
         int samplesPerChannel,
         const BinauralConfig& config,
         GeneratorState& state,
-        int32_t timeSeconds,
+        float timeSeconds,
         int64_t elapsedMs,
         int frequencyUpdateIntervalMs
     );
@@ -107,7 +107,7 @@ public:
         int samplesPerChannel,
         const BinauralConfig& config,
         GeneratorState& state,
-        int32_t timeSeconds,
+        float timeSeconds,
         int64_t elapsedMs,
         int frequencyUpdateIntervalMs
     );
@@ -217,6 +217,142 @@ private:
         const FrequencyCurve& curve,
         float timeSeconds
     ) const;
+    
+    // ========================================================================
+    // СПЕЦИАЛИЗИРОВАННЫЕ ФУНКЦИИ ГЕНЕРАЦИИ (приватные)
+    // ========================================================================
+    
+    /**
+     * Генерация сплошного буфера без fade (скалярная версия)
+     */
+    void generateSolidBuffer(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        bool swapActive,
+        GeneratorState& state
+    );
+    
+    /**
+     * Генерация буфера с fade (скалярная версия)
+     * @return true если fade завершён
+     */
+    bool generateFadeBuffer(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        int fadeStartOffset,
+        int fadeDuration,
+        bool fadingOut,
+        bool swapActive,
+        GeneratorState& state
+    );
+    
+    /**
+     * Обновление фаз без генерации звука (для паузы)
+     */
+    void updatePhasesOnly(
+        int samples,
+        float leftOmega,
+        float rightOmega,
+        GeneratorState& state
+    );
+
+#ifdef USE_NEON
+    /**
+     * NEON-оптимизированная генерация сплошного буфера
+     */
+    void generateSolidBufferNeon(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        bool swapActive,
+        GeneratorState& state
+    );
+    
+    /**
+     * NEON-оптимизированная генерация буфера с fade
+     */
+    bool generateFadeBufferNeon(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        int fadeStartOffset,
+        int fadeDuration,
+        bool fadingOut,
+        bool swapActive,
+        GeneratorState& state
+    );
+#endif
+
+#ifdef USE_SSE
+    /**
+     * SSE-оптимизированная генерация сплошного буфера
+     */
+    void generateSolidBufferSse(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        bool swapActive,
+        GeneratorState& state
+    );
+    
+    /**
+     * SSE-оптимизированная генерация буфера с fade
+     */
+    bool generateFadeBufferSse(
+        float* buffer,
+        int samples,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
+        float startLeftAmp,
+        float startRightAmp,
+        float endLeftAmp,
+        float endRightAmp,
+        int fadeStartOffset,
+        int fadeDuration,
+        bool fadingOut,
+        bool swapActive,
+        GeneratorState& state
+    );
+#endif
 };
 
 } // namespace binaural

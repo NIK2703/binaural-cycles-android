@@ -672,13 +672,14 @@ fun RelaxationModeCard(
     onBeatReductionChange: (Int) -> Unit,
     onRelaxationGapChange: (Int) -> Unit,
     onTransitionPeriodChange: (Int) -> Unit,
-    onRelaxationDurationChange: (Int) -> Unit
+    onRelaxationDurationChange: (Int) -> Unit,
+    onSmoothIntervalChange: (Int) -> Unit = {}
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Выбор режима расслабления: 3 чипа в строке
+        // Выбор режима расслабления: 3 чипа в одной строке
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = stringResource(R.string.relaxation_mode),
@@ -687,18 +688,17 @@ fun RelaxationModeCard(
             )
             // Описание текущего режима под заголовком
             Text(
-                text = if (!relaxationModeSettings.enabled) {
-                    stringResource(R.string.relaxation_mode_disabled_desc)
-                } else if (relaxationModeSettings.mode == RelaxationMode.SIMPLE) {
-                    stringResource(R.string.relaxation_mode_simple_desc)
-                } else {
-                    stringResource(R.string.relaxation_mode_advanced_desc)
+                text = when {
+                    !relaxationModeSettings.enabled -> stringResource(R.string.relaxation_mode_disabled_desc)
+                    relaxationModeSettings.mode == RelaxationMode.STEP -> stringResource(R.string.relaxation_mode_step_desc)
+                    else -> stringResource(R.string.relaxation_mode_smooth_desc)
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
             Spacer(modifier = Modifier.height(8.dp))
+            // Одна строка: Выкл, Расширенный, Плавный
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -718,14 +718,14 @@ fun RelaxationModeCard(
                     modifier = Modifier.weight(1f)
                 )
                 FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SIMPLE,
+                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP,
                     onClick = { 
                         onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.SIMPLE)
+                        onRelaxationModeChange(RelaxationMode.STEP)
                     },
                     label = { 
                         Text(
-                            text = stringResource(R.string.relaxation_mode_simple),
+                            text = stringResource(R.string.relaxation_mode_step),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         ) 
@@ -733,14 +733,14 @@ fun RelaxationModeCard(
                     modifier = Modifier.weight(1f)
                 )
                 FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.ADVANCED,
+                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH,
                     onClick = { 
                         onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.ADVANCED)
+                        onRelaxationModeChange(RelaxationMode.SMOOTH)
                     },
                     label = { 
                         Text(
-                            text = stringResource(R.string.relaxation_mode_advanced),
+                            text = stringResource(R.string.relaxation_mode_smooth),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         ) 
@@ -754,8 +754,8 @@ fun RelaxationModeCard(
         if (relaxationModeSettings.enabled) {
             HorizontalDivider()
             
-            // Настройки расширенного режима
-            if (relaxationModeSettings.mode == RelaxationMode.ADVANCED) {
+            // Настройки ступенчатого режима
+            if (relaxationModeSettings.mode == RelaxationMode.STEP) {
                 
                 // Интервал между периодами расслабления
                 DiscreteSlider(
@@ -784,6 +784,21 @@ fun RelaxationModeCard(
                     values = listOf(1, 2, 3, 5, 7, 10),
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onTransitionPeriodChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+                
+                HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
+            }
+            
+            // Настройки плавного режима
+            if (relaxationModeSettings.mode == RelaxationMode.SMOOTH) {
+                // Интервал между точками
+                DiscreteSlider(
+                    label = stringResource(R.string.smooth_interval),
+                    value = relaxationModeSettings.smoothIntervalMinutes,
+                    values = listOf(10, 15, 20, 30, 45, 60, 90, 120),
+                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                    onValueChange = onSmoothIntervalChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
                 

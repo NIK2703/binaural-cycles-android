@@ -143,14 +143,13 @@ class NativeAudioEngine {
         // Генерируем точки для воспроизведения в зависимости от режима расслабления
         val playbackPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
             when (relaxationSettings.mode) {
-                RelaxationMode.ADVANCED -> {
-                    // В ADVANCED режиме используем ТОЛЬКО виртуальные точки
-                    generateAdvancedVirtualPoints(curve.points, relaxationSettings)
+                RelaxationMode.STEP -> {
+                    // В STEP режиме используем ТОЛЬКО виртуальные точки
+                    generateStepVirtualPoints(curve.points, relaxationSettings)
                 }
-                RelaxationMode.SIMPLE -> {
-                    // В SIMPLE режиме объединяем основные и виртуальные точки
-                    val virtualPoints = generateSimpleVirtualPoints(curve.points, relaxationSettings)
-                    (curve.points + virtualPoints).sortedBy { it.time.toSecondOfDay() }
+                RelaxationMode.SMOOTH -> {
+                    // В SMOOTH режиме используем ТОЛЬКО виртуальные точки (чередование базовых и сниженных)
+                    generateSmoothVirtualPoints(curve.points, relaxationSettings)
                 }
             }
         } else {
@@ -197,64 +196,60 @@ class NativeAudioEngine {
     }
     
     /**
-     * Генерирует виртуальные точки для SIMPLE режима расслабления.
-     * Виртуальные точки создаются посередине между каждой парой соседних точек.
+     * Генерирует виртуальные точки для SMOOTH режима расслабления.
+     * Чередует точки на графике и снижающие точки с заданным интервалом.
+     * Интерполяция производится ТОЛЬКО по виртуальным точкам.
      */
-    private fun generateSimpleVirtualPoints(
+    private fun generateSmoothVirtualPoints(
         points: List<FrequencyPoint>,
         settings: RelaxationModeSettings
     ): List<FrequencyPoint> {
         if (!settings.enabled || points.size < 2) return emptyList()
         
-        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
         val carrierReduction = settings.carrierReductionPercent / 100.0f
         val beatReduction = settings.beatReductionPercent / 100.0f
+        val intervalSeconds = settings.smoothIntervalMinutes * 60L
         
-        for (i in 0 until sortedPoints.size) {
-            val currentPoint = sortedPoints[i]
-            val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
+        val daySeconds = 24 * 3600L
+        
+        // Генерируем точки от 00:00 с заданным интервалом
+        // Чередуем: первая на графике, вторая снижающая, третья на графике, четвёртая снижающая и т.д.
+        var currentTimeSeconds = 0L
+        var isRelaxationPoint = false
+        
+        while (currentTimeSeconds < daySeconds) {
+            val time = LocalTime.fromSecondOfDay((currentTimeSeconds % daySeconds).toInt())
+            val baseCarrier = interpolateCarrierAtTime(points, time)
+            val baseBeat = interpolateBeatAtTime(points, time)
             
-            // Вычисляем время посередине между точками
-            val currentTimeSeconds = currentPoint.time.toSecondOfDay()
-            var nextTimeSeconds = nextPoint.time.toSecondOfDay()
-            
-            // Обработка перехода через полночь
-            if (nextTimeSeconds <= currentTimeSeconds) {
-                nextTimeSeconds += 24 * 3600
+            if (isRelaxationPoint) {
+                // Снижающая точка
+                virtualPoints.add(FrequencyPoint(
+                    time,
+                    baseCarrier * (1.0f - carrierReduction),
+                    baseBeat * (1.0f - beatReduction)
+                ))
+            } else {
+                // Точка на графике (базовая)
+                virtualPoints.add(FrequencyPoint(time, baseCarrier, baseBeat))
             }
             
-            val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
-            val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
-            
-            // Интерполируем значения на середине
-            val ratio = 0.5f
-            val midCarrier = currentPoint.carrierFrequency + (nextPoint.carrierFrequency - currentPoint.carrierFrequency) * ratio
-            val midBeat = currentPoint.beatFrequency + (nextPoint.beatFrequency - currentPoint.beatFrequency) * ratio
-            
-            // Применяем снижение частот для режима расслабления
-            val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
-            val relaxedBeat = midBeat * (1.0f - beatReduction)
-            
-            virtualPoints.add(
-                FrequencyPoint(
-                    time = midTime,
-                    carrierFrequency = relaxedCarrier,
-                    beatFrequency = relaxedBeat
-                )
-            )
+            isRelaxationPoint = !isRelaxationPoint
+            currentTimeSeconds += intervalSeconds
         }
         
-        return virtualPoints
+        // Сортируем по времени
+        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
     }
     
     /**
-     * Генерирует виртуальные точки для ADVANCED режима расслабления.
+     * Генерирует виртуальные точки для STEP режима расслабления.
      * Создаёт группы из 4 точек для каждого периода расслабления, образующие трапецию.
      * Итоговая кривая проходит ТОЛЬКО через эти виртуальные точки.
      */
-    private fun generateAdvancedVirtualPoints(
+    private fun generateStepVirtualPoints(
         points: List<FrequencyPoint>,
         settings: RelaxationModeSettings
     ): List<FrequencyPoint> {

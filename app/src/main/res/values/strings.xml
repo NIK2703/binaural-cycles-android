@@ -88,10 +88,11 @@
     <string name="beat_reduction_description">Процент снижения частоты биений в периоды расслабления</string>
     <string name="reduction_percent_format">%d%%</string>
     <string name="relaxation_mode_type">Режим</string>
-    <string name="relaxation_mode_simple">Простой</string>
-    <string name="relaxation_mode_advanced">Расширенный</string>
-    <string name="relaxation_mode_simple_desc">Снижение частот в серединах интервалов между точками</string>
-    <string name="relaxation_mode_advanced_desc">Периодическое снижение по расписанию с плавными переходами</string>
+    <string name="relaxation_mode_step">Ступенчатый</string>
+    <string name="relaxation_mode_smooth">Плавный</string>
+    <string name="relaxation_mode_step_desc">Периодическое снижение по расписанию с плавными переходами</string>
+    <string name="relaxation_mode_smooth_desc">Чередование базовых и сниженных частот с регулируемым интервалом</string>
+    <string name="smooth_interval">Интервал между точками</string>
     <string name="gap_between_relaxation">Интервал между периодами</string>
     <string name="relaxation_duration">Длительность расслабления</string>
     <string name="transition_period">Период перехода</string>

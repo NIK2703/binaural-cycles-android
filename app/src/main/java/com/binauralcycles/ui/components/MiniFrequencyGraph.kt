@@ -9,6 +9,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
@@ -203,7 +204,10 @@ private fun computeGraphGeometry(
     
     // Определяем точки для интерполяции
     val pointsForInterpolation = when {
-        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.ADVANCED && virtualPoints.isNotEmpty() -> {
+        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP && virtualPoints.isNotEmpty() -> {
+            virtualPoints
+        }
+        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH && virtualPoints.isNotEmpty() -> {
             virtualPoints
         }
         relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> {
@@ -215,6 +219,15 @@ private fun computeGraphGeometry(
     // Вычисляем пути
     val carrierPath = computeCarrierPath(pointsForInterpolation, finalParams, interpolationType, splineTension)
     val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, finalParams, interpolationType, splineTension)
+    
+    // Вычисляем путь базовой кривой (по основным точкам) для режимов STEP и SMOOTH
+    val baseCarrierPath = if (relaxationModeSettings.enabled && 
+        (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+        sortedPoints.size >= 2) {
+        computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension)
+    } else {
+        null
+    }
     
     // Сетки
     val width = widthPx.toFloat()
@@ -240,25 +253,15 @@ private fun computeGraphGeometry(
         labelTexts.add("%.0f(%s)".format(point.carrierFrequency, beatStr))
     }
     
-    // Позиции виртуальных точек
-    val virtualPointPositions = if (relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SIMPLE) {
-        FloatArray(virtualPoints.size * 2) { idx ->
-            val pointIdx = idx / 2
-            if (idx % 2 == 0) {
-                finalParams.timeToX(virtualPoints[pointIdx].time)
-            } else {
-                finalParams.carrierToY(virtualPoints[pointIdx].carrierFrequency)
-            }
-        }
-    } else {
-        FloatArray(0)
-    }
+    // Позиции виртуальных точек (не используются в SMOOTH режиме)
+    val virtualPointPositions = FloatArray(0)
     
     return CachedGraphGeometry(
         carrierPath = carrierPath,
         upperBeatPath = upperPath,
         lowerBeatPath = lowerPath,
         combinedBeatPath = combinedPath,
+        baseCarrierPath = baseCarrierPath,
         gridLines = gridLines,
         verticalLines = verticalLines,
         pointPositions = pointPositions,
@@ -337,19 +340,17 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         style = Stroke(width = 1.5f)
     )
     
-    // Виртуальные точки (только в SIMPLE режиме)
-    if (relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SIMPLE) {
-        for (i in geometry.virtualPointPositions.indices step 2) {
-            val x = geometry.virtualPointPositions[i]
-            val y = geometry.virtualPointPositions[i + 1]
-            
-            drawCircle(
-                color = relaxationColor.copy(alpha = 0.5f),
-                radius = 3f,
-                center = Offset(x, y),
-                style = Fill
+    // Пунктирная линия базовой кривой (для режимов ADVANCED и SMOOTH)
+    geometry.baseCarrierPath?.let { basePath ->
+        val dashPattern = floatArrayOf(6f, 6f)
+        drawPath(
+            path = basePath,
+            color = primaryColor.copy(alpha = 0.3f),
+            style = Stroke(
+                width = 1f,
+                pathEffect = PathEffect.dashPathEffect(dashPattern)
             )
-        }
+        )
     }
     
     // Основные точки и подписи
@@ -470,56 +471,12 @@ private fun createRelaxationVirtualPoints(
     if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
     
     return when (relaxationModeSettings.mode) {
-        RelaxationMode.SIMPLE -> createSimpleVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-        RelaxationMode.ADVANCED -> createAdvancedVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+        RelaxationMode.STEP -> createStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+        RelaxationMode.SMOOTH -> createSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
     }
 }
 
-private fun createSimpleVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    
-    for (i in 0 until sortedPoints.size) {
-        val currentPoint = sortedPoints[i]
-        val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
-        
-        val currentTimeSeconds = currentPoint.time.toSecondOfDay()
-        var nextTimeSeconds = nextPoint.time.toSecondOfDay()
-        
-        if (nextTimeSeconds <= currentTimeSeconds) {
-            nextTimeSeconds += 24 * 3600
-        }
-        
-        val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
-        val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
-        
-        val midCarrier = interpolateCarrierFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
-        val midBeat = interpolateBeatFrequencyMini(sortedPoints, midTime, interpolationType, splineTension)
-        
-        val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
-        val relaxedBeat = midBeat * (1.0f - beatReduction)
-        
-        virtualPoints.add(
-            FrequencyPoint(
-                time = midTime,
-                carrierFrequency = relaxedCarrier,
-                beatFrequency = relaxedBeat
-            )
-        )
-    }
-    
-    return virtualPoints
-}
-
-private fun createAdvancedVirtualPoints(
+private fun createStepVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType,
@@ -584,6 +541,44 @@ private fun createAdvancedVirtualPoints(
     return virtualPoints.sortedBy { it.time.toSecondOfDay() }
 }
 
+private fun createSmoothVirtualPoints(
+    points: List<FrequencyPoint>,
+    relaxationModeSettings: RelaxationModeSettings,
+    interpolationType: InterpolationType,
+    splineTension: Float
+): List<FrequencyPoint> {
+    val virtualPoints = mutableListOf<FrequencyPoint>()
+    
+    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
+    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
+    val intervalSeconds = relaxationModeSettings.smoothIntervalMinutes * 60L
+    val daySeconds = 24 * 3600L
+    
+    var currentTimeSeconds = 0L
+    var isRelaxationPoint = false
+    
+    while (currentTimeSeconds < daySeconds) {
+        val time = LocalTime.fromSecondOfDay((currentTimeSeconds % daySeconds).toInt())
+        val baseCarrier = interpolateCarrierFrequencyMini(points, time, interpolationType, splineTension)
+        val baseBeat = interpolateBeatFrequencyMini(points, time, interpolationType, splineTension)
+        
+        if (isRelaxationPoint) {
+            virtualPoints.add(FrequencyPoint(
+                time,
+                baseCarrier * (1.0f - carrierReduction),
+                baseBeat * (1.0f - beatReduction)
+            ))
+        } else {
+            virtualPoints.add(FrequencyPoint(time, baseCarrier, baseBeat))
+        }
+        
+        isRelaxationPoint = !isRelaxationPoint
+        currentTimeSeconds += intervalSeconds
+    }
+    
+    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+}
+
 // Функции вычисления путей
 
 private fun computeCarrierPath(
@@ -619,7 +614,7 @@ private fun computeCarrierPath(
             carrierPath.lineTo(nextX, currentCarrierY)
         }
     } else {
-        val numSamples = (sortedPoints.size * 2).coerceAtLeast(200)
+        val numSamples = (sortedPoints.size * 4).coerceAtLeast(400)
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
@@ -640,7 +635,7 @@ private fun computeBeatPaths(
     splineTension: Float
 ): Triple<Path, Path, Path> {
     val width = params.widthPx.toFloat()
-    val numSamples = (sortedPoints.size * 2).coerceAtLeast(200)
+    val numSamples = (sortedPoints.size * 4).coerceAtLeast(400)
     
     val upperPath = Path()
     val lowerPath = Path()
