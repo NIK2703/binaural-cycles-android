@@ -17,6 +17,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -129,8 +130,8 @@ private data class GraphParams(
 
 /**
  * Генерирует виртуальные точки режима расслабления.
- * Для SIMPLE режима: точки в серединах интервалов между основными точками.
  * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
+ * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
  */
 fun generateRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
@@ -141,64 +142,13 @@ fun generateRelaxationVirtualPoints(
     if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
     
     return when (relaxationModeSettings.mode) {
-        RelaxationMode.SIMPLE -> generateSimpleVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-        RelaxationMode.ADVANCED -> generateAdvancedVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+        RelaxationMode.STEP -> generateStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+        RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
     }
 }
 
 /**
- * Простой режим: виртуальные точки в серединах интервалов между основными точками.
- */
-private fun generateSimpleVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    
-    for (i in 0 until sortedPoints.size) {
-        val currentPoint = sortedPoints[i]
-        val nextPoint = sortedPoints[(i + 1) % sortedPoints.size]
-        
-        // Вычисляем время посередине между точками
-        val currentTimeSeconds = currentPoint.time.toSecondOfDay()
-        var nextTimeSeconds = nextPoint.time.toSecondOfDay()
-        
-        // Обработка перехода через полночь
-        if (nextTimeSeconds <= currentTimeSeconds) {
-            nextTimeSeconds += 24 * 3600
-        }
-        
-        val midTimeSeconds = (currentTimeSeconds + nextTimeSeconds) / 2
-        val midTime = LocalTime.fromSecondOfDay(midTimeSeconds % (24 * 3600))
-        
-        // Интерполируем значения по кривой (учитывает тип интерполяции)
-        val midCarrier = interpolateCarrierFrequency(sortedPoints, midTime, interpolationType, splineTension)
-        val midBeat = interpolateBeatFrequency(sortedPoints, midTime, interpolationType, splineTension)
-        
-        // Применяем снижение частот для режима расслабления
-        val relaxedCarrier = midCarrier * (1.0f - carrierReduction)
-        val relaxedBeat = midBeat * (1.0f - beatReduction)
-        
-        virtualPoints.add(
-            FrequencyPoint(
-                time = midTime,
-                carrierFrequency = relaxedCarrier,
-                beatFrequency = relaxedBeat
-            )
-        )
-    }
-    
-    return virtualPoints
-}
-
-/**
- * Расширенный режим: генерация виртуальных точек по расписанию.
+ * Ступенчатый режим: генерация виртуальных точек по расписанию.
  * Создаётся группа из 4 точек для каждого периода расслабления:
  * - Точка 1: на базовой кривой (начало периода)
  * - Точка 2: сниженные частоты (после перехода)
@@ -207,7 +157,7 @@ private fun generateSimpleVirtualPoints(
  * 
  * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
  */
-private fun generateAdvancedVirtualPoints(
+private fun generateStepVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType,
@@ -278,6 +228,57 @@ private fun generateAdvancedVirtualPoints(
     }
     
     // Сортируем по времени
+    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+}
+
+/**
+ * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
+ * Интервал между точками регулируется параметром smoothIntervalMinutes.
+ * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+ */
+private fun generateSmoothVirtualPoints(
+    points: List<FrequencyPoint>,
+    relaxationModeSettings: RelaxationModeSettings,
+    interpolationType: InterpolationType,
+    splineTension: Float
+): List<FrequencyPoint> {
+    val virtualPoints = mutableListOf<FrequencyPoint>()
+    
+    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
+    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
+    val intervalSeconds = relaxationModeSettings.smoothIntervalMinutes * 60L
+    val daySeconds = 24 * 3600L
+    
+    // Генерируем точки от 00:00 до 23:59 с заданным интервалом
+    // Чётные индексы (0, 2, 4...) - точки на базовой кривой
+    // Нечётные индексы (1, 3, 5...) - снижающие точки
+    
+    var currentSeconds = 0L
+    var index = 0
+    
+    while (currentSeconds < daySeconds) {
+        val time = LocalTime.fromSecondOfDay((currentSeconds % daySeconds).toInt())
+        
+        if (index % 2 == 0) {
+            // Чётный индекс - точка на базовой кривой
+            val carrier = interpolateCarrierFrequency(points, time, interpolationType, splineTension)
+            val beat = interpolateBeatFrequency(points, time, interpolationType, splineTension)
+            virtualPoints.add(FrequencyPoint(time, carrier, beat))
+        } else {
+            // Нечётный индекс - снижающая точка
+            val baseCarrier = interpolateCarrierFrequency(points, time, interpolationType, splineTension)
+            val baseBeat = interpolateBeatFrequency(points, time, interpolationType, splineTension)
+            virtualPoints.add(FrequencyPoint(
+                time,
+                baseCarrier * (1.0f - carrierReduction),
+                baseBeat * (1.0f - beatReduction)
+            ))
+        }
+        
+        currentSeconds += intervalSeconds
+        index++
+    }
+    
     return virtualPoints.sortedBy { it.time.toSecondOfDay() }
 }
 
@@ -362,15 +363,11 @@ fun FrequencyGraph(
             val relaxationColor = MaterialTheme.colorScheme.tertiary
 
             // Объединяем реальные и виртуальные точки для отрисовки
-            // В ADVANCED режиме используем только виртуальные точки (кривая проходит только через них)
-            // В SIMPLE режиме объединяем реальные и виртуальные точки
+            // В ADVANCED и SMOOTH режимах используем только виртуальные точки (кривая проходит только через них)
             val allPoints = remember(displayPoints, virtualPoints, relaxationModeSettings) {
                 when {
-                    relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.ADVANCED && virtualPoints.isNotEmpty() -> {
-                        virtualPoints  // Только виртуальные точки для ADVANCED режима
-                    }
                     relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> {
-                        (displayPoints + virtualPoints).sortedBy { it.time.toSecondOfDay() }  // SIMPLE режим
+                        virtualPoints  // Только виртуальные точки для ADVANCED и SMOOTH режимов
                     }
                     else -> displayPoints
                 }
@@ -392,7 +389,8 @@ fun FrequencyGraph(
                             relaxationColor = relaxationColor,
                             interpolationType = interpolationType,
                             splineTension = splineTension,
-                            isPlaying = isPlaying
+                            isPlaying = isPlaying,
+                            relaxationModeSettings = relaxationModeSettings
                         )
                     }
                     .pointerInput(Unit) {
@@ -487,23 +485,8 @@ fun FrequencyGraph(
                     )
                 }
                 
-                // Виртуальные точки режима расслабления (нередактируемые) - показываем только в SIMPLE режиме
-                // В ADVANCED режиме виртуальные точки скрыты, но кривая проходит через них
-                if (relaxationModeSettings.mode == RelaxationMode.SIMPLE) {
-                    virtualPoints.forEach { virtualPoint ->
-                        val xPx = graphParams.timeToX(virtualPoint.time)
-                        val yPx = graphParams.carrierToY(virtualPoint.carrierFrequency)
-                        val pointSize = 12.dp
-                        val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
-                        
-                        Box(
-                            modifier = Modifier
-                                .offset { IntOffset((xPx - halfSizePx).toInt(), (yPx - halfSizePx).toInt()) }
-                                .size(pointSize)
-                                .background(relaxationColor.copy(alpha = 0.5f), CircleShape)
-                        )
-                    }
-                }
+                // Виртуальные точки режима расслабления скрыты - кривая проходит через них
+                // В SMOOTH и ADVANCED режимах виртуальные точки не отображаются отдельно
                 
                 if (dragState.startIndex >= 0 && dragState.currentTime != null && dragState.direction != DragDirection.NONE) {
                     val previewXPx = graphParams.timeToX(dragState.currentTime!!)
@@ -601,7 +584,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     relaxationColor: Color,
     interpolationType: InterpolationType,
     splineTension: Float = 0.0f,
-    isPlaying: Boolean = false
+    isPlaying: Boolean = false,
+    relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
 ) {
     val width = size.width
     val height = size.height
@@ -622,6 +606,13 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     if (sortedPoints.size >= 2) {
         drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
         drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
+    }
+    
+    // В режимах STEP и SMOOTH рисуем пунктирную линию базовой кривой (через основные точки)
+    if (relaxationModeSettings.enabled && 
+        (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+        realPoints.size >= 2) {
+        drawDashedBaseCurve(realPoints, graphParams, primaryColor, interpolationType, splineTension)
     }
     
     // Рисуем указатель текущей частоты только если воспроизводится этот график
@@ -646,8 +637,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     splineTension: Float = 0.0f
 ) {
     val width = size.width
-    // Динамическое количество сэмплов: минимум 300, для большого количества точек - больше
-    val numSamples = (sortedPoints.size * 2).coerceAtLeast(300)
+    // Динамическое количество сэмплов: минимум 500, для плавных кривых - больше
+    val numSamples = (sortedPoints.size * 4).coerceAtLeast(500)
     
     val upperPath = Path()
     val lowerPath = Path()
@@ -789,8 +780,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
         }
     } else {
         // Обычная интерполяция для других типов
-        // Динамическое количество сэмплов: минимум 300, для большого количества точек - больше
-        val numSamples = (sortedPoints.size * 2).coerceAtLeast(300)
+        // Динамическое количество сэмплов: минимум 500, для плавных кривых - больше
+        val numSamples = (sortedPoints.size * 4).coerceAtLeast(500)
         for (i in 1..numSamples) {
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
@@ -805,6 +796,49 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
 }
 
 private enum class RangeType { MIN, MAX }
+
+/**
+ * Рисует пунктирную линию базовой кривой (проходящей через основные точки)
+ * Используется в режимах ADVANCED и SMOOTH для отображения исходной кривой
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDashedBaseCurve(
+    realPoints: List<FrequencyPoint>,
+    params: GraphParams,
+    primaryColor: Color,
+    interpolationType: InterpolationType,
+    splineTension: Float
+) {
+    val width = size.width
+    val carrierPath = Path()
+    
+    // Начинаем с левой границы (время 0)
+    val startTime = LocalTime.fromSecondOfDay(0)
+    val startCarrier = interpolateCarrierFrequency(realPoints, startTime, interpolationType, splineTension)
+    val startY = params.carrierToY(startCarrier)
+    carrierPath.moveTo(0f, startY)
+    
+    // Динамическое количество сэмплов
+    val numSamples = (realPoints.size * 2).coerceAtLeast(300)
+    for (i in 1..numSamples) {
+        val t = i.toDouble() / numSamples
+        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+        val carrier = interpolateCarrierFrequency(realPoints, time, interpolationType, splineTension)
+        val y = params.carrierToY(carrier)
+        val x = (t * width).toFloat()
+        carrierPath.lineTo(x, y)
+    }
+    
+    // Рисуем пунктирной линией
+    val dashPattern = floatArrayOf(10f, 10f)
+    drawPath(
+        path = carrierPath,
+        color = primaryColor.copy(alpha = 0.3f),
+        style = Stroke(
+            width = 2f,
+            pathEffect = PathEffect.dashPathEffect(dashPattern)
+        )
+    )
+}
 
 /**
  * Вычисляет максимальную частоту биений для верхней границы (2000 Гц).

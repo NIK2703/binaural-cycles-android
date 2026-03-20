@@ -345,6 +345,8 @@ class BinauralViewModel @Inject constructor(
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val isActivePreset = _uiState.value.activePreset?.id == presetId
         
+        android.util.Log.d("BinauralViewModel", "startEditingPreset: presetId=$presetId, relaxationModeSettings=${preset.relaxationModeSettings}, smoothInterval=${preset.relaxationModeSettings.smoothIntervalMinutes}")
+        
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = preset.frequencyCurve,
@@ -447,6 +449,7 @@ class BinauralViewModel @Inject constructor(
         curve: FrequencyCurve, 
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
+        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings, smoothInterval=${relaxationModeSettings.smoothIntervalMinutes}")
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
@@ -957,6 +960,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingRelaxationMode(mode: RelaxationMode) {
         val state = _uiState.value
+        android.util.Log.d("BinauralViewModel", "setEditingRelaxationMode: mode=$mode, current smoothInterval=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(mode = mode)
@@ -999,6 +1003,19 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(transitionPeriodMinutes = clampedMinutes)
+            )
+        }
+    }
+    
+    /**
+     * Установить интервал между точками для SMOOTH режима (в минутах)
+     */
+    fun setEditingSmoothIntervalMinutes(minutes: Int) {
+        val clampedMinutes = minutes.coerceIn(5, 60)
+        _uiState.update { state ->
+            android.util.Log.d("BinauralViewModel", "setEditingSmoothIntervalMinutes: minutes=$minutes, clamped=$clampedMinutes, current=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
+            state.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(smoothIntervalMinutes = clampedMinutes)
             )
         }
     }

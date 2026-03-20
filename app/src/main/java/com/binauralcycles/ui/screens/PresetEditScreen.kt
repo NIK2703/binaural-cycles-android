@@ -274,7 +274,8 @@ fun PresetEditScreen(
                     onBeatReductionChange = { viewModel.setEditingBeatReductionPercent(it) },
                     onRelaxationGapChange = { viewModel.setEditingRelaxationGapMinutes(it) },
                     onTransitionPeriodChange = { viewModel.setEditingTransitionPeriodMinutes(it) },
-                    onRelaxationDurationChange = { viewModel.setEditingRelaxationDurationMinutes(it) }
+                    onRelaxationDurationChange = { viewModel.setEditingRelaxationDurationMinutes(it) },
+                    onSmoothIntervalChange = { viewModel.setEditingSmoothIntervalMinutes(it) }
                 )
                 
                 Spacer(modifier = Modifier.height(16.dp))

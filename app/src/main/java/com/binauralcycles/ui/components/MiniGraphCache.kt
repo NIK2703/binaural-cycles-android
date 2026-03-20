@@ -14,6 +14,7 @@ data class CachedGraphGeometry(
     val upperBeatPath: Path,
     val lowerBeatPath: Path,
     val combinedBeatPath: Path,
+    val baseCarrierPath: Path? = null,  // Путь базовой кривой (по основным точкам) для режимов ADVANCED и SMOOTH
     val gridLines: FloatArray,
     val verticalLines: FloatArray,
     val pointPositions: FloatArray,  // [x0, y0, x1, y1, ...]
@@ -149,6 +150,7 @@ object MiniGraphCache {
         hash = 31 * hash + settings.transitionPeriodMinutes
         hash = 31 * hash + settings.relaxationDurationMinutes
         hash = 31 * hash + settings.gapBetweenRelaxationMinutes
+        hash = 31 * hash + settings.smoothIntervalMinutes
         return hash
     }
 }
