@@ -97,7 +97,11 @@ class BinauralAudioEngine(private val context: Context) {
     @Volatile
     private var volumeShaper: VolumeShaper? = null
     
-    // Текущая громкость (0.0 - 1.0)
+    // Громкость, установленная пользователем (0.0 - 1.0)
+    // Сохраняется между сессиями воспроизведения и не изменяется при fade
+    private var userVolume: Float = 1.0f
+    
+    // Текущая громкость (0.0 - 1.0) - используется для отслеживания состояния fade
     private var currentVolume: Float = 1.0f
     
     // Трекинг параметров fade
@@ -265,7 +269,9 @@ class BinauralAudioEngine(private val context: Context) {
             }
             
             createAudioTrack()
-            createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = 1.0f)
+            // Fade-in от MIN_VOLUME до пользовательской громкости
+            currentVolume = MIN_VOLUME  // Начинаем с минимума для плавного нарастания
+            createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = userVolume)
             audioTrack?.play()
             startVolumeShaper()
             
@@ -311,7 +317,11 @@ class BinauralAudioEngine(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        audioTrack?.setVolume(currentVolume)
+        // Устанавливаем базовую громкость 1.0 для корректной работы VolumeShaper.
+        // VolumeShaper работает как множитель поверх AudioTrack.setVolume():
+        // итоговая_громкость = AudioTrack.volume × VolumeShaper.value
+        // При fade-in: 1.0 × [0.001→1.0] = плавное нарастание от 0.001 до 1.0
+        audioTrack?.setVolume(1.0f)
         audioTrackBufferSize = bufferSize
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
     }
@@ -794,6 +804,7 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun setVolume(volume: Float) {
         val clampedVolume = volume.coerceIn(0f, 1f)
+        userVolume = clampedVolume  // Сохраняем пользовательскую громкость
         
         val track = audioTrack
         if (track != null && isActive.get()) {
@@ -802,7 +813,7 @@ class BinauralAudioEngine(private val context: Context) {
             // в нативном движке volume всегда 1.0 для корректной работы fade
             track.setVolume(clampedVolume)
             currentVolume = clampedVolume
-            Log.d(TAG, "Volume set to $clampedVolume")
+            Log.d(TAG, "Volume set to $clampedVolume (userVolume)")
         }
     }
     

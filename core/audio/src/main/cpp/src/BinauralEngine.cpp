@@ -13,8 +13,13 @@
 #include <immintrin.h>
 #endif
 
+// Логирование только в DEBUG сборках
+#ifdef AUDIO_DEBUG
 #define LOG_TAG "BinauralEngine"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#else
+#define LOGD(...) ((void)0)
+#endif
 
 namespace binaural {
 
@@ -206,6 +211,9 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
     
     // Уведомляем о перестановке каналов (редкое событие)
     if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
+        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d, fadeOp=%d",
+             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0,
+             static_cast<int>(m_state.currentFadeOperation));
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
     
