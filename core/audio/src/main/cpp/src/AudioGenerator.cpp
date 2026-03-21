@@ -349,6 +349,14 @@ GenerateResult AudioGenerator::generateBuffer(
     float endLeftFreq = endFreqResult.lowerFreq;
     float endRightFreq = endFreqResult.upperFreq;
     
+    // Логирование частот начала и конца буфера (только в DEBUG)
+    LOGD("BufferGen: time=%.3fs, dur=%.3fs, startFreq=[%.2f, %.2f], endFreq=[%.2f, %.2f], swapped=%d, fadeOp=%d",
+         timeSeconds, bufferDurationSeconds,
+         startLeftFreq, startRightFreq,
+         endLeftFreq, endRightFreq,
+         state.channelsSwapped ? 1 : 0,
+         static_cast<int>(state.currentFadeOperation));
+    
     // Амплитуды
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
         startLeftFreq, startRightFreq, config, config.curve
@@ -877,6 +885,14 @@ GenerateResult AudioGenerator::generateBufferNeon(
     float endLeftFreq = endFreqResult.lowerFreq;
     float endRightFreq = endFreqResult.upperFreq;
     
+    // Логирование частот начала и конца буфера (только в DEBUG)
+    LOGD("BufferGenNeon: time=%.3fs, dur=%.3fs, startFreq=[%.2f, %.2f], endFreq=[%.2f, %.2f], swapped=%d, fadeOp=%d",
+         timeSeconds, bufferDurationSeconds,
+         startLeftFreq, startRightFreq,
+         endLeftFreq, endRightFreq,
+         state.channelsSwapped ? 1 : 0,
+         static_cast<int>(state.currentFadeOperation));
+    
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
         startLeftFreq, startRightFreq, config, config.curve
     );
@@ -1373,6 +1389,14 @@ GenerateResult AudioGenerator::generateBufferSse(
     );
     float endLeftFreq = endFreqResult.lowerFreq;
     float endRightFreq = endFreqResult.upperFreq;
+    
+    // Логирование частот начала и конца буфера (только в DEBUG)
+    LOGD("BufferGenSse: time=%.3fs, dur=%.3fs, startFreq=[%.2f, %.2f], endFreq=[%.2f, %.2f], swapped=%d, fadeOp=%d",
+         timeSeconds, bufferDurationSeconds,
+         startLeftFreq, startRightFreq,
+         endLeftFreq, endRightFreq,
+         state.channelsSwapped ? 1 : 0,
+         static_cast<int>(state.currentFadeOperation));
     
     auto [startLeftAmplitude, startRightAmplitude] = calculateNormalizedAmplitudes(
         startLeftFreq, startRightFreq, config, config.curve
