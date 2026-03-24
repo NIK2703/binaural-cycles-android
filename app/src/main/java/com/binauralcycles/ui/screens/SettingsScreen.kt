@@ -92,9 +92,9 @@ fun SettingsScreen(
             // Настройки энергопотребления
             PowerSettingsCard(
                 sampleRate = uiState.sampleRate,
-                frequencyUpdateIntervalMs = uiState.frequencyUpdateIntervalMs,
+                bufferGenerationMinutes = uiState.bufferGenerationMinutes,
                 onSampleRateChange = { viewModel.setSampleRate(it) },
-                onFrequencyUpdateIntervalChange = { viewModel.setFrequencyUpdateInterval(it) }
+                onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
             )
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))

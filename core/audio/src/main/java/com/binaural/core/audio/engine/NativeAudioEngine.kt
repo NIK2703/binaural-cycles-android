@@ -476,6 +476,37 @@ class NativeAudioEngine {
     fun getFrequencyUpdateInterval(): Int = nativeGetFrequencyUpdateInterval()
     fun getRecommendedBufferSize(): Int = nativeGetRecommendedBufferSize()
     
+    // === Нативные методы для батчевой генерации (оптимизация энергопотребления) ===
+    
+    private external fun nativeSetBatchDurationMinutes(durationMinutes: Int)
+    private external fun nativeGetBatchDurationMinutes(): Int
+    private external fun nativeGenerateBatch(buffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int
+    
+    /**
+     * Установить длительность батча для оптимизации энергопотребления
+     * @param durationMinutes длительность в минутах (0 = отключено)
+     */
+    fun setBatchDurationMinutes(durationMinutes: Int) {
+        nativeSetBatchDurationMinutes(durationMinutes.coerceIn(0, 60))
+        Log.d(TAG, "Batch duration set to $durationMinutes minutes")
+    }
+    
+    /**
+     * Получить длительность батча в минутах
+     */
+    fun getBatchDurationMinutes(): Int = nativeGetBatchDurationMinutes()
+    
+    /**
+     * Сгенерировать батч аудио (оптимизация энергопотребления)
+     * Генерирует один большой буфер на заданное время за один вызов
+     * @param directBuffer DirectByteBuffer достаточного размера
+     * @param maxSamplesPerChannel максимальное количество сэмплов на канал
+     * @return количество сгенерированных сэмплов на канал
+     */
+    fun generateBatch(directBuffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int {
+        return nativeGenerateBatch(directBuffer, maxSamplesPerChannel)
+    }
+    
     // === Публичные методы для интерполяции (используются в UI для графика) ===
     
     /**

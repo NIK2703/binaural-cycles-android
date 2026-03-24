@@ -77,8 +77,15 @@ void AudioGenerator::resetState(GeneratorState& state) {
     state.channelsSwapped = false;
     state.lastSwapElapsedMs = 0;
     state.totalSamplesGenerated = 0;
+    
+    // Новая state machine для swap-цикла
+    state.swapPhase = SwapPhase::SOLID;
+    state.phaseSamplePosition = 0;
+    state.solidStartMs = 0;
+    
+    // Legacy поля (для обратной совместимости)
     state.currentFadeOperation = GeneratorState::FadeOperation::NONE;
-    state.isFadingOut = false;  // Исправлено: согласованное начальное состояние
+    state.isFadingOut = true;
     state.fadeStartSample = 0;
     state.pauseStartSample = 0;
 }
@@ -379,27 +386,37 @@ GenerateResult AudioGenerator::generateBuffer(
     const bool channelSwapEnabled = config.channelSwapEnabled;
     const bool channelsSwappedAtStart = state.channelsSwapped;
     
+    // Вычисляем размер буфера в мс
+    const int bufferDurationMs = (static_cast<int64_t>(samplesPerChannel) * 1000) / m_sampleRate;
+    
     // Проверка необходимости начать fade для перестановки каналов
+    // ИСПРАВЛЕНО: swap должен происходить в ТОЧНЫЙ момент времени внутри буфера
+    int swapOffsetInBuffer = -1;  // Позиция swap внутри буфера (-1 = нет swap в этом буфере)
+    
     if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && channelSwapEnabled) {
         const int64_t swapIntervalMs = config.channelSwapIntervalSec * 1000LL;
-        if (elapsedMs - state.lastSwapElapsedMs >= swapIntervalMs) {
-            if (config.channelSwapFadeEnabled) {
-                state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
-                state.isFadingOut = true;
-                state.fadeStartSample = state.totalSamplesGenerated;
-                // Записываем время НАЧАЛА перестановки (fade-out)
-                state.lastSwapElapsedMs = elapsedMs;
-            } else {
-                state.channelsSwapped = !state.channelsSwapped;
-                state.lastSwapElapsedMs = elapsedMs;
-                result.channelsSwapped = true;
-            }
+        const int64_t timeUntilSwap = swapIntervalMs - (elapsedMs - state.lastSwapElapsedMs);
+        
+        // Swap попадает внутрь этого буфера?
+        if (timeUntilSwap < bufferDurationMs && timeUntilSwap >= 0) {
+            // Вычисляем точную позицию swap в сэмплах от начала буфера
+            // timeUntilSwap = 0 → swap в начале буфера (offset = 0)
+            // timeUntilSwap = bufferDurationMs → swap в конце буфера
+            swapOffsetInBuffer = static_cast<int>((timeUntilSwap * m_sampleRate) / 1000);
+            swapOffsetInBuffer = std::clamp(swapOffsetInBuffer, 0, samplesPerChannel - 1);
+            
+            LOGD("Swap scheduled at offset %d samples (%lld ms) in buffer of %d samples (%d ms)",
+                 swapOffsetInBuffer, (long long)timeUntilSwap, samplesPerChannel, bufferDurationMs);
+        } else if (timeUntilSwap < 0) {
+            // Swap уже просрочен - делаем немедленно в начале буфера
+            swapOffsetInBuffer = 0;
+            LOGD("Swap overdue by %lld ms, starting at buffer start", -(long long)timeUntilSwap);
         }
     }
     
     // Определяем, какой тип генерации нужен
-    if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE) {
-        // Самый быстрый путь: сплошной буфер без fade
+    if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && swapOffsetInBuffer < 0) {
+        // Самый быстрый путь: сплошной буфер без fade и без swap
         const bool swapActive = channelSwapEnabled && state.channelsSwapped;
         
         generateSolidBuffer(
@@ -416,6 +433,163 @@ GenerateResult AudioGenerator::generateBuffer(
             swapActive,
             state
         );
+    } else if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && swapOffsetInBuffer >= 0) {
+        // ================================================================
+        // НОВОЕ: Swap в точной позиции внутри буфера
+        // Генерируем составной буфер: [часть до swap] + [fade] + [часть после swap]
+        // ================================================================
+        
+        const bool currentSwapState = state.channelsSwapped;
+        
+        // ИСПРАВЛЕНО: Интерполируем омеги для каждой части буфера
+        // Часть 1: до swap - омеги от начала до позиции swap
+        if (swapOffsetInBuffer > 0) {
+            const float ratio1 = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+            const float endLeftOmega1 = startLeftOmega + (endLeftOmega - startLeftOmega) * ratio1;
+            const float endRightOmega1 = startRightOmega + (endRightOmega - startRightOmega) * ratio1;
+            const float endLeftAmp1 = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratio1;
+            const float endRightAmp1 = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratio1;
+            
+            generateSolidBuffer(
+                buffer,
+                swapOffsetInBuffer,
+                startLeftOmega,
+                startRightOmega,
+                endLeftOmega1,
+                endRightOmega1,
+                startLeftAmplitude,
+                startRightAmplitude,
+                endLeftAmp1,
+                endRightAmp1,
+                currentSwapState,
+                state
+            );
+        }
+        
+        // Выполняем swap
+        if (config.channelSwapFadeEnabled) {
+            // С fade: начинаем fade-out в точной позиции
+            state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+            state.isFadingOut = true;
+            state.fadeStartSample = state.totalSamplesGenerated + swapOffsetInBuffer;
+            
+            // Записываем точное время swap (elapsedMs + время до swap в буфере)
+            const int64_t swapTimeInBufferMs = (static_cast<int64_t>(swapOffsetInBuffer) * 1000) / m_sampleRate;
+            state.lastSwapElapsedMs = elapsedMs + swapTimeInBufferMs;
+            
+            // Часть 2: fade-out от позиции swap
+            const int samplesAfterSwap = samplesPerChannel - swapOffsetInBuffer;
+            const int fadeOutSamples = std::min(fadeDurationSamples, samplesAfterSwap);
+            
+            // Омеги для fade-out части
+            const float ratioFadeStart = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+            const float ratioFadeEnd = static_cast<float>(swapOffsetInBuffer + fadeOutSamples) / samplesPerChannel;
+            const float fadeStartLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeStart;
+            const float fadeStartRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeStart;
+            const float fadeEndLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeEnd;
+            const float fadeEndRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeEnd;
+            const float fadeStartLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeStart;
+            const float fadeStartRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeStart;
+            const float fadeEndLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeEnd;
+            const float fadeEndRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeEnd;
+            
+            generateFadeBuffer(
+                buffer + swapOffsetInBuffer * 2,
+                fadeOutSamples,
+                fadeStartLeftOmega,
+                fadeStartRightOmega,
+                fadeEndLeftOmega,
+                fadeEndRightOmega,
+                fadeStartLeftAmp,
+                fadeStartRightAmp,
+                fadeEndLeftAmp,
+                fadeEndRightAmp,
+                0,
+                fadeDurationSamples,
+                true,
+                currentSwapState,
+                state
+            );
+            
+            // Если fade-out завершён и есть место для fade-in
+            if (fadeOutSamples >= fadeDurationSamples && samplesAfterSwap > fadeOutSamples) {
+                // Переключаем каналы
+                state.channelsSwapped = !currentSwapState;
+                state.isFadingOut = false;
+                state.fadeStartSample = state.totalSamplesGenerated + swapOffsetInBuffer + fadeOutSamples;
+                
+                // Часть 3: fade-in
+                const int fadeInSamples = samplesAfterSwap - fadeOutSamples;
+                
+                // Омеги для fade-in части
+                const float ratioFadeInStart = static_cast<float>(swapOffsetInBuffer + fadeOutSamples) / samplesPerChannel;
+                const float ratioFadeInEnd = static_cast<float>(swapOffsetInBuffer + fadeOutSamples + fadeInSamples) / samplesPerChannel;
+                const float fadeInStartLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeInStart;
+                const float fadeInStartRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeInStart;
+                const float fadeInEndLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeInEnd;
+                const float fadeInEndRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeInEnd;
+                const float fadeInStartLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeInStart;
+                const float fadeInStartRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeInStart;
+                const float fadeInEndLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeInEnd;
+                const float fadeInEndRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeInEnd;
+                
+                generateFadeBuffer(
+                    buffer + (swapOffsetInBuffer + fadeOutSamples) * 2,
+                    fadeInSamples,
+                    fadeInStartLeftOmega,
+                    fadeInStartRightOmega,
+                    fadeInEndLeftOmega,
+                    fadeInEndRightOmega,
+                    fadeInStartLeftAmp,
+                    fadeInStartRightAmp,
+                    fadeInEndLeftAmp,
+                    fadeInEndRightAmp,
+                    0,
+                    fadeDurationSamples,
+                    false,
+                    state.channelsSwapped,
+                    state
+                );
+                
+                if (fadeInSamples >= fadeDurationSamples) {
+                    state.currentFadeOperation = GeneratorState::FadeOperation::NONE;
+                }
+            }
+            
+            result.channelsSwapped = true;
+            result.fadePhaseCompleted = true;
+        } else {
+            // Без fade: мгновенный swap
+            state.channelsSwapped = !currentSwapState;
+            state.lastSwapElapsedMs = elapsedMs + (static_cast<int64_t>(swapOffsetInBuffer) * 1000) / m_sampleRate;
+            result.channelsSwapped = true;
+            
+            // Часть 2: после swap (новое состояние каналов)
+            const int samplesAfterSwap = samplesPerChannel - swapOffsetInBuffer;
+            if (samplesAfterSwap > 0) {
+                // Омеги для части после swap
+                const float ratio2 = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+                const float startLeftOmega2 = startLeftOmega + (endLeftOmega - startLeftOmega) * ratio2;
+                const float startRightOmega2 = startRightOmega + (endRightOmega - startRightOmega) * ratio2;
+                const float startLeftAmp2 = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratio2;
+                const float startRightAmp2 = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratio2;
+                
+                generateSolidBuffer(
+                    buffer + swapOffsetInBuffer * 2,
+                    samplesAfterSwap,
+                    startLeftOmega2,
+                    startRightOmega2,
+                    endLeftOmega,
+                    endRightOmega,
+                    startLeftAmp2,
+                    startRightAmp2,
+                    endLeftAmplitude,
+                    endRightAmplitude,
+                    state.channelsSwapped,
+                    state
+                );
+            }
+        }
     } else {
         // Путь с fade
         const int64_t currentFadeOffset = state.totalSamplesGenerated - state.fadeStartSample;
@@ -579,11 +753,28 @@ void AudioGenerator::generateSolidBufferNeon(
     int i = 0;
     const int neonEnd = samples - 3;
     
+    // ИСПРАВЛЕНО: Правильная интерполяция omega внутри NEON-блока
+    // omega[i] = baseOmega + step * i для каждого сэмпла в блоке из 4
+    // Переменные для амплитуд (используются в обоих ветках if/else)
+    float32x4_t vLeftAmps, vRightAmps;
+    
     if (swapActive) {
         for (; i < neonEnd; i += 4) {
-            float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
-            float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+            // Интерполированные omega для каждого из 4 сэмплов
+            float32x4_t vOmegaL = {leftOmega, leftOmega + omegaStepLeft, 
+                                   leftOmega + 2*omegaStepLeft, leftOmega + 3*omegaStepLeft};
+            float32x4_t vOmegaR = {rightOmega, rightOmega + omegaStepRight,
+                                   rightOmega + 2*omegaStepRight, rightOmega + 3*omegaStepRight};
             
+            // Интерполированные амплитуды
+            float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
+                                 leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
+            float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
+                                 rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
+            
+            // Фазы: phase[i] = basePhase + omega[0]*0 + omega[1]*1 + ... = накапливающая сумма
+            // Используем накопленную фазу: phase[i] = basePhase + i*omegaBase + step*i*(i-1)/2
+            // Для простоты: phase[i] ≈ basePhase + (omega + i*step/2) * i
             float32x4_t vLeftPhases = vaddq_f32(vdupq_n_f32(leftPhaseBase), vmulq_f32(vOmegaL, vOffsets));
             float32x4_t vRightPhases = vaddq_f32(vdupq_n_f32(rightPhaseBase), vmulq_f32(vOmegaR, vOffsets));
             
@@ -593,8 +784,8 @@ void AudioGenerator::generateSolidBufferNeon(
             float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
             float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
             
-            float32x4_t vLeftAmps = vmulq_n_f32(vBaseVol, leftAmplitude);
-            float32x4_t vRightAmps = vmulq_n_f32(vBaseVol, rightAmplitude);
+            vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
+            vRightAmps = vmulq_f32(vBaseVol, vAmpR);
             
             #ifdef __ARM_FEATURE_FMA
                 vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
@@ -604,9 +795,11 @@ void AudioGenerator::generateSolidBufferNeon(
                 vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
             #endif
             
-            leftPhaseBase += leftOmega * 4;
+            // Обновляем базовую фазу с учётом интерполяции
+            // Новая фаза = старая + sum(omega[i]) = старая + 4*omegaBase + 6*step
+            leftPhaseBase += leftOmega * 4 + omegaStepLeft * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            rightPhaseBase += rightOmega * 4;
+            rightPhaseBase += rightOmega * 4 + omegaStepRight * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
             
             leftOmega += omegaStepLeft * 4;
@@ -620,8 +813,17 @@ void AudioGenerator::generateSolidBufferNeon(
         }
     } else {
         for (; i < neonEnd; i += 4) {
-            float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
-            float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+            // Интерполированные omega для каждого из 4 сэмплов
+            float32x4_t vOmegaL = {leftOmega, leftOmega + omegaStepLeft, 
+                                   leftOmega + 2*omegaStepLeft, leftOmega + 3*omegaStepLeft};
+            float32x4_t vOmegaR = {rightOmega, rightOmega + omegaStepRight,
+                                   rightOmega + 2*omegaStepRight, rightOmega + 3*omegaStepRight};
+            
+            // Интерполированные амплитуды
+            float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
+                                 leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
+            float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
+                                 rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
             
             float32x4_t vLeftPhases = vaddq_f32(vdupq_n_f32(leftPhaseBase), vmulq_f32(vOmegaL, vOffsets));
             float32x4_t vRightPhases = vaddq_f32(vdupq_n_f32(rightPhaseBase), vmulq_f32(vOmegaR, vOffsets));
@@ -632,8 +834,8 @@ void AudioGenerator::generateSolidBufferNeon(
             float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
             float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
             
-            float32x4_t vLeftAmps = vmulq_n_f32(vBaseVol, leftAmplitude);
-            float32x4_t vRightAmps = vmulq_n_f32(vBaseVol, rightAmplitude);
+            vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
+            vRightAmps = vmulq_f32(vBaseVol, vAmpR);
             
             #ifdef __ARM_FEATURE_FMA
                 vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
@@ -643,9 +845,10 @@ void AudioGenerator::generateSolidBufferNeon(
                 vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
             #endif
             
-            leftPhaseBase += leftOmega * 4;
+            // Обновляем базовую фазу с учётом интерполяции
+            leftPhaseBase += leftOmega * 4 + omegaStepLeft * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            rightPhaseBase += rightOmega * 4;
+            rightPhaseBase += rightOmega * 4 + omegaStepRight * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
             
             leftOmega += omegaStepLeft * 4;
@@ -735,8 +938,11 @@ bool AudioGenerator::generateFadeBufferNeon(
     const int neonEnd = samples - 3;
     
     for (; i < neonEnd; i += 4) {
-        float32x4_t vOmegaL = vdupq_n_f32(leftOmega);
-        float32x4_t vOmegaR = vdupq_n_f32(rightOmega);
+        // ИСПРАВЛЕНО: Интерполированные omega для каждого из 4 сэмплов
+        float32x4_t vOmegaL = {leftOmega, leftOmega + omegaStepLeft, 
+                               leftOmega + 2*omegaStepLeft, leftOmega + 3*omegaStepLeft};
+        float32x4_t vOmegaR = {rightOmega, rightOmega + omegaStepRight,
+                               rightOmega + 2*omegaStepRight, rightOmega + 3*omegaStepRight};
         
         float32x4_t vLeftPhases = vaddq_f32(vdupq_n_f32(leftPhaseBase), vmulq_f32(vOmegaL, vOffsets));
         float32x4_t vRightPhases = vaddq_f32(vdupq_n_f32(rightPhaseBase), vmulq_f32(vOmegaR, vOffsets));
@@ -763,11 +969,17 @@ bool AudioGenerator::generateFadeBufferNeon(
             }
         }
         
+        // Интерполированные амплитуды
+        float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
+                             leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
+        float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
+                             rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
+        
         float leftAmps[4] __attribute__((aligned(16)));
         float rightAmps[4] __attribute__((aligned(16)));
         for (int j = 0; j < 4; ++j) {
-            leftAmps[j] = baseVolumeFactor * fadeMultipliers[j] * leftAmplitude;
-            rightAmps[j] = baseVolumeFactor * fadeMultipliers[j] * rightAmplitude;
+            leftAmps[j] = baseVolumeFactor * fadeMultipliers[j] * (leftAmplitude + j * ampStepLeft);
+            rightAmps[j] = baseVolumeFactor * fadeMultipliers[j] * (rightAmplitude + j * ampStepRight);
         }
         
         float32x4_t vLeftAmps = vld1q_f32(leftAmps);
@@ -781,9 +993,10 @@ bool AudioGenerator::generateFadeBufferNeon(
             vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
         #endif
         
-        leftPhaseBase += leftOmega * 4;
+        // ИСПРАВЛЕНО: Обновляем фазу с учётом интерполяции omega
+        leftPhaseBase += leftOmega * 4 + omegaStepLeft * 6;
         leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-        rightPhaseBase += rightOmega * 4;
+        rightPhaseBase += rightOmega * 4 + omegaStepRight * 6;
         rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
         
         leftOmega += omegaStepLeft * 4;
@@ -912,24 +1125,40 @@ GenerateResult AudioGenerator::generateBufferNeon(
     const bool channelSwapEnabled = config.channelSwapEnabled;
     const bool channelsSwappedAtStart = state.channelsSwapped;
     
+    // Вычисляем размер буфера в мс
+    const int bufferDurationMs = (static_cast<int64_t>(samplesPerChannel) * 1000) / m_sampleRate;
+    
+    // ИСПРАВЛЕНО: swap должен происходить в ТОЧНЫЙ момент времени внутри буфера
+    int swapOffsetInBuffer = -1;  // Позиция swap внутри буфера (-1 = нет swap в этом буфере)
+    
     if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && channelSwapEnabled) {
         const int64_t swapIntervalMs = config.channelSwapIntervalSec * 1000LL;
-        if (elapsedMs - state.lastSwapElapsedMs >= swapIntervalMs) {
-            if (config.channelSwapFadeEnabled) {
-                state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
-                state.isFadingOut = true;
-                state.fadeStartSample = state.totalSamplesGenerated;
-                // Записываем время НАЧАЛА перестановки (fade-out)
-                state.lastSwapElapsedMs = elapsedMs;
-            } else {
-                state.channelsSwapped = !state.channelsSwapped;
-                state.lastSwapElapsedMs = elapsedMs;
-                result.channelsSwapped = true;
-            }
+        const int64_t timeUntilSwap = swapIntervalMs - (elapsedMs - state.lastSwapElapsedMs);
+        
+        // Swap попадает внутрь этого буфера?
+        if (timeUntilSwap < bufferDurationMs && timeUntilSwap >= 0) {
+            swapOffsetInBuffer = static_cast<int>((timeUntilSwap * m_sampleRate) / 1000);
+            swapOffsetInBuffer = std::clamp(swapOffsetInBuffer, 0, samplesPerChannel - 1);
+            
+            LOGD("NEON Swap scheduled at offset %d samples (%lld ms) in buffer of %d samples (%d ms)",
+                 swapOffsetInBuffer, (long long)timeUntilSwap, samplesPerChannel, bufferDurationMs);
+        } else if (timeUntilSwap < 0) {
+            swapOffsetInBuffer = 0;
+            LOGD("NEON Swap overdue by %lld ms, starting at buffer start", -(long long)timeUntilSwap);
         }
     }
     
-    if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE) {
+    // Коэффициент для интерполяции параметров внутри буфера
+    const auto interpolateOmega = [](float start, float end, int offset, int total) -> std::pair<float, float> {
+        if (total <= 0) return {start, end};
+        const float ratio = static_cast<float>(offset) / total;
+        const float omegaAtOffset = start + (end - start) * ratio;
+        const float omegaAtEnd = start + (end - start) * ((offset + total) / static_cast<float>(total));
+        return {omegaAtOffset, omegaAtEnd};
+    };
+    
+    if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && swapOffsetInBuffer < 0) {
+        // Самый быстрый путь: сплошной буфер без fade и без swap
         const bool swapActive = channelSwapEnabled && state.channelsSwapped;
         
         generateSolidBufferNeon(
@@ -946,6 +1175,160 @@ GenerateResult AudioGenerator::generateBufferNeon(
             swapActive,
             state
         );
+    } else if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && swapOffsetInBuffer >= 0) {
+        // ================================================================
+        // NEON: Swap в точной позиции внутри буфера
+        // Генерируем составной буфер: [часть до swap] + [fade] + [часть после swap]
+        // ================================================================
+        
+        const bool currentSwapState = state.channelsSwapped;
+        
+        // ИСПРАВЛЕНО: Интерполируем омеги для каждой части буфера
+        // Часть 1: до swap - омеги от начала до позиции swap
+        if (swapOffsetInBuffer > 0) {
+            const float ratio1 = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+            const float endLeftOmega1 = startLeftOmega + (endLeftOmega - startLeftOmega) * ratio1;
+            const float endRightOmega1 = startRightOmega + (endRightOmega - startRightOmega) * ratio1;
+            const float endLeftAmp1 = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratio1;
+            const float endRightAmp1 = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratio1;
+            
+            generateSolidBufferNeon(
+                buffer,
+                swapOffsetInBuffer,
+                startLeftOmega,
+                startRightOmega,
+                endLeftOmega1,
+                endRightOmega1,
+                startLeftAmplitude,
+                startRightAmplitude,
+                endLeftAmp1,
+                endRightAmp1,
+                currentSwapState,
+                state
+            );
+        }
+        
+        // Выполняем swap
+        if (config.channelSwapFadeEnabled) {
+            // С fade: начинаем fade-out в точной позиции
+            state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+            state.isFadingOut = true;
+            state.fadeStartSample = state.totalSamplesGenerated + swapOffsetInBuffer;
+            
+            const int64_t swapTimeInBufferMs = (static_cast<int64_t>(swapOffsetInBuffer) * 1000) / m_sampleRate;
+            state.lastSwapElapsedMs = elapsedMs + swapTimeInBufferMs;
+            
+            const int samplesAfterSwap = samplesPerChannel - swapOffsetInBuffer;
+            const int fadeOutSamples = std::min(fadeDurationSamples, samplesAfterSwap);
+            
+            // Омеги для fade-out части
+            const float ratioFadeStart = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+            const float ratioFadeEnd = static_cast<float>(swapOffsetInBuffer + fadeOutSamples) / samplesPerChannel;
+            const float fadeStartLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeStart;
+            const float fadeStartRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeStart;
+            const float fadeEndLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeEnd;
+            const float fadeEndRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeEnd;
+            const float fadeStartLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeStart;
+            const float fadeStartRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeStart;
+            const float fadeEndLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeEnd;
+            const float fadeEndRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeEnd;
+            
+            generateFadeBufferNeon(
+                buffer + swapOffsetInBuffer * 2,
+                fadeOutSamples,
+                fadeStartLeftOmega,
+                fadeStartRightOmega,
+                fadeEndLeftOmega,
+                fadeEndRightOmega,
+                fadeStartLeftAmp,
+                fadeStartRightAmp,
+                fadeEndLeftAmp,
+                fadeEndRightAmp,
+                0,
+                fadeDurationSamples,
+                true,
+                currentSwapState,
+                state
+            );
+            
+            if (fadeOutSamples >= fadeDurationSamples && samplesAfterSwap > fadeOutSamples) {
+                state.channelsSwapped = !currentSwapState;
+                state.isFadingOut = false;
+                state.fadeStartSample = state.totalSamplesGenerated + swapOffsetInBuffer + fadeOutSamples;
+                
+                const int fadeInSamples = samplesAfterSwap - fadeOutSamples;
+                
+                // Омеги для fade-in части
+                const float ratioFadeInStart = static_cast<float>(swapOffsetInBuffer + fadeOutSamples) / samplesPerChannel;
+                const float ratioFadeInEnd = static_cast<float>(swapOffsetInBuffer + fadeOutSamples + fadeInSamples) / samplesPerChannel;
+                const float fadeInStartLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeInStart;
+                const float fadeInStartRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeInStart;
+                const float fadeInEndLeftOmega = startLeftOmega + (endLeftOmega - startLeftOmega) * ratioFadeInEnd;
+                const float fadeInEndRightOmega = startRightOmega + (endRightOmega - startRightOmega) * ratioFadeInEnd;
+                const float fadeInStartLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeInStart;
+                const float fadeInStartRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeInStart;
+                const float fadeInEndLeftAmp = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratioFadeInEnd;
+                const float fadeInEndRightAmp = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratioFadeInEnd;
+                
+                generateFadeBufferNeon(
+                    buffer + (swapOffsetInBuffer + fadeOutSamples) * 2,
+                    fadeInSamples,
+                    fadeInStartLeftOmega,
+                    fadeInStartRightOmega,
+                    fadeInEndLeftOmega,
+                    fadeInEndRightOmega,
+                    fadeInStartLeftAmp,
+                    fadeInStartRightAmp,
+                    fadeInEndLeftAmp,
+                    fadeInEndRightAmp,
+                    0,
+                    fadeDurationSamples,
+                    false,
+                    state.channelsSwapped,
+                    state
+                );
+                
+                if (fadeInSamples >= fadeDurationSamples) {
+                    state.currentFadeOperation = GeneratorState::FadeOperation::NONE;
+                    // ИСПРАВЛЕНО: После завершения fade обновляем lastSwapElapsedMs
+                    // Это время когда swap БЫЛ ЗАПЛАНИРОВАН (не текущее время)
+                    // lastSwapElapsedMs уже правильный - время начала fade
+                }
+            }
+            
+            result.channelsSwapped = true;
+            result.fadePhaseCompleted = true;
+        } else {
+            // Без fade: мгновенный swap
+            state.channelsSwapped = !currentSwapState;
+            state.lastSwapElapsedMs = elapsedMs + (static_cast<int64_t>(swapOffsetInBuffer) * 1000) / m_sampleRate;
+            result.channelsSwapped = true;
+            
+            const int samplesAfterSwap = samplesPerChannel - swapOffsetInBuffer;
+            if (samplesAfterSwap > 0) {
+                // Омеги для части после swap
+                const float ratio2 = static_cast<float>(swapOffsetInBuffer) / samplesPerChannel;
+                const float startLeftOmega2 = startLeftOmega + (endLeftOmega - startLeftOmega) * ratio2;
+                const float startRightOmega2 = startRightOmega + (endRightOmega - startRightOmega) * ratio2;
+                const float startLeftAmp2 = startLeftAmplitude + (endLeftAmplitude - startLeftAmplitude) * ratio2;
+                const float startRightAmp2 = startRightAmplitude + (endRightAmplitude - startRightAmplitude) * ratio2;
+                
+                generateSolidBufferNeon(
+                    buffer + swapOffsetInBuffer * 2,
+                    samplesAfterSwap,
+                    startLeftOmega2,
+                    startRightOmega2,
+                    endLeftOmega,
+                    endRightOmega,
+                    startLeftAmp2,
+                    startRightAmp2,
+                    endLeftAmplitude,
+                    endRightAmplitude,
+                    state.channelsSwapped,
+                    state
+                );
+            }
+        }
     } else {
         const int64_t currentFadeOffset = state.totalSamplesGenerated - state.fadeStartSample;
         const int samplesUntilFadeEnd = fadeDurationSamples - static_cast<int>(currentFadeOffset);
@@ -1416,14 +1799,42 @@ GenerateResult AudioGenerator::generateBufferSse(
     
     const bool channelSwapEnabled = config.channelSwapEnabled;
     
+    // ОПТИМИЗАЦИЯ КРАЕВЫХ FADE: если swap попадает близко к концу буфера,
+    // начинаем его раньше чтобы весь цикл (fade-out + fade-in) поместился в одном буфере
     if (state.currentFadeOperation == GeneratorState::FadeOperation::NONE && channelSwapEnabled) {
         const int64_t swapIntervalMs = config.channelSwapIntervalSec * 1000LL;
-        if (elapsedMs - state.lastSwapElapsedMs >= swapIntervalMs) {
+        const int64_t timeUntilSwap = swapIntervalMs - (elapsedMs - state.lastSwapElapsedMs);
+        
+        const int bufferDurationMs = (static_cast<int64_t>(samplesPerChannel) * 1000) / m_sampleRate;
+        
+        if (timeUntilSwap <= bufferDurationMs && timeUntilSwap >= 0) {
+            const int64_t totalFadeDurationMs = config.channelSwapFadeEnabled 
+                ? (config.channelSwapFadeDurationMs * 2 + config.channelSwapPauseDurationMs)
+                : 0;
+            
+            const int64_t timeAfterSwapStart = bufferDurationMs - timeUntilSwap;
+            
+            const bool needEarlyStart = config.channelSwapFadeEnabled && 
+                (timeAfterSwapStart < totalFadeDurationMs) &&
+                (timeUntilSwap > 0);
+            
+            if (timeUntilSwap == 0 || needEarlyStart) {
+                if (config.channelSwapFadeEnabled) {
+                    state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
+                    state.isFadingOut = true;
+                    state.fadeStartSample = state.totalSamplesGenerated;
+                    state.lastSwapElapsedMs = elapsedMs;
+                } else {
+                    state.channelsSwapped = !state.channelsSwapped;
+                    state.lastSwapElapsedMs = elapsedMs;
+                    result.channelsSwapped = true;
+                }
+            }
+        } else if (timeUntilSwap <= 0) {
             if (config.channelSwapFadeEnabled) {
                 state.currentFadeOperation = GeneratorState::FadeOperation::CHANNEL_SWAP;
                 state.isFadingOut = true;
                 state.fadeStartSample = state.totalSamplesGenerated;
-                // Записываем время НАЧАЛА перестановки (fade-out)
                 state.lastSwapElapsedMs = elapsedMs;
             } else {
                 state.channelsSwapped = !state.channelsSwapped;
@@ -1501,5 +1912,266 @@ GenerateResult AudioGenerator::generateBufferSse(
     return result;
 }
 #endif // USE_SSE
+
+// ========================================================================
+// ГЕНЕРАЦИЯ ПАКЕТОВ БУФЕРОВ (НОВАЯ АРХИТЕКТУРА)
+// ========================================================================
+
+GenerateResult AudioGenerator::generatePackage(
+    float* buffer,
+    const PackagePlan& plan,
+    const BinauralConfig& config,
+    GeneratorState& state,
+    float startTimeSeconds,
+    int64_t elapsedMs
+) {
+    GenerateResult result;
+    
+    if (plan.segments.empty()) {
+        return result;
+    }
+    
+    const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
+    constexpr float baseVolumeFactor = 0.5f;
+    
+    int currentSample = 0;
+    float currentTime = startTimeSeconds;
+    int64_t currentElapsedMs = elapsedMs;
+    
+    // Инициализируем переменные для частот
+    float lastLeftFreq = 0.0f;
+    float lastRightFreq = 0.0f;
+    
+    for (const auto& segment : plan.segments) {
+        // Вычисляем параметры для сегмента
+        const int samples = static_cast<int>((segment.durationMs * m_sampleRate) / 1000);
+        const float durationSec = static_cast<float>(segment.durationMs) / 1000.0f;
+        
+        if (samples <= 0) continue;
+        
+        // Получаем частоты для начала и конца сегмента
+        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, currentTime);
+        float startLeftFreq = startFreqResult.lowerFreq;
+        float startRightFreq = startFreqResult.upperFreq;
+        
+        FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
+            config.curve, currentTime + durationSec
+        );
+        float endLeftFreq = endFreqResult.lowerFreq;
+        float endRightFreq = endFreqResult.upperFreq;
+        
+        // Вычисляем амплитуды
+        auto [startLeftAmp, startRightAmp] = calculateNormalizedAmplitudes(
+            startLeftFreq, startRightFreq, config, config.curve
+        );
+        auto [endLeftAmp, endRightAmp] = calculateNormalizedAmplitudes(
+            endLeftFreq, endRightFreq, config, config.curve
+        );
+        
+        // Омеги
+        const float startLeftOmega = twoPiOverSampleRate * startLeftFreq;
+        const float startRightOmega = twoPiOverSampleRate * startRightFreq;
+        const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
+        const float endRightOmega = twoPiOverSampleRate * endRightFreq;
+        
+        // Генерируем сегмент в зависимости от типа
+        switch (segment.type) {
+            case BufferType::SOLID:
+                generateSolidBuffer(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+                
+            case BufferType::FADE_OUT:
+                generateFadeBuffer(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    0,  // fadeStartOffset
+                    samples,  // fadeDuration = длительность сегмента
+                    true,  // fadingOut
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+                
+            case BufferType::FADE_IN:
+                generateFadeBuffer(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    0,  // fadeStartOffset
+                    samples,  // fadeDuration = длительность сегмента
+                    false,  // fadingOut = fade-in
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+        }
+        
+        // Swap после сегмента если нужно
+        if (segment.swapAfterSegment) {
+            state.channelsSwapped = !state.channelsSwapped;
+            result.channelsSwapped = true;
+            
+            LOGD("PackageGen: swap at elapsedMs=%lld, channelsSwapped=%d",
+                 (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+        }
+        
+        // Обновляем позицию
+        currentSample += samples;
+        currentTime += durationSec;
+        currentElapsedMs += segment.durationMs;
+        
+        // Сохраняем последние частоты для результата
+        lastLeftFreq = endLeftFreq;
+        lastRightFreq = endRightFreq;
+    }
+    
+    state.totalSamplesGenerated += currentSample;
+    
+    // Вычисляем результат
+    result.currentBeatFreq = (lastRightFreq - lastLeftFreq);
+    result.currentCarrierFreq = (lastLeftFreq + lastRightFreq) / 2.0f;
+    
+    return result;
+}
+
+#ifdef USE_NEON
+GenerateResult AudioGenerator::generatePackageNeon(
+    float* buffer,
+    const PackagePlan& plan,
+    const BinauralConfig& config,
+    GeneratorState& state,
+    float startTimeSeconds,
+    int64_t elapsedMs
+) {
+    GenerateResult result;
+    
+    if (plan.segments.empty()) {
+        return result;
+    }
+    
+    const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
+    
+    int currentSample = 0;
+    float currentTime = startTimeSeconds;
+    int64_t currentElapsedMs = elapsedMs;
+    
+    float lastLeftFreq = 0.0f;
+    float lastRightFreq = 0.0f;
+    
+    for (const auto& segment : plan.segments) {
+        const int samples = static_cast<int>((segment.durationMs * m_sampleRate) / 1000);
+        const float durationSec = static_cast<float>(segment.durationMs) / 1000.0f;
+        
+        if (samples <= 0) continue;
+        
+        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, currentTime);
+        float startLeftFreq = startFreqResult.lowerFreq;
+        float startRightFreq = startFreqResult.upperFreq;
+        
+        FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
+            config.curve, currentTime + durationSec
+        );
+        float endLeftFreq = endFreqResult.lowerFreq;
+        float endRightFreq = endFreqResult.upperFreq;
+        
+        auto [startLeftAmp, startRightAmp] = calculateNormalizedAmplitudes(
+            startLeftFreq, startRightFreq, config, config.curve
+        );
+        auto [endLeftAmp, endRightAmp] = calculateNormalizedAmplitudes(
+            endLeftFreq, endRightFreq, config, config.curve
+        );
+        
+        const float startLeftOmega = twoPiOverSampleRate * startLeftFreq;
+        const float startRightOmega = twoPiOverSampleRate * startRightFreq;
+        const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
+        const float endRightOmega = twoPiOverSampleRate * endRightFreq;
+        
+        switch (segment.type) {
+            case BufferType::SOLID:
+                generateSolidBufferNeon(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+                
+            case BufferType::FADE_OUT:
+                generateFadeBufferNeon(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    0,
+                    samples,
+                    true,
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+                
+            case BufferType::FADE_IN:
+                generateFadeBufferNeon(
+                    buffer + currentSample * 2,
+                    samples,
+                    startLeftOmega, startRightOmega,
+                    endLeftOmega, endRightOmega,
+                    startLeftAmp, startRightAmp,
+                    endLeftAmp, endRightAmp,
+                    0,
+                    samples,
+                    false,
+                    state.channelsSwapped,
+                    state
+                );
+                break;
+        }
+        
+        if (segment.swapAfterSegment) {
+            state.channelsSwapped = !state.channelsSwapped;
+            result.channelsSwapped = true;
+            
+            LOGD("PackageGenNeon: swap at elapsedMs=%lld, channelsSwapped=%d",
+                 (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+        }
+        
+        currentSample += samples;
+        currentTime += durationSec;
+        currentElapsedMs += segment.durationMs;
+        
+        lastLeftFreq = endLeftFreq;
+        lastRightFreq = endRightFreq;
+    }
+    
+    state.totalSamplesGenerated += currentSample;
+    
+    result.currentBeatFreq = (lastRightFreq - lastLeftFreq);
+    result.currentCarrierFreq = (lastLeftFreq + lastRightFreq) / 2.0f;
+    
+    return result;
+}
+#endif // USE_NEON
 
 } // namespace binaural

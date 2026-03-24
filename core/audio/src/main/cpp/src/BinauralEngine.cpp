@@ -1,4 +1,5 @@
 #include "BinauralEngine.h"
+#include "BufferPackagePlanner.h"
 #include <chrono>
 #include <algorithm>
 #include <android/log.h>
@@ -70,13 +71,103 @@ void BinauralEngine::setFrequencyUpdateInterval(int intervalMs) {
     LOGD("Frequency update interval set to %d ms", intervalMs);
 }
 
+void BinauralEngine::setBatchDurationMinutes(int durationMinutes) {
+    m_batchDurationMinutes = durationMinutes;
+    LOGD("Batch duration set to %d minutes", durationMinutes);
+}
+
+int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
+    if (!m_isPlaying.load(std::memory_order_acquire) || m_batchDurationMinutes <= 0) {
+        return 0;
+    }
+    
+    const int sampleRate = m_generator.getSampleRate();
+    const int64_t packageDurationMs = static_cast<int64_t>(m_batchDurationMinutes) * 60 * 1000LL;
+    const int maxSamples = m_batchDurationMinutes * 60 * sampleRate;
+    const int samplesToGenerate = std::min(maxSamples, maxSamplesPerChannel);
+    
+    BinauralConfig config;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        config = m_config;
+    }
+    
+    // Планируем пакет буферов
+    BufferPackagePlanner planner;
+    PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state);
+    
+    // Точное время для начала буфера
+    int32_t timeSeconds = static_cast<int32_t>(m_baseTimeSeconds + m_totalBufferTimeSeconds);
+    constexpr int32_t SECONDS_PER_DAY = 86400;
+    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    
+    const int64_t elapsedMs = static_cast<int64_t>(
+        m_elapsedSeconds.load(std::memory_order_relaxed)
+    ) * 1000;
+    
+    // Генерируем пакет буферов по плану
+#if defined(USE_NEON)
+    GenerateResult result = m_generator.generatePackageNeon(
+        buffer,
+        plan,
+        config,
+        m_state,
+        static_cast<float>(timeSeconds),
+        elapsedMs
+    );
+#elif defined(USE_SSE)
+    GenerateResult result = m_generator.generatePackage(
+        buffer,
+        plan,
+        config,
+        m_state,
+        static_cast<float>(timeSeconds),
+        elapsedMs
+    );
+#else
+    GenerateResult result = m_generator.generatePackage(
+        buffer,
+        plan,
+        config,
+        m_state,
+        static_cast<float>(timeSeconds),
+        elapsedMs
+    );
+#endif
+    
+    // Обновляем время
+    const float batchDurationSeconds = static_cast<float>(samplesToGenerate) / sampleRate;
+    m_totalBufferTimeSeconds += batchDurationSeconds;
+    
+    // Обновляем атомарные значения для Java
+    const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq, std::memory_order_relaxed);
+    m_currentCarrierFreq.store(result.currentCarrierFreq, std::memory_order_relaxed);
+    
+    // Callback при значительном изменении частоты (> 0.1 Hz)
+    if (std::abs(result.currentBeatFreq - prevBeatFreq) > 0.1f) {
+        if (m_callbacks.onFrequencyChanged) {
+            m_callbacks.onFrequencyChanged(result.currentBeatFreq, result.currentCarrierFreq);
+        }
+    }
+    
+    // Уведомляем о перестановке каналов
+    if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
+        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d",
+             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0);
+        m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
+    }
+    
+    return samplesToGenerate;
+}
+
 void BinauralEngine::setPlaying(bool playing) {
     m_isPlaying.store(playing, std::memory_order_release);
     
     if (playing) {
         // Сброс состояния при начале воспроизведения
+        BufferPackagePlanner planner;
+        planner.resetState(m_state);
         m_state.lastSwapElapsedMs = 0;
-        m_state.channelsSwapped = false;
         m_elapsedSeconds.store(0, std::memory_order_relaxed);
         m_baseTimeSeconds = getCurrentTimeSeconds();
         m_totalBufferTimeSeconds = 0.0;
@@ -87,6 +178,11 @@ void BinauralEngine::setPlaying(bool playing) {
 
 void BinauralEngine::resetState() {
     m_generator.resetState(m_state);
+    
+    // Сброс состояния планировщика
+    BufferPackagePlanner planner;
+    planner.resetState(m_state);
+    
     m_elapsedSeconds.store(0, std::memory_order_relaxed);
     m_currentBeatFreq.store(0.0f, std::memory_order_relaxed);
     m_currentCarrierFreq.store(0.0f, std::memory_order_relaxed);
@@ -141,6 +237,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
     // Вычисляем точное время для интерполяции
     const int sampleRate = m_generator.getSampleRate();
     const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / sampleRate;
+    const int64_t bufferDurationMs = static_cast<int64_t>(samplesPerChannel) * 1000 / sampleRate;
     
     // Точное время для начала буфера
     int32_t timeSeconds = static_cast<int32_t>(m_baseTimeSeconds + m_totalBufferTimeSeconds);
@@ -165,36 +262,38 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         config = m_config;
     }
     
+    // НОВАЯ АРХИТЕКТУРА: Используем планировщик пакетов
+    // Планируем пакет буферов на основе текущего состояния
+    BufferPackagePlanner planner;
+    PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state);
+    
     // Используем SIMD-оптимизированную версию если доступна
 #if defined(USE_NEON)
-    GenerateResult result = m_generator.generateBufferNeon(
+    GenerateResult result = m_generator.generatePackageNeon(
         buffer,
-        samplesPerChannel,
+        plan,
         config,
         m_state,
-        timeSeconds,
-        elapsedMs,
-        frequencyUpdateIntervalMs
+        static_cast<float>(timeSeconds),
+        elapsedMs
     );
 #elif defined(USE_SSE)
-    GenerateResult result = m_generator.generateBufferSse(
+    GenerateResult result = m_generator.generatePackage(
         buffer,
-        samplesPerChannel,
+        plan,
         config,
         m_state,
-        timeSeconds,
-        elapsedMs,
-        frequencyUpdateIntervalMs
+        static_cast<float>(timeSeconds),
+        elapsedMs
     );
 #else
-    GenerateResult result = m_generator.generateBuffer(
+    GenerateResult result = m_generator.generatePackage(
         buffer,
-        samplesPerChannel,
+        plan,
         config,
         m_state,
-        timeSeconds,
-        elapsedMs,
-        frequencyUpdateIntervalMs
+        static_cast<float>(timeSeconds),
+        elapsedMs
     );
 #endif
     
@@ -211,9 +310,8 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
     
     // Уведомляем о перестановке каналов (редкое событие)
     if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
-        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d, fadeOp=%d",
-             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0,
-             static_cast<int>(m_state.currentFadeOperation));
+        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d",
+             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0);
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
     

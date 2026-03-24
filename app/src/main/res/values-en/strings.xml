@@ -100,6 +100,9 @@
     <string name="minutes_format">%d min</string>
     
     <!-- App Settings -->
+    <string name="buffer_generation_minutes">Buffer generation interval</string>
+    <string name="buffer_generation_description">How many minutes of audio buffer is generated ahead. Larger interval reduces CPU wake-ups and saves battery</string>
+    <string name="buffer_generation_memory_limit">10 min limit to prevent out-of-memory</string>
     <string name="update_interval">Frequency update interval</string>
     <string name="update_interval_description">How often playback frequencies are recalculated</string>
     <string name="audio_quality">Sample rate</string>

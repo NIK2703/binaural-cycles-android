@@ -63,7 +63,8 @@ data class BinauralUiState(
     val isChannelsSwapped: Boolean = false,
     // Общие настройки приложения
     val sampleRate: SampleRate = SampleRate.LOW,
-    val frequencyUpdateIntervalMs: Int = 10000,
+    // Интервал генерации буфера в минутах (для оптимизации энергопотребления)
+    val bufferGenerationMinutes: Int = 10,
     // Автоматическое расширение границ графика при редактировании (по умолчанию выключено)
     val autoExpandGraphRange: Boolean = false,
     // Флаг подключения к сервису
@@ -109,7 +110,7 @@ class BinauralViewModel @Inject constructor(
             updateAudioConfig()
             
             // Устанавливаем настройки, которые могли быть загружены до подключения сервиса
-            playbackService?.setFrequencyUpdateInterval(state.frequencyUpdateIntervalMs)
+            playbackService?.setFrequencyUpdateInterval(state.bufferGenerationMinutes * 60 * 1000)
             playbackService?.setVolume(state.volume)
             playbackService?.setSampleRate(state.sampleRate)
             playbackService?.setResumeOnHeadsetConnect(state.resumeOnHeadsetConnect)
@@ -202,11 +203,13 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.setSampleRate(sampleRate)
             }
         }
-        // Интервал обновления частот
+        // Интервал генерации буфера (в минутах)
         viewModelScope.launch {
-            preferencesRepository.getFrequencyUpdateInterval().collect { interval ->
-                _uiState.update { it.copy(frequencyUpdateIntervalMs = interval) }
-                playbackService?.setFrequencyUpdateInterval(interval)
+            preferencesRepository.getBufferGenerationMinutes().collect { minutes ->
+                _uiState.update { it.copy(bufferGenerationMinutes = minutes) }
+                // Преобразуем минуты в миллисекунды для частоты обновления
+                // Большой буфер = реже обновления = лучше энергопотребление
+                playbackService?.setFrequencyUpdateInterval(minutes * 60 * 1000)
             }
         }
         // Громкость - загружаем только для UI
@@ -1030,12 +1033,17 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
-    fun setFrequencyUpdateInterval(intervalMs: Int) {
-        val clampedInterval = intervalMs.coerceIn(1000, 60000)
-        _uiState.update { it.copy(frequencyUpdateIntervalMs = clampedInterval) }
-        playbackService?.setFrequencyUpdateInterval(clampedInterval)
+    /**
+     * Установить интервал генерации буфера в минутах
+     * Большой интервал = меньше пробуждений CPU = лучше энергопотребление
+     */
+    fun setBufferGenerationMinutes(minutes: Int) {
+        val clampedMinutes = minutes.coerceIn(1, 60)
+        _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
+        // Преобразуем минуты в миллисекунды
+        playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)
         viewModelScope.launch {
-            preferencesRepository.saveFrequencyUpdateInterval(clampedInterval)
+            preferencesRepository.saveBufferGenerationMinutes(clampedMinutes)
         }
     }
     

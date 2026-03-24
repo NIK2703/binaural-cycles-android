@@ -67,6 +67,23 @@ public:
     int getFrequencyUpdateInterval() const { return m_frequencyUpdateIntervalMs; }
     
     /**
+     * Установить длительность батча для оптимизации энергопотребления
+     * @param durationMinutes длительность в минутах (0 = отключено)
+     */
+    void setBatchDurationMinutes(int durationMinutes);
+    
+    /**
+     * Получить длительность батча в минутах
+     */
+    int getBatchDurationMinutes() const { return m_batchDurationMinutes; }
+    
+    /**
+     * Сгенерировать батч аудио на заданное время
+     * Оптимизация: генерирует один большой буфер вместо множества маленьких
+     */
+    int generateBatch(float* buffer, int maxSamplesPerChannel);
+    
+    /**
      * Получить рекомендуемый размер буфера в сэмплах на канал
      * на основе интервала обновления частот
      */
@@ -145,6 +162,9 @@ private:
     // Начальное значение до получения из настроек через JNI
     // Должно соответствовать значению по умолчанию в BinauralPreferencesRepository
     int m_frequencyUpdateIntervalMs = 10000;
+    
+    // Длительность батча в минутах (0 = отключено)
+    int m_batchDurationMinutes = 0;
     
     // Точная интерполяция времени между буферами
     int32_t m_baseTimeSeconds = 0;          // Время начала воспроизведения

@@ -100,6 +100,9 @@
     <string name="minutes_format">%d мин</string>
     
     <!-- App Settings -->
+    <string name="buffer_generation_minutes">Интервал генерации буфера</string>
+    <string name="buffer_generation_description">На сколько минут вперёд генерируется аудиобуфер. Большой интервал снижает пробуждения процессора и экономит батарею</string>
+    <string name="buffer_generation_memory_limit">Лимит 10 мин для предотвращения нехватки памяти</string>
     <string name="update_interval">Интервал обновления частоты</string>
     <string name="update_interval_description">Как часто пересчитываются частоты воспроизведения</string>
     <string name="audio_quality">Частота дискретизации</string>

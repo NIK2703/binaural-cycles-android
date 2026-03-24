@@ -1,0 +1,5 @@
+New buffer package architecture for precise channel swap timing:
+- Implemented SOLID, FADE-OUT, FADE-IN buffer types
+- Channel swap now occurs exactly between fade-out and fade-in
+- Fixed first play button press failure
+- Improved audio generation stability

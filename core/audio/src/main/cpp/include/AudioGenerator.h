@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Config.h"
+#include "BufferPackagePlanner.h"
 #include "Wavetable.h"
 #include "Interpolation.h"
 #include <cmath>
@@ -42,8 +43,8 @@ public:
     int getSampleRate() const { return m_sampleRate; }
     
     /**
-     * Сгенерировать буфер аудио
-     * 
+     * Сгенерировать буфер аудио (legacy метод)
+     *
      * @param buffer выходной буфер (interleaved stereo, размер = samplesPerChannel * 2)
      * @param samplesPerChannel количество сэмплов на канал
      * @param config конфигурация
@@ -63,11 +64,34 @@ public:
         int frequencyUpdateIntervalMs
     );
     
+    /**
+     * Сгенерировать пакет буферов по плану
+     *
+     * Новая архитектура: генерирует последовательность целых буферов
+     * согласно плану от BufferPackagePlanner.
+     *
+     * @param buffer выходной буфер (interleaved stereo)
+     * @param plan план пакета с сегментами
+     * @param config конфигурация
+     * @param state состояние генератора (изменяется)
+     * @param startTimeSeconds время начала в секундах с начала суток
+     * @param elapsedMs прошедшее время воспроизведения в мс
+     * @return результат генерации
+     */
+    GenerateResult generatePackage(
+        float* buffer,
+        const PackagePlan& plan,
+        const BinauralConfig& config,
+        GeneratorState& state,
+        float startTimeSeconds,
+        int64_t elapsedMs
+    );
+    
 #ifdef USE_NEON
     /**
-     * NEON-оптимизированная генерация буфера
+     * NEON-оптимизированная генерация буфера (legacy метод)
      * Обрабатывает 4 сэмпла одновременно используя SIMD инструкции ARM NEON.
-     * 
+     *
      * @param buffer выходной буфер (interleaved stereo)
      * @param samplesPerChannel количество сэмплов на канал
      * @param config конфигурация
@@ -85,6 +109,26 @@ public:
         float timeSeconds,
         int64_t elapsedMs,
         int frequencyUpdateIntervalMs
+    );
+    
+    /**
+     * NEON-оптимизированная генерация пакета буферов
+     *
+     * @param buffer выходной буфер (interleaved stereo)
+     * @param plan план пакета с сегментами
+     * @param config конфигурация
+     * @param state состояние генератора (изменяется)
+     * @param startTimeSeconds время начала в секундах с начала суток
+     * @param elapsedMs прошедшее время воспроизведения в мс
+     * @return результат генерации
+     */
+    GenerateResult generatePackageNeon(
+        float* buffer,
+        const PackagePlan& plan,
+        const BinauralConfig& config,
+        GeneratorState& state,
+        float startTimeSeconds,
+        int64_t elapsedMs
     );
 #endif
 

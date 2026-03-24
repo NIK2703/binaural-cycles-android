@@ -301,39 +301,45 @@ fun ChannelSwapSettingsCard(
 }
 
 /**
- * Блок настроек энергопотребления (интервал обновления, частота дискретизации)
+ * Блок настроек энергопотребления (интервал генерации буфера, частота дискретизации)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PowerSettingsCard(
     sampleRate: SampleRate,
-    frequencyUpdateIntervalMs: Int,
+    bufferGenerationMinutes: Int,
     onSampleRateChange: (SampleRate) -> Unit,
-    onFrequencyUpdateIntervalChange: (Int) -> Unit
+    onBufferGenerationMinutesChange: (Int) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Интервал обновления частот - слайдер (от 1 сек до 1 мин)
+        // Интервал генерации буфера в минутах - слайдер (от 1 до 10 минут, ограничено памятью)
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
             Text(
-                text = stringResource(R.string.update_interval),
+                text = stringResource(R.string.buffer_generation_minutes),
                 style = MaterialTheme.typography.bodyLarge
             )
             Text(
-                text = stringResource(R.string.update_interval_description),
+                text = stringResource(R.string.buffer_generation_description),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.height(8.dp))
             DiscreteSlider(
                 label = "",
-                value = frequencyUpdateIntervalMs,
-                values = listOf(1000, 2000, 5000, 10000, 15000, 30000, 60000),
-                formatValue = { ms -> formatUpdateInterval(ms) },
-                onValueChange = onFrequencyUpdateIntervalChange,
+                value = bufferGenerationMinutes.coerceAtMost(10),  // Ограничиваем отображаемое значение
+                values = listOf(1, 2, 5, 10),  // Максимум 10 минут для предотвращения OOM
+                formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                onValueChange = onBufferGenerationMinutesChange,
                 modifier = Modifier.fillMaxWidth()
+            )
+            // Предупреждение о лимите памяти
+            Text(
+                text = stringResource(R.string.buffer_generation_memory_limit),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.tertiary
             )
         }
         

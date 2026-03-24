@@ -144,8 +144,8 @@ class BinauralPreferencesRepository @Inject constructor(
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
         // Частота дискретизации
         private val SAMPLE_RATE_KEY = intPreferencesKey("sample_rate")
-        // Интервал обновления частот (мс)
-        private val FREQUENCY_UPDATE_INTERVAL_KEY = intPreferencesKey("frequency_update_interval")
+        // Интервал генерации буфера (в минутах) - для оптимизации энергопотребления
+        private val BUFFER_GENERATION_MINUTES_KEY = intPreferencesKey("buffer_generation_minutes")
         // Wavetable оптимизация (быстрая генерация синусоид)
         private val WAVETABLE_OPTIMIZATION_KEY = booleanPreferencesKey("wavetable_optimization")
         // Размер таблицы волн (качество)
@@ -373,25 +373,27 @@ class BinauralPreferencesRepository @Inject constructor(
         }
     }
     
-    // Методы для интервала обновления частот
+    // Методы для интервала генерации буфера (оптимизация энергопотребления)
     
     /**
-     * Получить интервал обновления частот в миллисекундах
-     * По умолчанию 1000мс (1 секунда)
+     * Получить интервал генерации буфера в минутах
+     * Определяет, на сколько минут вперёд генерируется аудиобуфер за один раз.
+     * Больший интервал = меньше пробуждений CPU = лучше энергопотребление.
+     * @return интервал в минутах (1-60), по умолчанию 10 минут
      */
-    fun getFrequencyUpdateInterval(): Flow<Int> {
+    fun getBufferGenerationMinutes(): Flow<Int> {
         return dataStore.data.map { preferences ->
-            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] ?: 10000 // 10 секунд по умолчанию
+            preferences[BUFFER_GENERATION_MINUTES_KEY] ?: 10 // 10 минут по умолчанию
         }
     }
     
     /**
-     * Сохранить интервал обновления частот
-     * @param intervalMs интервал в миллисекундах (1000-60000)
+     * Сохранить интервал генерации буфера
+     * @param minutes интервал в минутах (1-60)
      */
-    suspend fun saveFrequencyUpdateInterval(intervalMs: Int) {
+    suspend fun saveBufferGenerationMinutes(minutes: Int) {
         dataStore.edit { preferences ->
-            preferences[FREQUENCY_UPDATE_INTERVAL_KEY] = intervalMs.coerceIn(1000, 60000)
+            preferences[BUFFER_GENERATION_MINUTES_KEY] = minutes.coerceIn(1, 60)
         }
     }
 

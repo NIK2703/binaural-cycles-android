@@ -118,6 +118,46 @@ struct BinauralConfig {
 };
 
 /**
+ * Фаза цикла перестановки каналов
+ *
+ * Цикл: [SOLID N сек] → [FADE_OUT M сек] → [FADE_IN M сек] → [SOLID N сек] → ...
+ *                                           ↑
+ *                               swap каналов здесь (в конце FADE_IN)
+ */
+enum class SwapPhase : int8_t {
+    SOLID = 0,      // Сплошной буфер без fade (до swap)
+    FADE_OUT = 1,   // Затухание (перед swap)
+    FADE_IN = 2     // Возрастание (после swap)
+};
+
+/**
+ * Тип сегмента буфера для генерации пакета
+ */
+enum class BufferType : int8_t {
+    SOLID = 0,     // Сплошной буфер без fade
+    FADE_OUT = 1,  // Затухание
+    FADE_IN = 2    // Возрастание
+};
+
+/**
+ * Описание сегмента буфера для генерации пакета
+ */
+struct BufferSegment {
+    BufferType type;           // Тип буфера
+    int64_t durationMs;        // Длительность в мс
+    bool swapAfterSegment;     // Выполнить swap после этого сегмента
+};
+
+/**
+ * Результат планирования пакета
+ */
+struct PackagePlan {
+    std::vector<BufferSegment> segments;  // Последовательность сегментов
+    int64_t totalDurationMs = 0;          // Общая длительность пакета в мс
+    bool endsMidCycle = false;            // Пакет заканчивается в середине цикла
+};
+
+/**
  * Состояние генератора
  * Используем float для фаз - совместимость с NEON SIMD и достаточная точность
  */
@@ -128,18 +168,43 @@ struct GeneratorState {
     int64_t lastSwapElapsedMs = 0;
     int64_t totalSamplesGenerated = 0;
     
-    // Fade состояние
+    // ================================================================
+    // НОВАЯ STATE MACHINE ДЛЯ SWAP-ЦИКЛА
+    // ================================================================
+    
+    // Текущая фаза swap-цикла
+    SwapPhase swapPhase = SwapPhase::SOLID;
+    
+    // Оставшееся время в текущей фазе (в мс)
+    // Когда достигает 0, переходим к следующей фазе
+    int64_t phaseRemainingMs = 0;
+    
+    // Позиция внутри цикла для переноса между пакетами
+    int64_t cyclePositionMs = 0;
+    
+    // ================================================================
+    // LEGACY ПОЛЯ (для обратной совместимости)
+    // Будут удалены после полного перехода на новую архитектуру
+    // ================================================================
+    
+    // Позиция внутри текущей фазы (в сэмплах)
+    int64_t phaseSamplePosition = 0;
+    
+    // Время начала текущего SOLID периода (для вычисления времени до swap)
+    int64_t solidStartMs = 0;
+    
+    // Legacy fade состояние
     enum class FadeOperation : int8_t {
         NONE = 0,
         CHANNEL_SWAP = 1,
         PRESET_SWITCH = 2,
-        PAUSE = 3  // Пауза между fade-out и fade-in
+        PAUSE = 3
     };
     
     FadeOperation currentFadeOperation = FadeOperation::NONE;
-    bool isFadingOut = true;
+    bool isFadingOut = true;  // Для CHANNEL_SWAP: true = fade-out, false = fade-in
     int64_t fadeStartSample = 0;
-    int64_t pauseStartSample = 0;  // Начало паузы (в сэмплах)
+    int64_t pauseStartSample = 0;
 };
 
 } // namespace binaural

@@ -359,6 +359,64 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeUpdateElapsedTime(
     }
 }
 
+/**
+ * Установка длительности батча для оптимизации энергопотребления
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetBatchDurationMinutes(
+    JNIEnv* env,
+    jobject thiz,
+    jint durationMinutes
+) {
+    if (g_engine) {
+        g_engine->setBatchDurationMinutes(durationMinutes);
+        LOGD("Batch duration set to %d minutes", durationMinutes);
+    }
+}
+
+/**
+ * Получение длительности батча
+ */
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetBatchDurationMinutes(
+    JNIEnv* env,
+    jobject thiz
+) {
+    return g_engine ? g_engine->getBatchDurationMinutes() : 0;
+}
+
+/**
+ * Генерация батча аудио (оптимизация энергопотребления)
+ * Генерирует большой буфер на заданное время за один вызов
+ */
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBatch(
+    JNIEnv* env,
+    jobject thiz,
+    jobject directBuffer,
+    jint maxSamplesPerChannel
+) {
+    if (!g_engine) return 0;
+    
+    float* bufferPtr = static_cast<float*>(env->GetDirectBufferAddress(directBuffer));
+    if (!bufferPtr) {
+        LOGE("nativeGenerateBatch: Failed to get direct buffer address");
+        return 0;
+    }
+    
+    int samplesGenerated = g_engine->generateBatch(bufferPtr, maxSamplesPerChannel);
+    
+    // Обновляем атомарные переменные
+    if (samplesGenerated > 0) {
+        g_currentBeatFreq.store(g_engine->getCurrentBeatFrequency(), std::memory_order_relaxed);
+        g_currentCarrierFreq.store(g_engine->getCurrentCarrierFrequency(), std::memory_order_relaxed);
+        g_elapsedSeconds.store(g_engine->getElapsedSeconds(), std::memory_order_relaxed);
+        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
+    }
+    
+    return samplesGenerated;
+}
+
 // ============================================================================
 // JNI методы для интерполяции (используются в UI для графика)
 // ============================================================================

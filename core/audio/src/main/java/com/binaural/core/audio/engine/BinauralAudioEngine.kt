@@ -55,6 +55,14 @@ class BinauralAudioEngine(private val context: Context) {
         
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
+        
+        // Максимальный размер буфера в минутах (ограничен памятью Android)
+        // При 22050 Гц: 10 мин = 13,230,000 сэмплов × 2 канала × 4 байта = ~106 МБ
+        private const val MAX_BUFFER_MINUTES = 10
+        
+        // Максимальный размер буфера в байтах (дополнительная защита)
+        // ~500 МБ - безопасный лимит для современных Android устройств
+        private const val MAX_BUFFER_BYTES = 500 * 1024 * 1024
     }
     
     // Атомарные ссылки для потокобезопасного доступа
@@ -72,14 +80,9 @@ class BinauralAudioEngine(private val context: Context) {
     private var sampleRate: Int = SampleRate.MEDIUM.value
     private var frequencyUpdateIntervalMs: Int = 10000
 
-    // Предварительно выделенный буфер для генерации аудио (fallback для старых устройств)
-    private var audioBuffer = FloatArray(0)
-    private var maxSamplesPerChannel = 0
-    
-    // DirectByteBuffer для zero-copy генерации (ОПТИМИЗАЦИЯ)
+    // DirectByteBuffer для zero-copy генерации
     // Запись в AudioTrack выполняется порциями не больше audioTrackBufferSize
     private var directAudioBuffer: java.nio.ByteBuffer? = null
-    private var useDirectBuffer = true  // Включено
     private var audioTrackBufferSize = 0  // Размер буфера AudioTrack в байтах
 
     // AudioTrack
@@ -233,39 +236,60 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun startNewPlayback(handler: Handler) {
-        if (isActive.get()) return
+        Log.d(TAG, "startNewPlayback() called, isActive=${isActive.get()}")
+        
+        if (isActive.get()) {
+            Log.w(TAG, "startNewPlayback() - already active, returning")
+            return
+        }
         
         isActive.set(true)
         _isPlaying.value = true
         playbackStartTime = System.currentTimeMillis()
         
+        Log.d(TAG, "startNewPlayback() - calling nativeEngine.resetState() and play()")
         nativeEngine?.resetState()
         nativeEngine?.play()
         
         acquireWakeLock()
+        Log.d(TAG, "startNewPlayback() - posting startPlayback to handler")
         handler.post(::startPlayback)
     }
     
     private fun startPlayback() {
-        if (!isActive.get()) return
+        Log.d(TAG, "startPlayback() called, isActive=${isActive.get()}")
+        
+        if (!isActive.get()) {
+            Log.w(TAG, "startPlayback() - isActive is false, returning")
+            return
+        }
 
         Log.d(TAG, "startPlayback() on thread: ${Thread.currentThread().name}")
 
         try {
-            maxSamplesPerChannel = sampleRate * 60
+            // Максимальный размер буфера в сэмплах (из MAX_BUFFER_MINUTES)
+            val maxSamplesPerChannelLimit = sampleRate * 60 * MAX_BUFFER_MINUTES
+            
+            // Учитываем отложенный интервал при создании буфера
+            // pendingFrequencyUpdateIntervalMs может быть установлен до нажатия play
+            val effectiveIntervalMs = pendingFrequencyUpdateIntervalMs.get() ?: frequencyUpdateIntervalMs
+            
+            // Вычисляем размер буфера на основе эффективного интервала с ограничением
+            val requestedSamplesPerChannel = (sampleRate.toLong() * effectiveIntervalMs / 1000).toInt()
+            val samplesPerChannel = minOf(requestedSamplesPerChannel, maxSamplesPerChannelLimit)
             
             // Создаём DirectByteBuffer для zero-copy генерации
-            // Размер: maxSamplesPerChannel * 2 канала * 4 байта на float
-            val directBufferSize = maxSamplesPerChannel * 2 * 4
+            // Размер: samplesPerChannel * 2 канала * 4 байта на float
+            // Дополнительно ограничиваем MAX_BUFFER_BYTES для защиты от OOM
+            val directBufferSize = minOf(
+                samplesPerChannel * 2 * 4,
+                MAX_BUFFER_BYTES
+            )
+            
             if (directAudioBuffer == null || directAudioBuffer!!.capacity() < directBufferSize) {
                 directAudioBuffer = java.nio.ByteBuffer.allocateDirect(directBufferSize)
                     .order(java.nio.ByteOrder.nativeOrder())
-                Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes")
-            }
-            
-            // Fallback буфер на случай проблем с DirectByteBuffer
-            if (audioBuffer.size < maxSamplesPerChannel * 2) {
-                audioBuffer = FloatArray(maxSamplesPerChannel * 2)
+                Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes (${directBufferSize / 1024 / 1024} MB) for interval ${effectiveIntervalMs}ms")
             }
             
             createAudioTrack()
@@ -276,9 +300,11 @@ class BinauralAudioEngine(private val context: Context) {
             startVolumeShaper()
             
             generateAudioLoop()
+            Log.d(TAG, "startPlayback() - generateAudioLoop() completed normally")
         } catch (e: Exception) {
             Log.e(TAG, "Playback error", e)
         } finally {
+            Log.d(TAG, "startPlayback() - finally block, calling cleanupPlayback()")
             cleanupPlayback()
         }
     }
@@ -404,60 +430,67 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun generateAudioLoop() {
-        val engine = nativeEngine ?: return
-        val directBuffer = directAudioBuffer
+        Log.d(TAG, "generateAudioLoop() started, isActive=${isActive.get()}")
+        
+        val engine = nativeEngine
+        if (engine == null) {
+            Log.e(TAG, "generateAudioLoop() - nativeEngine is null, returning")
+            return
+        }
 
+        // Максимальный размер буфера в сэмплах (из MAX_BUFFER_MINUTES)
+        val maxSamplesPerChannelLimit = sampleRate * 60 * MAX_BUFFER_MINUTES
+        
         var currentIntervalMs = frequencyUpdateIntervalMs
-        var samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
+        var samplesPerChannel = minOf(
+            (sampleRate.toLong() * currentIntervalMs / 1000).toInt(),
+            maxSamplesPerChannelLimit
+        )
 
         isGenerating = true
-        
-        // Счётчик ошибок для fallback на FloatArray
-        var directBufferErrors = 0
-        val maxDirectBufferErrors = 3
+        Log.d(TAG, "generateAudioLoop() - entering main loop, isActive=${isActive.get()}, audioTrack=$audioTrack")
 
         while (isActive.get() && audioTrack != null) {
             applyPendingSettings()
 
             if (frequencyUpdateIntervalMs != currentIntervalMs) {
                 currentIntervalMs = frequencyUpdateIntervalMs
-                samplesPerChannel = (sampleRate.toLong() * currentIntervalMs / 1000).toInt()
+                samplesPerChannel = minOf(
+                    (sampleRate.toLong() * currentIntervalMs / 1000).toInt(),
+                    maxSamplesPerChannelLimit
+                )
+                
+                // Пересоздаём буфер если нужно больше места
+                val requiredSize = samplesPerChannel * 2 * 4
+                if (directAudioBuffer == null || directAudioBuffer!!.capacity() < requiredSize) {
+                    directAudioBuffer = java.nio.ByteBuffer.allocateDirect(requiredSize)
+                        .order(java.nio.ByteOrder.nativeOrder())
+                    Log.d(TAG, "Resized DirectByteBuffer: $requiredSize bytes (${requiredSize / 1024 / 1024} MB)")
+                }
             }
 
             checkFadeRequests()
 
-            // Выбираем метод генерации: DirectByteBuffer (zero-copy) или FloatArray (fallback)
-            val success = if (useDirectBuffer && directBuffer != null && directBufferErrors < maxDirectBufferErrors) {
-                // Zero-copy генерация через DirectByteBuffer
-                directBuffer.clear()
-                engine.generateBufferDirect(directBuffer, samplesPerChannel, currentIntervalMs)
-            } else {
-                // Fallback: генерация с копированием через FloatArray
-                engine.generateBuffer(audioBuffer, samplesPerChannel, currentIntervalMs)
+            // Получаем актуальный буфер (может измениться при ресайзе)
+            val directBuffer = directAudioBuffer
+            if (directBuffer == null) {
+                Log.e(TAG, "generateAudioLoop() - directAudioBuffer is null, returning")
+                break
             }
+
+            // Zero-copy генерация через DirectByteBuffer
+            directBuffer.clear()
+            val success = engine.generateBufferDirect(directBuffer, samplesPerChannel, currentIntervalMs)
             
             if (!success) {
-                directBufferErrors++
-                if (directBufferErrors >= maxDirectBufferErrors && useDirectBuffer) {
-                    Log.w(TAG, "DirectByteBuffer failed $directBufferErrors times, switching to FloatArray fallback")
-                    useDirectBuffer = false
-                }
-                if (directBufferErrors < maxDirectBufferErrors) {
-                    continue  // Пробуем ещё раз
-                }
                 Log.e(TAG, "Native buffer generation failed")
                 break
             }
 
             // PULL MODEL: Читаем данные из атомарных переменных C++ после генерации
-            // Это устраняет overhead JNI callbacks - вместо push из C++ мы pull из Kotlin
-            // Данные уже обновлены в C++ атомарных переменных после generateBufferDirect/generateBuffer
-            
             val beatFreq = engine.getCurrentBeatFrequency()
             val carrierFreq = engine.getCurrentCarrierFrequency()
             
-            // Обновляем StateFlows только при реальных изменениях (distinctUntilChanged pattern)
-            // Это избегает лишних recomposition в Compose UI
             if (_currentBeatFrequency.value != beatFreq) {
                 _currentBeatFrequency.value = beatFreq
             }
@@ -483,41 +516,29 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            // Запись в AudioTrack: ByteBuffer (zero-copy) или FloatArray
+            // Запись в AudioTrack через DirectByteBuffer
+            directBuffer.flip()
+            val sizeInBytes = samplesPerChannel * 2 * 4
+            
             val writeResult = try {
-                if (useDirectBuffer && directBuffer != null) {
-                    // DirectByteBuffer: данные уже в нужном формате (float, native byte order)
-                    // Размер в байтах: samplesPerChannel * 2 канала * 4 байта на float
-                    directBuffer.flip()
-                    val sizeInBytes = samplesPerChannel * 2 * 4
+                // Записываем порциями не больше audioTrackBufferSize
+                var totalWritten = 0
+                while (totalWritten < sizeInBytes && isActive.get()) {
+                    val remaining = sizeInBytes - totalWritten
+                    val chunkSize = minOf(remaining, audioTrackBufferSize)
                     
-                    // Записываем порциями не больше audioTrackBufferSize
-                    var totalWritten = 0
-                    while (totalWritten < sizeInBytes && isActive.get()) {
-                        val remaining = sizeInBytes - totalWritten
-                        val chunkSize = minOf(remaining, audioTrackBufferSize)
-                        
-                        // Устанавливаем limit для текущей порции
-                        directBuffer.position(totalWritten)
-                        directBuffer.limit(totalWritten + chunkSize)
-                        
-                        val written = currentAudioTrack.write(directBuffer, chunkSize, AudioTrack.WRITE_BLOCKING)
-                        if (written < 0) {
-                            Log.e(TAG, "DirectByteBuffer write failed at offset $totalWritten: $written")
-                            break
-                        }
-                        totalWritten += written
-                    }
+                    directBuffer.position(totalWritten)
+                    directBuffer.limit(totalWritten + chunkSize)
                     
-                    if (totalWritten == sizeInBytes) {
-                        sizeInBytes  // Возвращаем размер как признак успеха
-                    } else {
-                        -1  // Ошибка
+                    val written = currentAudioTrack.write(directBuffer, chunkSize, AudioTrack.WRITE_BLOCKING)
+                    if (written < 0) {
+                        Log.e(TAG, "DirectByteBuffer write failed at offset $totalWritten: $written")
+                        break
                     }
-                } else {
-                    // FloatArray: запись с копированием
-                    currentAudioTrack.write(audioBuffer, 0, samplesPerChannel * 2, AudioTrack.WRITE_BLOCKING)
+                    totalWritten += written
                 }
+                
+                if (totalWritten == sizeInBytes) sizeInBytes else -1
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "AudioTrack write error: ${e.message}")
                 -1
@@ -533,7 +554,7 @@ class BinauralAudioEngine(private val context: Context) {
         }
 
         isGenerating = false
-        Log.d(TAG, "generateAudioLoop() ended (directBuffer=${useDirectBuffer})")
+        Log.d(TAG, "generateAudioLoop() ended")
     }
     
     private fun checkFadeRequests() {
@@ -723,8 +744,11 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun cleanupPlayback() {
+        Log.d(TAG, "cleanupPlayback() called, isActive=${isActive.get()}, isGenerating=$isGenerating")
+        
         currentVolume = getVolumeFromShaper()
         
+        Log.d(TAG, "cleanupPlayback() - stopping and releasing AudioTrack")
         audioTrack?.stop()
         audioTrack?.release()
         audioTrack = null
@@ -859,11 +883,14 @@ class BinauralAudioEngine(private val context: Context) {
     
     /**
      * Установить интервал обновления частот
+     * @param intervalMs интервал в миллисекундах (от 1 секунды до 60 минут)
      */
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        val clampedInterval = intervalMs.coerceIn(1000, 60000)
+        // Максимум 60 минут = 3,600,000 мс
+        val clampedInterval = intervalMs.coerceIn(1000, 60 * 60 * 1000)
         pendingFrequencyUpdateIntervalMs.set(clampedInterval)
         nativeEngine?.setFrequencyUpdateInterval(clampedInterval)
+        Log.d(TAG, "Frequency update interval set to $clampedInterval ms (${clampedInterval / 60000} min)")
     }
 
     fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
