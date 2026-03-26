@@ -79,26 +79,6 @@ fun SettingsScreen(
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             
-            // Раздел: Энергопотребление
-            Text(
-                text = stringResource(R.string.settings_section_power),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-            
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            // Настройки энергопотребления
-            PowerSettingsCard(
-                sampleRate = uiState.sampleRate,
-                bufferGenerationMinutes = uiState.bufferGenerationMinutes,
-                onSampleRateChange = { viewModel.setSampleRate(it) },
-                onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-            
             // Раздел: Интерфейс
             Text(
                 text = stringResource(R.string.settings_section_interface),
@@ -119,8 +99,41 @@ fun SettingsScreen(
                 }
             )
             
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            
+            // Настройка автовозобновления при запуске приложения
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.auto_resume_on_app_start)) },
+                supportingContent = { Text(stringResource(R.string.auto_resume_on_app_start_desc)) },
+                trailingContent = {
+                    Switch(
+                        checked = uiState.autoResumeOnAppStart,
+                        onCheckedChange = { viewModel.setAutoResumeOnAppStart(it) }
+                    )
+                }
+            )
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+            
+            // Раздел: Энергопотребление
+            Text(
+                text = stringResource(R.string.settings_section_power),
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Настройки энергопотребления
+            PowerSettingsCard(
+                sampleRate = uiState.sampleRate,
+                bufferGenerationMinutes = uiState.bufferGenerationMinutes,
+                onSampleRateChange = { viewModel.setSampleRate(it) },
+                onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
+            )
+            
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
-

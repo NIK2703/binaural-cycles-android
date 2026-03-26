@@ -128,6 +128,10 @@
     <string name="resume_on_headset_connect">Возобновление при подключении</string>
     <string name="resume_on_headset_connect_desc">Автоматически возобновлять воспроизведение при подключении гарнитуры, если оно было остановлено из-за её отключения</string>
     
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Автовозобновление при запуске</string>
+    <string name="auto_resume_on_app_start_desc">Автоматически возобновлять воспроизведение при запуске приложения</string>
+    
     <!-- Time units -->
     <string name="seconds_short">сек</string>
     <string name="hz">Гц</string>

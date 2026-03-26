@@ -72,7 +72,9 @@ data class BinauralUiState(
     // Флаг блокировки навигации во время SharedTransition анимации
     val isSharedTransitionRunning: Boolean = false,
     // Возобновление воспроизведения при подключении гарнитуры
-    val resumeOnHeadsetConnect: Boolean = false
+    val resumeOnHeadsetConnect: Boolean = false,
+    // Автовозобновление воспроизведения при запуске приложения
+    val autoResumeOnAppStart: Boolean = false
 )
 
 @HiltViewModel
@@ -86,6 +88,9 @@ class BinauralViewModel @Inject constructor(
     
     // Ссылка на сервис (может быть null если сервис не привязан)
     private var playbackService: BinauralPlaybackService? = null
+    
+    // Флаг для отслеживания, было ли обработано автовозобновление
+    private var autoResumeHandled = false
     
     // ServiceConnection для привязки к сервису
     private val serviceConnection = object : ServiceConnection {
@@ -127,6 +132,9 @@ class BinauralViewModel @Inject constructor(
             
             // Наблюдаем за состоянием воспроизведения из сервиса
             observeServiceState()
+            
+            // Проверяем необходимость автовозобновления
+            tryAutoResumeOnAppStart()
         }
         
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -242,6 +250,12 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(resumeOnHeadsetConnect = enabled) }
                 // Уведомляем сервис об изменении настройки
                 playbackService?.setResumeOnHeadsetConnect(enabled)
+            }
+        }
+        // Автовозобновление воспроизведения при запуске приложения
+        viewModelScope.launch {
+            preferencesRepository.getAutoResumeOnAppStart().collect { enabled ->
+                _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
             }
         }
     }
@@ -1165,6 +1179,16 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.saveResumeOnHeadsetConnect(enabled)
         }
     }
+    
+    /**
+     * Включить/выключить автовозобновление воспроизведения при запуске приложения
+     */
+    fun setAutoResumeOnAppStart(enabled: Boolean) {
+        _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
+        viewModelScope.launch {
+            preferencesRepository.saveAutoResumeOnAppStart(enabled)
+        }
+    }
 
     private fun updateAudioConfig() {
         val state = _uiState.value
@@ -1356,6 +1380,33 @@ class BinauralViewModel @Inject constructor(
      */
     fun endSharedTransition() {
         _uiState.update { it.copy(isSharedTransitionRunning = false) }
+    }
+    
+    /**
+     * Попытка автовозобновления воспроизведения при запуске приложения.
+     * Вызывается после подключения сервиса, если включена соответствующая настройка.
+     */
+    private fun tryAutoResumeOnAppStart() {
+        val state = _uiState.value
+        
+        // Проверяем, что:
+        // 1. Автовозобновление включено
+        // 2. Есть активный пресет
+        // 3. Сервис подключен
+        // 4. Воспроизведение не идёт
+        // 5. Мы ещё не обрабатывали автовозобновление
+        if (state.autoResumeOnAppStart &&
+            state.activePreset != null &&
+            state.isServiceConnected &&
+            !state.isPlaying &&
+            !autoResumeHandled) {
+            
+            autoResumeHandled = true
+            android.util.Log.d("BinauralViewModel", "Auto-resuming playback on app start for preset: ${state.activePreset.name}")
+            
+            // Запускаем воспроизведение с fade-in
+            playbackService?.resumeWithFade()
+        }
     }
 
     override fun onCleared() {

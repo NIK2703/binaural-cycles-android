@@ -154,6 +154,8 @@ class BinauralPreferencesRepository @Inject constructor(
         private val AUTO_EXPAND_GRAPH_RANGE_KEY = booleanPreferencesKey("auto_expand_graph_range")
         // Возобновление воспроизведения при подключении гарнитуры
         private val RESUME_ON_HEADSET_CONNECT_KEY = booleanPreferencesKey("resume_on_headset_connect")
+        // Автовозобновление воспроизведения при запуске приложения
+        private val AUTO_RESUME_ON_APP_START_KEY = booleanPreferencesKey("auto_resume_on_app_start")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -505,6 +507,28 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveResumeOnHeadsetConnect(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[RESUME_ON_HEADSET_CONNECT_KEY] = enabled
+        }
+    }
+    
+    // Методы для автовозобновления воспроизведения при запуске приложения
+    
+    /**
+     * Получить настройку автовозобновления воспроизведения при запуске приложения
+     * @return true если воспроизведение должно возобновляться автоматически при запуске
+     */
+    fun getAutoResumeOnAppStart(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[AUTO_RESUME_ON_APP_START_KEY] ?: false // По умолчанию выключено
+        }
+    }
+    
+    /**
+     * Сохранить настройку автовозобновления воспроизведения при запуске приложения
+     * @param enabled true если воспроизведение должно возобновляться автоматически при запуске
+     */
+    suspend fun saveAutoResumeOnAppStart(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[AUTO_RESUME_ON_APP_START_KEY] = enabled
         }
     }
     
