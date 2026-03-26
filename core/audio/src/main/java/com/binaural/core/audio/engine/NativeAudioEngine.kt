@@ -63,18 +63,15 @@ class NativeAudioEngine {
         volumeNormalizationStrength: Float
     )
     private external fun nativeSetSampleRate(sampleRate: Int)
-    private external fun nativeSetFrequencyUpdateInterval(intervalMs: Int)
-    private external fun nativeGetFrequencyUpdateInterval(): Int
-    private external fun nativeGetRecommendedBufferSize(): Int
     private external fun nativeResetState()
     private external fun nativeSetPlaying(playing: Boolean)
     private external fun nativeSetPlaybackStartTime(startTimeMs: Long)
     
     // FloatArray версия (с копированием) - для обратной совместимости
-    private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
+    private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean
     
     // Zero-copy версия через DirectByteBuffer - ОПТИМИЗИРОВАНО
-    private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean
+    private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int): Boolean
     
     // PULL MODEL: Геттеры читают из атомарных переменных в C++
     private external fun nativeGetCurrentBeatFrequency(): Float
@@ -443,8 +440,8 @@ class NativeAudioEngine {
     /**
      * Сгенерировать буфер аудио (FloatArray версия - с копированием)
      */
-    fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int, frequencyUpdateIntervalMs: Int): Boolean {
-        return nativeGenerateBuffer(buffer, samplesPerChannel, frequencyUpdateIntervalMs)
+    fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean {
+        return nativeGenerateBuffer(buffer, samplesPerChannel)
     }
     
     /**
@@ -452,11 +449,10 @@ class NativeAudioEngine {
      * ОПТИМИЗАЦИЯ: Избегает копирования данных между Java и C++
      */
     fun generateBufferDirect(
-        directBuffer: java.nio.ByteBuffer, 
-        samplesPerChannel: Int, 
-        frequencyUpdateIntervalMs: Int
+        directBuffer: java.nio.ByteBuffer,
+        samplesPerChannel: Int
     ): Boolean {
-        return nativeGenerateBufferDirect(directBuffer, samplesPerChannel, frequencyUpdateIntervalMs)
+        return nativeGenerateBufferDirect(directBuffer, samplesPerChannel)
     }
     
     // === PULL MODEL: Геттеры читают из атомарных переменных в C++ ===
@@ -467,14 +463,6 @@ class NativeAudioEngine {
     fun getCurrentCarrierFrequency(): Float = nativeGetCurrentCarrierFrequency()
     fun getElapsedSeconds(): Int = nativeGetElapsedSeconds()
     fun isChannelsSwapped(): Boolean = nativeIsChannelsSwapped()
-    
-    fun setFrequencyUpdateInterval(intervalMs: Int) {
-        nativeSetFrequencyUpdateInterval(intervalMs.coerceIn(1000, 60000))
-        Log.d(TAG, "Frequency update interval set to $intervalMs ms")
-    }
-    
-    fun getFrequencyUpdateInterval(): Int = nativeGetFrequencyUpdateInterval()
-    fun getRecommendedBufferSize(): Int = nativeGetRecommendedBufferSize()
     
     // === Нативные методы для батчевой генерации (оптимизация энергопотребления) ===
     

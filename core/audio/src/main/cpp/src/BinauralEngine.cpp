@@ -27,8 +27,6 @@ namespace binaural {
 BinauralEngine::BinauralEngine() {
     // Инициализация конфигурации по умолчанию
     m_config.curve.updateCache();
-    // Интервал обновления частот по умолчанию - 10 секунд
-    m_frequencyUpdateIntervalMs = 10000;
     
 #ifdef USE_NEON
     LOGD("BinauralEngine initialized with NEON SIMD + FMA optimization");
@@ -49,7 +47,7 @@ void BinauralEngine::setConfig(const BinauralConfig& config) {
     // Быстрый путь: обновляем конфигурацию с минимальной блокировкой
     // Копируем и строим lookup table вне мьютекса
     BinauralConfig newConfig = config;
-    newConfig.curve.buildLookupTable(m_frequencyUpdateIntervalMs);
+    newConfig.curve.buildLookupTable();
     
     // Эксклюзивная блокировка для записи
     std::unique_lock<std::shared_mutex> lock(m_configMutex);
@@ -58,17 +56,6 @@ void BinauralEngine::setConfig(const BinauralConfig& config) {
 
 void BinauralEngine::setSampleRate(int sampleRate) {
     m_generator.setSampleRate(sampleRate);
-}
-
-void BinauralEngine::setFrequencyUpdateInterval(int intervalMs) {
-    m_frequencyUpdateIntervalMs = intervalMs;
-    
-    // Перестраиваем lookup table с новым интервалом
-    // Эксклюзивная блокировка для записи
-    std::unique_lock<std::shared_mutex> lock(m_configMutex);
-    m_config.curve.buildLookupTable(intervalMs);
-    
-    LOGD("Frequency update interval set to %d ms", intervalMs);
 }
 
 void BinauralEngine::setBatchDurationMinutes(int durationMinutes) {
@@ -116,7 +103,7 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         elapsedMs
     );
 #elif defined(USE_SSE)
-    GenerateResult result = m_generator.generatePackage(
+    GenerateResult result = m_generator.generatePackageSse(
         buffer,
         plan,
         config,
@@ -188,11 +175,6 @@ void BinauralEngine::resetState() {
     m_currentCarrierFreq.store(0.0f, std::memory_order_relaxed);
 }
 
-int BinauralEngine::getRecommendedBufferSize() const {
-    int sampleRate = m_generator.getSampleRate();
-    return (sampleRate * m_frequencyUpdateIntervalMs) / 1000;
-}
-
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
     // Thread-safe получение текущего времени суток
     auto now = std::chrono::system_clock::now();
@@ -228,7 +210,7 @@ void BinauralEngine::updateElapsedTime() {
     }
 }
 
-bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, int frequencyUpdateIntervalMs) {
+bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // Быстрая проверка без блокировки
     if (!m_isPlaying.load(std::memory_order_acquire)) {
         return false;
@@ -278,7 +260,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel, i
         elapsedMs
     );
 #elif defined(USE_SSE)
-    GenerateResult result = m_generator.generatePackage(
+    GenerateResult result = m_generator.generatePackageSse(
         buffer,
         plan,
         config,

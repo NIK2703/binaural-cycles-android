@@ -150,12 +150,12 @@ inline float interpolate(
 
 /**
  * Внутренняя реализация построения таблицы
- * @param intervalSeconds интервал между значениями таблицы в секундах
- * 
- * ОПТИМИЗАЦИЯ: Использует бинарный поиск O(log n) вместо линейного O(n)
- * для нахождения интервала при построении таблицы.
+ * Использует фиксированный шаг FREQUENCY_TABLE_INTERVAL_MS (100 мс)
+ *
+ * ОПТИМИЗАЦИЯ: Использует итеративный поиск O(n) вместо бинарного O(n log n)
+ * т.к. время монотонно возрастает при построении таблицы.
  */
-inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
+inline void FrequencyCurve::buildLookupTableInternal() {
     if (points.size() < 2) {
         // Минимальный размер таблицы
         lowerFreqTable.assign(1, 200.0);
@@ -163,11 +163,8 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
         return;
     }
     
-    // Размер таблицы = 86400 / intervalSeconds
-    // При intervalSeconds = 1 → 86400 значений
-    // При intervalSeconds = 10 → 8640 значений
-    // При intervalSeconds = 60 → 1440 значений
-    const int tableSize = SECONDS_PER_DAY / intervalSeconds;
+    // Фиксированный размер таблицы
+    const int tableSize = FREQUENCY_TABLE_SIZE;
     
     // Сортированные точки (предполагаем, что уже отсортированы по времени)
     const auto& sortedPoints = points;
@@ -192,7 +189,9 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
     
     for (int tableIndex = 0; tableIndex < tableSize; ++tableIndex) {
         // Конвертируем индекс таблицы в секунды суток
-        const int timeSeconds = tableIndex * intervalSeconds;
+        // FREQUENCY_TABLE_INTERVAL_MS = 100, поэтому шаг = 0.1 секунды
+        // tableIndex * 100 / 1000 = tableIndex / 10 (секунды)
+        const int timeSeconds = tableIndex * FREQUENCY_TABLE_INTERVAL_MS / 1000;
         
         // Итеративный поиск - двигаемся вперёд пока не найдём нужный интервал
         // Это O(1) амортизированное время, т.к. leftIndex только увеличивается
@@ -250,59 +249,56 @@ inline void FrequencyCurve::buildLookupTableInternal(int intervalSeconds) {
 }
 
 /**
- * Построить lookup table для заданного интервала обновления частот
- * @param intervalMs интервал обновления частот в миллисекундах
+ * Построить lookup table с фиксированным шагом FREQUENCY_TABLE_INTERVAL_MS
  */
-inline void FrequencyCurve::buildLookupTable(int intervalMs) {
-    // Сохраняем интервал для которого построена таблица
-    tableIntervalMs = intervalMs;
-    
-    // Конвертируем в секунды (минимум 1 секунда)
-    const int intervalSeconds = std::max(1, intervalMs / 1000);
-    
-    buildLookupTableInternal(intervalSeconds);
+inline void FrequencyCurve::buildLookupTable() {
+    buildLookupTableInternal();
 }
 
 /**
- * Обновить кэш min/max частот
+ * Обновить кэш min/max частот и перестроить lookup table
+ *
+ * ВАЖНО: min/max вычисляются по lookup-таблице, а не по контрольным точкам,
+ * т.к. при интерполяции CARDINAL возможен overshoot и реальные значения
+ * могут отличаться от значений в контрольных точках.
  */
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
     
+    // Сначала строим lookup table
+    buildLookupTable();
+    
+    // Вычисляем min/max по lookup-таблице (учитывает интерполяцию)
     minLowerFreq = std::numeric_limits<float>::max();
     maxLowerFreq = std::numeric_limits<float>::lowest();
     minUpperFreq = std::numeric_limits<float>::max();
     maxUpperFreq = std::numeric_limits<float>::lowest();
     
-    for (const auto& point : points) {
-        float lowerFreq = point.carrierFrequency - point.beatFrequency / 2.0;
-        float upperFreq = point.carrierFrequency + point.beatFrequency / 2.0;
-        
-        minLowerFreq = std::min(minLowerFreq, std::max(0.0f, lowerFreq));
-        maxLowerFreq = std::max(maxLowerFreq, lowerFreq);
-        minUpperFreq = std::min(minUpperFreq, std::max(0.0f, upperFreq));
-        maxUpperFreq = std::max(maxUpperFreq, upperFreq);
+    for (size_t i = 0; i < lowerFreqTable.size(); ++i) {
+        minLowerFreq = std::min(minLowerFreq, lowerFreqTable[i]);
+        maxLowerFreq = std::max(maxLowerFreq, lowerFreqTable[i]);
     }
     
-    // Строим lookup table с текущим интервалом (или значением по умолчанию)
-    const int intervalSeconds = std::max(1, tableIntervalMs / 1000);
-    buildLookupTableInternal(intervalSeconds);
+    for (size_t i = 0; i < upperFreqTable.size(); ++i) {
+        minUpperFreq = std::min(minUpperFreq, upperFreqTable[i]);
+        maxUpperFreq = std::max(maxUpperFreq, upperFreqTable[i]);
+    }
 }
 
 /**
  * Получить частоты каналов для заданного времени через lookup table
  * Возвращает интерполированные частоты для конкретного момента времени
- * 
+ *
  * СЛОЖНОСТЬ: O(1) - прямой доступ по индексу + линейная интерполяция
- * 
+ *
  * ИНТЕРПОЛЯЦИЯ ВНУТРИ ТАБЛИЦЫ:
  * Использует линейную интерполяцию между соседними значениями таблицы,
  * что обеспечивает плавные переходы при любом разрешении таблицы.
- * 
+ *
  * ДРОБНОЕ ВРЕМЯ:
  * Поддерживает дробные секунды для корректной интерполяции внутри буфера.
  * Например: 0.186 сек позволяет вычислить частоты в середине буфера.
- * 
+ *
  * ОПТИМИЗАЦИЯ:
  * Использует __builtin_prefetch для предзагрузки следующего значения в кэш.
  */
@@ -321,12 +317,12 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
         timeSeconds += static_cast<float>(SECONDS_PER_DAY);
     }
     
-    // Вычисляем индекс в таблице
-    const int intervalSeconds = std::max(1, tableIntervalMs / 1000);
+    // Фиксированный шаг таблицы 0.1 сек (100 мс)
+    constexpr float intervalSeconds = static_cast<float>(FREQUENCY_TABLE_INTERVAL_MS) / 1000.0f;
     const int tableSize = static_cast<int>(lowerFreqTable.size());
     
     // Вычисляем непрерывную позицию в таблице (дробная)
-    const float continuousIndex = timeSeconds / static_cast<float>(intervalSeconds);
+    const float continuousIndex = timeSeconds / intervalSeconds;
     
     // Индекс текущей точки
     const int currentIndex = static_cast<int>(continuousIndex);

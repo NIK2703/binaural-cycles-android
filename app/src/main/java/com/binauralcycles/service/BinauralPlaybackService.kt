@@ -70,6 +70,26 @@ class BinauralPlaybackService : Service() {
         
         private val _currentPresetName = MutableStateFlow<String?>(null)
         val currentPresetName: StateFlow<String?> = _currentPresetName.asStateFlow()
+        
+        // Ссылка на экземпляр сервиса для статических методов
+        @Volatile
+        private var serviceInstance: BinauralPlaybackService? = null
+        
+        /**
+         * Приложение на экране - запускаем частое обновление частот (1 сек)
+         */
+        fun onAppForeground() {
+            android.util.Log.d("BinauralPlaybackService", "onAppForeground static: serviceInstance=${serviceInstance != null}")
+            serviceInstance?.onAppForeground()
+        }
+        
+        /**
+         * Приложение в фоне - останавливаем частое обновление частот
+         */
+        fun onAppBackground() {
+            android.util.Log.d("BinauralPlaybackService", "onAppBackground static: serviceInstance=${serviceInstance != null}")
+            serviceInstance?.onAppBackground()
+        }
     }
 
     // Аудио-движок создаётся только в сервисе
@@ -133,6 +153,8 @@ class BinauralPlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         android.util.Log.d("BinauralPlaybackService", "onCreate()")
+        
+        serviceInstance = this
         
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         createNotificationChannel()
@@ -356,6 +378,9 @@ class BinauralPlaybackService : Service() {
     // Job для периодического обновления уведомления
     private var notificationUpdateJob: Job? = null
     
+    // Job для обновления частот в UI (каждую секунду)
+    private var uiFrequencyUpdateJob: Job? = null
+    
     // BroadcastReceiver для режима энергосбережения
     private var powerSaveReceiver: BroadcastReceiver? = null
     
@@ -557,22 +582,44 @@ class BinauralPlaybackService : Service() {
     
     /**
      * Запускает периодическое обновление уведомления во время воспроизведения.
-     * Автоматически адаптируется к изменению интервала из настроек.
+     * Фиксированный интервал 10 секунд для уведомления.
      */
     private fun startNotificationUpdateJob() {
         notificationUpdateJob?.cancel()
         notificationUpdateJob = serviceScope.launch {
-            // Используем collectLatest для автоматического перезапуска при изменении интервала
-            _frequencyUpdateIntervalMs.collectLatest { intervalMs ->
-                android.util.Log.d("BinauralPlaybackService", "Notification interval changed to $intervalMs ms")
-                while (true) {
-                    delay(intervalMs.toLong())
-                    if (_isPlaying.value) {
-                        updateNotificationSilently()
-                    }
+            while (true) {
+                delay(10_000) // Каждые 10 секунд
+                if (_isPlaying.value) {
+                    updateNotificationSilently()
                 }
             }
         }
+    }
+    
+    /**
+     * Запускает периодическое обновление частот в UI (каждую секунду).
+     * Работает только когда приложение на экране (не в фоне).
+     *
+     * ВАЖНО: Частоты уже обновляются из native кода через collectLatest (строки 193-210).
+     * Здесь мы только обновляем уведомление, чтобы оно было актуальным.
+     */
+    private fun startUiFrequencyUpdateJob() {
+        uiFrequencyUpdateJob?.cancel()
+        uiFrequencyUpdateJob = serviceScope.launch {
+            while (true) {
+                delay(1000) // Каждую секунду
+                // Обновляем уведомление с текущими частотами из native кода
+                if (_isPlaying.value && _currentBeatFrequency.value > 0) {
+                    updateMediaMetadata()
+                    updateNotificationSilently()
+                }
+            }
+        }
+    }
+    
+    private fun stopUiFrequencyUpdateJob() {
+        uiFrequencyUpdateJob?.cancel()
+        uiFrequencyUpdateJob = null
     }
     
     /**
@@ -931,10 +978,28 @@ class BinauralPlaybackService : Service() {
             wasStoppedByHeadsetDisconnect = false
         }
     }
+    
+    /**
+     * Приложение на экране - запускаем частое обновление частот (1 сек)
+     */
+    fun onAppForeground() {
+        android.util.Log.d("BinauralPlaybackService", "onAppForeground - starting UI frequency updates")
+        startUiFrequencyUpdateJob()
+    }
+    
+    /**
+     * Приложение в фоне - останавливаем частое обновление частот
+     */
+    fun onAppBackground() {
+        android.util.Log.d("BinauralPlaybackService", "onAppBackground - stopping UI frequency updates")
+        stopUiFrequencyUpdateJob()
+    }
 
     override fun onDestroy() {
         android.util.Log.d("BinauralPlaybackService", "onDestroy()")
         
+        serviceInstance = null
+        uiFrequencyUpdateJob?.cancel()
         notificationUpdateJob?.cancel()
         unregisterPowerSaveReceiver()
         unregisterNoisyAudioReceiver()

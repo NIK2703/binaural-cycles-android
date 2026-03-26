@@ -43,32 +43,10 @@ public:
     int getSampleRate() const { return m_sampleRate; }
     
     /**
-     * Сгенерировать буфер аудио (legacy метод)
-     *
-     * @param buffer выходной буфер (interleaved stereo, размер = samplesPerChannel * 2)
-     * @param samplesPerChannel количество сэмплов на канал
-     * @param config конфигурация
-     * @param state состояние генератора (изменяется)
-     * @param timeSeconds текущее время в секундах с начала суток
-     * @param elapsedMs прошедшее время воспроизведения в мс
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
-     * @return результат генерации
-     */
-    GenerateResult generateBuffer(
-        float* buffer,
-        int samplesPerChannel,
-        const BinauralConfig& config,
-        GeneratorState& state,
-        float timeSeconds,
-        int64_t elapsedMs,
-        int frequencyUpdateIntervalMs
-    );
-    
-    /**
      * Сгенерировать пакет буферов по плану
      *
-     * Новая архитектура: генерирует последовательность целых буферов
-     * согласно плану от BufferPackagePlanner.
+     * Генерирует последовательность сегментов согласно плану от BufferPackagePlanner.
+     * Поддерживает: SOLID, FADE_OUT, PAUSE, FADE_IN сегменты.
      *
      * @param buffer выходной буфер (interleaved stereo)
      * @param plan план пакета с сегментами
@@ -89,30 +67,8 @@ public:
     
 #ifdef USE_NEON
     /**
-     * NEON-оптимизированная генерация буфера (legacy метод)
-     * Обрабатывает 4 сэмпла одновременно используя SIMD инструкции ARM NEON.
-     *
-     * @param buffer выходной буфер (interleaved stereo)
-     * @param samplesPerChannel количество сэмплов на канал
-     * @param config конфигурация
-     * @param state состояние генератора
-     * @param timeSeconds текущее время в секундах с начала суток
-     * @param elapsedMs прошедшее время воспроизведения в мс
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс
-     * @return результат генерации
-     */
-    GenerateResult generateBufferNeon(
-        float* buffer,
-        int samplesPerChannel,
-        const BinauralConfig& config,
-        GeneratorState& state,
-        float timeSeconds,
-        int64_t elapsedMs,
-        int frequencyUpdateIntervalMs
-    );
-    
-    /**
      * NEON-оптимизированная генерация пакета буферов
+     * Обрабатывает 4 сэмпла одновременно используя SIMD инструкции ARM NEON.
      *
      * @param buffer выходной буфер (interleaved stereo)
      * @param plan план пакета с сегментами
@@ -134,26 +90,24 @@ public:
 
 #ifdef USE_SSE
     /**
-     * SSE-оптимизированная генерация буфера для x86/x86_64
+     * SSE-оптимизированная генерация пакета буферов для x86/x86_64
      * Обрабатывает 4 сэмпла одновременно используя SSE инструкции.
-     * 
+     *
      * @param buffer выходной буфер (interleaved stereo)
-     * @param samplesPerChannel количество сэмплов на канал
+     * @param plan план пакета с сегментами
      * @param config конфигурация
-     * @param state состояние генератора
-     * @param timeSeconds текущее время в секундах с начала суток
+     * @param state состояние генератора (изменяется)
+     * @param startTimeSeconds время начала в секундах с начала суток
      * @param elapsedMs прошедшее время воспроизведения в мс
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс
      * @return результат генерации
      */
-    GenerateResult generateBufferSse(
+    GenerateResult generatePackageSse(
         float* buffer,
-        int samplesPerChannel,
+        const PackagePlan& plan,
         const BinauralConfig& config,
         GeneratorState& state,
-        float timeSeconds,
-        int64_t elapsedMs,
-        int frequencyUpdateIntervalMs
+        float startTimeSeconds,
+        int64_t elapsedMs
     );
 #endif
     

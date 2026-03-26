@@ -315,7 +315,7 @@ fun PowerSettingsCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Интервал генерации буфера в минутах - слайдер (от 1 до 10 минут, ограничено памятью)
+        // Интервал генерации буфера в минутах - слайдер (от 1 минуты до 1 часа)
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
             Text(
                 text = stringResource(R.string.buffer_generation_minutes),
@@ -329,17 +329,11 @@ fun PowerSettingsCard(
             Spacer(modifier = Modifier.height(8.dp))
             DiscreteSlider(
                 label = "",
-                value = bufferGenerationMinutes.coerceAtMost(10),  // Ограничиваем отображаемое значение
-                values = listOf(1, 2, 5, 10),  // Максимум 10 минут для предотвращения OOM
-                formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                value = bufferGenerationMinutes,
+                values = listOf(1, 2, 5, 10, 15, 20, 30, 45, 60),  // От 1 минуты до 1 часа
+                formatValue = { mins -> formatBufferInterval(mins) },
                 onValueChange = onBufferGenerationMinutesChange,
                 modifier = Modifier.fillMaxWidth()
-            )
-            // Предупреждение о лимите памяти
-            Text(
-                text = stringResource(R.string.buffer_generation_memory_limit),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary
             )
         }
         
@@ -608,6 +602,24 @@ fun formatUpdateInterval(ms: Int): String {
     return when {
         ms < 1000 -> "$ms $msShort"
         else -> "${ms / 1000.0} $secFull"
+    }
+}
+
+/**
+ * Форматирование интервала генерации буфера (в минутах)
+ */
+@Composable
+fun formatBufferInterval(minutes: Int): String {
+    val minShort = stringResource(R.string.minutes_short)
+    val hourShort = stringResource(R.string.hours_short)
+    
+    return when {
+        minutes < 60 -> "$minutes $minShort"
+        else -> {
+            val hours = minutes / 60
+            val mins = minutes % 60
+            if (mins == 0) "$hours $hourShort" else "$hours $hourShort $mins $minShort"
+        }
     }
 }
 

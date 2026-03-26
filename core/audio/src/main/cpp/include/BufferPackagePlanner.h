@@ -141,8 +141,9 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         segment.type = toBufferType(currentPhase);
         segment.durationMs = segmentDuration;
         
-        // Swap происходит после полного FADE_OUT (перед FADE_IN)
-        // Это обеспечивает: SOLID → FADE_OUT → swap → FADE_IN → SOLID
+        // Swap происходит после полного FADE_OUT (перед PAUSE)
+        // Это обеспечивает: SOLID → FADE_OUT → swap → PAUSE → FADE_IN → SOLID
+        // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
         segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
                                     segmentDuration == phaseTimeRemaining);
         
@@ -195,7 +196,8 @@ inline void BufferPackagePlanner::resetState(GeneratorState& state) {
 inline SwapPhase BufferPackagePlanner::nextPhase(SwapPhase current) const {
     switch (current) {
         case SwapPhase::SOLID:    return SwapPhase::FADE_OUT;
-        case SwapPhase::FADE_OUT: return SwapPhase::FADE_IN;
+        case SwapPhase::FADE_OUT: return SwapPhase::PAUSE;
+        case SwapPhase::PAUSE:    return SwapPhase::FADE_IN;
         case SwapPhase::FADE_IN:  return SwapPhase::SOLID;
     }
     return SwapPhase::SOLID;
@@ -207,6 +209,9 @@ inline int64_t BufferPackagePlanner::phaseDuration(SwapPhase phase, const Binaur
         case SwapPhase::FADE_OUT:
             // Если fade отключён, пропускаем фазы затухания/возрастания
             return config.channelSwapFadeEnabled ? config.channelSwapFadeDurationMs : 0;
+        case SwapPhase::PAUSE:
+            // Пауза между fade-out и fade-in
+            return config.channelSwapPauseDurationMs;
         case SwapPhase::FADE_IN:
             // Если fade отключён, пропускаем фазы затухания/возрастания
             return config.channelSwapFadeEnabled ? config.channelSwapFadeDurationMs : 0;
@@ -218,6 +223,7 @@ inline BufferType BufferPackagePlanner::toBufferType(SwapPhase phase) const {
     switch (phase) {
         case SwapPhase::SOLID:    return BufferType::SOLID;
         case SwapPhase::FADE_OUT: return BufferType::FADE_OUT;
+        case SwapPhase::PAUSE:    return BufferType::PAUSE;
         case SwapPhase::FADE_IN:  return BufferType::FADE_IN;
     }
     return BufferType::SOLID;

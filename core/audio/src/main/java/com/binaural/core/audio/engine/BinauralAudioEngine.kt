@@ -143,6 +143,45 @@ class BinauralAudioEngine(private val context: Context) {
     val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
 
     /**
+     * Получить текущие частоты по текущему времени суток.
+     * Используется для отображения в UI без генерации буфера.
+     * @return Pair(beatFrequency, carrierFrequency) или null если конфиг не установлен
+     */
+    fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? {
+        val engine = nativeEngine ?: return null
+        val config = configRef.get()
+        
+        val curve = config.frequencyCurve
+        val points = curve.points
+        if (points.size < 2) return null
+        
+        // Текущее время в секундах с начала суток
+        val calendar = java.util.Calendar.getInstance()
+        val currentSeconds = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
+                            calendar.get(java.util.Calendar.MINUTE) * 60 +
+                            calendar.get(java.util.Calendar.SECOND)
+        
+        val timePoints = IntArray(points.size) { points[it].time.toSecondOfDay() }
+        val carrierFreqs = FloatArray(points.size) { points[it].carrierFrequency }
+        val beatFreqs = FloatArray(points.size) { points[it].beatFrequency }
+        
+        val result = engine.getChannelFrequenciesAt(
+            timePoints, carrierFreqs, beatFreqs,
+            currentSeconds,
+            curve.interpolationType,
+            curve.splineTension
+        ) ?: return null
+        
+        // result = (lowerFreq, upperFreq)
+        val lowerFreq = result.first
+        val upperFreq = result.second
+        val beatFreq = upperFreq - lowerFreq
+        val carrierFreq = (lowerFreq + upperFreq) / 2.0f
+        
+        return Pair(beatFreq, carrierFreq)
+    }
+
+    /**
      * Инициализация движка. Должна вызываться один раз при создании.
      */
     fun initialize() {
@@ -155,7 +194,6 @@ class BinauralAudioEngine(private val context: Context) {
         nativeEngine = NativeAudioEngine()
         nativeEngine?.initialize()
         nativeEngine?.setSampleRate(sampleRate)
-        nativeEngine?.setFrequencyUpdateInterval(frequencyUpdateIntervalMs)
         
         Log.d(TAG, "Audio engine initialized on thread: ${audioThread?.name}")
     }
@@ -480,7 +518,7 @@ class BinauralAudioEngine(private val context: Context) {
 
             // Zero-copy генерация через DirectByteBuffer
             directBuffer.clear()
-            val success = engine.generateBufferDirect(directBuffer, samplesPerChannel, currentIntervalMs)
+            val success = engine.generateBufferDirect(directBuffer, samplesPerChannel)
             
             if (!success) {
                 Log.e(TAG, "Native buffer generation failed")
@@ -882,15 +920,14 @@ class BinauralAudioEngine(private val context: Context) {
     fun getSampleRate(): SampleRate = SampleRate.fromValue(sampleRate)
     
     /**
-     * Установить интервал обновления частот
+     * Установить интервал генерации буфера
      * @param intervalMs интервал в миллисекундах (от 1 секунды до 60 минут)
      */
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         // Максимум 60 минут = 3,600,000 мс
         val clampedInterval = intervalMs.coerceIn(1000, 60 * 60 * 1000)
         pendingFrequencyUpdateIntervalMs.set(clampedInterval)
-        nativeEngine?.setFrequencyUpdateInterval(clampedInterval)
-        Log.d(TAG, "Frequency update interval set to $clampedInterval ms (${clampedInterval / 60000} min)")
+        Log.d(TAG, "Buffer generation interval set to $clampedInterval ms (${clampedInterval / 60000} min)")
     }
 
     fun getFrequencyUpdateInterval(): Int = frequencyUpdateIntervalMs
@@ -924,7 +961,6 @@ class BinauralAudioEngine(private val context: Context) {
         val adaptiveInterval = getAdaptiveFrequencyUpdateInterval()
         if (adaptiveInterval != frequencyUpdateIntervalMs) {
             pendingFrequencyUpdateIntervalMs.set(adaptiveInterval)
-            nativeEngine?.setFrequencyUpdateInterval(adaptiveInterval)
             Log.d(TAG, "Power save mode changed, interval adjusted to $adaptiveInterval ms")
         }
     }

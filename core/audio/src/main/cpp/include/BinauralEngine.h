@@ -54,19 +54,6 @@ public:
     int getSampleRate() const { return m_generator.getSampleRate(); }
     
     /**
-     * Установить интервал обновления частот в мс
-     * Этот параметр определяет размер порции генерации буфера
-     * Больший интервал = меньше прерываний = лучше энергоэффективность
-     * Также перестраивает lookup table для оптимального размера
-     */
-    void setFrequencyUpdateInterval(int intervalMs);
-    
-    /**
-     * Получить интервал обновления частот
-     */
-    int getFrequencyUpdateInterval() const { return m_frequencyUpdateIntervalMs; }
-    
-    /**
      * Установить длительность батча для оптимизации энергопотребления
      * @param durationMinutes длительность в минутах (0 = отключено)
      */
@@ -84,12 +71,6 @@ public:
     int generateBatch(float* buffer, int maxSamplesPerChannel);
     
     /**
-     * Получить рекомендуемый размер буфера в сэмплах на канал
-     * на основе интервала обновления частот
-     */
-    int getRecommendedBufferSize() const;
-    
-    /**
      * Сбросить состояние (при остановке)
      */
     void resetState();
@@ -97,13 +78,12 @@ public:
     /**
      * Сгенерировать буфер аудио
      * Вызывается из AudioTrack в Java
-     * 
+     *
      * @param buffer выходной буфер (float*, interleaved stereo)
      * @param samplesPerChannel количество сэмплов на канал
-     * @param frequencyUpdateIntervalMs интервал обновления частот в мс (для интерполяции)
      * @return true если генерация успешна
      */
-    bool generateAudioBuffer(float* buffer, int samplesPerChannel, int frequencyUpdateIntervalMs);
+    bool generateAudioBuffer(float* buffer, int samplesPerChannel);
     
     /**
      * Получить текущее состояние проигрывания
@@ -158,10 +138,6 @@ private:
     std::atomic<float> m_currentCarrierFreq{0.0};
     std::atomic<int> m_elapsedSeconds{0};
     std::atomic<int64_t> m_playbackStartTimeMs{0};
-    
-    // Начальное значение до получения из настроек через JNI
-    // Должно соответствовать значению по умолчанию в BinauralPreferencesRepository
-    int m_frequencyUpdateIntervalMs = 10000;
     
     // Длительность батча в минутах (0 = отключено)
     int m_batchDurationMinutes = 0;

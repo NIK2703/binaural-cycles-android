@@ -14,3 +14,11 @@
 
 # Keep AudioEngine
 -keep class com.binaural.core.audio.** { *; }
+
+# Удаление отладочных логов в релизной сборке
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
+    # w и e оставляем для анализа крашей
+}

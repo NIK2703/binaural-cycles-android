@@ -147,43 +147,6 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetSampleRate(
 }
 
 /**
- * Установка интервала обновления частот
- */
-JNIEXPORT void JNICALL
-Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetFrequencyUpdateInterval(
-    JNIEnv* env,
-    jobject thiz,
-    jint intervalMs
-) {
-    if (g_engine) {
-        g_engine->setFrequencyUpdateInterval(intervalMs);
-        LOGD("Frequency update interval set to %d ms", intervalMs);
-    }
-}
-
-/**
- * Получение интервала обновления частот
- */
-JNIEXPORT jint JNICALL
-Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetFrequencyUpdateInterval(
-    JNIEnv* env,
-    jobject thiz
-) {
-    return g_engine ? g_engine->getFrequencyUpdateInterval() : 10000;
-}
-
-/**
- * Получение рекомендуемого размера буфера в сэмплах на канал
- */
-JNIEXPORT jint JNICALL
-Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetRecommendedBufferSize(
-    JNIEnv* env,
-    jobject thiz
-) {
-    return g_engine ? g_engine->getRecommendedBufferSize() : 0;
-}
-
-/**
  * Сброс состояния
  */
 JNIEXPORT void JNICALL
@@ -238,15 +201,14 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBuffer(
     JNIEnv* env,
     jobject thiz,
     jfloatArray buffer,
-    jint samplesPerChannel,
-    jint frequencyUpdateIntervalMs
+    jint samplesPerChannel
 ) {
     if (!g_engine) return JNI_FALSE;
     
     jfloat* bufferPtr = env->GetFloatArrayElements(buffer, nullptr);
     if (!bufferPtr) return JNI_FALSE;
     
-    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel, frequencyUpdateIntervalMs);
+    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
     
     // PULL MODEL: Обновляем атомарные переменные после генерации
     if (result) {
@@ -269,8 +231,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect
     JNIEnv* env,
     jobject thiz,
     jobject directBuffer,
-    jint samplesPerChannel,
-    jint frequencyUpdateIntervalMs
+    jint samplesPerChannel
 ) {
     if (!g_engine) return JNI_FALSE;
     
@@ -283,12 +244,12 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect
     jlong bufferCapacity = env->GetDirectBufferCapacity(directBuffer);
     jlong requiredSize = samplesPerChannel * 2 * sizeof(float);
     if (bufferCapacity < requiredSize) {
-        LOGE("nativeGenerateBufferDirect: Buffer too small. Required: %ld, Got: %ld", 
+        LOGE("nativeGenerateBufferDirect: Buffer too small. Required: %ld, Got: %ld",
              (long)requiredSize, (long)bufferCapacity);
         return JNI_FALSE;
     }
     
-    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel, frequencyUpdateIntervalMs);
+    bool result = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
     
     // PULL MODEL: Обновляем атомарные переменные после генерации
     if (result) {

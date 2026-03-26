@@ -11,6 +11,18 @@ namespace binaural {
 constexpr int SECONDS_PER_DAY = 86400;
 
 /**
+ * Интервал дискретизации таблицы частот (в миллисекундах)
+ * Фиксированное значение обеспечивает постоянное разрешение 100 мс
+ * Размер таблицы: 86400 сек / 0.1 сек = 864000 значений на канал
+ */
+constexpr int FREQUENCY_TABLE_INTERVAL_MS = 100;
+
+/**
+ * Размер таблицы частот (количество значений на канал)
+ */
+constexpr int FREQUENCY_TABLE_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_INTERVAL_MS;
+
+/**
  * Тип интерполяции между точками
  */
 enum class InterpolationType : int8_t {
@@ -63,13 +75,9 @@ struct FrequencyCurve {
     int32_t cachedHash = -1;
     
     // Lookup table для O(1) доступа к частотам
-    // Размер определяется интервалом обновления частот из настроек
-    // При интервале 1 сек: 86400 значений
-    // При интервале 10 сек: 8640 значений
-    // При интервале 60 сек: 1440 значений
+    // Фиксированный размер: FREQUENCY_TABLE_SIZE (864000 значений при шаге 100 мс)
     std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
     std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
-    int32_t tableIntervalMs = 10000;     // Интервал в мс, для которого построена таблица
     
     /**
      * Получить частоты каналов для заданного времени через lookup table
@@ -80,22 +88,21 @@ struct FrequencyCurve {
     FrequencyTableResult getChannelFrequenciesAt(float timeSeconds) const;
     
     /**
-     * Обновить кэш min/max частот
+     * Обновить кэш min/max частот и перестроить lookup table
      * Вызывается при изменении точек графика
      */
     void updateCache();
     
     /**
-     * Построить lookup table для заданного интервала обновления частот
-     * @param intervalMs интервал обновления частот в миллисекундах
+     * Построить lookup table с фиксированным шагом FREQUENCY_TABLE_INTERVAL_MS
      */
-    void buildLookupTable(int intervalMs);
+    void buildLookupTable();
 
 private:
     /**
      * Внутренняя реализация построения таблицы
      */
-    void buildLookupTableInternal(int intervalSeconds);
+    void buildLookupTableInternal();
 };
 
 /**
@@ -120,14 +127,15 @@ struct BinauralConfig {
 /**
  * Фаза цикла перестановки каналов
  *
- * Цикл: [SOLID N сек] → [FADE_OUT M сек] → [FADE_IN M сек] → [SOLID N сек] → ...
+ * Цикл: [SOLID N сек] → [FADE_OUT M сек] → [PAUSE K сек] → [FADE_IN M сек] → [SOLID N сек] → ...
  *                                           ↑
- *                               swap каналов здесь (в конце FADE_IN)
+ *                               swap каналов здесь (в начале PAUSE)
  */
 enum class SwapPhase : int8_t {
     SOLID = 0,      // Сплошной буфер без fade (до swap)
     FADE_OUT = 1,   // Затухание (перед swap)
-    FADE_IN = 2     // Возрастание (после swap)
+    PAUSE = 2,      // Пауза между fade-out и fade-in (swap происходит здесь)
+    FADE_IN = 3     // Возрастание (после swap)
 };
 
 /**
@@ -136,7 +144,8 @@ enum class SwapPhase : int8_t {
 enum class BufferType : int8_t {
     SOLID = 0,     // Сплошной буфер без fade
     FADE_OUT = 1,  // Затухание
-    FADE_IN = 2    // Возрастание
+    PAUSE = 2,     // Пауза (тишина, фазы обновляются)
+    FADE_IN = 3    // Возрастание
 };
 
 /**
