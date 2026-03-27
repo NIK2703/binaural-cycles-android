@@ -126,8 +126,12 @@ std::pair<float, float> AudioGenerator::calculateNormalizedAmplitudes(
         }
         
         case NormalizationType::TEMPORAL: {
-            const float leftNormalized = leftFreq > 0 ? curve.minLowerFreq / leftFreq : 1.0;
-            const float rightNormalized = rightFreq > 0 ? curve.minUpperFreq / rightFreq : 1.0;
+            // Используем глобальную минимальную частоту среди всех каналов
+            // minChannelFreq = min(lower, upper) в каждой точке по всему графику
+            // Это корректно учитывает случай, когда beat < 0 (каналы поменялись местами)
+            const float globalMinFreq = curve.minChannelFreq;
+            const float leftNormalized = leftFreq > 0 ? globalMinFreq / leftFreq : 1.0;
+            const float rightNormalized = rightFreq > 0 ? globalMinFreq / rightFreq : 1.0;
             leftAmplitude = fastPow(leftNormalized, strength);
             rightAmplitude = fastPow(rightNormalized, strength);
             break;

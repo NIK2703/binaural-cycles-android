@@ -260,7 +260,7 @@ private fun PresetCard(
                     containerColor = if (isActive)
                         MaterialTheme.colorScheme.secondaryContainer
                     else
-                        MaterialTheme.colorScheme.surfaceVariant
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)
                 )
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {

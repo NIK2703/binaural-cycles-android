@@ -72,6 +72,7 @@ struct FrequencyCurve {
     float maxLowerFreq = 0.0;
     float minUpperFreq = 0.0;
     float maxUpperFreq = 0.0;
+    float minChannelFreq = 0.0;  // Минимальная частота среди обоих каналов (min(lower, upper) в каждой точке)
     int32_t cachedHash = -1;
     
     // Lookup table для O(1) доступа к частотам

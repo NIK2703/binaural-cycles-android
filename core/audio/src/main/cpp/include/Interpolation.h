@@ -156,10 +156,20 @@ inline float interpolate(
  * т.к. время монотонно возрастает при построении таблицы.
  */
 inline void FrequencyCurve::buildLookupTableInternal() {
-    if (points.size() < 2) {
-        // Минимальный размер таблицы
+    if (points.empty()) {
+        // Нет точек - используем значения по умолчанию
         lowerFreqTable.assign(1, 200.0);
         upperFreqTable.assign(1, 210.0);
+        return;
+    }
+    
+    if (points.size() == 1) {
+        // Одна точка - вычисляем частоты из неё
+        const auto& p = points[0];
+        const float lowerFreq = p.carrierFrequency - p.beatFrequency / 2.0;
+        const float upperFreq = p.carrierFrequency + p.beatFrequency / 2.0;
+        lowerFreqTable.assign(FREQUENCY_TABLE_SIZE, lowerFreq);
+        upperFreqTable.assign(FREQUENCY_TABLE_SIZE, upperFreq);
         return;
     }
     
@@ -258,9 +268,20 @@ inline void FrequencyCurve::buildLookupTable() {
 /**
  * Обновить кэш min/max частот и перестроить lookup table
  *
- * ВАЖНО: min/max вычисляются по lookup-таблице, а не по контрольным точкам,
+ * ВАЖНО: min/max для lower/upper частот вычисляются по lookup-таблице,
  * т.к. при интерполяции CARDINAL возможен overshoot и реальные значения
  * могут отличаться от значений в контрольных точках.
+ *
+ * minChannelFreq вычисляется по КОНТРОЛЬНЫМ ТОЧКАМ (не по lookup-таблице!),
+ * используя формулу: carrier - |beat|/2
+ * Это даёт истинную минимальную частоту тона для каждого из каналов:
+ * - При beat > 0: min = carrier - beat/2 (нижний канал)
+ * - При beat < 0: min = carrier - |beat|/2 (более низкий из двух каналов)
+ *
+ * Вычисление по контрольным точкам необходимо, т.к. при CARDINAL интерполяции
+ * возможен overshoot, и интерполированные значения в lookup-таблице могут
+ * стать отрицательными (и быть обрезаны до 0), что приведёт к неправильному
+ * вычислению minChannelFreq = 0 и потере звука при временной нормализации.
  */
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
@@ -277,11 +298,17 @@ inline void FrequencyCurve::updateCache() {
     for (size_t i = 0; i < lowerFreqTable.size(); ++i) {
         minLowerFreq = std::min(minLowerFreq, lowerFreqTable[i]);
         maxLowerFreq = std::max(maxLowerFreq, lowerFreqTable[i]);
-    }
-    
-    for (size_t i = 0; i < upperFreqTable.size(); ++i) {
         minUpperFreq = std::min(minUpperFreq, upperFreqTable[i]);
         maxUpperFreq = std::max(maxUpperFreq, upperFreqTable[i]);
+    }
+    
+    // minChannelFreq вычисляем по КОНТРОЛЬНЫМ ТОЧКАМ
+    // Используем формулу: carrier - |beat|/2
+    // Это даёт истинную минимальную частоту тона независимо от знака beatFrequency
+    minChannelFreq = std::numeric_limits<float>::max();
+    for (const auto& p : points) {
+        const float minFreqAtPoint = p.carrierFrequency - std::abs(p.beatFrequency) / 2.0f;
+        minChannelFreq = std::min(minChannelFreq, minFreqAtPoint);
     }
 }
 

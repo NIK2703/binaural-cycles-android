@@ -47,7 +47,7 @@ fun BottomPlaybackPanel(
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 8.dp
     ) {
         // Column чтобы navigationBarsPadding применялся только к контенту,

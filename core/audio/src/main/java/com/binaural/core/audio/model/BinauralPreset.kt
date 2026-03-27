@@ -45,7 +45,7 @@ data class FrequencyRange(
     fun clamp(value: Float): Float = value.coerceIn(min, max)
     
     companion object {
-        val DEFAULT_CARRIER = FrequencyRange(50.0f, 500.0f)
+        val DEFAULT_CARRIER = FrequencyRange(100.0f, 600.0f)
         val DEFAULT_BEAT = FrequencyRange(0.0f, 1000.0f)
     }
 }
@@ -309,7 +309,7 @@ data class FrequencyCurve(
                     FrequencyPoint.fromHours(18, 0, carrierFrequency = 250.0f, beatFrequency = 12.0f),  // Вечерний спад - альфа
                     FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 10.0f),  // Подготовка ко сну - альфа
                 ),
-                carrierRange = FrequencyRange(100.0f, 500.0f),
+                carrierRange = FrequencyRange(100.0f, 600.0f),
                 interpolationType = InterpolationType.MONOTONE
             )
         }
@@ -673,8 +673,8 @@ data class BinauralPreset(
                         FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),  // Расслабление - альфа/тета
                         FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),  // Подготовка ко сну - тета
                     ),
-                    carrierRange = FrequencyRange(100.0f, 500.0f),
-                    interpolationType = InterpolationType.CARDINAL
+                    carrierRange = FrequencyRange(100.0f, 600.0f),
+                    interpolationType = InterpolationType.MONOTONE
                 )
             )
         }
@@ -698,8 +698,8 @@ data class BinauralPreset(
                         FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),  // Вечернее расслабление - нижняя альфа
                         FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),  // Подготовка ко сну - тета
                     ),
-                    carrierRange = FrequencyRange(100.0f, 500.0f),
-                    interpolationType = InterpolationType.CARDINAL
+                    carrierRange = FrequencyRange(100.0f, 600.0f),
+                    interpolationType = InterpolationType.MONOTONE
                 )
             )
         }

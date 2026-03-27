@@ -7,7 +7,45 @@ import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 
 /**
- * Кэшированная геометрия графика (без цветов)
+ * Кэшированная сетка графика (одна на все карточки одинакового размера)
+ */
+data class CachedGrid(
+    val gridLines: FloatArray,      // Горизонтальные линии (Y-координаты)
+    val verticalLines: FloatArray   // Вертикальные линии (X-координаты)
+)
+
+/**
+ * Глобальный кэш сетки для мини-графиков
+ * Сетка зависит только от размеров и одинакова для всех карточек
+ */
+object GridCache {
+    private val cache = mutableMapOf<Pair<Int, Int>, CachedGrid>()
+    
+    /**
+     * Получить или создать закэшированную сетку
+     */
+    fun getOrCreate(widthPx: Int, heightPx: Int): CachedGrid {
+        val key = Pair(widthPx, heightPx)
+        return cache.getOrPut(key) {
+            val width = widthPx.toFloat()
+            val height = heightPx.toFloat()
+            CachedGrid(
+                gridLines = FloatArray(3) { (height * (it + 1) / 4) },
+                verticalLines = FloatArray(7) { (width * (it + 1) * 3 / 24) }
+            )
+        }
+    }
+    
+    /**
+     * Очистить кэш
+     */
+    fun clear() {
+        cache.clear()
+    }
+}
+
+/**
+ * Кэшированная геометрия графика (без цветов и без сетки)
  */
 data class CachedGraphGeometry(
     val carrierPath: Path,
@@ -15,8 +53,6 @@ data class CachedGraphGeometry(
     val lowerBeatPath: Path,
     val combinedBeatPath: Path,
     val baseCarrierPath: Path? = null,  // Путь базовой кривой (по основным точкам) для режимов ADVANCED и SMOOTH
-    val gridLines: FloatArray,
-    val verticalLines: FloatArray,
     val pointPositions: FloatArray,  // [x0, y0, x1, y1, ...]
     val labelTexts: List<String>,
     val virtualPointPositions: FloatArray,  // [x0, y0, x1, y1, ...]

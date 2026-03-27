@@ -569,8 +569,8 @@ class BinauralPreferencesRepository @Inject constructor(
                         com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),
                         com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),
                     ),
-                    carrierRange = FrequencyRange(100.0f, 500.0f),
-                    interpolationType = InterpolationType.CARDINAL
+                    carrierRange = FrequencyRange(100.0f, 600.0f),
+                    interpolationType = InterpolationType.MONOTONE
                 )
             ),
             BinauralPreset(
@@ -587,8 +587,8 @@ class BinauralPreferencesRepository @Inject constructor(
                         com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),
                         com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
                     ),
-                    carrierRange = FrequencyRange(100.0f, 500.0f),
-                    interpolationType = InterpolationType.CARDINAL
+                    carrierRange = FrequencyRange(100.0f, 600.0f),
+                    interpolationType = InterpolationType.MONOTONE
                 )
             )
         )

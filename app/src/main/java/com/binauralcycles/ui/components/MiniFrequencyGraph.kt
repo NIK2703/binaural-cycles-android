@@ -85,19 +85,18 @@ fun MiniFrequencyGraph(
     var widthPx by remember { mutableIntStateOf(0) }
     var heightPx by remember { mutableIntStateOf(0) }
     
-    // Paint объекты создаём один раз
-    val labelPaint = remember {
+    // Paint объекты создаём один раз с учётом масштаба интерфейса
+    val labelPaint = remember(density) {
         Paint().apply {
-            textSize = 18f
+            textSize = with(density) { 8.sp.toPx() }
             isAntiAlias = true
         }
     }
     
-    val axisPaint = remember {
+    val axisPaint = remember(density) {
         Paint().apply {
-            textSize = 24f
+            textSize = with(density) { 10.sp.toPx() }
             isAntiAlias = true
-            isFakeBoldText = true
         }
     }
     
@@ -229,12 +228,6 @@ private fun computeGraphGeometry(
         null
     }
     
-    // Сетки
-    val width = widthPx.toFloat()
-    val height = heightPx.toFloat()
-    val gridLines = FloatArray(3) { (height * (it + 1) / 4) }
-    val verticalLines = FloatArray(7) { (width * (it + 1) * 3 / 24) }
-    
     // Позиции точек и подписи
     val pointPositions = FloatArray(sortedPoints.size * 2)
     val labelTexts = mutableListOf<String>()
@@ -262,8 +255,6 @@ private fun computeGraphGeometry(
         lowerBeatPath = lowerPath,
         combinedBeatPath = combinedPath,
         baseCarrierPath = baseCarrierPath,
-        gridLines = gridLines,
-        verticalLines = verticalLines,
         pointPositions = pointPositions,
         labelTexts = labelTexts,
         virtualPointPositions = virtualPointPositions,
@@ -292,24 +283,27 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     axisPaint: Paint,
     carrierRange: FrequencyRange
 ) {
+    // Получаем сетку из глобального кэша (одна на все карточки)
+    val cachedGrid = GridCache.getOrCreate(width.toInt(), height.toInt())
+    
+    // Сетка - кэшированная одна на все карточки, strokeWidth 1.0f вместо 0.5f
     val gridColor = primaryColor.copy(alpha = 0.1f)
     
-    // Сетка
-    for (y in geometry.gridLines) {
+    for (y in cachedGrid.gridLines) {
         drawLine(
             color = gridColor,
             start = Offset(0f, y),
             end = Offset(width, y),
-            strokeWidth = 0.5f
+            strokeWidth = 1.0f
         )
     }
     
-    for (x in geometry.verticalLines) {
+    for (x in cachedGrid.verticalLines) {
         drawLine(
             color = gridColor,
             start = Offset(x, 0f),
             end = Offset(x, height),
-            strokeWidth = 0.5f
+            strokeWidth = 1.0f
         )
     }
     
@@ -399,7 +393,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     
     // Ось Y
     axisPaint.color = android.graphics.Color.argb(
-        255,
+        (0.8f * 255).toInt(),
         (primaryColor.red * 255).toInt(),
         (primaryColor.green * 255).toInt(),
         (primaryColor.blue * 255).toInt()
