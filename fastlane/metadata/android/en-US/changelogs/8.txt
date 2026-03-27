@@ -1,0 +1,5 @@
+- Optimized mini-graph rendering with global grid cache
+- Fixed temporal normalization for negative beat frequencies
+- Changed carrier frequency range to 100-600 Hz
+- Switched to MONOTONE interpolation for stability
+- UI improvements and visual refinements
