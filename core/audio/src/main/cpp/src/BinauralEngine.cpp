@@ -2,6 +2,7 @@
 #include "BufferPackagePlanner.h"
 #include <chrono>
 #include <algorithm>
+#include <cmath>
 #include <android/log.h>
 #include <atomic>
 #include <shared_mutex>
@@ -83,10 +84,16 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     BufferPackagePlanner planner;
     PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state);
     
-    // Точное время для начала буфера
-    int32_t timeSeconds = static_cast<int32_t>(m_baseTimeSeconds + m_totalBufferTimeSeconds);
-    constexpr int32_t SECONDS_PER_DAY = 86400;
-    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    // Точное время для начала буфера (float для сохранения дробной части)
+    // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
+    float timeSeconds = m_baseTimeSeconds + m_totalBufferTimeSeconds;
+    
+    // Нормализация в пределах суток с сохранением дробной части
+    constexpr float SECONDS_PER_DAY_F = 86400.0f;
+    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
+    if (timeSeconds < 0.0f) {
+        timeSeconds += SECONDS_PER_DAY_F;
+    }
     
     const int64_t elapsedMs = static_cast<int64_t>(
         m_elapsedSeconds.load(std::memory_order_relaxed)
@@ -99,7 +106,7 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #elif defined(USE_SSE)
@@ -108,7 +115,7 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #else
@@ -117,7 +124,7 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #endif
@@ -221,12 +228,16 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / sampleRate;
     const int64_t bufferDurationMs = static_cast<int64_t>(samplesPerChannel) * 1000 / sampleRate;
     
-    // Точное время для начала буфера
-    int32_t timeSeconds = static_cast<int32_t>(m_baseTimeSeconds + m_totalBufferTimeSeconds);
+    // Точное время для начала буфера (float для сохранения дробной части)
+    // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
+    float timeSeconds = m_baseTimeSeconds + m_totalBufferTimeSeconds;
     
-    // Нормализация в пределах суток (branchless)
-    constexpr int32_t SECONDS_PER_DAY = 86400;
-    timeSeconds = ((timeSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
+    // Нормализация в пределах суток с сохранением дробной части
+    constexpr float SECONDS_PER_DAY_F = 86400.0f;
+    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
+    if (timeSeconds < 0.0f) {
+        timeSeconds += SECONDS_PER_DAY_F;
+    }
     
     // Накапливаем время для следующего буфера
     m_totalBufferTimeSeconds += bufferDurationSeconds;
@@ -256,7 +267,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #elif defined(USE_SSE)
@@ -265,7 +276,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #else
@@ -274,7 +285,7 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         plan,
         config,
         m_state,
-        static_cast<float>(timeSeconds),
+        timeSeconds,
         elapsedMs
     );
 #endif

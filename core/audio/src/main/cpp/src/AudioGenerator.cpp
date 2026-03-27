@@ -1066,8 +1066,10 @@ GenerateResult AudioGenerator::generatePackage(
     bool firstSegment = true;
     
     for (const auto& segment : plan.segments) {
+        // Вычисляем количество сэмплов и реальную длительность в секундах
+        // КРИТИЧНО: durationSec вычисляем из сэмплов для согласованности времени
         const int samples = static_cast<int>((segment.durationMs * m_sampleRate) / 1000);
-        const float durationSec = static_cast<float>(segment.durationMs) / 1000.0f;
+        const float durationSec = static_cast<float>(samples) / m_sampleRate;
         
         if (samples <= 0) continue;
         
@@ -1241,8 +1243,10 @@ GenerateResult AudioGenerator::generatePackageNeon(
     bool firstSegment = true;
     
     for (const auto& segment : plan.segments) {
+        // Вычисляем количество сэмплов и реальную длительность в секундах
+        // КРИТИЧНО: durationSec вычисляем из сэмплов для согласованности времени
         const int samples = static_cast<int>((segment.durationMs * m_sampleRate) / 1000);
-        const float durationSec = static_cast<float>(segment.durationMs) / 1000.0f;
+        const float durationSec = static_cast<float>(samples) / m_sampleRate;
         
         if (samples <= 0) continue;
         
@@ -1421,8 +1425,10 @@ GenerateResult AudioGenerator::generatePackageSse(
     bool firstSegment = true;
     
     for (const auto& segment : plan.segments) {
+        // Вычисляем количество сэмплов и реальную длительность в секундах
+        // КРИТИЧНО: durationSec вычисляем из сэмплов для согласованности времени
         const int samples = static_cast<int>((segment.durationMs * m_sampleRate) / 1000);
-        const float durationSec = static_cast<float>(segment.durationMs) / 1000.0f;
+        const float durationSec = static_cast<float>(samples) / m_sampleRate;
         
         if (samples <= 0) continue;
         

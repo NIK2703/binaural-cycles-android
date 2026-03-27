@@ -1,8 +1,5 @@
 package com.binauralcycles.ui.navigation
 
-import android.app.Activity
-import android.content.Context
-import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibilityScope
@@ -11,12 +8,12 @@ import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.*
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.content.FileProvider
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -29,7 +26,6 @@ import com.binauralcycles.ui.screens.PresetListScreen
 import com.binauralcycles.ui.screens.SettingsScreen
 import com.binauralcycles.viewmodel.BinauralViewModel
 import kotlinx.coroutines.launch
-import java.io.File
 
 sealed class Screen(val route: String) {
     object PresetList : Screen("presets")
@@ -88,29 +84,24 @@ fun BinauralNavigation(
         }
     }
     
-    SharedTransitionLayout {
-        Scaffold(
-            bottomBar = {
-                if (showBottomPanel) {
-                    BottomPlaybackPanel(
-                        presetName = uiState.activePreset?.name,
-                        beatFrequency = uiState.currentBeatFrequency,
-                        carrierFrequency = uiState.currentCarrierFrequency,
-                        isPlaying = uiState.isPlaying,
-                        volume = uiState.volume,
-                        onPlayClick = { viewModel.togglePlayback() },
-                        onVolumeChange = { viewModel.setVolumeImmediate(it) },
-                        onVolumeSave = { viewModel.saveVolume() }
-                    )
-                }
-            },
-            contentWindowInsets = WindowInsets(0, 0, 0, 0)
-        ) { paddingValues ->
-            NavHost(
-                navController = navController,
-                startDestination = Screen.PresetList.route,
-                modifier = Modifier.padding(paddingValues)
-            ) {
+    // Высота нижней панели воспроизведения (для компенсации в контенте)
+    val bottomPanelHeight = 60.dp
+    
+    Box(modifier = Modifier.fillMaxSize()) {
+        SharedTransitionLayout {
+            Scaffold(
+                contentWindowInsets = WindowInsets(0, 0, 0, 0)
+            ) { paddingValues ->
+                NavHost(
+                    navController = navController,
+                    startDestination = Screen.PresetList.route,
+                    modifier = Modifier
+                        .padding(paddingValues)
+                        // Добавляем снизу место для панели воспроизведения
+                        .padding(bottom = if (showBottomPanel) bottomPanelHeight else 0.dp)
+                        // Добавляем padding для navigation bar
+                        .navigationBarsPadding()
+                ) {
                 composable(Screen.PresetList.route) {
                     PresetListScreen(
                         viewModel = viewModel,
@@ -181,7 +172,25 @@ fun BinauralNavigation(
                         }
                     )
                 }
+                }
             }
+        }
+        
+        // Нижняя панель воспроизведения поверх контента
+        // navigationBarsPadding применяется внутри BottomPlaybackPanel только к контенту
+        // чтобы фон Surface заходил под navigation bar
+        if (showBottomPanel) {
+            BottomPlaybackPanel(
+                presetName = uiState.activePreset?.name,
+                beatFrequency = uiState.currentBeatFrequency,
+                carrierFrequency = uiState.currentCarrierFrequency,
+                isPlaying = uiState.isPlaying,
+                volume = uiState.volume,
+                onPlayClick = { viewModel.togglePlayback() },
+                onVolumeChange = { viewModel.setVolumeImmediate(it) },
+                onVolumeSave = { viewModel.saveVolume() },
+                modifier = Modifier.align(Alignment.BottomCenter)
+            )
         }
     }
 }

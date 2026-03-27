@@ -50,12 +50,18 @@ fun BottomPlaybackPanel(
         color = MaterialTheme.colorScheme.surfaceVariant,
         tonalElevation = 8.dp
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        // Column чтобы navigationBarsPadding применялся только к контенту,
+        // а фон Surface заходил под navigation bar
+        Column(
+            modifier = Modifier.fillMaxWidth()
         ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .navigationBarsPadding(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
             // Информация о текущем пресете и частотах
             Column(
                 modifier = Modifier.weight(1f),
@@ -175,6 +181,7 @@ fun BottomPlaybackPanel(
                     contentDescription = if (isPlaying) stopLabel else playLabel,
                     modifier = Modifier.size(24.dp)
                 )
+            }
             }
         }
     }
