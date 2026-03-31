@@ -20,7 +20,10 @@ namespace binaural {
  */
 
 // Логирование только в DEBUG сборках
-#ifdef AUDIO_DEBUG
+#ifdef AUDIO_TEST_BUILD
+// При тестировании отключаем логирование
+#define LOGD_PLANNER(...) ((void)0)
+#elif defined(ANDROID)
 #include <android/log.h>
 #define LOG_TAG "BufferPackagePlanner"
 #define LOGD_PLANNER(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -122,6 +125,10 @@ inline PackagePlan BufferPackagePlanner::planPackage(
                      static_cast<int>(currentPhase), (long long)phaseTimeRemaining);
     }
     
+    // Константа для разбиения SOLID на мелкие сегменты (1 сек)
+    // Это обеспечивает корректное вычисление частот из таблицы для каждого подсегмента
+    constexpr int64_t SOLID_SUBSEGMENT_MS = 1000;
+    
     int segmentIndex = 0;
     while (remainingTime > 0) {
         // Пропускаем фазы с нулевой длительностью (например, если fade отключён)
@@ -136,26 +143,50 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         // Определяем длительность текущего сегмента
         int64_t segmentDuration = std::min(remainingTime, phaseTimeRemaining);
         
-        // Создаём сегмент
-        BufferSegment segment;
-        segment.type = toBufferType(currentPhase);
-        segment.durationMs = segmentDuration;
-        
-        // Swap происходит после полного FADE_OUT (перед PAUSE)
-        // Это обеспечивает: SOLID → FADE_OUT → swap → PAUSE → FADE_IN → SOLID
-        // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
-        segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
-                                    segmentDuration == phaseTimeRemaining);
-        
-        plan.segments.push_back(segment);
-        plan.totalDurationMs += segmentDuration;
-        remainingTime -= segmentDuration;
-        phaseTimeRemaining -= segmentDuration;
-        
-        LOGD_PLANNER("  segment[%d]: type=%d, duration=%lldms, swapAfter=%d",
-                     segmentIndex, static_cast<int>(segment.type),
-                     (long long)segment.durationMs, segment.swapAfterSegment ? 1 : 0);
-        segmentIndex++;
+        // Для SOLID фазы разбиваем на подсегменты по 1 сек для точного вычисления частот
+        if (currentPhase == SwapPhase::SOLID && segmentDuration > SOLID_SUBSEGMENT_MS) {
+            // Создаём подсегменты по SOLID_SUBSEGMENT_MS
+            int64_t solidRemaining = segmentDuration;
+            while (solidRemaining > 0 && remainingTime > 0) {
+                int64_t subSegmentDuration = std::min({solidRemaining, remainingTime, SOLID_SUBSEGMENT_MS});
+                
+                BufferSegment subSegment;
+                subSegment.type = BufferType::SOLID;
+                subSegment.durationMs = subSegmentDuration;
+                subSegment.swapAfterSegment = false;  // КРИТИЧНО: явно инициализируем false
+                
+                plan.segments.push_back(subSegment);
+                plan.totalDurationMs += subSegmentDuration;
+                solidRemaining -= subSegmentDuration;
+                remainingTime -= subSegmentDuration;
+                phaseTimeRemaining -= subSegmentDuration;
+                
+                LOGD_PLANNER("  segment[%d]: type=SOLID_SUB, duration=%lldms, swapAfter=0",
+                             segmentIndex, (long long)subSegment.durationMs);
+                segmentIndex++;
+            }
+        } else {
+            // Для FADE_OUT, PAUSE, FADE_IN создаём один сегмент
+            BufferSegment segment;
+            segment.type = toBufferType(currentPhase);
+            segment.durationMs = segmentDuration;
+            
+            // Swap происходит после полного FADE_OUT (перед PAUSE)
+            // Это обеспечивает: SOLID → FADE_OUT → swap → PAUSE → FADE_IN → SOLID
+            // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
+            segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
+                                        segmentDuration == phaseTimeRemaining);
+            
+            plan.segments.push_back(segment);
+            plan.totalDurationMs += segmentDuration;
+            remainingTime -= segmentDuration;
+            phaseTimeRemaining -= segmentDuration;
+            
+            LOGD_PLANNER("  segment[%d]: type=%d, duration=%lldms, swapAfter=%d",
+                         segmentIndex, static_cast<int>(segment.type),
+                         (long long)segment.durationMs, segment.swapAfterSegment ? 1 : 0);
+            segmentIndex++;
+        }
         
         // Переход к следующей фазе
         if (phaseTimeRemaining == 0) {

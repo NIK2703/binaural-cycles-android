@@ -92,6 +92,9 @@ class BinauralViewModel @Inject constructor(
     // Флаг для отслеживания, было ли обработано автовозобновление
     private var autoResumeHandled = false
     
+    // Job для отмены предыдущего перезапуска при быстром переключении настроек
+    private var restartJob: kotlinx.coroutines.Job? = null
+    
     // ServiceConnection для привязки к сервису
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -229,19 +232,19 @@ class BinauralViewModel @Inject constructor(
             }
         }
         // Глобальные настройки перестановки каналов
+        // Примечание: updateAudioConfig() вызывается из методов setChannelSwap*() с затуханием
+        // Здесь только обновляем UI состояние при загрузке из preferences
         viewModelScope.launch {
             preferencesRepository.getChannelSwapSettings().collect { settings ->
                 _uiState.update { it.copy(channelSwapSettings = settings) }
-                // Обновляем конфиг аудио при изменении настроек каналов
-                updateAudioConfig()
             }
         }
         // Глобальные настройки нормализации громкости
+        // Примечание: updateAudioConfig() вызывается из методов setVolumeNormalization*() с затуханием
+        // Здесь только обновляем UI состояние при загрузке из preferences
         viewModelScope.launch {
             preferencesRepository.getVolumeNormalizationSettings().collect { settings ->
                 _uiState.update { it.copy(volumeNormalizationSettings = settings) }
-                // Обновляем конфиг аудио при изменении настроек нормализации
-                updateAudioConfig()
             }
         }
         // Возобновление воспроизведения при подключении гарнитуры
@@ -487,14 +490,38 @@ class BinauralViewModel @Inject constructor(
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
         val existingPreset = _uiState.value.presets.find { it.id == presetId } ?: return
+        val isActivePreset = _uiState.value.activePreset?.id == presetId
+        
         val updatedPreset = existingPreset.copy(
             name = name,
             frequencyCurve = curve,
             relaxationModeSettings = relaxationModeSettings,
             updatedAt = System.currentTimeMillis()
         )
-        viewModelScope.launch {
-            preferencesRepository.updatePreset(updatedPreset)
+        
+        // Если сохраняем активный пресет - применяем изменения с затуханием
+        if (isActivePreset) {
+            restartWithFadeIfNeeded {
+                // Обновляем состояние UI
+                _uiState.update { 
+                    it.copy(
+                        activePreset = updatedPreset,
+                        carrierRange = curve.carrierRange,
+                        beatRange = curve.beatRange
+                    )
+                }
+                // Применяем новый конфиг к сервису
+                updateAudioConfig()
+                // Сохраняем в preferences
+                viewModelScope.launch {
+                    preferencesRepository.updatePreset(updatedPreset)
+                }
+            }
+        } else {
+            // Не активный пресет - просто сохраняем
+            viewModelScope.launch {
+                preferencesRepository.updatePreset(updatedPreset)
+            }
         }
     }
     
@@ -1039,11 +1066,43 @@ class BinauralViewModel @Inject constructor(
 
     // ============= Методы для управления общими настройками приложения =============
     
+    /**
+     * Перезапустить воспроизведение с затуханием при изменении настроек.
+     * Если воспроизводится - делает fade-out, применяет изменения, затем fade-in.
+     * Если не воспроизводится - просто применяет изменения.
+     * 
+     * ВАЖНО: При быстром переключении настроек отменяет предыдущий перезапуск,
+     * чтобы избежать накопления нескольких корутин и гонки fade-операций.
+     */
+    private fun restartWithFadeIfNeeded(applyChanges: () -> Unit) {
+        // Отменяем предыдущий перезапуск - это ключ к решению проблемы с громкостью!
+        // При быстром переключении настроек старая корутина отменяется,
+        // предотвращая гонку между несколькими fade-операциями
+        restartJob?.cancel()
+        
+        val state = _uiState.value
+        
+        if (state.isPlaying && state.isServiceConnected) {
+            playbackService?.stopWithFade()
+            
+            restartJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(300) // Ждём завершения fade-out
+                applyChanges()
+                playbackService?.play()
+            }
+        } else {
+            // Не воспроизводится - просто применяем изменения
+            applyChanges()
+        }
+    }
+    
     fun setSampleRate(rate: SampleRate) {
-        _uiState.update { it.copy(sampleRate = rate) }
-        playbackService?.setSampleRate(rate)
-        viewModelScope.launch {
-            preferencesRepository.saveSampleRate(rate.value)
+        restartWithFadeIfNeeded {
+            _uiState.update { it.copy(sampleRate = rate) }
+            playbackService?.setSampleRate(rate)
+            viewModelScope.launch {
+                preferencesRepository.saveSampleRate(rate.value)
+            }
         }
     }
     
@@ -1067,13 +1126,16 @@ class BinauralViewModel @Inject constructor(
      * Включить/выключить нормализацию громкости (глобальная настройка)
      */
     fun setVolumeNormalizationEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        // При включении устанавливаем CHANNEL, при выключении - NONE
-        val newType = if (enabled) NormalizationType.CHANNEL else NormalizationType.NONE
-        val newSettings = state.volumeNormalizationSettings.copy(type = newType)
-        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            // При включении устанавливаем CHANNEL, при выключении - NONE
+            val newType = if (enabled) NormalizationType.CHANNEL else NormalizationType.NONE
+            val newSettings = state.volumeNormalizationSettings.copy(type = newType)
+            _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+            }
         }
     }
     
@@ -1081,12 +1143,15 @@ class BinauralViewModel @Inject constructor(
      * Установить силу нормализации громкости (глобальная настройка)
      */
     fun setVolumeNormalizationStrength(strength: Float) {
-        val state = _uiState.value
-        val clampedStrength = strength.coerceIn(0f, 2f)
-        val newSettings = state.volumeNormalizationSettings.copy(strength = clampedStrength)
-        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val clampedStrength = strength.coerceIn(0f, 2f)
+            val newSettings = state.volumeNormalizationSettings.copy(strength = clampedStrength)
+            _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+            }
         }
     }
     
@@ -1094,13 +1159,16 @@ class BinauralViewModel @Inject constructor(
      * Включить/выключить временную нормализацию (глобальная настройка)
      */
     fun setTemporalNormalizationEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        // При включении временной нормализации устанавливаем TEMPORAL
-        val newType = if (enabled) NormalizationType.TEMPORAL else NormalizationType.CHANNEL
-        val newSettings = state.volumeNormalizationSettings.copy(type = newType)
-        _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            // При включении временной нормализации устанавливаем TEMPORAL
+            val newType = if (enabled) NormalizationType.TEMPORAL else NormalizationType.CHANNEL
+            val newSettings = state.volumeNormalizationSettings.copy(type = newType)
+            _uiState.update { it.copy(volumeNormalizationSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveVolumeNormalizationSettings(newSettings)
+            }
         }
     }
     
@@ -1110,11 +1178,14 @@ class BinauralViewModel @Inject constructor(
      * Включить/выключить перестановку каналов
      */
     fun setChannelSwapEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        val newSettings = state.channelSwapSettings.copy(enabled = enabled)
-        _uiState.update { it.copy(channelSwapSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val newSettings = state.channelSwapSettings.copy(enabled = enabled)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
         }
     }
     
@@ -1122,12 +1193,15 @@ class BinauralViewModel @Inject constructor(
      * Установить интервал перестановки каналов
      */
     fun setChannelSwapInterval(seconds: Int) {
-        val state = _uiState.value
-        val clampedSeconds = seconds.coerceIn(5, 3600)
-        val newSettings = state.channelSwapSettings.copy(intervalSeconds = clampedSeconds)
-        _uiState.update { it.copy(channelSwapSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val clampedSeconds = seconds.coerceIn(5, 3600)
+            val newSettings = state.channelSwapSettings.copy(intervalSeconds = clampedSeconds)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
         }
     }
     
@@ -1135,11 +1209,14 @@ class BinauralViewModel @Inject constructor(
      * Включить/выключить плавный переход при перестановке каналов
      */
     fun setChannelSwapFadeEnabled(enabled: Boolean) {
-        val state = _uiState.value
-        val newSettings = state.channelSwapSettings.copy(fadeEnabled = enabled)
-        _uiState.update { it.copy(channelSwapSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val newSettings = state.channelSwapSettings.copy(fadeEnabled = enabled)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
         }
     }
     
@@ -1147,12 +1224,15 @@ class BinauralViewModel @Inject constructor(
      * Установить длительность плавного перехода при перестановке каналов
      */
     fun setChannelSwapFadeDuration(ms: Long) {
-        val state = _uiState.value
-        val clampedMs = ms.coerceIn(1000L, 15000L)
-        val newSettings = state.channelSwapSettings.copy(fadeDurationMs = clampedMs)
-        _uiState.update { it.copy(channelSwapSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val clampedMs = ms.coerceIn(1000L, 15000L)
+            val newSettings = state.channelSwapSettings.copy(fadeDurationMs = clampedMs)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
         }
     }
     
@@ -1160,12 +1240,15 @@ class BinauralViewModel @Inject constructor(
      * Установить длительность паузы при переключении каналов (до 1 минуты)
      */
     fun setChannelSwapPauseDuration(ms: Long) {
-        val state = _uiState.value
-        val clampedMs = ms.coerceIn(0L, 60000L)
-        val newSettings = state.channelSwapSettings.copy(pauseDurationMs = clampedMs)
-        _uiState.update { it.copy(channelSwapSettings = newSettings) }
-        viewModelScope.launch {
-            preferencesRepository.saveChannelSwapSettings(newSettings)
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val clampedMs = ms.coerceIn(0L, 60000L)
+            val newSettings = state.channelSwapSettings.copy(pauseDurationMs = clampedMs)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
         }
     }
     

@@ -18,6 +18,7 @@ struct GenerateResult {
     bool channelsSwapped = false;
     float currentBeatFreq = 0.0;
     float currentCarrierFreq = 0.0;
+    int samplesGenerated = 0;  // Реальное количество сгенерированных сэмплов
 };
 
 /**

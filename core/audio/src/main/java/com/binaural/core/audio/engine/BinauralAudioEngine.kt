@@ -52,17 +52,23 @@ class BinauralAudioEngine(private val context: Context) {
         private const val THREAD_NAME = "BinauralAudioThread"
         private const val MIN_VOLUME = 0.001f
         private const val PLAYBACK_FADE_DURATION_MS = 250L
-        
+
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
-        
+
         // Максимальный размер буфера в минутах (ограничен памятью Android)
         // При 22050 Гц: 10 мин = 13,230,000 сэмплов × 2 канала × 4 байта = ~106 МБ
         private const val MAX_BUFFER_MINUTES = 10
-        
+
         // Максимальный размер буфера в байтах (дополнительная защита)
         // ~500 МБ - безопасный лимит для современных Android устройств
         private const val MAX_BUFFER_BYTES = 500 * 1024 * 1024
+
+        // Токен для отмены callbacks при переключении частоты дискретизации
+        private val RESTART_PLAYBACK_TOKEN = Any()
+        
+        // Токен для отмены callback завершения fade-in
+        private val FADE_IN_COMPLETE_TOKEN = Any()
     }
     
     // Атомарные ссылки для потокобезопасного доступа
@@ -70,12 +76,19 @@ class BinauralAudioEngine(private val context: Context) {
     private val isActive = AtomicBoolean(false)
     private val pendingSampleRate = AtomicReference<SampleRate?>(null)
     private val pendingFrequencyUpdateIntervalMs = AtomicReference<Int?>(null)
-    
+
     // Запросы на операции с fade (потокобезопасные)
     private val stopWithFadeRequested = AtomicBoolean(false)
     private val pauseWithFadeRequested = AtomicBoolean(false)
     private val presetSwitchRequested = AtomicReference<BinauralConfig?>(null)
-    
+
+    // Флаг для отслеживания запланированной операции перезапуска после смены частоты
+    @Volatile
+    private var restartPlaybackScheduled = false
+
+    // Токен для debounce операций переключения частоты дискретизации
+    private val SAMPLE_RATE_CHANGE_TOKEN = Any()
+
     // Текущие настройки
     private var sampleRate: Int = SampleRate.MEDIUM.value
     private var frequencyUpdateIntervalMs: Int = 10000
@@ -242,17 +255,17 @@ class BinauralAudioEngine(private val context: Context) {
             stopWithFadeRequested.set(false)
             pauseWithFadeRequested.set(false)
             
-            val savedVolume = currentVolume
-            
+            // При прерывании восстанавливаем пользовательскую громкость
+            // (не currentVolume, которая может быть MIN_VOLUME)
             try {
                 volumeShaper?.close()
                 volumeShaper = null
-                audioTrack?.setVolume(savedVolume)
+                audioTrack?.setVolume(userVolume)
             } catch (e: Exception) {
                 Log.e(TAG, "Error setting volume: ${e.message}")
             }
             
-            currentVolume = savedVolume
+            currentVolume = userVolume
             isActive.set(false)
             isFadeInProgress = false
             try {
@@ -284,19 +297,26 @@ class BinauralAudioEngine(private val context: Context) {
         isActive.set(true)
         _isPlaying.value = true
         playbackStartTime = System.currentTimeMillis()
-        
+
         Log.d(TAG, "startNewPlayback() - calling nativeEngine.resetState() and play()")
         nativeEngine?.resetState()
         nativeEngine?.play()
-        
+
         acquireWakeLock()
         Log.d(TAG, "startNewPlayback() - posting startPlayback to handler")
         handler.post(::startPlayback)
     }
-    
+
+    @Synchronized
     private fun startPlayback() {
         Log.d(TAG, "startPlayback() called, isActive=${isActive.get()}")
-        
+
+        // Проверяем что не идёт перезапуск с другой частотой
+        if (restartPlaybackScheduled) {
+            Log.w(TAG, "startPlayback() - restart is scheduled, skipping")
+            return
+        }
+
         if (!isActive.get()) {
             Log.w(TAG, "startPlayback() - isActive is false, returning")
             return
@@ -336,6 +356,19 @@ class BinauralAudioEngine(private val context: Context) {
             createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = userVolume)
             audioTrack?.play()
             startVolumeShaper()
+            
+            // После завершения fade-in устанавливаем громкость напрямую и освобождаем VolumeShaper
+            // Это предотвращает влияние VolumeShaper на последующие изменения громкости
+            audioHandler?.postAtTime({
+                if (isActive.get()) {
+                    audioTrack?.setVolume(userVolume)
+                    volumeShaper?.close()
+                    volumeShaper = null
+                    currentVolume = userVolume
+                    isFadeInProgress = false
+                    Log.d(TAG, "Fade-in completed, volume set to $userVolume")
+                }
+            }, FADE_IN_COMPLETE_TOKEN, System.currentTimeMillis() + PLAYBACK_FADE_DURATION_MS + 50)
             
             generateAudioLoop()
             Log.d(TAG, "startPlayback() - generateAudioLoop() completed normally")
@@ -469,19 +502,21 @@ class BinauralAudioEngine(private val context: Context) {
     
     private fun generateAudioLoop() {
         Log.d(TAG, "generateAudioLoop() started, isActive=${isActive.get()}")
-        
+
         val engine = nativeEngine
         if (engine == null) {
             Log.e(TAG, "generateAudioLoop() - nativeEngine is null, returning")
             return
         }
 
+        // Локальная копия sampleRate для защиты от изменений во время работы
+        val localSampleRate = sampleRate
         // Максимальный размер буфера в сэмплах (из MAX_BUFFER_MINUTES)
-        val maxSamplesPerChannelLimit = sampleRate * 60 * MAX_BUFFER_MINUTES
-        
+        val maxSamplesPerChannelLimit = localSampleRate * 60 * MAX_BUFFER_MINUTES
+
         var currentIntervalMs = frequencyUpdateIntervalMs
         var samplesPerChannel = minOf(
-            (sampleRate.toLong() * currentIntervalMs / 1000).toInt(),
+            (localSampleRate.toLong() * currentIntervalMs / 1000).toInt(),
             maxSamplesPerChannelLimit
         )
 
@@ -494,10 +529,10 @@ class BinauralAudioEngine(private val context: Context) {
             if (frequencyUpdateIntervalMs != currentIntervalMs) {
                 currentIntervalMs = frequencyUpdateIntervalMs
                 samplesPerChannel = minOf(
-                    (sampleRate.toLong() * currentIntervalMs / 1000).toInt(),
+                    (localSampleRate.toLong() * currentIntervalMs / 1000).toInt(),
                     maxSamplesPerChannelLimit
                 )
-                
+
                 // Пересоздаём буфер если нужно больше места
                 val requiredSize = samplesPerChannel * 2 * 4
                 if (directAudioBuffer == null || directAudioBuffer!!.capacity() < requiredSize) {
@@ -687,6 +722,9 @@ class BinauralAudioEngine(private val context: Context) {
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
         
+        // Отменяем callback завершения fade-in
+        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
+        
         try {
             audioTrack?.stop()
         } catch (e: Exception) {
@@ -701,9 +739,15 @@ class BinauralAudioEngine(private val context: Context) {
      * Остановить воспроизведение с плавным затуханием
      */
     fun stopWithFade() {
-        Log.d(TAG, "stopWithFade() called")
+        Log.d(TAG, "stopWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
         
-        if (!_isPlaying.value) return
+        // Проверяем isActive, а не _isPlaying!
+        // isActive остаётся true во время fade-out, что предотвращает
+        // накопление нескольких fade-out операций при быстрых переключениях
+        if (!isActive.get()) {
+            Log.d(TAG, "stopWithFade() - not active, returning")
+            return
+        }
         
         currentVolume = getVolumeFromShaper()
         _isPlaying.value = false
@@ -813,9 +857,13 @@ class BinauralAudioEngine(private val context: Context) {
      * Приостановить воспроизведение с плавным затуханием
      */
     fun pauseWithFade() {
-        Log.d(TAG, "pauseWithFade() called")
+        Log.d(TAG, "pauseWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
         
-        if (!_isPlaying.value) return
+        // Проверяем isActive, а не _isPlaying - аналогично stopWithFade()
+        if (!isActive.get()) {
+            Log.d(TAG, "pauseWithFade() - not active, returning")
+            return
+        }
         
         // Немедленно запускаем fade-out, не дожидаясь цикла генерации
         currentVolume = getVolumeFromShaper()
@@ -881,39 +929,111 @@ class BinauralAudioEngine(private val context: Context) {
     
     /**
      * Установить частоту дискретизации
+     *
+     * АСИНХРОННАЯ РЕАЛИЗАЦИЯ:
+     * - Все операции выполняются в audioHandler потоке
+     * - Debounce предотвращает множественные перезапуски при быстрых переключениях
+     * - Нет блокировок (synchronized) и Thread.sleep
      */
     fun setSampleRate(rate: SampleRate) {
         Log.d(TAG, "setSampleRate() called: ${rate.value} Hz")
-        
-        if (sampleRate == rate.value) return
-        
+
+        val handler = audioHandler
+        if (handler == null) {
+            Log.w(TAG, "setSampleRate() - audioHandler is null, updating sampleRate directly")
+            if (sampleRate != rate.value) {
+                sampleRate = rate.value
+                nativeEngine?.setSampleRate(sampleRate)
+            }
+            return
+        }
+
+        // Отменяем предыдущие запросы на переключение (debounce)
+        handler.removeCallbacksAndMessages(SAMPLE_RATE_CHANGE_TOKEN)
+
+        // Если уже идёт перезапуск, просто обновляем pending rate
+        if (restartPlaybackScheduled) {
+            Log.d(TAG, "setSampleRate() - restart already scheduled, updating pending rate to ${rate.value} Hz")
+            pendingSampleRate.set(rate)
+            return
+        }
+
+        // Проверяем, нужно ли вообще переключение
+        if (sampleRate == rate.value) {
+            Log.d(TAG, "setSampleRate() - already at ${rate.value} Hz, skipping")
+            return
+        }
+
+        // Планируем переключение с небольшой задержкой для debounce
+        handler.postAtTime({
+            executeSampleRateChange(rate)
+        }, SAMPLE_RATE_CHANGE_TOKEN, System.currentTimeMillis() + 50)
+    }
+
+    /**
+     * Выполнить переключение частоты дискретизации
+     * Вызывается только из audioHandler потока
+     */
+    private fun executeSampleRateChange(rate: SampleRate) {
+        Log.d(TAG, "executeSampleRateChange() called: ${rate.value} Hz")
+
+        // Проверяем, не изменилось ли значение пока ждали в очереди
+        if (sampleRate == rate.value) {
+            Log.d(TAG, "executeSampleRateChange() - already at ${rate.value} Hz, skipping")
+            return
+        }
+
         val wasPlaying = _isPlaying.value
-        
+
         if (wasPlaying) {
+            // Сохраняем текущую громкость для восстановления после перезапуска
             currentVolume = getVolumeFromShaper()
-            
+
+            // Останавливаем генерацию
             isActive.set(false)
             _isPlaying.value = false
-            
+            restartPlaybackScheduled = true
+
+            // Отменяем все запланированные операции restart с другим токеном
+            audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+
+            // Останавливаем AudioTrack
             try {
                 audioTrack?.stop()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping AudioTrack: ${e.message}")
             }
-            
+
+            // Обновляем частоту дискретизации
             sampleRate = rate.value
             nativeEngine?.setSampleRate(sampleRate)
             Log.d(TAG, "Sample rate changed to ${sampleRate} Hz")
-            
-            audioHandler?.post {
+
+            // Освобождаем AudioTrack и перезапускаем воспроизведение
+            audioHandler?.postAtTime({
+                Log.d(TAG, "Executing scheduled restart: release AudioTrack and play")
+                restartPlaybackScheduled = false
+
+                // Проверяем, не запросили ли другую частоту пока выполнялся restart
+                val pendingRate = pendingSampleRate.getAndSet(null)
+                if (pendingRate != null && pendingRate.value != sampleRate) {
+                    Log.d(TAG, "Pending sample rate change detected: ${pendingRate.value} Hz, executing")
+                    executeSampleRateChange(pendingRate)
+                    return@postAtTime
+                }
+
+                // Освобождаем и пересоздаём AudioTrack
                 audioTrack?.release()
                 audioTrack = null
-                Thread.sleep(50)
+
+                // Запускаем воспроизведение с новой частотой
                 play()
-            }
+            }, RESTART_PLAYBACK_TOKEN, System.currentTimeMillis() + 50)
         } else {
+            // Если не воспроизводится, просто обновляем параметр
             sampleRate = rate.value
             nativeEngine?.setSampleRate(sampleRate)
+            Log.d(TAG, "Sample rate changed to ${sampleRate} Hz (not playing)")
         }
     }
     

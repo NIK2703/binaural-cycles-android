@@ -3,9 +3,17 @@
 #include <chrono>
 #include <algorithm>
 #include <cmath>
-#include <android/log.h>
 #include <atomic>
 #include <shared_mutex>
+#include <mutex>
+
+#ifdef AUDIO_TEST_BUILD
+#include "../tests/android_stub.h"
+#elif defined(ANDROID)
+#include <android/log.h>
+#else
+#include "../tests/android_stub.h"
+#endif
 
 #ifdef USE_NEON
 #include <arm_neon.h>
@@ -129,8 +137,9 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     );
 #endif
     
-    // Обновляем время
-    const float batchDurationSeconds = static_cast<float>(samplesToGenerate) / sampleRate;
+    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов
+    // Это исправляет баг рассинхронизации времени между пакетами
+    const float batchDurationSeconds = static_cast<float>(result.samplesGenerated) / sampleRate;
     m_totalBufferTimeSeconds += batchDurationSeconds;
     
     // Обновляем атомарные значения для Java
@@ -239,9 +248,6 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         timeSeconds += SECONDS_PER_DAY_F;
     }
     
-    // Накапливаем время для следующего буфера
-    m_totalBufferTimeSeconds += bufferDurationSeconds;
-    
     const int64_t elapsedMs = static_cast<int64_t>(m_elapsedSeconds.load(std::memory_order_relaxed)) * 1000;
     
     // Обновляем прошедшее время асинхронно
@@ -307,6 +313,11 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
              (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0);
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
+    
+    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов
+    // Это исправляет баг рассинхронизации времени между пакетами
+    const float actualDurationSeconds = static_cast<float>(result.samplesGenerated) / sampleRate;
+    m_totalBufferTimeSeconds += actualDurationSeconds;
     
     return true;
 }
