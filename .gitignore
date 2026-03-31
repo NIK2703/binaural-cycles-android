@@ -55,6 +55,9 @@ keystore.properties
 .externalNativeBuild
 .cxx/
 
+# CMake build folders
+build_tests/
+
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 
