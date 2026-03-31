@@ -80,6 +80,9 @@ class NativeAudioEngine {
     private external fun nativeIsChannelsSwapped(): Boolean
     private external fun nativeUpdateElapsedTime()
     
+    // O(1) получение частот из lookup table по текущему времени
+    private external fun nativeGetFrequenciesAtCurrentTime(): FloatArray?
+    
     // === Нативные методы для интерполяции (используются в UI для графика) ===
     
     private external fun nativeInterpolate(
@@ -463,6 +466,16 @@ class NativeAudioEngine {
     fun getCurrentCarrierFrequency(): Float = nativeGetCurrentCarrierFrequency()
     fun getElapsedSeconds(): Int = nativeGetElapsedSeconds()
     fun isChannelsSwapped(): Boolean = nativeIsChannelsSwapped()
+    
+    /**
+     * Получить частоты для текущего времени из lookup table.
+     * O(1) операция - использует предвычисленную таблицу в C++.
+     * @return Pair(beatFrequency, carrierFrequency) или null если конфиг не установлен
+     */
+    fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? {
+        val result = nativeGetFrequenciesAtCurrentTime()
+        return result?.let { Pair(it[0], it[1]) }
+    }
     
     // === Нативные методы для батчевой генерации (оптимизация энергопотребления) ===
     

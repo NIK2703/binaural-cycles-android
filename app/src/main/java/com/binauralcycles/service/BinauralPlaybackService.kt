@@ -188,29 +188,11 @@ class BinauralPlaybackService : Service() {
             }
         }
         
-        // Частоты обновляем в UI напрямую из audioEngine
-        // Также обновляем уведомление и метаданные при изменении частот
-        serviceScope.launch {
-            audioEngine?.currentBeatFrequency?.collectLatest { freq ->
-                _currentBeatFrequency.value = freq
-                // Обновляем уведомление и метаданные при изменении частоты
-                if (_isPlaying.value && freq > 0) {
-                    updateMediaMetadata()
-                    updateNotificationSilently()
-                }
-            }
-        }
-        
-        serviceScope.launch {
-            audioEngine?.currentCarrierFrequency?.collectLatest { freq ->
-                _currentCarrierFrequency.value = freq
-                // Обновляем уведомление и метаданные при изменении частоты
-                if (_isPlaying.value && freq > 0) {
-                    updateMediaMetadata()
-                    updateNotificationSilently()
-                }
-            }
-        }
+        // ВНИМАНИЕ: Частоты НЕ обновляем через collectLatest из audioEngine!
+        // Это вызывало мерцание некорректных значений при старте/смене пресета.
+        // Частоты обновляются только через updateCurrentFrequencies() в:
+        // - startUiFrequencyUpdateJob() - каждую секунду (когда приложение на экране)
+        // - startNotificationUpdateJob() - каждые 10 секунд (всегда)
         
         serviceScope.launch {
             audioEngine?.isChannelsSwapped?.collectLatest { swapped ->
@@ -226,6 +208,11 @@ class BinauralPlaybackService : Service() {
         
         // Периодическое обновление notification во время воспроизведения
         startNotificationUpdateJob()
+        
+        // Запускаем ежесекундное обновление частот для UI сразу при создании сервиса.
+        // Это гарантирует, что частоты обновляются с момента запуска приложения,
+        // даже если onAppForeground() был вызван до установки serviceInstance.
+        startUiFrequencyUpdateJob()
         
         // Регистрируем приёмник для режима энергосбережения
         registerPowerSaveReceiver()
@@ -583,6 +570,10 @@ class BinauralPlaybackService : Service() {
     /**
      * Запускает периодическое обновление уведомления во время воспроизведения.
      * Фиксированный интервал 10 секунд для уведомления.
+     *
+     * O(1) операция: использует предвычисленную lookup table в C++ движке.
+     * Это позволяет отображать актуальные частоты в уведомлении каждые 10 секунд,
+     * даже когда приложение в фоне и генерация буфера происходит каждые N минут.
      */
     private fun startNotificationUpdateJob() {
         notificationUpdateJob?.cancel()
@@ -590,7 +581,13 @@ class BinauralPlaybackService : Service() {
             while (true) {
                 delay(10_000) // Каждые 10 секунд
                 if (_isPlaying.value) {
-                    updateNotificationSilently()
+                    // O(1) получение частот из lookup table
+                    audioEngine?.updateCurrentFrequencies()
+                    // Обновляем уведомление с актуальными частотами
+                    if (_currentBeatFrequency.value > 0) {
+                        updateMediaMetadata()
+                        updateNotificationSilently()
+                    }
                 }
             }
         }
@@ -600,18 +597,23 @@ class BinauralPlaybackService : Service() {
      * Запускает периодическое обновление частот в UI (каждую секунду).
      * Работает только когда приложение на экране (не в фоне).
      *
-     * ВАЖНО: Частоты уже обновляются из native кода через collectLatest (строки 193-210).
-     * Здесь мы только обновляем уведомление, чтобы оно было актуальным.
+     * O(1) операция: использует предвычисленную lookup table в C++ движке.
+     * Это позволяет отображать актуальные частоты каждую секунду,
+     * даже если генерация буфера происходит каждые N минут.
      */
     private fun startUiFrequencyUpdateJob() {
         uiFrequencyUpdateJob?.cancel()
         uiFrequencyUpdateJob = serviceScope.launch {
             while (true) {
                 delay(1000) // Каждую секунду
-                // Обновляем уведомление с текущими частотами из native кода
-                if (_isPlaying.value && _currentBeatFrequency.value > 0) {
-                    updateMediaMetadata()
-                    updateNotificationSilently()
+                if (_isPlaying.value) {
+                    // O(1) получение частот из lookup table
+                    audioEngine?.updateCurrentFrequencies()
+                    // Обновляем уведомление с актуальными частотами
+                    if (_currentBeatFrequency.value > 0) {
+                        updateMediaMetadata()
+                        updateNotificationSilently()
+                    }
                 }
             }
         }

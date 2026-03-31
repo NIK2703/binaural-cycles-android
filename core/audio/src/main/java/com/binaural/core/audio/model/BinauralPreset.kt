@@ -413,8 +413,8 @@ data class RelaxationModeSettings(
         require(beatReductionPercent in 0..100) { "Снижение частоты биений должно быть от 0% до 100%" }
         require(gapBetweenRelaxationMinutes in 0..120) { "Интервал между периодами расслабления должен быть от 0 до 120 минут" }
         require(transitionPeriodMinutes in 1..10) { "Период перехода должен быть от 1 до 10 минут" }
-        require(relaxationDurationMinutes in 10..60) { "Длительность периода расслабления должна быть от 10 до 60 минут" }
-        require(smoothIntervalMinutes in 10..120) { "Интервал между точками должен быть от 10 до 120 минут" }
+        require(relaxationDurationMinutes in 5..60) { "Длительность периода расслабления должна быть от 5 до 60 минут" }
+        require(smoothIntervalMinutes in 5..120) { "Интервал между точками должен быть от 5 до 120 минут" }
     }
     
     /**

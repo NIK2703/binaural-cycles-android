@@ -210,6 +210,39 @@ int32_t BinauralEngine::getCurrentTimeSeconds() const {
 #endif
 }
 
+std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
+    // Получаем текущее время суток в секундах
+    const int32_t currentSeconds = getCurrentTimeSeconds();
+    
+    // Читаем конфигурацию с shared_lock
+    std::shared_lock<std::shared_mutex> lock(m_configMutex);
+    
+    const auto& curve = m_config.curve;
+    
+    // Проверяем что lookup table построена
+    if (curve.lowerFreqTable.empty() || curve.upperFreqTable.empty()) {
+        return {0.0f, 0.0f};
+    }
+    
+    // O(1) доступ к предвычисленной таблице
+    // Индекс: время в мс / шаг таблицы (100 мс)
+    const float timeMs = static_cast<float>(currentSeconds) * 1000.0f;
+    const float indexFloat = timeMs / FREQUENCY_TABLE_INTERVAL_MS;
+    const int index = static_cast<int>(indexFloat);
+    
+    // Безопасное получение значений с проверкой границ
+    const int clampedIndex = std::clamp(index, 0, static_cast<int>(curve.lowerFreqTable.size()) - 1);
+    
+    const float lowerFreq = curve.lowerFreqTable[clampedIndex];
+    const float upperFreq = curve.upperFreqTable[clampedIndex];
+    
+    // Вычисляем beat и carrier частоты
+    const float beatFreq = upperFreq - lowerFreq;
+    const float carrierFreq = (lowerFreq + upperFreq) / 2.0f;
+    
+    return {beatFreq, carrierFreq};
+}
+
 void BinauralEngine::updateElapsedTime() {
     const int64_t startTime = m_playbackStartTimeMs.load(std::memory_order_relaxed);
     if (startTime > 0) {

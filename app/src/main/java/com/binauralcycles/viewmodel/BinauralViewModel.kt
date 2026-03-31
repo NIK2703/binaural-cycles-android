@@ -1030,7 +1030,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingRelaxationDurationMinutes(minutes: Int) {
         val state = _uiState.value
-        val clampedMinutes = minutes.coerceIn(10, 60)
+        val clampedMinutes = minutes.coerceIn(5, 60)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(relaxationDurationMinutes = clampedMinutes)
@@ -1055,7 +1055,7 @@ class BinauralViewModel @Inject constructor(
      * Установить интервал между точками для SMOOTH режима (в минутах)
      */
     fun setEditingSmoothIntervalMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(5, 60)
+        val clampedMinutes = minutes.coerceIn(5, 120)
         _uiState.update { state ->
             android.util.Log.d("BinauralViewModel", "setEditingSmoothIntervalMinutes: minutes=$minutes, clamped=$clampedMinutes, current=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
             state.copy(

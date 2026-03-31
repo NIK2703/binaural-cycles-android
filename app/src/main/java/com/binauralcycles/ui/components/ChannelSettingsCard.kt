@@ -779,7 +779,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.gap_between_relaxation),
                     value = relaxationModeSettings.gapBetweenRelaxationMinutes,
-                    values = listOf(10, 15, 20, 30, 45, 60, 90, 120),
+                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationGapChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -789,7 +789,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.relaxation_duration),
                     value = relaxationModeSettings.relaxationDurationMinutes,
-                    values = listOf(10, 15, 20, 30, 45, 60),
+                    values = listOf(5, 10, 15, 20, 30, 45, 60),
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationDurationChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -814,7 +814,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.smooth_interval),
                     value = relaxationModeSettings.smoothIntervalMinutes,
-                    values = listOf(10, 15, 20, 30, 45, 60, 90, 120),
+                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onSmoothIntervalChange,
                     modifier = Modifier.padding(horizontal = 16.dp)

@@ -274,6 +274,33 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentBeatFreque
 }
 
 /**
+ * Получение частот для текущего времени из lookup table (O(1) операция)
+ * Использует предвычисленную таблицу, не требует интерполяции на лету.
+ * @return float[2] {beatFrequency, carrierFrequency} или null если конфиг не установлен
+ */
+JNIEXPORT jfloatArray JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetFrequenciesAtCurrentTime(
+    JNIEnv* env,
+    jobject thiz
+) {
+    if (!g_engine) return nullptr;
+    
+    auto result = g_engine->getFrequenciesAtCurrentTime();
+    
+    // Проверяем что конфиг установлен (частоты не нулевые)
+    if (result.first == 0.0f && result.second == 0.0f) {
+        return nullptr;
+    }
+    
+    jfloatArray resultArray = env->NewFloatArray(2);
+    if (resultArray) {
+        const jfloat data[2] = { result.first, result.second };
+        env->SetFloatArrayRegion(resultArray, 0, 2, data);
+    }
+    return resultArray;
+}
+
+/**
  * Получение текущей несущей частоты (из атомарной переменной)
  */
 JNIEXPORT jfloat JNICALL

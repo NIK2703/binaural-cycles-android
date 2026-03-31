@@ -125,6 +125,13 @@ public:
      * Получить состояние перестановки каналов
      */
     bool isChannelsSwapped() const { return m_state.channelsSwapped; }
+    
+    /**
+     * Получить частоты каналов для текущего времени из lookup table.
+     * O(1) операция - использует предвычисленную таблицу.
+     * @return Pair(beatFrequency, carrierFrequency) или (0, 0) если конфиг не установлен
+     */
+    std::pair<float, float> getFrequenciesAtCurrentTime();
 
 private:
     BinauralConfig m_config;

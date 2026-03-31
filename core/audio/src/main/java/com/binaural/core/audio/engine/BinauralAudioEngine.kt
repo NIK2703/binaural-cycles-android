@@ -157,41 +157,23 @@ class BinauralAudioEngine(private val context: Context) {
 
     /**
      * Получить текущие частоты по текущему времени суток.
-     * Используется для отображения в UI без генерации буфера.
+     * O(1) операция - использует предвычисленную lookup table в C++.
      * @return Pair(beatFrequency, carrierFrequency) или null если конфиг не установлен
      */
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? {
-        val engine = nativeEngine ?: return null
-        val config = configRef.get()
-        
-        val curve = config.frequencyCurve
-        val points = curve.points
-        if (points.size < 2) return null
-        
-        // Текущее время в секундах с начала суток
-        val calendar = java.util.Calendar.getInstance()
-        val currentSeconds = calendar.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
-                            calendar.get(java.util.Calendar.MINUTE) * 60 +
-                            calendar.get(java.util.Calendar.SECOND)
-        
-        val timePoints = IntArray(points.size) { points[it].time.toSecondOfDay() }
-        val carrierFreqs = FloatArray(points.size) { points[it].carrierFrequency }
-        val beatFreqs = FloatArray(points.size) { points[it].beatFrequency }
-        
-        val result = engine.getChannelFrequenciesAt(
-            timePoints, carrierFreqs, beatFreqs,
-            currentSeconds,
-            curve.interpolationType,
-            curve.splineTension
-        ) ?: return null
-        
-        // result = (lowerFreq, upperFreq)
-        val lowerFreq = result.first
-        val upperFreq = result.second
-        val beatFreq = upperFreq - lowerFreq
-        val carrierFreq = (lowerFreq + upperFreq) / 2.0f
-        
-        return Pair(beatFreq, carrierFreq)
+        return nativeEngine?.getFrequenciesAtCurrentTime()
+    }
+    
+    /**
+     * Обновить текущие частоты из lookup table.
+     * Вызывается периодически из UI для отображения актуальных частот.
+     */
+    fun updateCurrentFrequencies() {
+        val result = getFrequenciesAtCurrentTime()
+        if (result != null) {
+            _currentBeatFrequency.value = result.first
+            _currentCarrierFrequency.value = result.second
+        }
     }
 
     /**
@@ -217,7 +199,14 @@ class BinauralAudioEngine(private val context: Context) {
     fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
         configRef.set(config)
         _currentConfig.value = config
+        // ВАЖНО: НЕ обновляем userVolume из config.volume!
+        // userVolume управляется ТОЛЬКО через setVolume() от слайдера пользователя.
+        // VolumeShaper используется исключительно для плавного затухания/восстановления
+        // и не должен менять базовую громкость воспроизведения.
+        // config.volume используется только при сохранении/загрузке настроек.
         nativeEngine?.updateConfig(config, relaxationSettings)
+        // НЕ обновляем частоты здесь - native engine может ещё не иметь актуальных данных.
+        // Частоты обновляются ежесекундно в startUiFrequencyUpdateJob() через lookup table.
     }
     
     /**
@@ -295,12 +284,16 @@ class BinauralAudioEngine(private val context: Context) {
         }
         
         isActive.set(true)
-        _isPlaying.value = true
         playbackStartTime = System.currentTimeMillis()
 
         Log.d(TAG, "startNewPlayback() - calling nativeEngine.resetState() and play()")
         nativeEngine?.resetState()
         nativeEngine?.play()
+        // НЕ обновляем частоты здесь - native engine может ещё не иметь актуальных данных.
+        // Частоты обновляются ежесекундно в startUiFrequencyUpdateJob() через lookup table.
+        
+        // Сообщаем UI о начале воспроизведения
+        _isPlaying.value = true
 
         acquireWakeLock()
         Log.d(TAG, "startNewPlayback() - posting startPlayback to handler")
@@ -351,22 +344,26 @@ class BinauralAudioEngine(private val context: Context) {
             }
             
             createAudioTrack()
-            // Fade-in от MIN_VOLUME до пользовательской громкости
+            // Fade-in от MIN_VOLUME до полной громкости (1.0 как множитель)
+            // AudioTrack уже имеет базовую громкость userVolume,
+            // VolumeShaper работает как множитель: итоговая = userVolume × VolumeShaper.value
             currentVolume = MIN_VOLUME  // Начинаем с минимума для плавного нарастания
-            createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = userVolume)
+            createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = 1.0f)
             audioTrack?.play()
             startVolumeShaper()
             
-            // После завершения fade-in устанавливаем громкость напрямую и освобождаем VolumeShaper
-            // Это предотвращает влияние VolumeShaper на последующие изменения громкости
+            // ВАЖНО: Не используем отложенный callback для установки userVolume!
+            // Если пользователь изменит громкость во время fade-in, callback перезапишет
+            // новое значение на старое. Вместо этого VolumeShaper плавно приводит громкость
+            // к userVolume, и после завершения шейпера просто освобождаем ресурсы.
+            // Громкость установлена через AudioTrack.setVolume(userVolume) в createAudioTrack()
+            // или через setVolume() от слайдера пользователя.
             audioHandler?.postAtTime({
                 if (isActive.get()) {
-                    audioTrack?.setVolume(userVolume)
                     volumeShaper?.close()
                     volumeShaper = null
-                    currentVolume = userVolume
                     isFadeInProgress = false
-                    Log.d(TAG, "Fade-in completed, volume set to $userVolume")
+                    Log.d(TAG, "Fade-in completed, userVolume=$userVolume")
                 }
             }, FADE_IN_COMPLETE_TOKEN, System.currentTimeMillis() + PLAYBACK_FADE_DURATION_MS + 50)
             
@@ -414,11 +411,12 @@ class BinauralAudioEngine(private val context: Context) {
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
 
-        // Устанавливаем базовую громкость 1.0 для корректной работы VolumeShaper.
+        // Устанавливаем громкость пользователя как базовую.
+        // userVolume - единственный источник истины для громкости.
         // VolumeShaper работает как множитель поверх AudioTrack.setVolume():
         // итоговая_громкость = AudioTrack.volume × VolumeShaper.value
-        // При fade-in: 1.0 × [0.001→1.0] = плавное нарастание от 0.001 до 1.0
-        audioTrack?.setVolume(1.0f)
+        // При fade-in: userVolume × [0.001→1.0] = плавное нарастание от MIN_VOLUME до userVolume
+        audioTrack?.setVolume(userVolume)
         audioTrackBufferSize = bufferSize
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
     }
@@ -453,7 +451,10 @@ class BinauralAudioEngine(private val context: Context) {
             if (kotlin.math.abs(startVolume - clampedTarget) < 0.01f) {
                 currentVolume = clampedTarget
                 isFadeInProgress = false
-                audioTrack?.setVolume(clampedTarget)
+                // При fade-in (target = 1.0) устанавливаем userVolume как базовую громкость
+                // При fade-out (target = 0.0) устанавливаем 0
+                val finalVolume = if (clampedTarget >= 0.99f) userVolume else clampedTarget
+                audioTrack?.setVolume(finalVolume)
                 return
             }
             
@@ -560,16 +561,11 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            // PULL MODEL: Читаем данные из атомарных переменных C++ после генерации
-            val beatFreq = engine.getCurrentBeatFrequency()
-            val carrierFreq = engine.getCurrentCarrierFrequency()
-            
-            if (_currentBeatFrequency.value != beatFreq) {
-                _currentBeatFrequency.value = beatFreq
-            }
-            if (_currentCarrierFrequency.value != carrierFreq) {
-                _currentCarrierFrequency.value = carrierFreq
-            }
+            // ВНИМАНИЕ: Частоты НЕ обновляем здесь!
+            // Это вызывало мерцание некорректных значений при старте/смене пресета.
+            // Частоты обновляются только через updateCurrentFrequencies() в:
+            // - startUiFrequencyUpdateJob() - каждую секунду (когда приложение на экране)
+            // - startNotificationUpdateJob() - каждые 10 секунд (всегда)
             
             val swapped = engine.isChannelsSwapped()
             if (_isChannelsSwapped.value != swapped) {
@@ -741,6 +737,10 @@ class BinauralAudioEngine(private val context: Context) {
     fun stopWithFade() {
         Log.d(TAG, "stopWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
         
+        // Отменяем callback завершения fade-in, чтобы он не выполнился
+        // на новом AudioTrack после перезапуска воспроизведения
+        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
+        
         // Проверяем isActive, а не _isPlaying!
         // isActive остаётся true во время fade-out, что предотвращает
         // накопление нескольких fade-out операций при быстрых переключениях
@@ -805,8 +805,6 @@ class BinauralAudioEngine(private val context: Context) {
     }
     
     private fun stopPlayback() {
-        val finalVolume = getVolumeFromShaper()
-        
         audioTrack?.stop()
         audioTrack?.release()
         audioTrack = null
@@ -814,7 +812,9 @@ class BinauralAudioEngine(private val context: Context) {
         volumeShaper = null
         isFadeInProgress = false
         
-        currentVolume = if (finalVolume < 0.05f) 0.0f else finalVolume
+        // Восстанавливаем currentVolume до userVolume для корректного
+        // последующего перезапуска. userVolume - единственный источник истины.
+        currentVolume = userVolume
         
         releaseWakeLock()
         resetState()
@@ -822,13 +822,11 @@ class BinauralAudioEngine(private val context: Context) {
         _isPlaying.value = false
         isActive.set(false)
         
-        Log.d(TAG, "stopPlayback() completed")
+        Log.d(TAG, "stopPlayback() completed, userVolume=$userVolume")
     }
     
     private fun cleanupPlayback() {
         Log.d(TAG, "cleanupPlayback() called, isActive=${isActive.get()}, isGenerating=$isGenerating")
-        
-        currentVolume = getVolumeFromShaper()
         
         Log.d(TAG, "cleanupPlayback() - stopping and releasing AudioTrack")
         audioTrack?.stop()
@@ -844,7 +842,11 @@ class BinauralAudioEngine(private val context: Context) {
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
         
-        Log.d(TAG, "cleanupPlayback() completed")
+        // Восстанавливаем currentVolume до userVolume для корректного
+        // последующего перезапуска. userVolume - единственный источник истины.
+        currentVolume = userVolume
+        
+        Log.d(TAG, "cleanupPlayback() completed, userVolume=$userVolume")
     }
     
     private fun resetState() {
@@ -858,6 +860,10 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun pauseWithFade() {
         Log.d(TAG, "pauseWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
+        
+        // Отменяем callback завершения fade-in, чтобы он не выполнился
+        // на новом AudioTrack после возобновления воспроизведения
+        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
         
         // Проверяем isActive, а не _isPlaying - аналогично stopWithFade()
         if (!isActive.get()) {
@@ -994,6 +1000,9 @@ class BinauralAudioEngine(private val context: Context) {
             _isPlaying.value = false
             restartPlaybackScheduled = true
 
+            // Отменяем callback завершения fade-in
+            audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
+            
             // Отменяем все запланированные операции restart с другим токеном
             audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
 

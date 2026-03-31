@@ -120,7 +120,7 @@
     <string name="wavetable_size_description">Больше значение — точнее звук, но чуть больше потребление памяти</string>
     
     <!-- Settings Sections -->
-    <string name="settings_section_comfort">Комфорт прослушивания</string>
+    <string name="settings_section_comfort">Воспроизведение</string>
     <string name="settings_section_power">Энергопотребление</string>
     <string name="settings_section_interface">Интерфейс</string>
     
