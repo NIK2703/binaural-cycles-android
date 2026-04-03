@@ -583,6 +583,9 @@ class BinauralPlaybackService : Service() {
                 if (_isPlaying.value) {
                     // O(1) получение частот из lookup table
                     audioEngine?.updateCurrentFrequencies()
+                    // Копируем значения из audioEngine в сервис для UI
+                    audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
+                    audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
                     // Обновляем уведомление с актуальными частотами
                     if (_currentBeatFrequency.value > 0) {
                         updateMediaMetadata()
@@ -609,6 +612,9 @@ class BinauralPlaybackService : Service() {
                 if (_isPlaying.value) {
                     // O(1) получение частот из lookup table
                     audioEngine?.updateCurrentFrequencies()
+                    // Копируем значения из audioEngine в сервис для UI
+                    audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
+                    audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
                     // Обновляем уведомление с актуальными частотами
                     if (_currentBeatFrequency.value > 0) {
                         updateMediaMetadata()
