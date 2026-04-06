@@ -25,14 +25,15 @@ android {
                 cppFlags += "-std=c++17 -O3 -ffast-math -funroll-loops"
                 arguments += listOf(
                     "-DANDROID_STL=c++_shared",
-                    "-DANDROID_TOOLCHAIN=clang"
+                    "-DANDROID_TOOLCHAIN=clang",
+                    "-DANDROID_LD=lld"
                 )
             }
         }
     }
     
     // Используем NDK, установленный в системе
-    ndkVersion = "26.2.11394342"
+    ndkVersion = "26.3.11579264"
 
     buildTypes {
         release {
@@ -63,6 +64,9 @@ android {
 }
 
 dependencies {
+    // Core modules
+    implementation(project(":core:domain"))
+
     // AndroidX
     implementation(libs.androidx.core.ktx)
 

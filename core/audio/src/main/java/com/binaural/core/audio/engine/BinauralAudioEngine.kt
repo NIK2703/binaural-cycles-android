@@ -10,29 +10,16 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.PowerManager
 import android.util.Log
-import com.binaural.core.audio.model.BinauralConfig
-import com.binaural.core.audio.model.FrequencyCurve
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binaural.core.domain.model.BinauralConfig
+import com.binaural.core.domain.model.FrequencyCurve
+import com.binaural.core.domain.model.RelaxationModeSettings
+import com.binaural.core.domain.model.SampleRate
+import com.binaural.core.domain.service.AudioEngineInterface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-
-/**
- * Частота дискретизации аудио
- */
-enum class SampleRate(val value: Int) {
-    ULTRA_LOW(8000),
-    VERY_LOW(16000),
-    LOW(22050),
-    MEDIUM(44100),
-    HIGH(48000);
-    
-    companion object {
-        fun fromValue(value: Int): SampleRate = entries.find { it.value == value } ?: MEDIUM
-    }
-}
 
 /**
  * Движок для генерации и воспроизведения бинауральных ритмов.
@@ -43,7 +30,7 @@ enum class SampleRate(val value: Int) {
  * - Этот класс управляет AudioTrack и VolumeShaper для воспроизведения
  * - VolumeShaper обеспечивает плавные переходы при старте/остановке
  */
-class BinauralAudioEngine(private val context: Context) {
+class BinauralAudioEngine(private val context: Context) : AudioEngineInterface {
 
     companion object {
         private const val TAG = "BinauralAudioEngine"
@@ -144,10 +131,10 @@ class BinauralAudioEngine(private val context: Context) {
     val currentConfig: StateFlow<BinauralConfig> = _currentConfig.asStateFlow()
 
     private val _currentBeatFrequency = MutableStateFlow(0.0f)
-    val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
+    override val currentBeatFrequency: StateFlow<Float> = _currentBeatFrequency.asStateFlow()
 
     private val _currentCarrierFrequency = MutableStateFlow(0.0f)
-    val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
+    override val currentCarrierFrequency: StateFlow<Float> = _currentCarrierFrequency.asStateFlow()
 
     private val _elapsedSeconds = MutableStateFlow(0)
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
@@ -168,7 +155,7 @@ class BinauralAudioEngine(private val context: Context) {
      * Обновить текущие частоты из lookup table.
      * Вызывается периодически из UI для отображения актуальных частот.
      */
-    fun updateCurrentFrequencies() {
+    override fun updateCurrentFrequencies() {
         val result = getFrequenciesAtCurrentTime()
         if (result != null) {
             _currentBeatFrequency.value = result.first

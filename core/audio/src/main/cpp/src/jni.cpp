@@ -89,7 +89,9 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jlong channelSwapFadeDurationMs,
     jlong channelSwapPauseDurationMs,
     jint normalizationType,
-    jfloat volumeNormalizationStrength
+    jfloat volumeNormalizationStrength,
+    jint channelSwapMode,
+    jboolean invertTendencyBehavior
 ) {
     if (!g_engine) return;
     
@@ -125,6 +127,10 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     config.channelSwapPauseDurationMs = channelSwapPauseDurationMs;
     config.normalizationType = static_cast<binaural::NormalizationType>(normalizationType);
     config.volumeNormalizationStrength = volumeNormalizationStrength;
+    
+    // Новые параметры для режима TENDENCY
+    config.channelSwapMode = static_cast<binaural::SwapMode>(channelSwapMode);
+    config.invertTendencyBehavior = invertTendencyBehavior;
     
     // Обновляем кэш
     config.curve.updateCache();

@@ -16,11 +16,14 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.navigation.compose.rememberNavController
+import com.binaural.core.domain.service.PlaybackController
 import com.binauralcycles.service.BinauralPlaybackService
+import com.binauralcycles.service.ServiceLifecycleManager
 import com.binauralcycles.ui.navigation.BinauralNavigation
 import com.binaural.core.ui.theme.BinauralTheme
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -28,6 +31,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val ACTION_EXIT = "com.binauralcycles.action.EXIT_APP"
     }
+    
+    @Inject
+    lateinit var playbackController: PlaybackController
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,7 +56,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 // Приложение на экране - обновляем частоты каждую секунду
-                BinauralPlaybackService.onAppForeground()
+                playbackController.onAppForeground()
             }
         }
         
@@ -78,13 +84,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         // Приложение на экране
-        BinauralPlaybackService.onAppForeground()
+        playbackController.onAppForeground()
     }
     
     override fun onPause() {
         super.onPause()
         // Приложение уходит в фон
-        BinauralPlaybackService.onAppBackground()
+        playbackController.onAppBackground()
     }
     
     override fun onNewIntent(intent: Intent) {

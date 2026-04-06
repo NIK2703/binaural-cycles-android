@@ -9,8 +9,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.R
-
-private const val MIN_AUDIBLE_FREQUENCY = 20.0
+import com.binauralcycles.ui.theme.AudioConstants
 
 @Composable
 fun CurrentFrequenciesCard(
@@ -19,7 +18,7 @@ fun CurrentFrequenciesCard(
     isPlaying: Boolean
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
-    val isLeftChannelTooLow = leftChannelFreq < MIN_AUDIBLE_FREQUENCY
+    val isLeftChannelTooLow = leftChannelFreq < AudioConstants.MIN_AUDIBLE_FREQUENCY
     
     // Локализованные строки
     val beatLabel = stringResource(R.string.beat_frequency)

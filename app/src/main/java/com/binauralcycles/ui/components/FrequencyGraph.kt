@@ -25,13 +25,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.FrequencyRange
-import com.binaural.core.audio.model.Interpolation
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationMode
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.FrequencyRange
+import com.binaural.core.domain.model.Interpolation
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.RelaxationMode
+import com.binaural.core.domain.model.RelaxationModeSettings
 import com.binauralcycles.R
+import com.binauralcycles.ui.theme.AudioConstants
+import com.binauralcycles.ui.theme.GraphConstants
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
@@ -42,12 +44,6 @@ import kotlin.math.cos
 
 // Порог для определения направления перетаскивания
 private const val DRAG_DIRECTION_THRESHOLD = 10f
-
-// Минимальная слышимая частота
-private const val MIN_AUDIBLE_FREQUENCY = 20.0f
-
-// Максимальная частота для графика
-private const val MAX_FREQUENCY = 2000.0f
 
 /**
  * Направление перетаскивания
@@ -75,7 +71,7 @@ private data class PointDragState(
  * Формула: (carrierFrequency - 20) * 2 (гарантирует, что нижняя боковая частота останется >= 20 Гц)
  */
 fun maxBeatForCarrier(carrierFrequency: Float): Float {
-    return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
+    return ((carrierFrequency - AudioConstants.MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
 }
 
 /**
@@ -132,18 +128,21 @@ private data class GraphParams(
  * Генерирует виртуальные точки режима расслабления.
  * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
  * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
+ * 
+ * @param carrierRange Диапазон несущей частоты графика (сниженная частота не опускается ниже min)
  */
 fun generateRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
-    splineTension: Float = 0.0f
+    splineTension: Float = 0.0f,
+    carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER
 ): List<FrequencyPoint> {
     if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
     
     return when (relaxationModeSettings.mode) {
-        RelaxationMode.STEP -> generateStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-        RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+        RelaxationMode.STEP -> generateStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension, carrierRange)
+        RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension, carrierRange)
     }
 }
 
@@ -156,12 +155,15 @@ fun generateRelaxationVirtualPoints(
  * - Точка 4: на базовой кривой (после выхода)
  * 
  * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
+ * 
+ * @param carrierRange Диапазон несущей частоты графика (сниженная частота не опускается ниже min)
  */
 private fun generateStepVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    carrierRange: FrequencyRange
 ): List<FrequencyPoint> {
     val virtualPoints = mutableListOf<FrequencyPoint>()
     
@@ -194,9 +196,13 @@ private fun generateStepVirtualPoints(
             val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
             val baseCarrier2 = interpolateCarrierFrequency(points, time2, interpolationType, splineTension)
             val baseBeat2 = interpolateBeatFrequency(points, time2, interpolationType, splineTension)
+            // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+            val reducedCarrier2 = (baseCarrier2 * (1.0f - carrierReduction))
+                .coerceAtLeast(carrierRange.min)
+                .coerceAtLeast(AudioConstants.MIN_AUDIBLE_FREQUENCY)
             virtualPoints.add(FrequencyPoint(
                 time2,
-                baseCarrier2 * (1.0f - carrierReduction),
+                reducedCarrier2,
                 baseBeat2 * (1.0f - beatReduction)
             ))
         }
@@ -207,9 +213,13 @@ private fun generateStepVirtualPoints(
             val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
             val baseCarrier3 = interpolateCarrierFrequency(points, time3, interpolationType, splineTension)
             val baseBeat3 = interpolateBeatFrequency(points, time3, interpolationType, splineTension)
+            // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+            val reducedCarrier3 = (baseCarrier3 * (1.0f - carrierReduction))
+                .coerceAtLeast(carrierRange.min)
+                .coerceAtLeast(AudioConstants.MIN_AUDIBLE_FREQUENCY)
             virtualPoints.add(FrequencyPoint(
                 time3,
-                baseCarrier3 * (1.0f - carrierReduction),
+                reducedCarrier3,
                 baseBeat3 * (1.0f - beatReduction)
             ))
         }
@@ -235,12 +245,15 @@ private fun generateStepVirtualPoints(
  * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
  * Интервал между точками регулируется параметром smoothIntervalMinutes.
  * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+ * 
+ * @param carrierRange Диапазон несущей частоты графика (сниженная частота не опускается ниже min)
  */
 private fun generateSmoothVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    carrierRange: FrequencyRange
 ): List<FrequencyPoint> {
     val virtualPoints = mutableListOf<FrequencyPoint>()
     
@@ -268,9 +281,13 @@ private fun generateSmoothVirtualPoints(
             // Нечётный индекс - снижающая точка
             val baseCarrier = interpolateCarrierFrequency(points, time, interpolationType, splineTension)
             val baseBeat = interpolateBeatFrequency(points, time, interpolationType, splineTension)
+            // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+            val reducedCarrier = (baseCarrier * (1.0f - carrierReduction))
+                .coerceAtLeast(carrierRange.min)
+                .coerceAtLeast(AudioConstants.MIN_AUDIBLE_FREQUENCY)
             virtualPoints.add(FrequencyPoint(
                 time,
-                baseCarrier * (1.0f - carrierReduction),
+                reducedCarrier,
                 baseBeat * (1.0f - beatReduction)
             ))
         }
@@ -338,8 +355,9 @@ fun FrequencyGraph(
     val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
     
     // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции
-    val virtualPoints = remember(points, relaxationModeSettings, interpolationType, splineTension) {
-        generateRelaxationVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+    // Передаём carrierRange для ограничения сниженной частоты
+    val virtualPoints = remember(points, relaxationModeSettings, interpolationType, splineTension, carrierRange) {
+        generateRelaxationVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension, carrierRange)
     }
 
     Column(
@@ -558,10 +576,10 @@ fun FrequencyGraph(
             confirmButton = {
                 TextButton(onClick = {
                     val value = tempRangeValue.toFloatOrNull()
-                    if (value != null && value >= MIN_AUDIBLE_FREQUENCY) {
+                    if (value != null && value >= AudioConstants.MIN_AUDIBLE_FREQUENCY) {
                         val newMin = if (editingRangeType == RangeType.MIN) value else carrierRange.min
                         // Ограничиваем максимум значением 2000 Гц
-                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(MAX_FREQUENCY) else carrierRange.max
+                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(AudioConstants.MAX_FREQUENCY) else carrierRange.max
                         if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
                     }
                     showRangeDialog = false
@@ -589,18 +607,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
 ) {
     val width = size.width
     val height = size.height
-    val gridColor = primaryColor.copy(alpha = 0.15f)
+    val gridColor = primaryColor.copy(alpha = GraphConstants.GRID_ALPHA)
     
     // Горизонтальные линии сетки
     for (i in 0..4) {
         val y = height * i / 4
-        drawLine(color = gridColor, start = Offset(0f, y), end = Offset(width, y), strokeWidth = 1f)
+        drawLine(color = gridColor, start = Offset(0f, y), end = Offset(width, y), strokeWidth = GraphConstants.GRID_LINE_WIDTH)
     }
     
     // Вертикальные линии каждые 3 часа (8 линий + границы)
-    for (hour in 0..24 step 3) {
-        val x = width * hour / 24
-        drawLine(color = gridColor, start = Offset(x, 0f), end = Offset(x, height), strokeWidth = 1f)
+    for (hour in 0..GraphConstants.HOURS_PER_DAY step GraphConstants.GRID_VERTICAL_STEP_HOURS) {
+        val x = width * hour / GraphConstants.HOURS_PER_DAY
+        drawLine(color = gridColor, start = Offset(x, 0f), end = Offset(x, height), strokeWidth = GraphConstants.GRID_LINE_WIDTH)
     }
     
     if (sortedPoints.size >= 2) {
@@ -622,10 +640,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
         val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
         val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
         
-        drawLine(color = indicatorColor.copy(alpha = 0.7f), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = 2f)
-        drawCircle(color = indicatorColor, radius = 8f, center = Offset(currentX, currentCarrierY))
+        drawLine(color = indicatorColor.copy(alpha = GraphConstants.INDICATOR_ALPHA), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = GraphConstants.STROKE_VERY_THICK)
+        drawCircle(color = indicatorColor, radius = GraphConstants.POINT_RADIUS_SELECTED, center = Offset(currentX, currentCarrierY))
         // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
-        drawLine(color = indicatorColor.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+        drawLine(color = indicatorColor.copy(alpha = GraphConstants.INDICATOR_BEAT_ALPHA), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = GraphConstants.STROKE_VERY_THICK + 1f)
     }
 }
 
@@ -728,10 +746,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     combinedPath.close()
     
     // Заливка области биений
-    drawPath(path = combinedPath, color = primaryColor.copy(alpha = 0.2f), style = Fill)
+    drawPath(path = combinedPath, color = primaryColor.copy(alpha = GraphConstants.BEAT_AREA_ALPHA), style = Fill)
     // Границы области (кривые частот каналов)
-    drawPath(path = upperPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
-    drawPath(path = lowerPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
+    drawPath(path = upperPath, color = primaryColor.copy(alpha = GraphConstants.BEAT_STROKE_ALPHA), style = Stroke(width = GraphConstants.STROKE_NORMAL))
+    drawPath(path = lowerPath, color = primaryColor.copy(alpha = GraphConstants.BEAT_STROKE_ALPHA), style = Stroke(width = GraphConstants.STROKE_NORMAL))
 }
 
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
@@ -792,7 +810,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
         }
     }
     
-    drawPath(path = carrierPath, color = primaryColor.copy(alpha = 0.6f), style = Stroke(width = 3f))
+    drawPath(path = carrierPath, color = primaryColor.copy(alpha = GraphConstants.CARRIER_PATH_ALPHA), style = Stroke(width = GraphConstants.STROKE_VERY_THICK + 1f))
 }
 
 private enum class RangeType { MIN, MAX }
@@ -829,12 +847,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDashedBaseCurve
     }
     
     // Рисуем пунктирной линией
-    val dashPattern = floatArrayOf(10f, 10f)
+    val dashPattern = floatArrayOf(GraphConstants.DASH_PATTERN_ON * 1.67f, GraphConstants.DASH_PATTERN_OFF * 1.67f)
     drawPath(
         path = carrierPath,
-        color = primaryColor.copy(alpha = 0.3f),
+        color = primaryColor.copy(alpha = GraphConstants.BASE_CURVE_ALPHA),
         style = Stroke(
-            width = 2f,
+            width = GraphConstants.STROKE_VERY_THICK,
             pathEffect = PathEffect.dashPathEffect(dashPattern)
         )
     )
@@ -845,7 +863,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDashedBaseCurve
  * Формула: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
  */
 fun maxBeatForUpperLimit(carrierFrequency: Float): Float {
-    return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0f)
+    return ((AudioConstants.MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0f)
 }
 
 /**

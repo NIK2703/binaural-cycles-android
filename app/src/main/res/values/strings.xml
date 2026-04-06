@@ -51,6 +51,11 @@
     <string name="auto_channel_swap">Авто-перестановка каналов</string>
     <string name="channel_swap_description">Каналы меняются местами для равномерной нагрузки</string>
     <string name="channel_swap_disabled">Выключено</string>
+    <string name="swap_mode_title">Режим перестановки</string>
+    <string name="swap_mode_interval">По интервалу</string>
+    <string name="swap_mode_tendency">По тенденции</string>
+    <string name="swap_mode_interval_desc">Перестановка через фиксированные промежутки времени</string>
+    <string name="swap_mode_tendency_desc">Перестановка на экстремумах частоты биений</string>
     <string name="swap_interval">Интервал перестановки</string>
     <string name="smooth_fade">Плавное затухание</string>
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
@@ -178,4 +183,14 @@
     <string name="action_pause">Пауза</string>
     <string name="action_stop">Стоп</string>
     <string name="action_exit">Выход</string>
+    
+    <!-- Toast messages -->
+    <string name="preset_deleted">Пресет \"%s\" удалён</string>
+    <string name="preset_exported">Пресет экспортирован: %s</string>
+    <string name="preset_imported">Пресет \"%s\" импортирован</string>
+    <string name="preset_duplicated">Пресет \"%s\" дублирован</string>
+    <string name="settings_saved">Настройки сохранены</string>
+    
+    <!-- Samples formatting -->
+    <string name="samples_format">%d сэмплов</string>
 </resources>

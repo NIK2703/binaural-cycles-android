@@ -1,12 +1,13 @@
 package com.binaural.core.audio.engine
 
 import android.util.Log
-import com.binaural.core.audio.model.BinauralConfig
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binaural.core.domain.model.BinauralConfig
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.NormalizationType
+import com.binaural.core.domain.model.RelaxationMode
+import com.binaural.core.domain.model.RelaxationModeSettings
+import com.binaural.core.domain.model.SwapMode
 import kotlinx.datetime.LocalTime
 
 /**
@@ -60,7 +61,9 @@ class NativeAudioEngine {
         channelSwapFadeDurationMs: Long,
         channelSwapPauseDurationMs: Long,
         normalizationType: Int,
-        volumeNormalizationStrength: Float
+        volumeNormalizationStrength: Float,
+        channelSwapMode: Int,
+        invertTendencyBehavior: Boolean
     )
     private external fun nativeSetSampleRate(sampleRate: Int)
     private external fun nativeResetState()
@@ -175,6 +178,11 @@ class NativeAudioEngine {
             NormalizationType.TEMPORAL -> 2
         }
         
+        val swapModeInt = when (config.channelSwapMode) {
+            SwapMode.INTERVAL -> 0
+            SwapMode.TENDENCY -> 1
+        }
+        
         nativeSetConfig(
             timePoints = timePoints,
             carrierFreqs = carrierFreqs,
@@ -188,7 +196,9 @@ class NativeAudioEngine {
             channelSwapFadeDurationMs = config.channelSwapFadeDurationMs,
             channelSwapPauseDurationMs = config.channelSwapPauseDurationMs,
             normalizationType = normalizationType,
-            volumeNormalizationStrength = config.volumeNormalizationStrength
+            volumeNormalizationStrength = config.volumeNormalizationStrength,
+            channelSwapMode = swapModeInt,
+            invertTendencyBehavior = config.invertTendencyBehavior
         )
         
         Log.d(TAG, "Config updated with ${curve.points.size} real points, " +

@@ -19,13 +19,17 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import com.binauralcycles.ui.components.*
-import com.binauralcycles.viewmodel.BinauralViewModel
+import com.binauralcycles.viewmodel.PresetEditViewModel
+import com.binauralcycles.viewmodel.state.PresetEditUiState
+import com.binauralcycles.viewmodel.events.PresetEditEvent
 import com.binauralcycles.R
+import com.binaural.core.domain.model.InterpolationType
+import kotlinx.coroutines.flow.receiveAsFlow
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun PresetEditScreen(
-    viewModel: BinauralViewModel,
+    viewModel: PresetEditViewModel,
     presetId: String?,  // null для нового пресета
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
@@ -35,21 +39,19 @@ fun PresetEditScreen(
     val uiState by viewModel.uiState.collectAsState()
     val newPresetName = stringResource(R.string.new_preset)
     
-    // Находим пресет для редактирования
-    val editingPreset = remember(presetId, uiState.presets) {
-        if (presetId == null) null
-        else uiState.presets.find { it.id == presetId }
-    }
-    
-    // Локальное состояние для редактирования
-    var presetName by remember(editingPreset) { 
-        mutableStateOf(editingPreset?.name ?: newPresetName) 
+    // Локальное состояние для имени пресета
+    var presetName by remember(uiState.editingPresetName) { 
+        mutableStateOf(uiState.editingPresetName.ifEmpty { newPresetName }) 
     }
     var showUnsavedDialog by remember { mutableStateOf(false) }
     var hasChanges by remember { mutableStateOf(false) }
     
     // Флаг для предотвращения повторных навигаций (локальный debounce)
     var isNavigating by remember { mutableStateOf(false) }
+    
+    // Состояние для Snackbar
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     
     // Инициализируем редактируемый пресет в ViewModel
     LaunchedEffect(presetId) {
@@ -60,38 +62,60 @@ fun PresetEditScreen(
         }
     }
     
+    // Обработка событий от ViewModel
+    LaunchedEffect(Unit) {
+        viewModel.events.receiveAsFlow().collect { event ->
+            when (event) {
+                is PresetEditEvent.NavigateBack -> {
+                    onNavigateBack()
+                }
+                is PresetEditEvent.PresetCreated -> {
+                    // Завершаем редактирование без очистки состояния для плавной анимации
+                    viewModel.finishEditingWithoutClear()
+                }
+                is PresetEditEvent.PresetSaved -> {
+                    // Завершаем редактирование без очистки состояния для плавной анимации
+                    viewModel.finishEditingWithoutClear()
+                }
+                is PresetEditEvent.ShowError -> {
+                    snackbarHostState.showSnackbar(
+                        message = event.message,
+                        duration = SnackbarDuration.Short
+                    )
+                    isNavigating = false
+                }
+                is PresetEditEvent.ShowValidationErrors -> {
+                    snackbarHostState.showSnackbar(
+                        message = event.errors.joinToString("\n"),
+                        duration = SnackbarDuration.Long
+                    )
+                    isNavigating = false
+                }
+            }
+        }
+    }
+    
     // Проверяем наличие изменений
-    hasChanges = editingPreset?.let { preset ->
+    hasChanges = uiState.originalPreset?.let { preset ->
+        // Для существующего пресета - сравниваем с оригиналом
         preset.name != presetName || 
         uiState.editingFrequencyCurve != preset.frequencyCurve ||
         uiState.editingRelaxationModeSettings != preset.relaxationModeSettings
-    } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
+    } ?: if (uiState.editingPresetId != null) {
+        // Оригинальный пресет ещё загружается - считаем что изменений нет
+        false
+    } else {
+        // Для нового пресета - проверяем что имя изменено или есть кривая
+        presetName != newPresetName || uiState.editingFrequencyCurve != null
+    }
     
     fun saveAndNavigateBack() {
         // Предотвращаем повторный вызов во время навигации
         if (isNavigating) return
         isNavigating = true
         
-        val curve = uiState.editingFrequencyCurve ?: return
-        if (presetId == null) {
-            // Создаём новый пресет
-            viewModel.createPreset(
-                name = presetName,
-                curve = curve,
-                relaxationModeSettings = uiState.editingRelaxationModeSettings
-            )
-        } else {
-            // Обновляем существующий
-            viewModel.saveEditingPreset(
-                presetId = presetId,
-                name = presetName,
-                curve = curve,
-                relaxationModeSettings = uiState.editingRelaxationModeSettings
-            )
-        }
-        // Завершаем редактирование без очистки состояния для плавной анимации
-        viewModel.finishEditingWithoutClear()
-        onNavigateBack()
+        viewModel.savePreset(presetName)
+        // Навигация произойдёт через event
     }
     
     fun navigateBackWithCheck() {
@@ -103,10 +127,8 @@ fun PresetEditScreen(
             showUnsavedDialog = true
             isNavigating = false  // Сбрасываем если показываем диалог
         } else {
-            // Восстанавливаем кривую активного пресета в сервисе (если нужно)
-            // Но не очищаем editingFrequencyCurve - это позволит анимации работать плавно
-            viewModel.cancelEditingInService()
-            onNavigateBack()
+            viewModel.cancelEditing()
+            // Навигация произойдёт через event
         }
     }
     
@@ -121,6 +143,9 @@ fun PresetEditScreen(
     
     with(sharedTransitionScope) {
         Scaffold(
+            snackbarHost = {
+                SnackbarHost(hostState = snackbarHostState)
+            },
             topBar = {
                 TopAppBar(
                     title = { 
@@ -143,9 +168,16 @@ fun PresetEditScreen(
                         }
                         IconButton(
                             onClick = { saveAndNavigateBack() },
-                            enabled = presetName.isNotBlank()
+                            enabled = presetName.isNotBlank() && !uiState.isSaving
                         ) {
-                            Icon(Icons.Default.Save, contentDescription = stringResource(R.string.save))
+                            if (uiState.isSaving) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Icon(Icons.Default.Save, contentDescription = stringResource(R.string.save))
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -190,7 +222,6 @@ fun PresetEditScreen(
                 // График частот (используем редактируемую кривую)
                 val editingCurve = uiState.editingFrequencyCurve
                 // Показываем указатель текущей частоты только если редактируется активный пресет
-                val isEditingActivePreset = presetId != null && uiState.activePreset?.id == presetId
                 if (editingCurve != null) {
                     FrequencyGraph(
                         points = editingCurve.points,
@@ -202,7 +233,7 @@ fun PresetEditScreen(
                         interpolationType = editingCurve.interpolationType,
                         splineTension = editingCurve.splineTension,
                         // Показываем указатель только если редактируется активный пресет
-                        isPlaying = isEditingActivePreset && uiState.isPlaying,
+                        isPlaying = uiState.isActivePreset && uiState.isPlaying,
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
@@ -257,7 +288,7 @@ fun PresetEditScreen(
                 
                 // Настройки интерполяции пресета
                 PresetSettingsCard(
-                    interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
+                    interpolationType = editingCurve?.interpolationType ?: InterpolationType.LINEAR,
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
                 )
                 
@@ -295,7 +326,7 @@ fun PresetEditScreen(
                         showUnsavedDialog = false
                         saveAndNavigateBack()
                     },
-                    enabled = !isNavigating
+                    enabled = !isNavigating && !uiState.isSaving
                 ) {
                     Text(stringResource(R.string.save))
                 }
@@ -308,10 +339,8 @@ fun PresetEditScreen(
                         isNavigating = true
                         
                         showUnsavedDialog = false
-                        // Восстанавливаем кривую активного пресета в сервисе
-                        // Но не очищаем editingFrequencyCurve - это произойдёт после анимации
-                        viewModel.cancelEditingInService()
-                        onNavigateBack()
+                        viewModel.cancelEditing()
+                        // Навигация произойдёт через event
                     },
                     enabled = !isNavigating
                 ) {

@@ -34,7 +34,7 @@ android {
 
 dependencies {
     // Modules
-    implementation(project(":core:audio"))
+    implementation(project(":core:domain"))
 
     // AndroidX
     implementation(libs.androidx.core.ktx)
@@ -45,6 +45,11 @@ dependencies {
 
     // DataStore
     implementation(libs.datastore.preferences)
+
+    // Room
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
 
     // Coroutines
     implementation(libs.bundles.coroutines)

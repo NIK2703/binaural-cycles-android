@@ -99,6 +99,7 @@ dependencies {
     // Modules
     implementation(project(":core:audio"))
     implementation(project(":core:ui"))
+    implementation(project(":core:domain"))
     implementation(project(":data:preferences"))
 
     // AndroidX
@@ -113,6 +114,7 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.bundles.compose)
     implementation(libs.navigation.compose)
+    implementation(libs.compose.material.icons.extended)
 
     // Hilt
     implementation(libs.bundles.hilt)
@@ -129,8 +131,13 @@ dependencies {
 
     // Testing
     testImplementation(libs.bundles.testing)
+    testImplementation(project(":core:domain"))  // Для доступа к Fake классам
     androidTestImplementation(libs.bundles.android.testing)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     debugImplementation(libs.bundles.compose.debug)
+    
+    // Hilt testing
+    androidTestImplementation("com.google.dagger:hilt-android-testing:${libs.versions.hilt.get()}")
+    androidTestImplementation(libs.hilt.navigation.compose)
 }

@@ -51,6 +51,11 @@
     <string name="auto_channel_swap">Auto channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
     <string name="channel_swap_disabled">Disabled</string>
+    <string name="swap_mode_title">Swap mode</string>
+    <string name="swap_mode_interval">By interval</string>
+    <string name="swap_mode_tendency">By tendency</string>
+    <string name="swap_mode_interval_desc">Swap at fixed time intervals</string>
+    <string name="swap_mode_tendency_desc">Swap at beat frequency extrema</string>
     <string name="swap_interval">Swap interval</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
@@ -178,4 +183,14 @@
     <string name="action_pause">Pause</string>
     <string name="action_stop">Stop</string>
     <string name="action_exit">Exit</string>
+    
+    <!-- Toast messages -->
+    <string name="preset_deleted">Preset \"%s\" deleted</string>
+    <string name="preset_exported">Preset exported: %s</string>
+    <string name="preset_imported">Preset \"%s\" imported</string>
+    <string name="preset_duplicated">Preset \"%s\" duplicated</string>
+    <string name="settings_saved">Settings saved</string>
+    
+    <!-- Samples formatting -->
+    <string name="samples_format">%d samples</string>
 </resources>

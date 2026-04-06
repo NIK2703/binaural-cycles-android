@@ -42,6 +42,14 @@ enum class NormalizationType : int8_t {
 };
 
 /**
+ * Режим перестановки каналов
+ */
+enum class SwapMode : int8_t {
+    INTERVAL = 0,   // Фиксированный интервал (текущее поведение)
+    TENDENCY = 1    // По тенденции графика (в точках экстремума)
+};
+
+/**
  * Результат запроса частот из lookup table
  * Содержит интерполированные частоты для конкретного момента времени
  */
@@ -80,6 +88,15 @@ struct FrequencyCurve {
     std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
     std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
     
+    // ================================================================
+    // ПОЛЯ ДЛЯ РЕЖИМА ПЕРЕСТАНОВКИ ПО ТЕНДЕНЦИИ
+    // ================================================================
+    
+    // Точки экстремума для перестановки каналов (в мс от начала суток)
+    std::vector<int64_t> swapPointsMs;
+    int32_t swapPointsCount = 0;          // Количество точек (для быстрой проверки empty)
+    int8_t initialTendency = 0;           // Тенденция в начале суток (+1, -1, 0)
+    
     /**
      * Получить частоты каналов для заданного времени через lookup table
      * Возвращает интерполированные частоты для конкретного момента времени
@@ -98,6 +115,12 @@ struct FrequencyCurve {
      * Построить lookup table с фиксированным шагом FREQUENCY_TABLE_INTERVAL_MS
      */
     void buildLookupTable();
+    
+    /**
+     * Построить таблицу точек экстремума для режима TENDENCY
+     * Детектирует смены знака производной несущей частоты
+     */
+    void buildSwapPointsTable();
 
 private:
     /**
@@ -119,6 +142,10 @@ struct BinauralConfig {
     bool channelSwapFadeEnabled = true;
     int64_t channelSwapFadeDurationMs = 1000;
     int64_t channelSwapPauseDurationMs = 0;  // Пауза между fade-out и fade-in (0 = без паузы)
+    
+    // Режим перестановки каналов
+    SwapMode channelSwapMode = SwapMode::INTERVAL;
+    bool invertTendencyBehavior = false;   // Инвертировать привязку каналов к тенденции
     
     // Настройки нормализации
     NormalizationType normalizationType = NormalizationType::TEMPORAL;
@@ -191,6 +218,19 @@ struct GeneratorState {
     
     // Позиция внутри цикла для переноса между пакетами
     int64_t cyclePositionMs = 0;
+    
+    // ================================================================
+    // ПОЛЯ ДЛЯ РЕЖИМА ПЕРЕСТАНОВКИ ПО ТЕНДЕНЦИИ
+    // ================================================================
+    
+    // Индекс следующей точки экстремума в swapPointsMs
+    int32_t currentSwapPointIndex = 0;
+    
+    // Кэшированное значение следующей точки swap (для O(1) проверки)
+    int64_t nextSwapPointMs = 0;
+    
+    // Текущая тенденция: +1 (рост), -1 (падение), 0 (не определена)
+    int8_t currentTendency = 0;
     
     // ================================================================
     // LEGACY ПОЛЯ (для обратной совместимости)

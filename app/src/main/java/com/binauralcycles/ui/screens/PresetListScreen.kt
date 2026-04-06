@@ -15,7 +15,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -24,22 +23,22 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
 import com.binauralcycles.ui.components.MiniFrequencyGraph
-import com.binauralcycles.viewmodel.BinauralViewModel
-import com.binaural.core.audio.model.FrequencyCurve
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binauralcycles.viewmodel.PresetListViewModel
+import com.binauralcycles.viewmodel.events.PresetListEvent
+import com.binaural.core.domain.model.FrequencyCurve
+import com.binaural.core.domain.model.RelaxationModeSettings
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import com.binauralcycles.R
-
-// Время блокировки навигации после перехода на экран (для защиты от "пробивания" касаний)
-private const val NAVIGATION_BLOCK_DURATION_MS = 500L
+import com.binauralcycles.ui.theme.AudioConstants
+import kotlinx.coroutines.flow.receiveAsFlow
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun PresetListScreen(
-    viewModel: BinauralViewModel,
+    viewModel: PresetListViewModel,
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
     onPresetClick: (String) -> Unit,
@@ -56,18 +55,83 @@ fun PresetListScreen(
     // Время последней навигации для защиты от быстрых повторных нажатий
     var lastNavigationTime by remember { mutableStateOf(0L) }
     
+    // Состояние для Snackbar
+    val snackbarHostState = remember { SnackbarHostState() }
+    
+    // Получаем строки заранее для использования в LaunchedEffect
+    val presetDeletedStr = stringResource(R.string.preset_deleted)
+    val presetExportedStr = stringResource(R.string.preset_exported)
+    val presetImportedStr = stringResource(R.string.preset_imported)
+    val presetDuplicatedStr = stringResource(R.string.preset_duplicated)
+    
     // Функция проверки можно ли выполнять навигацию
     fun canNavigate(): Boolean {
         val now = System.currentTimeMillis()
-        return now - lastNavigationTime > NAVIGATION_BLOCK_DURATION_MS
+        return now - lastNavigationTime > AudioConstants.NAVIGATION_BLOCK_DURATION_MS
     }
     
     // Обновляем время навигации при выполнении действия
     fun recordNavigation() {
         lastNavigationTime = System.currentTimeMillis()
     }
+    
+    // Обработка событий от ViewModel
+    LaunchedEffect(Unit) {
+        viewModel.events.receiveAsFlow().collect { event ->
+            when (event) {
+                is PresetListEvent.ShowError -> {
+                    snackbarHostState.showSnackbar(
+                        message = event.message,
+                        duration = SnackbarDuration.Long
+                    )
+                }
+                is PresetListEvent.NavigateToEdit -> {
+                    if (canNavigate()) {
+                        recordNavigation()
+                        onEditPreset(event.presetId)
+                    }
+                }
+                is PresetListEvent.NavigateToNewPreset -> {
+                    if (canNavigate()) {
+                        recordNavigation()
+                        onCreatePreset()
+                    }
+                }
+                is PresetListEvent.PresetDeleted -> {
+                    snackbarHostState.showSnackbar(
+                        message = presetDeletedStr.format(event.presetName),
+                        duration = SnackbarDuration.Short
+                    )
+                }
+                is PresetListEvent.ShowExportSuccess -> {
+                    snackbarHostState.showSnackbar(
+                        message = presetExportedStr.format(event.fileName),
+                        duration = SnackbarDuration.Short
+                    )
+                }
+                is PresetListEvent.ShowImportSuccess -> {
+                    snackbarHostState.showSnackbar(
+                        message = presetImportedStr.format(event.presetName),
+                        duration = SnackbarDuration.Short
+                    )
+                }
+                is PresetListEvent.ShowDuplicateSuccess -> {
+                    snackbarHostState.showSnackbar(
+                        message = presetDuplicatedStr.format(event.presetName),
+                        duration = SnackbarDuration.Short
+                    )
+                }
+                is PresetListEvent.NavigateBack -> {
+                    // Обработка навигации назад, если нужна
+                }
+            }
+        }
+    }
 
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState)
+        },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.preset_list_title)) },
@@ -92,6 +156,7 @@ fun PresetListScreen(
                 onClick = {
                     if (canNavigate()) {
                         recordNavigation()
+                        viewModel.prepareNewPreset()
                         onCreatePreset()
                     }
                 },
@@ -129,6 +194,15 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
+                        val isEditingPreset = uiState.editingPresetId == preset.id
+                        
+                        // Если это редактируемый пресет и есть editingFrequencyCurve, используем её для анимации
+                        val displayCurve = if (isEditingPreset && uiState.editingFrequencyCurve != null) {
+                            uiState.editingFrequencyCurve!!
+                        } else {
+                            preset.frequencyCurve
+                        }
+                        
                         // Используем методы BinauralPreset для учёта виртуальных точек расслабления
                         val carrierFreq = preset.getCarrierFrequencyAt(currentTime.value)
                         val beatFreq = preset.getBeatFrequencyAt(currentTime.value)
@@ -136,7 +210,7 @@ fun PresetListScreen(
                         PresetCard(
                             presetId = preset.id,
                             name = preset.name,
-                            frequencyCurve = preset.frequencyCurve,
+                            frequencyCurve = displayCurve,
                             relaxationModeSettings = preset.relaxationModeSettings,
                             isActive = isActivePreset,
                             isPlaying = isActivePreset && uiState.isPlaying,
@@ -149,6 +223,7 @@ fun PresetListScreen(
                             onEditClick = { 
                                 if (canNavigate()) {
                                     recordNavigation()
+                                    viewModel.prepareEditingPreset(preset.id)
                                     onEditPreset(preset.id)
                                 }
                             },
@@ -187,7 +262,7 @@ private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
             while (true) {
                 val now = Clock.System.now()
                 currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-                kotlinx.coroutines.delay(5000)
+                kotlinx.coroutines.delay(AudioConstants.TIME_UPDATE_INTERVAL_MS)
             }
         }
         // При isPlaying = false НЕ сбрасываем время в 12:00

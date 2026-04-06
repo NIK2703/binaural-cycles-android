@@ -22,6 +22,7 @@ include(":app")
 // Core modules
 include(":core:audio")
 include(":core:ui")
+include(":core:domain")
 
 // Data modules
 include(":data:preferences")

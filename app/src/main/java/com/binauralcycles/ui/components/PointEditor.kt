@@ -27,13 +27,12 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.FrequencyRange
 import com.binauralcycles.R
+import com.binauralcycles.ui.theme.AudioConstants
 import kotlinx.datetime.LocalTime
 import java.util.Locale
-
-private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 /**
  * Парсит строку в Float, принимая как точку, так и запятую как разделитель
@@ -125,7 +124,7 @@ fun PointEditor(
     val carrierValue = parseFrequency(tempCarrierFrequency.text)
     val beatValue = parseFrequency(tempBeatFrequency.text)
     
-    val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0f
+    val isCarrierValid = carrierValue != null && carrierValue >= AudioConstants.MIN_AUDIBLE_FREQUENCY && carrierValue <= AudioConstants.MAX_FREQUENCY
     
     // Максимальная частота биений для слайдера ограничена условиями:
     // 1. Нижняя боковая частота >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
@@ -138,8 +137,8 @@ fun PointEditor(
     // или от значения точки (для слайдера)
     val maxBeatFrequencyForValidation = if (carrierValue != null && isCarrierValid) {
         val globalMax = minOf(
-            (carrierValue - MIN_AUDIBLE_FREQUENCY) * 2,  // нижняя боковая >= 20 Гц
-            (2000.0f - carrierValue) * 2  // верхняя боковая <= 2000 Гц
+            (carrierValue - AudioConstants.MIN_AUDIBLE_FREQUENCY) * 2,  // нижняя боковая >= 20 Гц
+            (AudioConstants.MAX_FREQUENCY - carrierValue) * 2  // верхняя боковая <= 2000 Гц
         )
         if (autoExpandGraphRange) {
             globalMax.coerceAtLeast(1.0f)
@@ -153,8 +152,8 @@ fun PointEditor(
         }
     } else {
         val globalMax = minOf(
-            (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0f - point.carrierFrequency) * 2
+            (point.carrierFrequency - AudioConstants.MIN_AUDIBLE_FREQUENCY) * 2,
+            (AudioConstants.MAX_FREQUENCY - point.carrierFrequency) * 2
         )
         if (autoExpandGraphRange) {
             globalMax.coerceAtLeast(1.0f)
@@ -169,8 +168,8 @@ fun PointEditor(
     
     val maxBeatFrequencyForSlider = run {
         val globalMax = minOf(
-            (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0f - point.carrierFrequency) * 2
+            (point.carrierFrequency - AudioConstants.MIN_AUDIBLE_FREQUENCY) * 2,
+            (AudioConstants.MAX_FREQUENCY - point.carrierFrequency) * 2
         )
         if (autoExpandGraphRange) {
             globalMax.coerceAtLeast(1.0f)
@@ -422,7 +421,7 @@ fun PointEditor(
                         onDone = {
                             // Сохраняем значение при нажатии Done
                             val value = parseFrequency(tempCarrierFrequency.text)
-                            if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
+                            if (value != null && value >= AudioConstants.MIN_AUDIBLE_FREQUENCY && value <= AudioConstants.MAX_FREQUENCY) {
                                 sliderCarrier = value.toFloat()
                                 onCarrierFrequencyChange(value)
                             } else {
@@ -444,7 +443,7 @@ fun PointEditor(
                                 // Фокус был потерян после того как был получен - сохраняем
                                 carrierWasFocused = false
                                 val value = parseFrequency(tempCarrierFrequency.text)
-                                if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
+                                if (value != null && value >= AudioConstants.MIN_AUDIBLE_FREQUENCY && value <= AudioConstants.MAX_FREQUENCY) {
                                     sliderCarrier = value.toFloat()
                                     onCarrierFrequencyChange(value)
                                 } else {

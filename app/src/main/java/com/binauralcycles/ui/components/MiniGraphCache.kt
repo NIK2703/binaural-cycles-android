@@ -1,9 +1,9 @@
 package com.binauralcycles.ui.components
 
 import androidx.compose.ui.graphics.Path
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 
 /**

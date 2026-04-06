@@ -58,6 +58,11 @@ void BinauralEngine::setConfig(const BinauralConfig& config) {
     BinauralConfig newConfig = config;
     newConfig.curve.buildLookupTable();
     
+    // Строим таблицу точек экстремума для режима TENDENCY
+    if (newConfig.channelSwapEnabled && newConfig.channelSwapMode == SwapMode::TENDENCY) {
+        newConfig.curve.buildSwapPointsTable();
+    }
+    
     // Эксклюзивная блокировка для записи
     std::unique_lock<std::shared_mutex> lock(m_configMutex);
     m_config = std::move(newConfig);
@@ -88,10 +93,6 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         config = m_config;
     }
     
-    // Планируем пакет буферов
-    BufferPackagePlanner planner;
-    PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state);
-    
     // Точное время для начала буфера (float для сохранения дробной части)
     // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
     float timeSeconds = m_baseTimeSeconds + m_totalBufferTimeSeconds;
@@ -106,6 +107,12 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     const int64_t elapsedMs = static_cast<int64_t>(
         m_elapsedSeconds.load(std::memory_order_relaxed)
     ) * 1000;
+    
+    // Планируем пакет буферов
+    BufferPackagePlanner planner;
+    // КРИТИЧНО: передаём currentTimeMs для режима TENDENCY
+    const int64_t currentTimeMs = static_cast<int64_t>(timeSeconds * 1000.0f);
+    PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state, currentTimeMs);
     
     // Генерируем пакет буферов по плану
 #if defined(USE_NEON)
@@ -169,13 +176,22 @@ void BinauralEngine::setPlaying(bool playing) {
     if (playing) {
         // Сброс состояния при начале воспроизведения
         BufferPackagePlanner planner;
-        planner.resetState(m_state);
+        
+        // Получаем конфигурацию для режима TENDENCY
+        BinauralConfig config;
+        {
+            std::shared_lock<std::shared_mutex> lock(m_configMutex);
+            config = m_config;
+        }
+        
+        planner.resetState(m_state, config);
         m_state.lastSwapElapsedMs = 0;
         m_elapsedSeconds.store(0, std::memory_order_relaxed);
         m_baseTimeSeconds = getCurrentTimeSeconds();
         m_totalBufferTimeSeconds = 0.0;
         
-        LOGD("setPlaying(true): baseTime=%d", m_baseTimeSeconds);
+        LOGD("setPlaying(true): baseTime=%d, swapMode=%d", 
+             m_baseTimeSeconds, static_cast<int>(config.channelSwapMode));
     }
 }
 
@@ -184,7 +200,15 @@ void BinauralEngine::resetState() {
     
     // Сброс состояния планировщика
     BufferPackagePlanner planner;
-    planner.resetState(m_state);
+    
+    // Получаем конфигурацию для режима TENDENCY
+    BinauralConfig config;
+    {
+        std::shared_lock<std::shared_mutex> lock(m_configMutex);
+        config = m_config;
+    }
+    
+    planner.resetState(m_state, config);
     
     m_elapsedSeconds.store(0, std::memory_order_relaxed);
     m_currentBeatFreq.store(0.0f, std::memory_order_relaxed);
@@ -297,7 +321,9 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // НОВАЯ АРХИТЕКТУРА: Используем планировщик пакетов
     // Планируем пакет буферов на основе текущего состояния
     BufferPackagePlanner planner;
-    PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state);
+    // КРИТИЧНО: передаём currentTimeMs для режима TENDENCY
+    const int64_t currentTimeMs = static_cast<int64_t>(timeSeconds * 1000.0f);
+    PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state, currentTimeMs);
     
     // Используем SIMD-оптимизированную версию если доступна
 #if defined(USE_NEON)

@@ -12,14 +12,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.binaural.core.audio.engine.SampleRate
-import com.binaural.core.audio.model.ChannelSwapSettings
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
-import com.binaural.core.audio.model.RelaxationModeSettings
-import com.binaural.core.audio.model.VolumeNormalizationSettings
+import com.binaural.core.domain.model.ChannelSwapSettings
+import com.binaural.core.domain.model.SampleRate
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.NormalizationType
+import com.binaural.core.domain.model.RelaxationMode
+import com.binaural.core.domain.model.RelaxationModeSettings
+import com.binaural.core.domain.model.SwapMode
+import com.binaural.core.domain.model.VolumeNormalizationSettings
 import com.binauralcycles.R
+import com.binauralcycles.ui.theme.SliderDefaults
 
 /**
  * Блок настроек интерполяции для пресета
@@ -246,42 +248,106 @@ fun ChannelSwapSettingsCard(
     onChannelSwapEnabledChange: (Boolean) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
-    onChannelSwapPauseDurationChange: (Long) -> Unit
+    onChannelSwapPauseDurationChange: (Long) -> Unit,
+    onSwapModeChange: (SwapMode) -> Unit = {},
+    onChannelSwapEnabledAndModeChange: (Boolean, SwapMode) -> Unit = { enabled, _ -> onChannelSwapEnabledChange(enabled) }
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Авто-перестановка каналов
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
-            supportingContent = { 
-                Text(if (channelSwapSettings.enabled) stringResource(R.string.channel_swap_description) else stringResource(R.string.channel_swap_disabled))
-            },
-            trailingContent = {
-                Switch(
-                    checked = channelSwapSettings.enabled,
-                    onCheckedChange = onChannelSwapEnabledChange
-                )
-            }
-        )
-        
-        // Слайдер интервала перестановки (показываем только когда включено)
-        if (channelSwapSettings.enabled) {
-            DiscreteSlider(
-                label = stringResource(R.string.swap_interval),
-                value = channelSwapSettings.intervalSeconds,
-                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
-                formatValue = { seconds -> formatInterval(seconds) },
-                onValueChange = onChannelSwapIntervalChange,
+        // Авто-перестановка каналов - три чипа
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.auto_channel_swap),
+                style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            // Описание в зависимости от выбранного режима
+            Text(
+                text = when {
+                    !channelSwapSettings.enabled -> stringResource(R.string.channel_swap_disabled)
+                    channelSwapSettings.swapMode == SwapMode.INTERVAL -> stringResource(R.string.swap_mode_interval_desc)
+                    else -> stringResource(R.string.swap_mode_tendency_desc)
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+            ) {
+                FilterChip(
+                    selected = !channelSwapSettings.enabled,
+                    onClick = { onChannelSwapEnabledChange(false) },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.channel_swap_disabled),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = channelSwapSettings.enabled && channelSwapSettings.swapMode == SwapMode.INTERVAL,
+                    onClick = { 
+                        onChannelSwapEnabledAndModeChange(true, SwapMode.INTERVAL)
+                    },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.swap_mode_interval),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = channelSwapSettings.enabled && channelSwapSettings.swapMode == SwapMode.TENDENCY,
+                    onClick = { 
+                        onChannelSwapEnabledAndModeChange(true, SwapMode.TENDENCY)
+                    },
+                    label = { 
+                        Text(
+                            text = stringResource(R.string.swap_mode_tendency),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        ) 
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+        
+        // Настройки режима (показываем только когда включено)
+        if (channelSwapSettings.enabled) {
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            
+            // Слайдер интервала (только для режима INTERVAL)
+            if (channelSwapSettings.swapMode == SwapMode.INTERVAL) {
+                DiscreteSlider(
+                    label = stringResource(R.string.swap_interval),
+                    value = channelSwapSettings.intervalSeconds,
+                    values = SliderDefaults.SWAP_INTERVALS_SECONDS,
+                    formatValue = { seconds -> formatInterval(seconds) },
+                    onValueChange = onChannelSwapIntervalChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+            
+            // Для режима TENDENCY слайдер интервала не нужен - 
+            // переключение происходит автоматически на локальных экстремумах
             
             // Слайдер длительности затухания (всегда показываем, т.к. fadeEnabled всегда true)
             DiscreteSliderLong(
                 label = stringResource(R.string.fade_duration),
                 value = channelSwapSettings.fadeDurationMs,
-                values = listOf(1000L, 2000L, 3000L, 4000L, 5000L, 6000L, 7000L, 8000L, 9000L, 10000L, 11000L, 12000L, 13000L, 14000L, 15000L),
+                values = SliderDefaults.FADE_DURATIONS_MS,
                 formatValue = { ms -> formatFadeDurationLabel(ms) },
                 onValueChange = onChannelSwapFadeDurationChange,
                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -291,7 +357,7 @@ fun ChannelSwapSettingsCard(
             DiscreteSliderLong(
                 label = stringResource(R.string.pause_on_switch),
                 value = channelSwapSettings.pauseDurationMs,
-                values = listOf(0L, 1000L, 2000L, 3000L, 5000L, 10000L, 20000L, 30000L, 60000L),
+                values = SliderDefaults.PAUSE_DURATIONS_MS,
                 formatValue = { ms -> formatPauseDurationLabel(ms) },
                 onValueChange = onChannelSwapPauseDurationChange,
                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -330,7 +396,7 @@ fun PowerSettingsCard(
             DiscreteSlider(
                 label = "",
                 value = bufferGenerationMinutes,
-                values = listOf(1, 2, 5, 10, 15, 20, 30, 45, 60),  // От 1 минуты до 1 часа
+                values = SliderDefaults.BUFFER_INTERVALS_MINUTES,
                 formatValue = { mins -> formatBufferInterval(mins) },
                 onValueChange = onBufferGenerationMinutesChange,
                 modifier = Modifier.fillMaxWidth()
@@ -674,7 +740,7 @@ fun DiscreteSliderWavetableSize(
  */
 @Composable
 fun formatWavetableSize(size: Int): String {
-    return "$size samples"
+    return stringResource(R.string.samples_format, size)
 }
 
 /**
@@ -779,7 +845,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.gap_between_relaxation),
                     value = relaxationModeSettings.gapBetweenRelaxationMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
+                    values = SliderDefaults.RELAXATION_GAP_INTERVALS,
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationGapChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -789,7 +855,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.relaxation_duration),
                     value = relaxationModeSettings.relaxationDurationMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60),
+                    values = SliderDefaults.RELAXATION_DURATION_INTERVALS,
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onRelaxationDurationChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -799,7 +865,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.transition_period),
                     value = relaxationModeSettings.transitionPeriodMinutes,
-                    values = listOf(1, 2, 3, 5, 7, 10),
+                    values = SliderDefaults.RELAXATION_TRANSITION_INTERVALS,
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onTransitionPeriodChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -814,7 +880,7 @@ fun RelaxationModeCard(
                 DiscreteSlider(
                     label = stringResource(R.string.smooth_interval),
                     value = relaxationModeSettings.smoothIntervalMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
+                    values = SliderDefaults.RELAXATION_SMOOTH_INTERVALS,
                     formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
                     onValueChange = onSmoothIntervalChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
@@ -851,7 +917,7 @@ fun RelaxationModeCard(
                         onCarrierReductionChange(localCarrierReduction)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..50f
+                    valueRange = SliderDefaults.CARRIER_REDUCTION_MIN.toFloat()..SliderDefaults.CARRIER_REDUCTION_MAX.toFloat()
                 )
             }
             
@@ -883,7 +949,7 @@ fun RelaxationModeCard(
                         onBeatReductionChange(localBeatReduction)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..100f
+                    valueRange = SliderDefaults.BEAT_REDUCTION_MIN.toFloat()..SliderDefaults.BEAT_REDUCTION_MAX.toFloat()
                 )
             }
         }

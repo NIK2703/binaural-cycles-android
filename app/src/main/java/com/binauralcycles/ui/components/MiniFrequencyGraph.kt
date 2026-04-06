@@ -16,15 +16,16 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.binaural.core.audio.model.FrequencyCurve
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.FrequencyRange
-import com.binaural.core.audio.model.Interpolation
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationMode
-import com.binaural.core.audio.model.RelaxationModeSettings
+import com.binaural.core.domain.model.FrequencyCurve
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.FrequencyRange
+import com.binaural.core.domain.model.Interpolation
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.RelaxationMode
+import com.binaural.core.domain.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 import android.graphics.Paint
+import com.binauralcycles.ui.theme.GraphConstants
 
 /**
  * Параметры мини-графика
@@ -88,14 +89,14 @@ fun MiniFrequencyGraph(
     // Paint объекты создаём один раз с учётом масштаба интерфейса
     val labelPaint = remember(density) {
         Paint().apply {
-            textSize = with(density) { 8.sp.toPx() }
+            textSize = with(density) { GraphConstants.LABEL_TEXT_SIZE_SP.sp.toPx() }
             isAntiAlias = true
         }
     }
     
     val axisPaint = remember(density) {
         Paint().apply {
-            textSize = with(density) { 10.sp.toPx() }
+            textSize = with(density) { GraphConstants.AXIS_TEXT_SIZE_SP.sp.toPx() }
             isAntiAlias = true
         }
     }
@@ -286,15 +287,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     // Получаем сетку из глобального кэша (одна на все карточки)
     val cachedGrid = GridCache.getOrCreate(width.toInt(), height.toInt())
     
-    // Сетка - кэшированная одна на все карточки, strokeWidth 1.0f вместо 0.5f
-    val gridColor = primaryColor.copy(alpha = 0.1f)
+    // Сетка - кэшированная одна на все карточки
+    val gridColor = primaryColor.copy(alpha = GraphConstants.GRID_ALPHA)
     
     for (y in cachedGrid.gridLines) {
         drawLine(
             color = gridColor,
             start = Offset(0f, y),
             end = Offset(width, y),
-            strokeWidth = 1.0f
+            strokeWidth = GraphConstants.GRID_LINE_WIDTH
         )
     }
     
@@ -303,7 +304,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
             color = gridColor,
             start = Offset(x, 0f),
             end = Offset(x, height),
-            strokeWidth = 1.0f
+            strokeWidth = GraphConstants.GRID_LINE_WIDTH
         )
     }
     
@@ -313,35 +314,35 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     // Область биений
     drawPath(
         path = geometry.combinedBeatPath,
-        color = graphColor.copy(alpha = 0.15f),
+        color = graphColor.copy(alpha = GraphConstants.BEAT_AREA_ALPHA),
         style = Fill
     )
     drawPath(
         path = geometry.upperBeatPath,
-        color = graphColor.copy(alpha = 0.3f),
-        style = Stroke(width = 0.5f)
+        color = graphColor.copy(alpha = GraphConstants.BEAT_STROKE_ALPHA),
+        style = Stroke(width = GraphConstants.STROKE_THIN)
     )
     drawPath(
         path = geometry.lowerBeatPath,
-        color = graphColor.copy(alpha = 0.3f),
-        style = Stroke(width = 0.5f)
+        color = graphColor.copy(alpha = GraphConstants.BEAT_STROKE_ALPHA),
+        style = Stroke(width = GraphConstants.STROKE_THIN)
     )
     
     // Несущая частота
     drawPath(
         path = geometry.carrierPath,
-        color = graphColor.copy(alpha = 0.6f),
-        style = Stroke(width = 1.5f)
+        color = graphColor.copy(alpha = GraphConstants.CARRIER_PATH_ALPHA),
+        style = Stroke(width = GraphConstants.STROKE_THICK)
     )
     
     // Пунктирная линия базовой кривой (для режимов ADVANCED и SMOOTH)
     geometry.baseCarrierPath?.let { basePath ->
-        val dashPattern = floatArrayOf(6f, 6f)
+        val dashPattern = floatArrayOf(GraphConstants.DASH_PATTERN_ON, GraphConstants.DASH_PATTERN_OFF)
         drawPath(
             path = basePath,
-            color = primaryColor.copy(alpha = 0.3f),
+            color = primaryColor.copy(alpha = GraphConstants.BASE_CURVE_ALPHA),
             style = Stroke(
-                width = 1f,
+                width = GraphConstants.STROKE_NORMAL,
                 pathEffect = PathEffect.dashPathEffect(dashPattern)
             )
         )
@@ -358,13 +359,13 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         
         drawCircle(
             color = primaryColor,
-            radius = 5f,
+            radius = GraphConstants.POINT_RADIUS_DEFAULT,
             center = Offset(x, y),
             style = Fill
         )
         
         val beatRatio = (point.beatFrequency / geometry.maxBeat).coerceIn(0.0f, 1.0f)
-        val innerRadius = 2f + beatRatio * 2f
+        val innerRadius = GraphConstants.POINT_INNER_RADIUS_BASE + beatRatio * (GraphConstants.POINT_INNER_RADIUS_MAX - GraphConstants.POINT_INNER_RADIUS_BASE)
         drawCircle(
             color = Color.White,
             radius = innerRadius,
@@ -374,14 +375,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         
         val label = labelTexts[i]
         labelPaint.color = android.graphics.Color.argb(
-            (0.8f * 255).toInt(),
+            (GraphConstants.LABEL_ALPHA * 255).toInt(),
             (primaryColor.red * 255).toInt(),
             (primaryColor.green * 255).toInt(),
             (primaryColor.blue * 255).toInt()
         )
         
-        val labelX = (x - 25f).coerceAtLeast(0f)
-        val labelY = (y - 8f).coerceAtLeast(15f)
+        val labelX = (x - GraphConstants.LABEL_OFFSET_X).coerceAtLeast(0f)
+        val labelY = (y - GraphConstants.LABEL_OFFSET_Y).coerceAtLeast(GraphConstants.LABEL_MIN_Y)
         
         drawContext.canvas.nativeCanvas.drawText(
             label,
@@ -393,7 +394,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     
     // Ось Y
     axisPaint.color = android.graphics.Color.argb(
-        (0.8f * 255).toInt(),
+        (GraphConstants.LABEL_ALPHA * 255).toInt(),
         (primaryColor.red * 255).toInt(),
         (primaryColor.green * 255).toInt(),
         (primaryColor.blue * 255).toInt()
@@ -402,8 +403,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     
     val maxLabel = "%.0f".format(carrierRange.max)
     val minLabel = "%.0f".format(carrierRange.min)
-    val axisX = width - 20f
-    val axisPadding = 20f
+    val axisX = width - GraphConstants.AXIS_PADDING
+    val axisPadding = GraphConstants.AXIS_PADDING
     
     drawContext.canvas.nativeCanvas.drawText(
         maxLabel,
@@ -422,7 +423,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     // Индикатор воспроизведения
     if (isPlaying) {
         val carrierRangeSize = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
-        fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (24.0f * 3600f) * width)
+        fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (GraphConstants.HOURS_PER_DAY.toFloat() * GraphConstants.SECONDS_PER_HOUR) * width)
         fun carrierToY(carrier: Float): Float = height - ((carrier - carrierRange.min) / carrierRangeSize * height)
         fun beatUpperY(carrier: Float, beat: Float): Float = carrierToY(carrier + beat / 2.0f)
         fun beatLowerY(carrier: Float, beat: Float): Float = carrierToY(carrier - beat / 2.0f)
@@ -433,23 +434,23 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         val currentLowerY = beatLowerY(currentCarrierFrequency, currentBeatFrequency)
         
         drawLine(
-            color = indicatorColor.copy(alpha = 0.7f),
+            color = indicatorColor.copy(alpha = GraphConstants.INDICATOR_ALPHA),
             start = Offset(currentX, 0f),
             end = Offset(currentX, height),
-            strokeWidth = 2f
+            strokeWidth = GraphConstants.STROKE_VERY_THICK
         )
         
         drawCircle(
             color = indicatorColor,
-            radius = 6f,
+            radius = GraphConstants.INDICATOR_RADIUS,
             center = Offset(currentX, currentCarrierY)
         )
         
         drawLine(
-            color = indicatorColor.copy(alpha = 0.5f),
+            color = indicatorColor.copy(alpha = GraphConstants.INDICATOR_BEAT_ALPHA),
             start = Offset(currentX, currentUpperY),
             end = Offset(currentX, currentLowerY),
-            strokeWidth = 2f
+            strokeWidth = GraphConstants.STROKE_VERY_THICK
         )
     }
 }
@@ -486,7 +487,7 @@ private fun createStepVirtualPoints(
     val durationSeconds = relaxationModeSettings.relaxationDurationMinutes * 60L
     
     val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-    val daySeconds = 24 * 3600L
+    val daySeconds = GraphConstants.SECONDS_PER_DAY
     
     var periodStartSeconds = 0L
     
@@ -546,7 +547,7 @@ private fun createSmoothVirtualPoints(
     val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
     val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
     val intervalSeconds = relaxationModeSettings.smoothIntervalMinutes * 60L
-    val daySeconds = 24 * 3600L
+    val daySeconds = GraphConstants.SECONDS_PER_DAY
     
     var currentTimeSeconds = 0L
     var isRelaxationPoint = false
@@ -608,10 +609,10 @@ private fun computeCarrierPath(
             carrierPath.lineTo(nextX, currentCarrierY)
         }
     } else {
-        val numSamples = (sortedPoints.size * 4).coerceAtLeast(400)
+        val numSamples = (sortedPoints.size * GraphConstants.SAMPLES_PER_POINT_MULTIPLIER).coerceAtLeast(GraphConstants.MIN_SAMPLES_INTERPOLATION)
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
-            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val time = LocalTime.fromSecondOfDay((t * GraphConstants.HOURS_PER_DAY * GraphConstants.SECONDS_PER_HOUR).toInt().coerceAtMost(86399))
             val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
             val y = params.carrierToY(carrier)
             val x = t * width
@@ -629,7 +630,7 @@ private fun computeBeatPaths(
     splineTension: Float
 ): Triple<Path, Path, Path> {
     val width = params.widthPx.toFloat()
-    val numSamples = (sortedPoints.size * 4).coerceAtLeast(400)
+    val numSamples = (sortedPoints.size * GraphConstants.SAMPLES_PER_POINT_MULTIPLIER).coerceAtLeast(GraphConstants.MIN_SAMPLES_INTERPOLATION)
     
     val upperPath = Path()
     val lowerPath = Path()
@@ -666,7 +667,7 @@ private fun computeBeatPaths(
     } else {
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
-            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val time = LocalTime.fromSecondOfDay((t * GraphConstants.HOURS_PER_DAY * GraphConstants.SECONDS_PER_HOUR).toInt().coerceAtMost(86399))
             val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
             val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
             val x = t * width
@@ -680,7 +681,7 @@ private fun computeBeatPaths(
     
     for (i in numSamples downTo 0) {
         val t = i.toFloat() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+        val time = LocalTime.fromSecondOfDay((t * GraphConstants.HOURS_PER_DAY * GraphConstants.SECONDS_PER_HOUR).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
         val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
         val x = t * width
@@ -770,12 +771,12 @@ private fun interpolateBetweenPointsMini(
     
     val t1 = leftPoint.time.toSecondOfDay()
     val t2 = if (isWrapping) {
-        rightPoint.time.toSecondOfDay() + 24 * 3600
+        rightPoint.time.toSecondOfDay() + GraphConstants.SECONDS_PER_DAY.toInt()
     } else {
         rightPoint.time.toSecondOfDay()
     }
     val t = if (time.toSecondOfDay() < t1 && isWrapping) {
-        time.toSecondOfDay() + 24 * 3600
+        time.toSecondOfDay() + GraphConstants.SECONDS_PER_DAY.toInt()
     } else {
         time.toSecondOfDay()
     }

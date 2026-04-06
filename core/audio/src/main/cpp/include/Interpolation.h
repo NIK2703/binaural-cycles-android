@@ -266,6 +266,85 @@ inline void FrequencyCurve::buildLookupTable() {
 }
 
 /**
+ * Построить таблицу точек экстремума для перестановки каналов по тенденции
+ * 
+ * АЛГОРИТМ:
+ * 1. Проходим по lookup table с шагом 1 секунда
+ * 2. Вычисляем тенденцию (направление изменения частоты) по знаку производной
+ * 3. Фиксируем точки смены тенденции (экстремумы)
+ * 
+ * ТОЧКИ ЭКСТРЕМУМА:
+ * - Локальный максимум: тенденция меняется с +1 на -1
+ * - Локальный минимум: тенденция меняется с -1 на +1
+ */
+inline void FrequencyCurve::buildSwapPointsTable() {
+    swapPointsMs.clear();
+    swapPointsCount = 0;
+    initialTendency = 0;
+    
+    if (lowerFreqTable.empty() || upperFreqTable.size() < 20) {
+        return;
+    }
+    
+    // Шаг по таблице: 1 секунда = 10 шагов по 100 мс
+    constexpr int STEP_SIZE = 10;  // 1 сек / 0.1 сек
+    const int tableSize = static_cast<int>(lowerFreqTable.size());
+    
+    // Вычисляем среднюю частоту (carrier) для определения тенденции
+    // carrier = (lower + upper) / 2
+    auto getCarrierAtIndex = [this](int idx) -> float {
+        return (lowerFreqTable[idx] + upperFreqTable[idx]) / 2.0f;
+    };
+    
+    // Первичная точка для определения начальной тенденции
+    const float firstCarrier = getCarrierAtIndex(0);
+    const float secondCarrier = getCarrierAtIndex(STEP_SIZE);
+    
+    // Определяем начальную тенденцию по знаку производной
+    const float initialDerivative = (secondCarrier - firstCarrier);  // Гц/сек
+    if (initialDerivative > 0.0f) {
+        initialTendency = 1;   // Рост
+    } else if (initialDerivative < 0.0f) {
+        initialTendency = -1;  // Падение
+    } else {
+        initialTendency = 0;   // Плато
+    }
+    
+    int prevTendency = initialTendency;
+    
+    // Проходим по всей таблице
+    for (int i = STEP_SIZE; i < tableSize - STEP_SIZE; i += STEP_SIZE) {
+        const float currentCarrier = getCarrierAtIndex(i);
+        const float nextCarrier = getCarrierAtIndex(i + STEP_SIZE);
+        
+        // Вычисляем производную (Гц/сек)
+        const float derivative = (nextCarrier - currentCarrier);
+        
+        // Определяем текущую тенденцию по знаку производной
+        int currentTendency = 0;
+        if (derivative > 0.0f) {
+            currentTendency = 1;   // Рост
+        } else if (derivative < 0.0f) {
+            currentTendency = -1;  // Падение
+        }
+        // else: плато (derivative == 0), тенденция = 0
+        
+        // Точка экстремума: смена тенденции с +1 на -1 или с -1 на +1
+        // Плато (0) не прерывает текущую тенденцию
+        if (currentTendency != 0 && currentTendency != prevTendency) {
+            // Смена тенденции = экстремум
+            // Добавляем точку в мс от начала суток
+            const int64_t timeMs = static_cast<int64_t>(i) * FREQUENCY_TABLE_INTERVAL_MS;
+            swapPointsMs.push_back(timeMs);
+            
+            prevTendency = currentTendency;
+        }
+    }
+    
+    swapPointsCount = static_cast<int32_t>(swapPointsMs.size());
+}
+
+/**
  * Обновить кэш min/max частот и перестроить lookup table
  *
  * ВАЖНО: min/max для lower/upper частот вычисляются по lookup-таблице,

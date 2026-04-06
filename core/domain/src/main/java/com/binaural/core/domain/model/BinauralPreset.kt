@@ -1,4 +1,4 @@
-package com.binaural.core.audio.model
+package com.binaural.core.domain.model
 
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.KSerializer
@@ -9,9 +9,6 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import java.util.UUID
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.pow
 
 /**
  * Сериализатор для LocalTime
@@ -48,17 +45,6 @@ data class FrequencyRange(
         val DEFAULT_CARRIER = FrequencyRange(100.0f, 600.0f)
         val DEFAULT_BEAT = FrequencyRange(0.0f, 1000.0f)
     }
-}
-
-/**
- * Тип интерполяции между точками
- */
-@Serializable
-enum class InterpolationType {
-    LINEAR,             // Линейная интерполяция
-    CARDINAL,           // Кардинальный сплайн (с параметром tension: 0=Catmull-Rom, 1=линейная)
-    MONOTONE,           // Монотонный сплайн (без overshoot, сохраняет форму данных)
-    STEP                // Ступенчатая интерполяция (без интерполяции, значение до следующей точки)
 }
 
 /**
@@ -317,71 +303,13 @@ data class FrequencyCurve(
 }
 
 /**
- * Конфигурация бинаурального ритма
- */
-data class BinauralConfig(
-    val frequencyCurve: FrequencyCurve = FrequencyCurve.defaultCurve(),
-    val volume: Float = 0.7f,
-    // Настройки перестановки каналов
-    val channelSwapEnabled: Boolean = false,
-    val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию
-    val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
-    val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
-    val channelSwapPauseDurationMs: Long = 0L, // длительность паузы между fade-out и fade-in (0 = без паузы)
-    // Настройки нормализации громкости
-    val normalizationType: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
-    val volumeNormalizationStrength: Float = 0.5f, // от 0 до 2.0
-    // Поля для обратной совместимости
-    @kotlinx.serialization.Transient
-    val volumeNormalizationEnabled: Boolean = true,  // DEPRECATED: используйте normalizationType
-    @kotlinx.serialization.Transient
-    val temporalNormalizationEnabled: Boolean = false  // DEPRECATED: используйте normalizationType
-) {
-    /**
-     * Получить текущие частоты для заданного времени
-     * Возвращает (частота_биений, несущая_частота)
-     */
-    fun getFrequenciesAt(time: LocalTime): Pair<Float, Float> {
-        val beatFreq = frequencyCurve.getBeatFrequencyAt(time)
-        val carrierFreq = frequencyCurve.getCarrierFrequencyAt(time)
-        return Pair(beatFreq, carrierFreq)
-    }
-    
-    /**
-     * Получить частоты каналов для заданного времени
-     * Интерполяция применяется НАПРЯМУЮ к кривым каналов
-     * Возвращает (нижняя_частота, верхняя_частота) = (carrier - beat/2, carrier + beat/2)
-     * 
-     * ВАЖНО: Каждая кривая канала интерполируется отдельно через свои точки!
-     */
-    fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
-        val lowerFreq = frequencyCurve.getLowerChannelFrequencyAt(time)
-        val upperFreq = frequencyCurve.getUpperChannelFrequencyAt(time)
-        return Pair(lowerFreq, upperFreq)
-    }
-}
-
-/**
- * Состояние плеера
- */
-data class PlaybackState(
-    val isPlaying: Boolean = false,
-    val config: BinauralConfig = BinauralConfig(),
-    val elapsedSeconds: Int = 0,
-    val volume: Float = 0.7f
-)
-
-/**
- * Настройки перестановки каналов для пресета
+ * Режим перестановки каналов
  */
 @Serializable
-data class ChannelSwapSettings(
-    val enabled: Boolean = false,
-    val intervalSeconds: Int = 300,        // 5 минут по умолчанию
-    val fadeEnabled: Boolean = true,       // затухание при смене каналов
-    val fadeDurationMs: Long = 1000L,      // длительность затухания/нарастания в мс
-    val pauseDurationMs: Long = 0L         // длительность паузы между fade-out и fade-in в мс (0 = без паузы)
-)
+enum class SwapMode {
+    INTERVAL,    // По фиксированному интервалу (существующая логика)
+    TENDENCY     // По тенденции изменения частоты (на экстремумах)
+}
 
 /**
  * Режим периодов расслабления
@@ -391,6 +319,21 @@ enum class RelaxationMode {
     STEP,      // Ступенчатый режим - трапецеидальные впадины по расписанию
     SMOOTH     // Плавный режим - чередующиеся точки с регулируемым интервалом
 }
+
+/**
+ * Настройки перестановки каналов для пресета
+ */
+@Serializable
+data class ChannelSwapSettings(
+    val enabled: Boolean = false,
+    val intervalSeconds: Int = 300,        // 5 минут по умолчанию (для режима INTERVAL)
+    val fadeEnabled: Boolean = true,       // затухание при смене каналов
+    val fadeDurationMs: Long = 1000L,      // длительность затухания/нарастания в мс
+    val pauseDurationMs: Long = 0L,        // длительность паузы между fade-out и fade-in в мс (0 = без паузы)
+    // Новые параметры для режима TENDENCY
+    val swapMode: SwapMode = SwapMode.INTERVAL,  // режим перестановки
+    val invertTendencyBehavior: Boolean = false  // инвертировать поведение
+)
 
 /**
  * Настройки режима расслабления для пресета
@@ -417,6 +360,10 @@ data class RelaxationModeSettings(
         require(smoothIntervalMinutes in 5..120) { "Интервал между точками должен быть от 5 до 120 минут" }
     }
     
+    companion object {
+        private const val MIN_AUDIBLE_FREQUENCY = 20.0f
+    }
+    
     /**
      * Генерирует виртуальные точки режима расслабления.
      * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
@@ -428,8 +375,8 @@ data class RelaxationModeSettings(
         if (!enabled || curve.points.size < 2) return emptyList()
         
         return when (mode) {
-            RelaxationMode.STEP -> generateStepVirtualPoints(curve)
-            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(curve)
+            RelaxationMode.STEP -> generateStepVirtualPoints(curve, curve.carrierRange)
+            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(curve, curve.carrierRange)
         }
     }
     
@@ -444,8 +391,10 @@ data class RelaxationModeSettings(
      * 
      * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
      * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+     * 
+     * @param carrierRange Диапазон несущей частоты графика (сниженная частота не опускается ниже min)
      */
-    private fun generateStepVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
+    private fun generateStepVirtualPoints(curve: FrequencyCurve, carrierRange: FrequencyRange): List<FrequencyPoint> {
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
         val carrierReduction = carrierReductionPercent / 100.0f
@@ -477,9 +426,13 @@ data class RelaxationModeSettings(
                 val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
                 val baseCarrier2 = curve.getCarrierFrequencyAt(time2)
                 val baseBeat2 = curve.getBeatFrequencyAt(time2)
+                // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+                val reducedCarrier2 = (baseCarrier2 * (1.0f - carrierReduction))
+                    .coerceAtLeast(carrierRange.min)
+                    .coerceAtLeast(MIN_AUDIBLE_FREQUENCY)
                 virtualPoints.add(FrequencyPoint(
                     time2,
-                    baseCarrier2 * (1.0f - carrierReduction),
+                    reducedCarrier2,
                     baseBeat2 * (1.0f - beatReduction)
                 ))
             }
@@ -490,9 +443,13 @@ data class RelaxationModeSettings(
                 val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
                 val baseCarrier3 = curve.getCarrierFrequencyAt(time3)
                 val baseBeat3 = curve.getBeatFrequencyAt(time3)
+                // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+                val reducedCarrier3 = (baseCarrier3 * (1.0f - carrierReduction))
+                    .coerceAtLeast(carrierRange.min)
+                    .coerceAtLeast(MIN_AUDIBLE_FREQUENCY)
                 virtualPoints.add(FrequencyPoint(
                     time3,
-                    baseCarrier3 * (1.0f - carrierReduction),
+                    reducedCarrier3,
                     baseBeat3 * (1.0f - beatReduction)
                 ))
             }
@@ -518,8 +475,10 @@ data class RelaxationModeSettings(
      * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
      * Интервал между точками регулируется параметром smoothIntervalMinutes.
      * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+     * 
+     * @param carrierRange Диапазон несущей частоты графика (сниженная частота не опускается ниже min)
      */
-    private fun generateSmoothVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
+    private fun generateSmoothVirtualPoints(curve: FrequencyCurve, carrierRange: FrequencyRange): List<FrequencyPoint> {
         val virtualPoints = mutableListOf<FrequencyPoint>()
         
         val carrierReduction = carrierReductionPercent / 100.0f
@@ -546,9 +505,13 @@ data class RelaxationModeSettings(
                 // Нечётный индекс - снижающая точка
                 val baseCarrier = curve.getCarrierFrequencyAt(time)
                 val baseBeat = curve.getBeatFrequencyAt(time)
+                // Ограничиваем сниженную частоту снизу границей графика и физическим минимумом
+                val reducedCarrier = (baseCarrier * (1.0f - carrierReduction))
+                    .coerceAtLeast(carrierRange.min)
+                    .coerceAtLeast(MIN_AUDIBLE_FREQUENCY)
                 virtualPoints.add(FrequencyPoint(
                     time,
-                    baseCarrier * (1.0f - carrierReduction),
+                    reducedCarrier,
                     baseBeat * (1.0f - beatReduction)
                 ))
             }
@@ -567,12 +530,62 @@ data class RelaxationModeSettings(
 @Serializable
 data class VolumeNormalizationSettings(
     val type: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
-    val strength: Float = 1.0f,            // от 0 до 2.0 (0% - 200%)
-    // Поля для обратной совместимости со старыми пресетами
-    @kotlinx.serialization.Transient
-    val enabled: Boolean = true,           // DEPRECATED: используйте type
-    @kotlinx.serialization.Transient  
-    val temporalNormalizationEnabled: Boolean = false  // DEPRECATED: используйте type
+    val strength: Float = 1.0f            // от 0 до 2.0 (0% - 200%)
+)
+
+/**
+ * Конфигурация бинаурального ритма
+ */
+data class BinauralConfig(
+    val frequencyCurve: FrequencyCurve = FrequencyCurve.defaultCurve(),
+    val volume: Float = 0.7f,
+    // Настройки перестановки каналов
+    val channelSwapEnabled: Boolean = false,
+    val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию
+    val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
+    val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
+    val channelSwapPauseDurationMs: Long = 0L, // длительность паузы между fade-out и fade-in (0 = без паузы)
+    // Настройки нормализации громкости
+    val normalizationType: NormalizationType = NormalizationType.TEMPORAL,  // тип нормализации (временная по умолчанию)
+    val volumeNormalizationStrength: Float = 0.5f, // от 0 до 2.0
+    // Новые параметры для режима TENDENCY
+    val channelSwapMode: SwapMode = SwapMode.INTERVAL,
+    val invertTendencyBehavior: Boolean = false
+) {
+    /**
+     * Получить текущие частоты для заданного времени
+     * Возвращает (частота_биений, несущая_частота)
+     */
+    fun getFrequenciesAt(time: LocalTime): Pair<Float, Float> {
+        val beatFreq = frequencyCurve.getBeatFrequencyAt(time)
+        val carrierFreq = frequencyCurve.getCarrierFrequencyAt(time)
+        return Pair(beatFreq, carrierFreq)
+    }
+    
+    /**
+     * Получить частоты каналов для заданного времени
+     */
+    fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
+        val lowerFreq = frequencyCurve.getLowerChannelFrequencyAt(time)
+        val upperFreq = frequencyCurve.getUpperChannelFrequencyAt(time)
+        return Pair(lowerFreq, upperFreq)
+    }
+}
+
+/**
+ * Состояние воспроизведения.
+ * Используется как единый источник правды для UI и сервиса.
+ */
+data class PlaybackState(
+    val isPlaying: Boolean = false,
+    val currentBeatFrequency: Float = 0.0f,
+    val currentCarrierFrequency: Float = 0.0f,
+    val isChannelsSwapped: Boolean = false,
+    val elapsedSeconds: Int = 0,
+    val currentPresetName: String? = null,
+    val currentPresetId: String? = null,
+    val config: BinauralConfig = BinauralConfig(),
+    val volume: Float = 0.7f
 )
 
 /**
@@ -636,6 +649,7 @@ data class BinauralPreset(
     fun getBeatFrequencyAt(time: LocalTime): Float {
         return curveWithRelaxation.getBeatFrequencyAt(time)
     }
+    
     companion object {
         // Фиксированные ID для стандартных пресетов (важно для сохранения изменений)
         const val DEFAULT_PRESET_ID = "preset-circadian-rhythm"

@@ -8,16 +8,19 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import com.binaural.core.audio.model.BinauralPreset
+import com.binaural.core.domain.model.BinauralPreset
 import com.binaural.data.preferences.R
-import com.binaural.core.audio.model.ChannelSwapSettings
-import com.binaural.core.audio.model.FrequencyCurve
-import com.binaural.core.audio.model.FrequencyPoint
-import com.binaural.core.audio.model.FrequencyRange
-import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationModeSettings
-import com.binaural.core.audio.model.VolumeNormalizationSettings
+import com.binaural.core.domain.model.ChannelSwapSettings
+import com.binaural.core.domain.model.FrequencyCurve
+import com.binaural.core.domain.model.FrequencyPoint
+import com.binaural.core.domain.model.FrequencyRange
+import com.binaural.core.domain.model.InterpolationType
+import com.binaural.core.domain.model.NormalizationType
+import com.binaural.core.domain.model.RelaxationMode
+import com.binaural.core.domain.model.RelaxationModeSettings
+import com.binaural.core.domain.model.VolumeNormalizationSettings
+import com.binaural.core.domain.repository.PresetRepository
+import com.binaural.core.domain.repository.SettingsRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -123,13 +126,14 @@ data class SerializablePresetList(
 )
 
 /**
- * Репозиторий для хранения настроек бинауральных ритмов
+ * Репозиторий для хранения настроек бинауральных ритмов.
+ * Имплементирует интерфейсы PresetRepository и SettingsRepository из domain слоя.
  */
 @Singleton
 class BinauralPreferencesRepository @Inject constructor(
     private val dataStore: DataStore<Preferences>,
     private val context: Context
-) {
+) : PresetRepository, SettingsRepository {
     companion object {
         private val FREQUENCY_CURVE_KEY = stringPreferencesKey("frequency_curve")
         private val VOLUME_KEY = stringPreferencesKey("volume")
@@ -278,10 +282,68 @@ class BinauralPreferencesRepository @Inject constructor(
         }
     }
     
+    // ========== SettingsRepository implementation ==========
+    
+    /**
+     * Получить громкость воспроизведения
+     * По умолчанию 0.7 (70%)
+     */
+    override fun getVolume(): Flow<Float> {
+        return dataStore.data.map { preferences ->
+            preferences[VOLUME_KEY]?.toFloatOrNull() ?: 0.7f
+        }
+    }
+    
+    /**
+     * Сохранить громкость воспроизведения
+     * @param volume уровень громкости (0.0 - 1.0)
+     */
+    override suspend fun saveVolume(volume: Float) {
+        dataStore.edit { preferences ->
+            preferences[VOLUME_KEY] = volume.toString()
+        }
+    }
+    
+    /**
+     * Получить частоту дискретизации
+     */
+    override fun getSampleRate(): Flow<Int> {
+        return dataStore.data.map { preferences ->
+            preferences[SAMPLE_RATE_KEY] ?: 22050 // 22050 по умолчанию
+        }
+    }
+    
+    /**
+     * Сохранить частоту дискретизации
+     */
+    override suspend fun saveSampleRate(rate: Int) {
+        dataStore.edit { preferences ->
+            preferences[SAMPLE_RATE_KEY] = rate
+        }
+    }
+    
+    /**
+     * Получить интервал генерации буфера в минутах
+     */
+    override fun getBufferGenerationMinutes(): Flow<Int> {
+        return dataStore.data.map { preferences ->
+            preferences[BUFFER_GENERATION_MINUTES_KEY] ?: 10 // 10 минут по умолчанию
+        }
+    }
+    
+    /**
+     * Сохранить интервал генерации буфера
+     */
+    override suspend fun saveBufferGenerationMinutes(minutes: Int) {
+        dataStore.edit { preferences ->
+            preferences[BUFFER_GENERATION_MINUTES_KEY] = minutes.coerceIn(1, 60)
+        }
+    }
+    
     /**
      * Получить все настройки перестановки каналов одним Flow
      */
-    fun getChannelSwapSettings(): Flow<ChannelSwapSettings> {
+    override fun getChannelSwapSettings(): Flow<ChannelSwapSettings> {
         return dataStore.data.map { preferences ->
             ChannelSwapSettings(
                 enabled = preferences[CHANNEL_SWAP_ENABLED_KEY] ?: false,
@@ -296,7 +358,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Сохранить все настройки перестановки каналов
      */
-    suspend fun saveChannelSwapSettings(settings: ChannelSwapSettings) {
+    override suspend fun saveChannelSwapSettings(settings: ChannelSwapSettings) {
         dataStore.edit { preferences ->
             preferences[CHANNEL_SWAP_ENABLED_KEY] = settings.enabled
             preferences[CHANNEL_SWAP_INTERVAL_KEY] = settings.intervalSeconds
@@ -340,7 +402,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Получить все настройки нормализации громкости одним Flow
      */
-    fun getVolumeNormalizationSettings(): Flow<VolumeNormalizationSettings> {
+    override fun getVolumeNormalizationSettings(): Flow<VolumeNormalizationSettings> {
         return dataStore.data.map { preferences ->
             VolumeNormalizationSettings(
                 type = preferences[VOLUME_NORMALIZATION_TYPE_KEY]?.let {
@@ -354,51 +416,13 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Сохранить все настройки нормализации громкости
      */
-    suspend fun saveVolumeNormalizationSettings(settings: VolumeNormalizationSettings) {
+    override suspend fun saveVolumeNormalizationSettings(settings: VolumeNormalizationSettings) {
         dataStore.edit { preferences ->
             preferences[VOLUME_NORMALIZATION_TYPE_KEY] = settings.type.name
             preferences[VOLUME_NORMALIZATION_STRENGTH_KEY] = settings.strength
         }
     }
     
-    // Методы для частоты дискретизации
-
-    fun getSampleRate(): Flow<Int> {
-        return dataStore.data.map { preferences ->
-            preferences[SAMPLE_RATE_KEY] ?: 22050 // 22050 по умолчанию (оптимально для бинауральных ритмов)
-        }
-    }
-    
-    suspend fun saveSampleRate(rate: Int) {
-        dataStore.edit { preferences ->
-            preferences[SAMPLE_RATE_KEY] = rate
-        }
-    }
-    
-    // Методы для интервала генерации буфера (оптимизация энергопотребления)
-    
-    /**
-     * Получить интервал генерации буфера в минутах
-     * Определяет, на сколько минут вперёд генерируется аудиобуфер за один раз.
-     * Больший интервал = меньше пробуждений CPU = лучше энергопотребление.
-     * @return интервал в минутах (1-60), по умолчанию 10 минут
-     */
-    fun getBufferGenerationMinutes(): Flow<Int> {
-        return dataStore.data.map { preferences ->
-            preferences[BUFFER_GENERATION_MINUTES_KEY] ?: 10 // 10 минут по умолчанию
-        }
-    }
-    
-    /**
-     * Сохранить интервал генерации буфера
-     * @param minutes интервал в минутах (1-60)
-     */
-    suspend fun saveBufferGenerationMinutes(minutes: Int) {
-        dataStore.edit { preferences ->
-            preferences[BUFFER_GENERATION_MINUTES_KEY] = minutes.coerceIn(1, 60)
-        }
-    }
-
     // Методы для wavetable оптимизации
 
     /**
@@ -449,7 +473,7 @@ class BinauralPreferencesRepository @Inject constructor(
      * @return true если границы расширяются автоматически при редактировании,
      *         false если значения ограничиваются заданными границами (по умолчанию)
      */
-    fun getAutoExpandGraphRange(): Flow<Boolean> {
+    override fun getAutoExpandGraphRange(): Flow<Boolean> {
         return dataStore.data.map { preferences ->
             preferences[AUTO_EXPAND_GRAPH_RANGE_KEY] ?: false // false по умолчанию - ограничивать значения
         }
@@ -460,31 +484,9 @@ class BinauralPreferencesRepository @Inject constructor(
      * @param enabled true = автоматически расширять границы при выходе за пределы
      *                false = ограничивать значения заданными границами
      */
-    suspend fun saveAutoExpandGraphRange(enabled: Boolean) {
+    override suspend fun saveAutoExpandGraphRange(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[AUTO_EXPAND_GRAPH_RANGE_KEY] = enabled
-        }
-    }
-    
-    // Методы для громкости
-    
-    /**
-     * Получить громкость воспроизведения
-     * По умолчанию 0.7 (70%)
-     */
-    fun getVolume(): Flow<Float> {
-        return dataStore.data.map { preferences ->
-            preferences[VOLUME_KEY]?.toFloatOrNull() ?: 0.7f
-        }
-    }
-    
-    /**
-     * Сохранить громкость воспроизведения
-     * @param volume уровень громкости (0.0 - 1.0)
-     */
-    suspend fun saveVolume(volume: Float) {
-        dataStore.edit { preferences ->
-            preferences[VOLUME_KEY] = volume.toString()
         }
     }
     
@@ -494,7 +496,7 @@ class BinauralPreferencesRepository @Inject constructor(
      * Получить настройку возобновления воспроизведения при подключении гарнитуры
      * @return true если воспроизведение должно возобновляться автоматически
      */
-    fun getResumeOnHeadsetConnect(): Flow<Boolean> {
+    override fun getResumeOnHeadsetConnect(): Flow<Boolean> {
         return dataStore.data.map { preferences ->
             preferences[RESUME_ON_HEADSET_CONNECT_KEY] ?: false // По умолчанию выключено
         }
@@ -504,7 +506,7 @@ class BinauralPreferencesRepository @Inject constructor(
      * Сохранить настройку возобновления воспроизведения при подключении гарнитуры
      * @param enabled true если воспроизведение должно возобновляться автоматически
      */
-    suspend fun saveResumeOnHeadsetConnect(enabled: Boolean) {
+    override suspend fun saveResumeOnHeadsetConnect(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[RESUME_ON_HEADSET_CONNECT_KEY] = enabled
         }
@@ -516,7 +518,7 @@ class BinauralPreferencesRepository @Inject constructor(
      * Получить настройку автовозобновления воспроизведения при запуске приложения
      * @return true если воспроизведение должно возобновляться автоматически при запуске
      */
-    fun getAutoResumeOnAppStart(): Flow<Boolean> {
+    override fun getAutoResumeOnAppStart(): Flow<Boolean> {
         return dataStore.data.map { preferences ->
             preferences[AUTO_RESUME_ON_APP_START_KEY] ?: false // По умолчанию выключено
         }
@@ -526,7 +528,7 @@ class BinauralPreferencesRepository @Inject constructor(
      * Сохранить настройку автовозобновления воспроизведения при запуске приложения
      * @param enabled true если воспроизведение должно возобновляться автоматически при запуске
      */
-    suspend fun saveAutoResumeOnAppStart(enabled: Boolean) {
+    override suspend fun saveAutoResumeOnAppStart(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[AUTO_RESUME_ON_APP_START_KEY] = enabled
         }
@@ -534,10 +536,12 @@ class BinauralPreferencesRepository @Inject constructor(
     
     // Методы для работы с пресетами
     
+    // ========== PresetRepository implementation ==========
+    
     /**
      * Получить список всех пресетов
      */
-    fun getPresets(): Flow<List<BinauralPreset>> {
+    override fun getPresets(): Flow<List<BinauralPreset>> {
         return dataStore.data.map { preferences ->
             preferences[PRESETS_KEY]?.let { jsonString ->
                 deserializePresets(jsonString)
@@ -560,14 +564,14 @@ class BinauralPreferencesRepository @Inject constructor(
                 name = context.getString(R.string.preset_gamma_productivity),
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0f, beatFrequency = 1.5f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0f, beatFrequency = 9.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0f, beatFrequency = 14.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0f, beatFrequency = 40.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 220.0f, beatFrequency = 1.5f),
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 340.0f, beatFrequency = 9.0f),
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 380.0f, beatFrequency = 14.0f),
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 440.0f, beatFrequency = 40.0f),
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 7.5f),
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 240.0f, beatFrequency = 4.0f),
                     ),
                     carrierRange = FrequencyRange(100.0f, 600.0f),
                     interpolationType = InterpolationType.MONOTONE
@@ -578,14 +582,14 @@ class BinauralPreferencesRepository @Inject constructor(
                 name = context.getString(R.string.preset_daily_cycle),
                 frequencyCurve = FrequencyCurve(
                     points = listOf(
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0f, beatFrequency = 2.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0f, beatFrequency = 3.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0f, beatFrequency = 10.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0f, beatFrequency = 6.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0f, beatFrequency = 25.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),
-                        com.binaural.core.audio.model.FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
+                        FrequencyPoint.fromHours(0, 0, carrierFrequency = 200.0f, beatFrequency = 2.0f),
+                        FrequencyPoint.fromHours(3, 0, carrierFrequency = 200.0f, beatFrequency = 3.0f),
+                        FrequencyPoint.fromHours(6, 0, carrierFrequency = 300.0f, beatFrequency = 10.0f),
+                        FrequencyPoint.fromHours(9, 0, carrierFrequency = 400.0f, beatFrequency = 18.0f),
+                        FrequencyPoint.fromHours(12, 0, carrierFrequency = 300.0f, beatFrequency = 6.0f),
+                        FrequencyPoint.fromHours(15, 0, carrierFrequency = 400.0f, beatFrequency = 25.0f),
+                        FrequencyPoint.fromHours(18, 0, carrierFrequency = 300.0f, beatFrequency = 9.0f),
+                        FrequencyPoint.fromHours(21, 0, carrierFrequency = 250.0f, beatFrequency = 5.0f),
                     ),
                     carrierRange = FrequencyRange(100.0f, 600.0f),
                     interpolationType = InterpolationType.MONOTONE
@@ -604,9 +608,16 @@ class BinauralPreferencesRepository @Inject constructor(
     }
     
     /**
+     * Получить пресет по ID
+     */
+    override suspend fun getPresetById(id: String): BinauralPreset? {
+        return getPresets().first().find { it.id == id }
+    }
+    
+    /**
      * Получить ID активного пресета
      */
-    fun getActivePresetId(): Flow<String?> {
+    override fun getActivePresetId(): Flow<String?> {
         return dataStore.data.map { preferences ->
             preferences[ACTIVE_PRESET_ID_KEY]
         }
@@ -615,7 +626,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Сохранить ID активного пресета
      */
-    suspend fun saveActivePresetId(id: String?) {
+    override suspend fun setActivePresetId(id: String?) {
         dataStore.edit { preferences ->
             if (id != null) {
                 preferences[ACTIVE_PRESET_ID_KEY] = id
@@ -628,7 +639,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Добавить новый пресет
      */
-    suspend fun addPreset(preset: BinauralPreset) {
+    override suspend fun addPreset(preset: BinauralPreset) {
         val currentPresets = getPresets().map { it.toMutableList() }.first()
         currentPresets.add(preset)
         savePresets(currentPresets)
@@ -637,7 +648,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Обновить пресет
      */
-    suspend fun updatePreset(preset: BinauralPreset) {
+    override suspend fun updatePreset(preset: BinauralPreset) {
         val currentPresets = getPresets().map { it.toMutableList() }.first()
         val index = currentPresets.indexOfFirst { it.id == preset.id }
         if (index >= 0) {
@@ -649,7 +660,7 @@ class BinauralPreferencesRepository @Inject constructor(
     /**
      * Удалить пресет
      */
-    suspend fun deletePreset(presetId: String) {
+    override suspend fun deletePreset(presetId: String) {
         val currentPresets = getPresets().map { it.toMutableList() }.first()
         currentPresets.removeAll { it.id == presetId }
         savePresets(currentPresets)
@@ -737,9 +748,9 @@ class BinauralPreferencesRepository @Inject constructor(
                         RelaxationModeSettings(
                             enabled = it.enabled,
                             mode = try { 
-                                com.binaural.core.audio.model.RelaxationMode.valueOf(it.mode) 
+                                RelaxationMode.valueOf(it.mode) 
                             } catch (e: Exception) { 
-                                com.binaural.core.audio.model.RelaxationMode.SMOOTH 
+                                RelaxationMode.SMOOTH 
                             },
                             carrierReductionPercent = it.carrierReductionPercent,
                             beatReductionPercent = it.beatReductionPercent,

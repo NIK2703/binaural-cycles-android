@@ -10,21 +10,59 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.binaural.core.domain.model.SampleRate
 import com.binauralcycles.ui.components.PowerSettingsCard
 import com.binauralcycles.ui.components.ChannelSwapSettingsCard
 import com.binauralcycles.ui.components.VolumeNormalizationSettingsCard
-import com.binauralcycles.viewmodel.BinauralViewModel
+import com.binauralcycles.viewmodel.SettingsViewModel
+import com.binauralcycles.viewmodel.events.SettingsEvent
 import com.binauralcycles.R
+import kotlinx.coroutines.flow.receiveAsFlow
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    viewModel: BinauralViewModel,
+    viewModel: SettingsViewModel,
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     
+    // Состояние для Snackbar
+    val snackbarHostState = remember { SnackbarHostState() }
+    
+    // Получаем строки заранее для использования в LaunchedEffect
+    val settingsSavedStr = stringResource(R.string.settings_saved)
+    
+    // Обработка событий от ViewModel
+    LaunchedEffect(Unit) {
+        viewModel.events.receiveAsFlow().collect { event ->
+            when (event) {
+                is SettingsEvent.ShowToast -> {
+                    snackbarHostState.showSnackbar(
+                        message = event.message,
+                        duration = SnackbarDuration.Short
+                    )
+                }
+                is SettingsEvent.ShowError -> {
+                    snackbarHostState.showSnackbar(
+                        message = event.message,
+                        duration = SnackbarDuration.Long
+                    )
+                }
+                is SettingsEvent.SettingsSaved -> {
+                    snackbarHostState.showSnackbar(
+                        message = settingsSavedStr,
+                        duration = SnackbarDuration.Short
+                    )
+                }
+            }
+        }
+    }
+    
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(hostState = snackbarHostState)
+        },
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings)) },
@@ -64,7 +102,9 @@ fun SettingsScreen(
                 onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
-                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) }
+                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) },
+                onSwapModeChange = { viewModel.setSwapMode(it) },
+                onChannelSwapEnabledAndModeChange = { enabled, mode -> viewModel.setChannelSwapEnabledAndMode(enabled, mode) }
             )
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))

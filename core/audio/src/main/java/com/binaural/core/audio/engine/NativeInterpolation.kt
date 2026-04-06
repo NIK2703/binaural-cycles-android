@@ -1,7 +1,7 @@
 package com.binaural.core.audio.engine
 
 import android.util.Log
-import com.binaural.core.audio.model.InterpolationType
+import com.binaural.core.domain.model.InterpolationType
 
 /**
  * Статический класс для доступа к C++ интерполяции из UI.

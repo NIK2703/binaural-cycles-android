@@ -16,38 +16,66 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
-import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
-import androidx.navigation.navArgument
+import androidx.navigation.toRoute
 import com.binauralcycles.ui.components.BottomPlaybackPanel
 import com.binauralcycles.ui.screens.PresetEditScreen
 import com.binauralcycles.ui.screens.PresetListScreen
 import com.binauralcycles.ui.screens.SettingsScreen
-import com.binauralcycles.viewmodel.BinauralViewModel
+import com.binauralcycles.viewmodel.PresetListViewModel
+import com.binauralcycles.viewmodel.PresetEditViewModel
+import com.binauralcycles.viewmodel.SettingsViewModel
+import com.binauralcycles.viewmodel.PlaybackViewModel
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 
-sealed class Screen(val route: String) {
-    object PresetList : Screen("presets")
-    object PresetEdit : Screen("preset/{presetId}") {
-        fun createRoute(presetId: String) = "preset/$presetId"
-    }
-    object PresetNew : Screen("preset/new")
-    object Settings : Screen("settings")
+/**
+ * Type-safe навигационные destinations.
+ * Используют Kotlin Serialization для безопасной навигации.
+ */
+sealed interface Destination {
+    
+    /**
+     * Список пресетов (главный экран)
+     */
+    @Serializable
+    data object PresetList : Destination
+    
+    /**
+     * Редактирование существующего пресета
+     * @param presetId ID пресета для редактирования
+     */
+    @Serializable
+    data class PresetEdit(val presetId: String) : Destination
+    
+    /**
+     * Создание нового пресета
+     */
+    @Serializable
+    data object PresetNew : Destination
+    
+    /**
+     * Настройки приложения
+     */
+    @Serializable
+    data object Settings : Destination
 }
 
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun BinauralNavigation(
     navController: NavHostController,
-    viewModel: BinauralViewModel = hiltViewModel()
+    presetListViewModel: PresetListViewModel = hiltViewModel(),
+    playbackViewModel: PlaybackViewModel = hiltViewModel()
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val presetListUiState by presetListViewModel.uiState.collectAsState()
+    val playbackUiState by playbackViewModel.uiState.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
     // Панель отображается только когда есть активный пресет
-    val showBottomPanel = uiState.activePreset != null
+    val showBottomPanel = presetListUiState.activePreset != null
     
     // Сохраняем ID пресета для экспорта (используется внутри лаунчера)
     var currentExportPresetId by remember { mutableStateOf<String?>(null) }
@@ -60,7 +88,7 @@ fun BinauralNavigation(
             currentExportPresetId?.let { presetId ->
                 scope.launch {
                     // Получаем JSON и записываем в файл
-                    viewModel.exportPresetToJson(presetId)?.let { json ->
+                    presetListViewModel.exportPresetToJson(presetId)?.let { json ->
                         context.contentResolver.openOutputStream(exportUri)?.use { outputStream ->
                             outputStream.bufferedWriter().use { writer ->
                                 writer.write(json)
@@ -78,7 +106,7 @@ fun BinauralNavigation(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { importUri ->
-            viewModel.importPresetFromUri(importUri)
+            presetListViewModel.importPresetFromUri(importUri)
             // После успешного импорта возвращаемся к списку
             navController.popBackStack()
         }
@@ -94,7 +122,7 @@ fun BinauralNavigation(
             ) { paddingValues ->
                 NavHost(
                     navController = navController,
-                    startDestination = Screen.PresetList.route,
+                    startDestination = Destination.PresetList,
                     modifier = Modifier
                         .padding(paddingValues)
                         // Добавляем снизу место для панели воспроизведения
@@ -102,23 +130,23 @@ fun BinauralNavigation(
                         // Добавляем padding для navigation bar
                         .navigationBarsPadding()
                 ) {
-                composable(Screen.PresetList.route) {
+                composable<Destination.PresetList> {
                     PresetListScreen(
-                        viewModel = viewModel,
+                        viewModel = presetListViewModel,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = this@composable,
                         onPresetClick = { presetId ->
                             // При клике на пресет начинаем воспроизведение
-                            viewModel.playPreset(presetId)
+                            presetListViewModel.playPreset(presetId)
                         },
                         onEditPreset = { presetId ->
-                            navController.navigate(Screen.PresetEdit.createRoute(presetId))
+                            navController.navigate(Destination.PresetEdit(presetId))
                         },
                         onCreatePreset = {
-                            navController.navigate(Screen.PresetNew.route)
+                            navController.navigate(Destination.PresetNew)
                         },
                         onExportPreset = { presetId ->
-                            val preset = viewModel.getPresetForExport(presetId)
+                            val preset = presetListViewModel.getPresetForExport(presetId)
                             preset?.let {
                                 currentExportPresetId = presetId
                                 val fileName = "${it.name.replace(" ", "_")}.json"
@@ -126,20 +154,17 @@ fun BinauralNavigation(
                             }
                         },
                         onOpenSettings = {
-                            navController.navigate(Screen.Settings.route)
+                            navController.navigate(Destination.Settings)
                         }
                     )
                 }
                 
-                composable(
-                    route = Screen.PresetEdit.route,
-                    arguments = listOf(
-                        navArgument("presetId") { type = NavType.StringType }
-                    )
-                ) { backStackEntry ->
-                    val presetId = backStackEntry.arguments?.getString("presetId") ?: ""
+                composable<Destination.PresetEdit> { backStackEntry ->
+                    val route: Destination.PresetEdit = backStackEntry.toRoute()
+                    val presetId = route.presetId
+                    val editViewModel: PresetEditViewModel = hiltViewModel()
                     PresetEditScreen(
-                        viewModel = viewModel,
+                        viewModel = editViewModel,
                         presetId = presetId,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = this@composable,
@@ -149,9 +174,10 @@ fun BinauralNavigation(
                     )
                 }
                 
-                composable(Screen.PresetNew.route) {
+                composable<Destination.PresetNew> {
+                    val editViewModel: PresetEditViewModel = hiltViewModel()
                     PresetEditScreen(
-                        viewModel = viewModel,
+                        viewModel = editViewModel,
                         presetId = null,
                         sharedTransitionScope = this@SharedTransitionLayout,
                         animatedVisibilityScope = this@composable,
@@ -164,9 +190,10 @@ fun BinauralNavigation(
                     )
                 }
                 
-                composable(Screen.Settings.route) {
+                composable<Destination.Settings> {
+                    val settingsViewModel: SettingsViewModel = hiltViewModel()
                     SettingsScreen(
-                        viewModel = viewModel,
+                        viewModel = settingsViewModel,
                         onNavigateBack = {
                             navController.popBackStack()
                         }
@@ -181,14 +208,14 @@ fun BinauralNavigation(
         // чтобы фон Surface заходил под navigation bar
         if (showBottomPanel) {
             BottomPlaybackPanel(
-                presetName = uiState.activePreset?.name,
-                beatFrequency = uiState.currentBeatFrequency,
-                carrierFrequency = uiState.currentCarrierFrequency,
-                isPlaying = uiState.isPlaying,
-                volume = uiState.volume,
-                onPlayClick = { viewModel.togglePlayback() },
-                onVolumeChange = { viewModel.setVolumeImmediate(it) },
-                onVolumeSave = { viewModel.saveVolume() },
+                presetName = presetListUiState.activePreset?.name,
+                beatFrequency = presetListUiState.currentBeatFrequency,
+                carrierFrequency = presetListUiState.currentCarrierFrequency,
+                isPlaying = playbackUiState.isPlaying,
+                volume = playbackUiState.volume,
+                onPlayClick = { playbackViewModel.togglePlayback() },
+                onVolumeChange = { playbackViewModel.setVolumeImmediate(it) },
+                onVolumeSave = { /* Volume saved in SettingsViewModel */ },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
         }

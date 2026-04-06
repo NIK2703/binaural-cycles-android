@@ -19,7 +19,9 @@ set -e
 
 # === КОНФИГУРАЦИЯ ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REMOTE_CODE_DIR="$(dirname "$SCRIPT_DIR")/RemoteCode3"
+TOOLS_DIR="$HOME/tools"
+JAVA_HOME="$TOOLS_DIR/jdk-17.0.2"
+export JAVA_HOME
 APP_PACKAGE_BASE="com.binauralcycles"
 APP_ACTIVITY="com.binauralcycles.MainActivity"
 APK_PATH="./app/build/outputs/apk/debug/app-debug.apk"
@@ -77,13 +79,18 @@ find_apk() {
     fi
 }
 
-# Проверяем наличие Gradle wrapper в RemoteCode3
-if [ ! -f "$REMOTE_CODE_DIR/gradlew" ]; then
-    echo "❌ Ошибка: Gradle wrapper не найден в $REMOTE_CODE_DIR"
+# Проверяем наличие Gradle: приоритет локальному gradlew, затем gradle из ~/tools
+if [ -f "$SCRIPT_DIR/gradlew" ]; then
+    GRADLEW="$SCRIPT_DIR/gradlew"
+elif [ -f "$TOOLS_DIR/gradle-8.4/bin/gradle" ]; then
+    GRADLEW="$TOOLS_DIR/gradle-8.4/bin/gradle"
+else
+    echo "❌ Ошибка: Gradle не найден"
+    echo "   Ожидаемые пути:"
+    echo "   - $SCRIPT_DIR/gradlew"
+    echo "   - $TOOLS_DIR/gradle-8.4/bin/gradle"
     exit 1
 fi
-
-GRADLEW="$REMOTE_CODE_DIR/gradlew"
 
 # Создаём директорию для логов
 mkdir -p "$LOG_DIR"
