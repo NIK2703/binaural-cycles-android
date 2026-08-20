@@ -46,6 +46,10 @@ data class BinauralUiState(
     val volume: Float = 0.7f,
     val selectedPointIndex: Int? = null,
     val currentTime: LocalTime = LocalTime(12, 0),
+    // НОВОЕ: debug virtual time
+    val debugVirtualTimeEnabled: Boolean = false,
+    val debugTimeScale: Float = 1.0f,
+    val debugVirtualTimeRunning: Boolean = true,
     // Редактируемая кривая (для экрана редактирования)
     val editingFrequencyCurve: FrequencyCurve? = null,
     // ID редактируемого пресета (null для нового пресета)
@@ -283,6 +287,14 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             BinauralPlaybackService.isChannelsSwapped.collect { swapped ->
                 _uiState.update { it.copy(isChannelsSwapped = swapped) }
+            }
+        }
+        
+        // НОВОЕ: единое время (реальное в release, виртуальное в debug)
+        viewModelScope.launch {
+            BinauralPlaybackService.currentTimeOfDaySeconds.collect { secs ->
+                val clamped = secs.coerceIn(0, 86399)
+                _uiState.update { it.copy(currentTime = LocalTime.fromSecondOfDay(clamped)) }
             }
         }
     }
@@ -1498,6 +1510,45 @@ class BinauralViewModel @Inject constructor(
             context.unbindService(serviceConnection)
         } catch (e: Exception) {
             // Сервис уже отвязан
+        }
+    }
+
+    // ============= Debug virtual time (только debug) =============
+
+    fun setDebugVirtualTimeEnabled(enabled: Boolean) {
+        playbackService?.debugSetVirtualTimeEnabled(enabled)
+        _uiState.update { it.copy(debugVirtualTimeEnabled = enabled) }
+    }
+
+    fun debugScrubTime(timeSeconds: Int) {
+        val clamped = timeSeconds.coerceIn(0, 86399)
+        // Перезапуск с затуханием, как и для остальных настроек:
+        // новый "виртуальный момент" применяется к аудио сразу, без ожидания границы буфера
+        restartWithFadeIfNeeded {
+            playbackService?.debugScrub(clamped)
+            // Мгновенное отражение в UI, не дожидаясь 1-секундного поллинга
+            _uiState.update { it.copy(currentTime = LocalTime.fromSecondOfDay(clamped)) }
+        }
+    }
+
+    fun debugSetTimeScale(scale: Float) {
+        val clamped = scale.coerceIn(1f, 60f)
+        // Перезапуск с затуханием, как и для остальных настроек
+        restartWithFadeIfNeeded {
+            playbackService?.debugSetTimeScale(clamped)
+            _uiState.update { it.copy(debugTimeScale = clamped) }
+        }
+    }
+
+    fun debugSetVirtualTimeRunning(running: Boolean) {
+        playbackService?.debugSetRunning(running)
+        _uiState.update { it.copy(debugVirtualTimeRunning = running) }
+    }
+
+    fun debugResetToRealTime() {
+        // Перезапуск с затуханием: возврат к реальному времени применяется сразу
+        restartWithFadeIfNeeded {
+            playbackService?.debugResetToRealTime()
         }
     }
 }

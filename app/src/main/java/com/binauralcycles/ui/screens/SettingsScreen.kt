@@ -13,7 +13,9 @@ import androidx.compose.ui.unit.dp
 import com.binauralcycles.ui.components.PowerSettingsCard
 import com.binauralcycles.ui.components.ChannelSwapSettingsCard
 import com.binauralcycles.ui.components.VolumeNormalizationSettingsCard
+import com.binauralcycles.ui.components.DebugTimeControlPanel
 import com.binauralcycles.viewmodel.BinauralViewModel
+import com.binauralcycles.BuildConfig
 import com.binauralcycles.R
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -132,6 +134,19 @@ fun SettingsScreen(
                 onSampleRateChange = { viewModel.setSampleRate(it) },
                 onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
             )
+            
+            // НОВОЕ: DEBUG-панель виртуального времени (только debug-сборка)
+            if (BuildConfig.DEBUG) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+                Text(
+                    text = "Отладка",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(vertical = 8.dp)
+                )
+                DebugTimeControlPanel(viewModel)
+                Spacer(modifier = Modifier.height(16.dp))
+            }
             
             Spacer(modifier = Modifier.height(16.dp))
         }

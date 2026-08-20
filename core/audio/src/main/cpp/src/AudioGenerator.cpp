@@ -1074,7 +1074,8 @@ GenerateResult AudioGenerator::generatePackage(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs
+    int64_t elapsedMs,
+    float timeScale
 ) {
     GenerateResult result;
     
@@ -1120,7 +1121,7 @@ GenerateResult AudioGenerator::generatePackage(
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec
+            config.curve, currentTime + durationSec * timeScale
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
@@ -1222,7 +1223,7 @@ GenerateResult AudioGenerator::generatePackage(
         }
         
         currentSample += samples;
-        currentTime += durationSec;
+        currentTime += durationSec * timeScale;
         currentElapsedMs += segment.durationMs;
         
         lastLeftFreq = endLeftFreq;
@@ -1245,7 +1246,8 @@ GenerateResult AudioGenerator::generatePackageNeon(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs
+    int64_t elapsedMs,
+    float timeScale
 ) {
     GenerateResult result;
     
@@ -1282,7 +1284,7 @@ GenerateResult AudioGenerator::generatePackageNeon(
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec
+            config.curve, currentTime + durationSec * timeScale
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
@@ -1397,7 +1399,7 @@ GenerateResult AudioGenerator::generatePackageNeon(
         }
         
         currentSample += samples;
-        currentTime += durationSec;
+        currentTime += durationSec * timeScale;
         currentElapsedMs += segment.durationMs;
         
         lastLeftFreq = endLeftFreq;
@@ -1421,7 +1423,8 @@ GenerateResult AudioGenerator::generatePackageSse(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs
+    int64_t elapsedMs,
+    float timeScale
 ) {
     GenerateResult result;
     
@@ -1458,7 +1461,7 @@ GenerateResult AudioGenerator::generatePackageSse(
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec
+            config.curve, currentTime + durationSec * timeScale
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
@@ -1552,7 +1555,7 @@ GenerateResult AudioGenerator::generatePackageSse(
         }
         
         currentSample += samples;
-        currentTime += durationSec;
+        currentTime += durationSec * timeScale;
         currentElapsedMs += segment.durationMs;
         
         lastLeftFreq = endLeftFreq;

@@ -152,6 +152,10 @@ class BinauralAudioEngine(private val context: Context) {
     private val _elapsedSeconds = MutableStateFlow(0)
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
     
+    // НОВОЕ: текущее время суток (реальное или виртуальное в debug)
+    private val _currentTimeOfDaySeconds = MutableStateFlow(0)
+    val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
+    
     private val _isChannelsSwapped = MutableStateFlow(false)
     val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
 
@@ -173,6 +177,10 @@ class BinauralAudioEngine(private val context: Context) {
         if (result != null) {
             _currentBeatFrequency.value = result.first
             _currentCarrierFrequency.value = result.second
+        }
+        // НОВОЕ: время суток (реальное или виртуальное из нативного движка)
+        nativeEngine?.let {
+            _currentTimeOfDaySeconds.value = it.getCurrentTimeOfDay()
         }
     }
 
@@ -1128,5 +1136,37 @@ class BinauralAudioEngine(private val context: Context) {
         audioThread = null
         audioHandler = null
         Log.d(TAG, "Audio engine released")
+    }
+
+    // ============ Debug virtual time (только debug-сборка) ============
+
+    fun debugSetVirtualTimeEnabled(enabled: Boolean) {
+        nativeEngine?.debugSetVirtualTimeEnabled(enabled)
+        if (enabled) {
+            // Мелкие буферы (1 с) => плавный свип частот даже при 20x.
+            pendingFrequencyUpdateIntervalMs.set(1000)
+            // Отключаем батч-генерацию, чтобы не было больших "замороженных" кусков.
+            nativeEngine?.setBatchDurationMinutes(0)
+        } else {
+            // Возврат к дефолтному интервалу.
+            pendingFrequencyUpdateIntervalMs.set(10000)
+        }
+    }
+
+    fun debugScrub(timeSeconds: Int) {
+        nativeEngine?.debugScrub(timeSeconds)
+        _currentTimeOfDaySeconds.value = timeSeconds
+    }
+
+    fun debugSetTimeScale(scale: Float) {
+        nativeEngine?.debugSetTimeScale(scale)
+    }
+
+    fun debugSetRunning(running: Boolean) {
+        nativeEngine?.debugSetRunning(running)
+    }
+
+    fun debugResetToRealTime() {
+        nativeEngine?.debugResetToRealTime()
     }
 }

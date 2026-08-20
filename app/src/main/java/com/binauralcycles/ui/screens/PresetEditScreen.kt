@@ -204,6 +204,8 @@ fun PresetEditScreen(
                         // Показываем указатель только если редактируется активный пресет
                         isPlaying = isEditingActivePreset && uiState.isPlaying,
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
+                        // НОВОЕ: единое время (реальное/виртуальное) для указателя на графике
+                        externalCurrentTime = uiState.currentTime,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
                             viewModel.updateEditingPointTimeDirect(index, newTime)

@@ -300,6 +300,8 @@ fun FrequencyGraph(
     onPointBeatChanged: (Int, Float) -> Unit = { _, _ -> },
     onAddPoint: (LocalTime, Float, Float) -> Unit,
     onCarrierRangeChange: (Float, Float) -> Unit,
+    // НОВОЕ: внешнее время (например, виртуальное из uiState). null => свои часы.
+    externalCurrentTime: LocalTime? = null,
     modifier: Modifier = Modifier
 ) {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
@@ -331,7 +333,7 @@ fun FrequencyGraph(
         // При isPlaying = false НЕ сбрасываем время - оставляем текущее
     }
     
-    val currentLocalTime = currentTime.value
+    val currentLocalTime = externalCurrentTime ?: currentTime.value
     val density = LocalDensity.current
 
     // Используем кэшированные sortedPoints если доступны (оптимизация)

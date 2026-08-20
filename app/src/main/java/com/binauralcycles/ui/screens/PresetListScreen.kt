@@ -27,10 +27,7 @@ import com.binauralcycles.ui.components.MiniFrequencyGraph
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.RelaxationModeSettings
-import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
-import kotlinx.datetime.TimeZone
-import kotlinx.datetime.toLocalDateTime
 import com.binauralcycles.R
 
 // Время блокировки навигации после перехода на экран (для защиты от "пробивания" касаний)
@@ -49,9 +46,6 @@ fun PresetListScreen(
     onOpenSettings: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
-
-    // Поднимаем состояние времени на уровень экрана - ОДНА корутина на весь список
-    val currentTime = rememberCurrentTime(uiState.isPlaying)
     
     // Время последней навигации для защиты от быстрых повторных нажатий
     var lastNavigationTime by remember { mutableStateOf(0L) }
@@ -130,8 +124,9 @@ fun PresetListScreen(
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
                         // Используем методы BinauralPreset для учёта виртуальных точек расслабления
-                        val carrierFreq = preset.getCarrierFrequencyAt(currentTime.value)
-                        val beatFreq = preset.getBeatFrequencyAt(currentTime.value)
+                        // Время: единое из uiState (реальное в release, виртуальное в debug)
+                        val carrierFreq = preset.getCarrierFrequencyAt(uiState.currentTime)
+                        val beatFreq = preset.getBeatFrequencyAt(uiState.currentTime)
                         
                         PresetCard(
                             presetId = preset.id,
@@ -142,7 +137,7 @@ fun PresetListScreen(
                             isPlaying = isActivePreset && uiState.isPlaying,
                             currentCarrierFrequency = carrierFreq,
                             currentBeatFrequency = beatFreq,
-                            currentTime = currentTime.value, // Передаём время из родителя
+                            currentTime = uiState.currentTime, // Передаём время из родителя
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
@@ -161,40 +156,6 @@ fun PresetListScreen(
             }
         }
     }
-}
-
-/**
- * Возвращает StateFlow с текущим временем, обновляемым каждые 5 секунд при воспроизведении
- * Оптимизация: одна корутина на весь экран вместо по одной на каждую карточку
- * 
- * Время всегда показывается текущее (не сбрасывается в 12:00 при паузе),
- * чтобы указатель на графике сразу появлялся в правильной позиции при выборе пресета.
- */
-@Composable
-private fun rememberCurrentTime(isPlaying: Boolean): State<LocalTime> {
-    val currentTime = remember { mutableStateOf(LocalTime.fromSecondOfDay(12 * 3600)) }
-    
-    // Инициализируем текущим временем сразу при первом отображении
-    LaunchedEffect(Unit) {
-        val now = Clock.System.now()
-        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-    }
-    
-    // Обновляем время каждые 5 секунд при воспроизведении
-    // При паузе не обновляем, но и не сбрасываем в 12:00 - оставляем текущее время
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            while (true) {
-                val now = Clock.System.now()
-                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-                kotlinx.coroutines.delay(5000)
-            }
-        }
-        // При isPlaying = false НЕ сбрасываем время в 12:00
-        // Указатель остаётся на текущей позиции
-    }
-    
-    return currentTime
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)

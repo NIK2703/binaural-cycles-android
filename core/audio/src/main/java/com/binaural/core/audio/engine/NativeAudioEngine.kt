@@ -1,6 +1,7 @@
 package com.binaural.core.audio.engine
 
 import android.util.Log
+import com.binaural.core.audio.BuildConfig
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.InterpolationType
@@ -483,6 +484,19 @@ class NativeAudioEngine {
     private external fun nativeGetBatchDurationMinutes(): Int
     private external fun nativeGenerateBatch(buffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int
     
+    // === НОВОЕ: текущее время суток (учитывает virtual-режим) ===
+    private external fun nativeGetCurrentTimeOfDay(): Int
+    
+    // === НОВОЕ: Debug virtual time (только debug-сборка) ===
+    private external fun nativeDebugSetVirtualTimeEnabled(enabled: Boolean)
+    private external fun nativeDebugScrub(timeSeconds: Int)
+    private external fun nativeDebugSetTimeScale(scale: Float)
+    private external fun nativeDebugSetRunning(running: Boolean)
+    private external fun nativeDebugReset()
+    private external fun nativeDebugGetVirtualTime(): Int
+    private external fun nativeDebugIsEnabled(): Boolean
+    private external fun nativeDebugGetTimeScale(): Float
+    
     /**
      * Установить длительность батча для оптимизации энергопотребления
      * @param durationMinutes длительность в минутах (0 = отключено)
@@ -507,6 +521,36 @@ class NativeAudioEngine {
     fun generateBatch(directBuffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int {
         return nativeGenerateBatch(directBuffer, maxSamplesPerChannel)
     }
+
+    /**
+     * Текущее время суток в секундах (реальное или виртуальное).
+     */
+    fun getCurrentTimeOfDay(): Int = nativeGetCurrentTimeOfDay()
+
+    // === Публичные обёртки для Debug virtual time (no-op в release) ===
+
+    fun debugSetVirtualTimeEnabled(enabled: Boolean) {
+        if (BuildConfig.DEBUG) nativeDebugSetVirtualTimeEnabled(enabled)
+    }
+
+    fun debugScrub(timeSeconds: Int) {
+        if (BuildConfig.DEBUG) nativeDebugScrub(timeSeconds)
+    }
+
+    fun debugSetTimeScale(scale: Float) {
+        if (BuildConfig.DEBUG) nativeDebugSetTimeScale(scale)
+    }
+
+    fun debugSetRunning(running: Boolean) {
+        if (BuildConfig.DEBUG) nativeDebugSetRunning(running)
+    }
+
+    fun debugResetToRealTime() {
+        if (BuildConfig.DEBUG) nativeDebugReset()
+    }
+
+    fun debugGetVirtualTime(): Int =
+        if (BuildConfig.DEBUG) nativeDebugGetVirtualTime() else 0
     
     // === Публичные методы для интерполяции (используются в UI для графика) ===
     

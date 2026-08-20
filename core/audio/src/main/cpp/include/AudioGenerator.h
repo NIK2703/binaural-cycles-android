@@ -55,6 +55,8 @@ public:
      * @param state состояние генератора (изменяется)
      * @param startTimeSeconds время начала в секундах с начала суток
      * @param elapsedMs прошедшее время воспроизведения в мс
+     * @param timeScale множитель скорости виртуального времени (1.0 = реальное время;
+     *        при debug-ускорении >1 частота-кривая обходится быстрее)
      * @return результат генерации
      */
     GenerateResult generatePackage(
@@ -63,7 +65,8 @@ public:
         const BinauralConfig& config,
         GeneratorState& state,
         float startTimeSeconds,
-        int64_t elapsedMs
+        int64_t elapsedMs,
+        float timeScale = 1.0f
     );
     
 #ifdef USE_NEON
@@ -77,6 +80,7 @@ public:
      * @param state состояние генератора (изменяется)
      * @param startTimeSeconds время начала в секундах с начала суток
      * @param elapsedMs прошедшее время воспроизведения в мс
+     * @param timeScale множитель скорости виртуального времени (1.0 = реальное время)
      * @return результат генерации
      */
     GenerateResult generatePackageNeon(
@@ -85,7 +89,8 @@ public:
         const BinauralConfig& config,
         GeneratorState& state,
         float startTimeSeconds,
-        int64_t elapsedMs
+        int64_t elapsedMs,
+        float timeScale = 1.0f
     );
 #endif
 
@@ -100,6 +105,7 @@ public:
      * @param state состояние генератора (изменяется)
      * @param startTimeSeconds время начала в секундах с начала суток
      * @param elapsedMs прошедшее время воспроизведения в мс
+     * @param timeScale множитель скорости виртуального времени (1.0 = реальное время)
      * @return результат генерации
      */
     GenerateResult generatePackageSse(
@@ -108,7 +114,8 @@ public:
         const BinauralConfig& config,
         GeneratorState& state,
         float startTimeSeconds,
-        int64_t elapsedMs
+        int64_t elapsedMs,
+        float timeScale = 1.0f
     );
 #endif
     

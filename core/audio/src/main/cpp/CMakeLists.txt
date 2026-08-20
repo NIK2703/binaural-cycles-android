@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Оптимизации для release
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math -funroll-loops -fomit-frame-pointer -fvisibility=hidden -ffp-contract=fast")
 
-# Debug флаги - включаем AUDIO_DEBUG для логирования
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -Wall -Wextra -DAUDIO_DEBUG")
+# Debug флаги - включаем AUDIO_DEBUG для логирования и ENABLE_DEBUG_TIME_CONTROL для виртуального времени
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -Wall -Wextra -DAUDIO_DEBUG -DENABLE_DEBUG_TIME_CONTROL=1")
 
 # LTO (Link Time Optimization) для release - дополнительная оптимизация
 if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -34,6 +34,7 @@ target_include_directories(
     binaural-engine
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Линковка с Android log и STL

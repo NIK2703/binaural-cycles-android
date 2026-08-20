@@ -32,7 +32,12 @@ android {
     }
     
     // Используем NDK, установленный в системе
-    ndkVersion = "26.2.11394342"
+    ndkVersion = "29.0.14206865"
+
+    // НОВОЕ: нужен BuildConfig.DEBUG в модуле core:audio
+    buildFeatures {
+        buildConfig = true
+    }
 
     buildTypes {
         release {

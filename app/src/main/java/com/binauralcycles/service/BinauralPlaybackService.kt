@@ -68,6 +68,13 @@ class BinauralPlaybackService : Service() {
         private val _elapsedSeconds = MutableStateFlow(0)
         val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
         
+        // НОВОЕ: текущее время суток (для UI-индикатора), виртуальное в debug
+        private val _currentTimeOfDaySeconds = MutableStateFlow(0)
+        val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
+        
+        // НОВОЕ: включён ли debug-режим виртуального времени
+        private val _debugTimeEnabled = MutableStateFlow(false)
+        
         private val _currentPresetName = MutableStateFlow<String?>(null)
         val currentPresetName: StateFlow<String?> = _currentPresetName.asStateFlow()
         
@@ -609,9 +616,12 @@ class BinauralPlaybackService : Service() {
         uiFrequencyUpdateJob = serviceScope.launch {
             while (true) {
                 delay(1000) // Каждую секунду
-                if (_isPlaying.value) {
-                    // O(1) получение частот из lookup table
-                    audioEngine?.updateCurrentFrequencies()
+                // Время суток (реальное/виртуальное) обновляем всегда,
+                // чтобы указатель времени на экране был актуальным даже без воспроизведения.
+                audioEngine?.updateCurrentFrequencies()
+                audioEngine?.currentTimeOfDaySeconds?.value?.let { _currentTimeOfDaySeconds.value = it }
+                // Частоты обновляем только при воспроизведении или включённом debug-режиме времени
+                if (_isPlaying.value || _debugTimeEnabled.value) {
                     // Копируем значения из audioEngine в сервис для UI
                     audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
                     audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
@@ -887,7 +897,31 @@ class BinauralPlaybackService : Service() {
     fun getSampleRate(): SampleRate {
         return audioEngine?.getSampleRate() ?: SampleRate.MEDIUM
     }
-    
+
+    // ============ Debug virtual time ============
+
+    fun debugSetVirtualTimeEnabled(enabled: Boolean) {
+        audioEngine?.debugSetVirtualTimeEnabled(enabled)
+        _debugTimeEnabled.value = enabled
+    }
+
+    fun debugScrub(timeSeconds: Int) {
+        audioEngine?.debugScrub(timeSeconds)
+        _currentTimeOfDaySeconds.value = timeSeconds
+    }
+
+    fun debugSetTimeScale(scale: Float) {
+        audioEngine?.debugSetTimeScale(scale)
+    }
+
+    fun debugSetRunning(running: Boolean) {
+        audioEngine?.debugSetRunning(running)
+    }
+
+    fun debugResetToRealTime() {
+        audioEngine?.debugResetToRealTime()
+    }
+
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         _frequencyUpdateIntervalMs.value = intervalMs
         audioEngine?.setFrequencyUpdateInterval(intervalMs)

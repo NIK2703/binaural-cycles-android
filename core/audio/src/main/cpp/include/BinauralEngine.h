@@ -2,6 +2,11 @@
 
 #include "Config.h"
 #include "AudioGenerator.h"
+
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+#include "VirtualClock.h"
+#endif
+
 #include <memory>
 #include <functional>
 #include <atomic>
@@ -133,6 +138,20 @@ public:
      */
     std::pair<float, float> getFrequenciesAtCurrentTime();
 
+    // ====== НОВОЕ: публичный доступ к текущему времени суток ======
+    // Учитывает виртуальный режим (в release всегда возвращает реальное время).
+    int32_t getCurrentTimeOfDaySeconds() const;
+
+    // ====== НОВОЕ: Debug virtual time (в release — no-op) ======
+    void setVirtualTimeEnabled(bool enabled);
+    void scrubVirtualTime(float timeOfDaySeconds);
+    void setVirtualTimeScale(float scale);       // clamp 1..60 внутри
+    void setVirtualTimeRunning(bool running);
+    void resetVirtualTimeToReal();
+    float getVirtualTimeOfDaySeconds() const;
+    bool isVirtualTimeEnabled() const;
+    float getVirtualTimeScale() const;
+
 private:
     BinauralConfig m_config;
     AudioGenerator m_generator;
@@ -152,11 +171,21 @@ private:
     // Точная интерполяция времени между буферами
     int32_t m_baseTimeSeconds = 0;          // Время начала воспроизведения
     float m_totalBufferTimeSeconds = 0.0;  // Накопленное время буферов
-    
+
     /**
      * Получить текущее время суток в секундах
      */
     int32_t getCurrentTimeSeconds() const;
+
+    /**
+     * Вычислить время суток для генерации буфера
+     * (virtual clock, если включён; иначе старая формула на основе baseTime + накопленного аудио)
+     */
+    float computePlaybackTimeSeconds() const;
+
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    VirtualClock m_virtualClock;   // присутствует только в debug-сборке
+#endif
 };
 
 } // namespace binaural

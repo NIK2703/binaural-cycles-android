@@ -742,4 +742,97 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     return result;
 }
 
+// ============================================================================
+// Debug virtual time (compile-time gated). В release — no-op заглушки.
+// ============================================================================
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetVirtualTimeEnabled(
+    JNIEnv* env, jobject thiz, jboolean enabled) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (g_engine) g_engine->setVirtualTimeEnabled(enabled == JNI_TRUE);
+#else
+    (void)enabled;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugScrub(
+    JNIEnv* env, jobject thiz, jint timeSeconds) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (g_engine) g_engine->scrubVirtualTime(static_cast<float>(timeSeconds));
+#else
+    (void)timeSeconds;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetTimeScale(
+    JNIEnv* env, jobject thiz, jfloat scale) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (g_engine) g_engine->setVirtualTimeScale(scale);
+#else
+    (void)scale;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetRunning(
+    JNIEnv* env, jobject thiz, jboolean running) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (g_engine) g_engine->setVirtualTimeRunning(running == JNI_TRUE);
+#else
+    (void)running;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugReset(
+    JNIEnv* env, jobject thiz) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (g_engine) g_engine->resetVirtualTimeToReal();
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetVirtualTime(
+    JNIEnv* env, jobject thiz) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (!g_engine) return 0;
+    return static_cast<jint>(g_engine->getVirtualTimeOfDaySeconds());
+#else
+    return 0;
+#endif
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugIsEnabled(
+    JNIEnv* env, jobject thiz) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return (g_engine && g_engine->isVirtualTimeEnabled()) ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jfloat JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetTimeScale(
+    JNIEnv* env, jobject thiz) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (!g_engine) return 1.0f;
+    return g_engine->getVirtualTimeScale();
+#else
+    return 1.0f;
+#endif
+}
+
+// Всегда доступно: текущее время суток (учитывает virtual-режим).
+// В release это просто реальные часы.
+JNIEXPORT jint JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentTimeOfDay(
+    JNIEnv* env, jobject thiz) {
+    if (!g_engine) return 0;
+    return static_cast<jint>(g_engine->getCurrentTimeOfDaySeconds());
+}
+
 } // extern "C"

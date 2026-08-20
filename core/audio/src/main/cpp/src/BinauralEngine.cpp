@@ -94,19 +94,20 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     
     // Точное время для начала буфера (float для сохранения дробной части)
     // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
-    float timeSeconds = m_baseTimeSeconds + m_totalBufferTimeSeconds;
-    
-    // Нормализация в пределах суток с сохранением дробной части
-    constexpr float SECONDS_PER_DAY_F = 86400.0f;
-    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
-    if (timeSeconds < 0.0f) {
-        timeSeconds += SECONDS_PER_DAY_F;
-    }
-    
+    float timeSeconds = computePlaybackTimeSeconds();
+
+    // Множитель скорости виртуального времени. В debug-режиме (VirtualClock
+    // включён) частота-кривая должна обходиться быстрее реального времени.
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float timeScale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
+#else
+    const float timeScale = 1.0f;
+#endif
+
     const int64_t elapsedMs = static_cast<int64_t>(
         m_elapsedSeconds.load(std::memory_order_relaxed)
     ) * 1000;
-    
+
     // Генерируем пакет буферов по плану
 #if defined(USE_NEON)
     GenerateResult result = m_generator.generatePackageNeon(
@@ -115,7 +116,8 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #elif defined(USE_SSE)
     GenerateResult result = m_generator.generatePackageSse(
@@ -124,7 +126,8 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #else
     GenerateResult result = m_generator.generatePackage(
@@ -133,7 +136,8 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #endif
     
@@ -192,6 +196,11 @@ void BinauralEngine::resetState() {
 }
 
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (m_virtualClock.isEnabled()) {
+        return static_cast<int32_t>(m_virtualClock.getTimeOfDaySeconds());
+    }
+#endif
     // Thread-safe получение текущего времени суток
     auto now = std::chrono::system_clock::now();
     
@@ -272,17 +281,17 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     
     // Точное время для начала буфера (float для сохранения дробной части)
     // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
-    float timeSeconds = m_baseTimeSeconds + m_totalBufferTimeSeconds;
-    
-    // Нормализация в пределах суток с сохранением дробной части
-    constexpr float SECONDS_PER_DAY_F = 86400.0f;
-    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
-    if (timeSeconds < 0.0f) {
-        timeSeconds += SECONDS_PER_DAY_F;
-    }
-    
+    float timeSeconds = computePlaybackTimeSeconds();
+
+    // Множитель скорости виртуального времени (см. generateBatch).
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float timeScale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
+#else
+    const float timeScale = 1.0f;
+#endif
+
     const int64_t elapsedMs = static_cast<int64_t>(m_elapsedSeconds.load(std::memory_order_relaxed)) * 1000;
-    
+
     // Обновляем прошедшее время асинхронно
     updateElapsedTime();
     
@@ -307,7 +316,8 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #elif defined(USE_SSE)
     GenerateResult result = m_generator.generatePackageSse(
@@ -316,7 +326,8 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #else
     GenerateResult result = m_generator.generatePackage(
@@ -325,7 +336,8 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         config,
         m_state,
         timeSeconds,
-        elapsedMs
+        elapsedMs,
+        timeScale
     );
 #endif
     
@@ -353,6 +365,94 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     m_totalBufferTimeSeconds += actualDurationSeconds;
     
     return true;
+}
+
+// ============ Debug virtual time ============
+
+int32_t BinauralEngine::getCurrentTimeOfDaySeconds() const {
+    return getCurrentTimeSeconds();
+}
+
+float BinauralEngine::computePlaybackTimeSeconds() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (m_virtualClock.isEnabled()) {
+        // Уже нормализовано в [0, 86400)
+        return m_virtualClock.getTimeOfDaySeconds();
+    }
+#endif
+    // Существующая логика
+    float timeSeconds = static_cast<float>(m_baseTimeSeconds) + m_totalBufferTimeSeconds;
+    constexpr float SECONDS_PER_DAY_F = 86400.0f;
+    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
+    if (timeSeconds < 0.0f) {
+        timeSeconds += SECONDS_PER_DAY_F;
+    }
+    return timeSeconds;
+}
+
+void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    m_virtualClock.setEnabled(enabled);
+    LOGD("setVirtualTimeEnabled(%d)", enabled ? 1 : 0);
+#else
+    (void)enabled;
+#endif
+}
+
+void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    m_virtualClock.scrubTo(timeOfDaySeconds);
+#else
+    (void)timeOfDaySeconds;
+#endif
+}
+
+void BinauralEngine::setVirtualTimeScale(float scale) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float clamped = std::clamp(scale, 1.0f, 60.0f);
+    m_virtualClock.setTimeScale(clamped);
+    LOGD("setVirtualTimeScale(%.2f)", clamped);
+#else
+    (void)scale;
+#endif
+}
+
+void BinauralEngine::setVirtualTimeRunning(bool running) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    m_virtualClock.setRunning(running);
+#else
+    (void)running;
+#endif
+}
+
+void BinauralEngine::resetVirtualTimeToReal() {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    m_virtualClock.resetToRealTime();
+#endif
+}
+
+float BinauralEngine::getVirtualTimeOfDaySeconds() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return m_virtualClock.getTimeOfDaySeconds();
+#else
+    return static_cast<float>(getCurrentTimeSeconds());
+#endif
+}
+
+bool BinauralEngine::isVirtualTimeEnabled() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return m_virtualClock.isEnabled();
+#else
+    return false;
+#endif
+}
+
+float BinauralEngine::getVirtualTimeScale() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return m_virtualClock.getTimeScale();
+#else
+    return 1.0f;
+#endif
 }
 
 } // namespace binaural
