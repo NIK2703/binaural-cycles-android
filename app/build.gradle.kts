@@ -38,8 +38,8 @@ android {
         applicationId = "com.binauralcycles"
         minSdk = 26
         targetSdk = 34
-        versionCode = 11
-        versionName = "0.9.1"
+        versionCode = 92
+        versionName = "9.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
