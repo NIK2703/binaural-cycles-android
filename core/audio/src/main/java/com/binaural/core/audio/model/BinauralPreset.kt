@@ -250,7 +250,9 @@ data class FrequencyCurve(
     
     /**
      * Получить соседнюю точку для сплайна Catmull-Rom
-     * Использует циклический переход через границы для получения 4 соседних точек.
+     * Использует циклический переход через границы (mod size) для получения 4 соседних точек.
+     * Согласовано с C++ реализацией (buildLookupTableInternal), которая всегда берёт
+     * соседей циклически: (leftIndex - 1 + n) % n и (rightIndex + 1) % n.
      */
     private fun getNeighborPoint(
         currentIndex: Int,
@@ -258,21 +260,10 @@ data class FrequencyCurve(
         frequencySelector: (FrequencyPoint) -> Float,
         isWrapping: Boolean = false
     ): Float {
-        val neighborIndex = currentIndex + offset
         val size = sortedPoints.size
-
-        // Обработка границ массива
-        return when {
-            neighborIndex < 0 -> {
-                if (isWrapping) frequencySelector(sortedPoints.last())
-                else frequencySelector(sortedPoints.first())
-            }
-            neighborIndex >= size -> {
-                if (isWrapping) frequencySelector(sortedPoints.first())
-                else frequencySelector(sortedPoints.last())
-            }
-            else -> frequencySelector(sortedPoints[neighborIndex])
-        }
+        // Циклический доступ — согласован с C++ (wrap-соседи всегда по модулю size)
+        val neighborIndex = ((currentIndex + offset) % size + size) % size
+        return frequencySelector(sortedPoints[neighborIndex])
     }
     
     

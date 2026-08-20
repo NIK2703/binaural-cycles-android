@@ -1115,33 +1115,9 @@ private fun getNeighborPoint(
     frequencySelector: (FrequencyPoint) -> Float,
     isWrapping: Boolean = false
 ): Float {
-    val neighborIndex = currentIndex + offset
-    
-    // Обработка границ массива
-    return when {
-        neighborIndex < 0 -> {
-            // Если идём влево от первой точки
-            if (isWrapping) {
-                // При переходе через полночь берём последнюю точку
-                frequencySelector(points.last())
-            } else {
-                // Иначе берём первую точку (clamp)
-                frequencySelector(points.first())
-            }
-        }
-        neighborIndex >= points.size -> {
-            // Если идём вправо от последней точки
-            if (isWrapping) {
-                // При переходе через полночь берём первую точку
-                frequencySelector(points.first())
-            } else {
-                // Иначе берём последнюю точку (clamp)
-                frequencySelector(points.last())
-            }
-        }
-        else -> {
-            frequencySelector(points[neighborIndex])
-        }
-    }
+    val size = points.size
+    // Циклический доступ — согласован с C++ (wrap-соседи всегда по модулю size)
+    val neighborIndex = ((currentIndex + offset) % size + size) % size
+    return frequencySelector(points[neighborIndex])
 }
 

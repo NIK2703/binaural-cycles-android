@@ -799,17 +799,8 @@ private fun getNeighborPointMini(
     frequencySelector: (FrequencyPoint) -> Float,
     isWrapping: Boolean
 ): Float {
-    val neighborIndex = currentIndex + offset
-    
-    return when {
-        neighborIndex < 0 -> {
-            if (isWrapping) frequencySelector(points.last())
-            else frequencySelector(points.first())
-        }
-        neighborIndex >= points.size -> {
-            if (isWrapping) frequencySelector(points.first())
-            else frequencySelector(points.last())
-        }
-        else -> frequencySelector(points[neighborIndex])
-    }
+    val size = points.size
+    // Циклический доступ — согласован с C++ (wrap-соседи всегда по модулю size)
+    val neighborIndex = ((currentIndex + offset) % size + size) % size
+    return frequencySelector(points[neighborIndex])
 }

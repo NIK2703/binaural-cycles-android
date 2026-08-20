@@ -192,50 +192,69 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         return p.carrierFrequency + p.beatFrequency / 2.0;
     };
     
-    // Предвычисляем частоты для каждого интервала
-    // ИСПОЛЬЗУЕМ ИТЕРАТИВНЫЙ ПОИСК - для отсортированных данных это O(n) вместо O(n log n)
-    // т.к. timeSeconds монотонно возрастает
+    // Предвычисляем частоты для каждого интервала.
+    // Итеративный поиск O(n) амортизировано: leftIndex только увеличивается.
+    //
+    // РОБАСТНОСТЬ: диапазон [0, points[0].time) принадлежит wrap-интервалу
+    // [последняя точка -> первая точка + 86400], а НЕ интервалу [points[0], points[1]].
+    // Это критично, когда первая точка НЕ в 0:00 (иначе ratio < 0 -> кламп к 0
+    // и значение "застревает" на первой точке).
+    const int firstPointTime = sortedPoints[0].timeSeconds;
     int leftIndex = 0;
-    
+
     for (int tableIndex = 0; tableIndex < tableSize; ++tableIndex) {
         // Конвертируем индекс таблицы в секунды суток
         // FREQUENCY_TABLE_INTERVAL_MS = 100, поэтому шаг = 0.1 секунды
         // tableIndex * 100 / 1000 = tableIndex / 10 (секунды)
         const int timeSeconds = tableIndex * FREQUENCY_TABLE_INTERVAL_MS / 1000;
-        
-        // Итеративный поиск - двигаемся вперёд пока не найдём нужный интервал
-        // Это O(1) амортизированное время, т.к. leftIndex только увеличивается
-        while (leftIndex < numPoints - 2 && sortedPoints[leftIndex + 1].timeSeconds <= timeSeconds) {
-            ++leftIndex;
+
+        // Выбираем левый индекс интервала для данной записи.
+        int effectiveLeftIndex;
+        if (timeSeconds < firstPointTime) {
+            // Начальный wrap-участок [0, firstPointTime): интервал
+            // [points[last], points[0] + 86400].
+            effectiveLeftIndex = numPoints - 1;
+        } else {
+            // Обычный монотонный поиск (leftIndex только растёт).
+            // ФИКС: было (numPoints - 2) — wrap-интервал [последняя точка -> первая + 86400]
+            // не строился, и для времени после последней точки происходила экстраполяция
+            // с ratio > 1.0. Теперь leftIndex достигает numPoints - 1 (wrap-интервал).
+            // Short-circuit && гарантирует отсутствие доступа к sortedPoints[numPoints].
+            while (leftIndex < numPoints - 1 && sortedPoints[leftIndex + 1].timeSeconds <= timeSeconds) {
+                ++leftIndex;
+            }
+            effectiveLeftIndex = leftIndex;
         }
-        
-        const int rightIndex = (leftIndex + 1) % numPoints;
-        
-        const auto& leftPoint = sortedPoints[leftIndex];
+
+        const int rightIndex = (effectiveLeftIndex + 1) % numPoints;
+
+        const auto& leftPoint = sortedPoints[effectiveLeftIndex];
         const auto& rightPoint = sortedPoints[rightIndex];
-        
+
         // Вычисляем нормализованную позицию t в интервале [0, 1]
         int t1 = leftPoint.timeSeconds;
         int t2 = rightPoint.timeSeconds;
-        
+
         // Обработка перехода через полночь
-        const bool isWrapping = (leftIndex == numPoints - 1);
+        const bool isWrapping = (effectiveLeftIndex == numPoints - 1);
         if (isWrapping) {
             t2 += SECONDS_PER_DAY;
         }
-        
+
         int t = timeSeconds;
         if (isWrapping && t < t1) {
             t += SECONDS_PER_DAY;
         }
-        
+
         float ratio = 0.0;
         if (t2 != t1) {
             ratio = static_cast<float>(t - t1) / (t2 - t1);
         }
-        
-        // Получаем 4 точки для сплайна
-        const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
+        // Защитный clamp — согласованность с jni.cpp (nativeGenerateInterpolatedCurve)
+        ratio = std::clamp(ratio, 0.0f, 1.0f);
+
+        // Получаем 4 точки для сплайна (циклические соседи)
+        const int prevIndex = (effectiveLeftIndex - 1 + numPoints) % numPoints;
         const int nextNextIndex = (rightIndex + 1) % numPoints;
         
         // Интерполируем нижнюю частоту
