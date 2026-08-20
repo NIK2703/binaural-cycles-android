@@ -1,1 +1,0 @@
-/home/nikita/tools/gradlew

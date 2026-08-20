@@ -170,7 +170,11 @@ private:
     
     // Точная интерполяция времени между буферами
     int32_t m_baseTimeSeconds = 0;          // Время начала воспроизведения
-    float m_totalBufferTimeSeconds = 0.0;  // Накопленное время буферов
+
+    // Накопленная РЕАЛЬНАЯ длительность сгенерированного аудио (сек).
+    // double — для точности при долгих сессиях (total*scale может быть большим).
+    // atomic — читается UI-потоком (getCurrentTimeSeconds) и пишется аудио-потоком.
+    std::atomic<double> m_totalBufferTimeSeconds{0.0};
 
     /**
      * Получить текущее время суток в секундах
@@ -185,6 +189,10 @@ private:
 
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     VirtualClock m_virtualClock;   // присутствует только в debug-сборке
+
+    // База sample-driven виртуального таймлайна (время суток в момент старта/scrub).
+    // Аудио-время = normalize(m_virtualBaseTimeSeconds + m_totalBufferTimeSeconds * scale).
+    std::atomic<float> m_virtualBaseTimeSeconds{0.0f};
 #endif
 };
 

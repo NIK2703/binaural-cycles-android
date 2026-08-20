@@ -1143,8 +1143,9 @@ class BinauralAudioEngine(private val context: Context) {
     fun debugSetVirtualTimeEnabled(enabled: Boolean) {
         nativeEngine?.debugSetVirtualTimeEnabled(enabled)
         if (enabled) {
-            // Мелкие буферы (1 с) => плавный свип частот даже при 20x.
-            pendingFrequencyUpdateIntervalMs.set(1000)
+            // 250 мс: низкая латентность scrub + плотное следование кривой при scale до 60
+            // (каждый буфер покрывает лишь scale*0.25 виртуальных секунд линейного рампа).
+            pendingFrequencyUpdateIntervalMs.set(250)
             // Отключаем батч-генерацию, чтобы не было больших "замороженных" кусков.
             nativeEngine?.setBatchDurationMinutes(0)
         } else {

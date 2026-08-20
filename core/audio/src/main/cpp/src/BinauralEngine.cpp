@@ -33,6 +33,16 @@
 
 namespace binaural {
 
+// Нормализация времени суток в [0, 86400). double — для точности при больших total*scale.
+namespace {
+constexpr double kSecondsPerDayD = 86400.0;
+inline float normalizeTimeOfDay(double t) {
+    double r = std::fmod(t, kSecondsPerDayD);
+    if (r < 0.0) r += kSecondsPerDayD;
+    return static_cast<float>(r);
+}
+} // namespace
+
 BinauralEngine::BinauralEngine() {
     // Инициализация конфигурации по умолчанию
     m_config.curve.updateCache();
@@ -141,10 +151,14 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     );
 #endif
     
-    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов
-    // Это исправляет баг рассинхронизации времени между пакетами
-    const float batchDurationSeconds = static_cast<float>(result.samplesGenerated) / sampleRate;
-    m_totalBufferTimeSeconds += batchDurationSeconds;
+    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
+    // double — для точности при долгих сессиях (total*scale может быть большим).
+    const double batchDurationSeconds =
+        static_cast<double>(result.samplesGenerated) / static_cast<double>(sampleRate);
+    m_totalBufferTimeSeconds.store(
+        m_totalBufferTimeSeconds.load(std::memory_order_relaxed) + batchDurationSeconds,
+        std::memory_order_relaxed
+    );
     
     // Обновляем атомарные значения для Java
     const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq, std::memory_order_relaxed);
@@ -171,15 +185,30 @@ void BinauralEngine::setPlaying(bool playing) {
     m_isPlaying.store(playing, std::memory_order_release);
     
     if (playing) {
-        // Сброс состояния при начале воспроизведения
         BufferPackagePlanner planner;
         planner.resetState(m_state);
         m_state.lastSwapElapsedMs = 0;
         m_elapsedSeconds.store(0, std::memory_order_relaxed);
+
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+        if (m_virtualClock.isEnabled()) {
+            // ВАЖНО: НЕ сбрасываем m_totalBufferTimeSeconds.
+            // И fresh-play, и resume в Kotlin идут через setPlaying(true);
+            // сброс total откатил бы виртуальное время и вернул стык.
+            // Таймлайн устанавливается в enable/scrub/setScale/reset.
+            LOGD("setPlaying(true): virtual timeline preserved (base=%.2f, total=%.3f)",
+                 m_virtualBaseTimeSeconds.load(std::memory_order_relaxed),
+                 m_totalBufferTimeSeconds.load(std::memory_order_relaxed));
+        } else {
+            m_baseTimeSeconds = getCurrentTimeSeconds();
+            m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+            LOGD("setPlaying(true): baseTime=%d", m_baseTimeSeconds);
+        }
+#else
         m_baseTimeSeconds = getCurrentTimeSeconds();
-        m_totalBufferTimeSeconds = 0.0;
-        
+        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
         LOGD("setPlaying(true): baseTime=%d", m_baseTimeSeconds);
+#endif
     }
 }
 
@@ -198,7 +227,9 @@ void BinauralEngine::resetState() {
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     if (m_virtualClock.isEnabled()) {
-        return static_cast<int32_t>(m_virtualClock.getTimeOfDaySeconds());
+        // Та же sample-driven ось времени, что и у генерации,
+        // чтобы UI-индикатор и отображаемые частоты совпадали со звуком.
+        return static_cast<int32_t>(computePlaybackTimeSeconds());
     }
 #endif
     // Thread-safe получение текущего времени суток
@@ -220,8 +251,8 @@ int32_t BinauralEngine::getCurrentTimeSeconds() const {
 }
 
 std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
-    // Получаем текущее время суток в секундах
-    const int32_t currentSeconds = getCurrentTimeSeconds();
+    // Получаем текущее время суток в секундах — тот же таймлайн, что и генерация.
+    const float currentSeconds = computePlaybackTimeSeconds();
     
     // Читаем конфигурацию с shared_lock
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
@@ -235,7 +266,7 @@ std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
     
     // O(1) доступ к предвычисленной таблице
     // Индекс: время в мс / шаг таблицы (100 мс)
-    const float timeMs = static_cast<float>(currentSeconds) * 1000.0f;
+    const float timeMs = currentSeconds * 1000.0f;
     const float indexFloat = timeMs / FREQUENCY_TABLE_INTERVAL_MS;
     const int index = static_cast<int>(indexFloat);
     
@@ -359,10 +390,14 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
     
-    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов
-    // Это исправляет баг рассинхронизации времени между пакетами
-    const float actualDurationSeconds = static_cast<float>(result.samplesGenerated) / sampleRate;
-    m_totalBufferTimeSeconds += actualDurationSeconds;
+    // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
+    // double — для точности при долгих сессиях (total*scale может быть большим).
+    const double actualDurationSeconds =
+        static_cast<double>(result.samplesGenerated) / static_cast<double>(sampleRate);
+    m_totalBufferTimeSeconds.store(
+        m_totalBufferTimeSeconds.load(std::memory_order_relaxed) + actualDurationSeconds,
+        std::memory_order_relaxed
+    );
     
     return true;
 }
@@ -376,23 +411,42 @@ int32_t BinauralEngine::getCurrentTimeOfDaySeconds() const {
 float BinauralEngine::computePlaybackTimeSeconds() const {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     if (m_virtualClock.isEnabled()) {
-        // Уже нормализовано в [0, 86400)
-        return m_virtualClock.getTimeOfDaySeconds();
+        // SAMPLE-DRIVEN таймлайн (как в реальном режиме), но с масштабом:
+        //   audioTime = normalize(base + totalSamples * scale)
+        // Это устраняет скачок при включении/выключении virtual clock и при
+        // смене scale/scrub — время всегда монотонно и непрерывно.
+        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const double scale = m_virtualClock.getTimeScale();
+        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        return normalizeTimeOfDay(base + total * scale);
     }
 #endif
-    // Существующая логика
-    float timeSeconds = static_cast<float>(m_baseTimeSeconds) + m_totalBufferTimeSeconds;
-    constexpr float SECONDS_PER_DAY_F = 86400.0f;
-    timeSeconds = std::fmod(timeSeconds, SECONDS_PER_DAY_F);
-    if (timeSeconds < 0.0f) {
-        timeSeconds += SECONDS_PER_DAY_F;
-    }
-    return timeSeconds;
+    // Существующая логика (real-time): base + накопленное реальное аудио
+    const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+    return normalizeTimeOfDay(static_cast<double>(m_baseTimeSeconds) + total);
 }
 
 void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
+    // Сначала заякорить VirtualClock на реальное время, затем прочитать его.
     m_virtualClock.setEnabled(enabled);
+    if (enabled) {
+        // Seed sample-driven таймлайна текущим реальным временем суток.
+        // setEnabled() только что заякорил VirtualClock на реальное время,
+        // поэтому getTimeOfDaySeconds() == реальное время суток.
+        m_virtualBaseTimeSeconds.store(m_virtualClock.getTimeOfDaySeconds(),
+                                       std::memory_order_relaxed);
+        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+    } else {
+        // Перед выключением синхронизируем реальный базис с текущим виртуальным
+        // временем генерации, чтобы реальный режим продолжился без скачка.
+        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const double scale = m_virtualClock.getTimeScale();
+        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        m_baseTimeSeconds = static_cast<int32_t>(normalizeTimeOfDay(base + total * scale));
+        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+        m_virtualClock.setEnabled(false);
+    }
     LOGD("setVirtualTimeEnabled(%d)", enabled ? 1 : 0);
 #else
     (void)enabled;
@@ -401,7 +455,10 @@ void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
 
 void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    m_virtualClock.scrubTo(timeOfDaySeconds);
+    // Сдвигаем базис таймлайна, сбрасываем накопленное аудио → без скачка скорости.
+    m_virtualBaseTimeSeconds.store(std::fmod(timeOfDaySeconds, 86400.0f),
+                                   std::memory_order_relaxed);
+    m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
 #else
     (void)timeOfDaySeconds;
 #endif
@@ -410,6 +467,17 @@ void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
 void BinauralEngine::setVirtualTimeScale(float scale) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     const float clamped = std::clamp(scale, 1.0f, 60.0f);
+    // Если уже бежит — сохраняем текущее аудио-время при смене масштаба
+    // (переносим base, сбрасываем накопленное), чтобы не было скачка.
+    if (m_virtualClock.isEnabled() && m_virtualClock.isRunning()) {
+        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const double oldScale = m_virtualClock.getTimeScale();
+        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        const double current = normalizeTimeOfDay(base + total * oldScale);
+        m_virtualBaseTimeSeconds.store(static_cast<float>(current),
+                                       std::memory_order_relaxed);
+        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+    }
     m_virtualClock.setTimeScale(clamped);
     LOGD("setVirtualTimeScale(%.2f)", clamped);
 #else
@@ -420,6 +488,8 @@ void BinauralEngine::setVirtualTimeScale(float scale) {
 void BinauralEngine::setVirtualTimeRunning(bool running) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     m_virtualClock.setRunning(running);
+    // Ничего не меняем в таймлайне: при паузе генерация останавливается
+    // (write блокируется о паузу AudioTrack) и m_totalBufferTimeSeconds замирает сам.
 #else
     (void)running;
 #endif
@@ -428,12 +498,21 @@ void BinauralEngine::setVirtualTimeRunning(bool running) {
 void BinauralEngine::resetVirtualTimeToReal() {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     m_virtualClock.resetToRealTime();
+    // Пересадка на реальное время суток (после resetToRealTime getTimeOfDaySeconds()
+    // возвращает реальное время, а не sample-driven ось UI).
+    m_virtualBaseTimeSeconds.store(m_virtualClock.getTimeOfDaySeconds(),
+                                    std::memory_order_relaxed);
+    m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
 #endif
 }
 
 float BinauralEngine::getVirtualTimeOfDaySeconds() const {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    return m_virtualClock.getTimeOfDaySeconds();
+    // Отдаём то же самое время, что генерируется (sample-driven), для консистентности UI.
+    if (m_virtualClock.isEnabled()) {
+        return computePlaybackTimeSeconds();
+    }
+    return static_cast<float>(getCurrentTimeSeconds());
 #else
     return static_cast<float>(getCurrentTimeSeconds());
 #endif
