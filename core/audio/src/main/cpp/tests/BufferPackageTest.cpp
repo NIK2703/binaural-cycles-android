@@ -3727,5 +3727,170 @@ TEST_F(StepInterpolationTest, StepPointAtSegmentEnd_HoldsOldValueUntilBoundary) 
     EXPECT_NEAR(measureLeftFreqAt(signal, 2.5f, 0.3f), 250.0f, FREQ_TOLERANCE);
 }
 
+// ============================================================================
+// ТЕСТЫ РЕЖИМА ПЕРЕСТАНОВКИ КАНАЛОВ ПО ТЕНДЕНЦИИ ГРАФИКА (ChannelSwapMode::TREND)
+// ============================================================================
+
+namespace {
+
+/**
+ * Кривая-пила по несущей для тренд-тестов:
+ * рост 00:00 -> 12:00 (200 -> 400 Гц), спад 12:00 -> ~24:00 (400 -> ~199 Гц).
+ */
+FrequencyCurve makeTrendSawCurve() {
+    FrequencyCurve curve;
+    curve.points = {
+        {0,          200.0f, 10.0f},
+        {12 * 3600,  400.0f, 10.0f},
+        {86340,      199.0f, 10.0f},
+    };
+    curve.interpolationType = InterpolationType::LINEAR;
+    return curve;
+}
+
+BinauralConfig makeTrendConfig(const FrequencyCurve& curve) {
+    BinauralConfig config;
+    config.curve = curve;
+    config.channelSwapEnabled = true;
+    config.channelSwapMode = ChannelSwapMode::TREND;
+    config.channelSwapIntervalSec = 30;   // в TREND не участвует
+    config.channelSwapFadeDurationMs = 1000;
+    return config;
+}
+
+bool planHasSwapAfter(const PackagePlan& plan) {
+    for (const auto& s : plan.segments) {
+        if (s.swapAfterSegment) return true;
+    }
+    return false;
+}
+
+int64_t solidMsBeforeFirstSwap(const PackagePlan& plan) {
+    int64_t total = 0;
+    for (const auto& s : plan.segments) {
+        if (s.swapAfterSegment) break;
+        if (s.type == BufferType::SOLID) total += s.durationMs;
+    }
+    return total;
+}
+
+} // namespace
+
+TEST(TrendSwapTest, TrendHelpers_SlopeSignAndDeadband) {
+    FrequencyCurve curve = makeTrendSawCurve();
+    curve.updateCache();
+
+    EXPECT_GT(trendCarrierDeltaAt(curve, 6.0f * 3600.0f), kTrendDeadbandHz);   // подъём
+    EXPECT_LT(trendCarrierDeltaAt(curve, 18.0f * 3600.0f), -kTrendDeadbandHz); // спад
+
+    EXPECT_FALSE(trendDesiredSwapped(false, +1.0f)); // рост -> прямое
+    EXPECT_TRUE(trendDesiredSwapped(false, -1.0f));  // спад -> обратное
+    EXPECT_FALSE(trendDesiredSwapped(true, +1.0f));  // рост при обратном -> к прямым
+    EXPECT_TRUE(trendDesiredSwapped(true, 0.0f));    // плато -> состояние сохраняется
+}
+
+TEST(TrendSwapTest, Rising_NormalArrangement_NoSwapPlanned) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        60000, config, state, /*curveStartSeconds=*/6.0f * 3600.0f);
+
+    EXPECT_FALSE(planHasSwapAfter(plan));
+    EXPECT_FALSE(state.channelsSwapped);
+}
+
+TEST(TrendSwapTest, Falling_ImmediateSwapToReversed_NoMinHold) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state; // channelsSwapped=false, спад на 18:00 -> рассогласование сразу
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        40000, config, state, /*curveStartSeconds=*/18.0f * 3600.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    // Переход обнаружен на offset=0: SOLID пропускается, FADE_OUT идёт первым
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);
+
+    // Порядок фаз: SOLID* -> FADE_OUT(+swap) -> [PAUSE] -> FADE_IN -> SOLID*
+    int phase = 0; // 0=SOLID, 1=FADE_OUT, 2=после swap
+    bool orderOk = true;
+    for (const auto& s : plan.segments) {
+        switch (phase) {
+            case 0:
+                if (s.type == BufferType::FADE_OUT) { phase = 1; break; }
+                if (s.type != BufferType::SOLID || s.swapAfterSegment) orderOk = false;
+                break;
+            case 1:
+                if (s.type == BufferType::FADE_OUT || s.type == BufferType::PAUSE) break;
+                if (s.type == BufferType::FADE_IN) { phase = 2; break; }
+                orderOk = false;
+                break;
+            case 2:
+                if (s.type != BufferType::SOLID || s.swapAfterSegment) orderOk = false;
+                break;
+        }
+        if (!orderOk) break;
+    }
+    EXPECT_TRUE(orderOk);
+}
+
+TEST(TrendSwapTest, Falling_AlreadySwapped_NoSwapPlanned) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+    state.channelsSwapped = true; // состояние уже соответствует спаду
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        60000, config, state, /*curveStartSeconds=*/18.0f * 3600.0f);
+
+    EXPECT_FALSE(planHasSwapAfter(plan));
+}
+
+TEST(TrendSwapTest, RisingWhileSwapped_CorrectsImmediately) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        1200000, config, state, /*curveStartSeconds=*/11.0f * 3600.0f + 50 * 60.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0); // немедленная коррекция без паузы
+}
+
+TEST(TrendSwapTest, MidnightWrap_FallingNearMidnightDetected) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+
+    // В 23:55 ещё спад к минимуму у полуночи — скан с wrap обязан это увидеть
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        600000, config, state, /*curveStartSeconds=*/23.0f * 3600.0f + 55 * 60.0f);
+
+    EXPECT_TRUE(planHasSwapAfter(plan));
+}
+
+TEST(TrendSwapTest, NoCurveStartTime_FallsBackToTimerBehavior) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+
+    // Старая сигнатура без времени кривой: TREND деградирует к периодическому swap
+    PackagePlan plan = BufferPackagePlanner().planPackage(35000, config, state);
+
+    EXPECT_TRUE(planHasSwapAfter(plan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan),
+              static_cast<int64_t>(config.channelSwapIntervalSec) * 1000LL);
+}
+
+TEST(TrendSwapTest, TimerMode_UnchangedByTrendCode) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    config.channelSwapMode = ChannelSwapMode::TIMER;
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(35000, config, state);
+
+    EXPECT_TRUE(planHasSwapAfter(plan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan),
+              static_cast<int64_t>(config.channelSwapIntervalSec) * 1000LL);
+}
+
 } // namespace test
 } // namespace binaural

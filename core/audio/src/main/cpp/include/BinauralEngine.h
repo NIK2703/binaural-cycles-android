@@ -43,12 +43,7 @@ public:
      * Установить конфигурацию
      */
     void setConfig(const BinauralConfig& config);
-    
-    /**
-     * Получить текущую конфигурацию
-     */
-    const BinauralConfig& getConfig() const { return m_config; }
-    
+
     /**
      * Установить частоту дискретизации
      */

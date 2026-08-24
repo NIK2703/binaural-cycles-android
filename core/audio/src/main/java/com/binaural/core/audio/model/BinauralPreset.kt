@@ -316,7 +316,8 @@ data class BinauralConfig(
     val volume: Float = 0.7f,
     // Настройки перестановки каналов
     val channelSwapEnabled: Boolean = false,
-    val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию
+    val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию (только TIMER)
+    val channelSwapMode: ChannelSwapMode = ChannelSwapMode.TIMER,
     val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
     val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
     val channelSwapPauseDurationMs: Long = 0L, // длительность паузы между fade-out и fade-in (0 = без паузы)
@@ -364,12 +365,24 @@ data class PlaybackState(
 )
 
 /**
+ * Режим автоматической перестановки каналов
+ */
+@Serializable
+enum class ChannelSwapMode {
+    TIMER,  // По таймеру: перестановка каждые intervalSeconds секунд
+    TREND   // По тенденции графика: несущая растёт - обычное расположение каналов,
+            // убывает - обратное; интервал не участвует, защита от дребезга -
+            // только мёртвая зона производной
+}
+
+/**
  * Настройки перестановки каналов для пресета
  */
 @Serializable
 data class ChannelSwapSettings(
     val enabled: Boolean = false,
-    val intervalSeconds: Int = 300,        // 5 минут по умолчанию
+    val mode: ChannelSwapMode = ChannelSwapMode.TIMER,
+    val intervalSeconds: Int = 300,        // 5 минут по умолчанию (только TIMER)
     val fadeEnabled: Boolean = true,       // затухание при смене каналов
     val fadeDurationMs: Long = 1000L,      // длительность затухания/нарастания в мс
     val pauseDurationMs: Long = 0L         // длительность паузы между fade-out и fade-in в мс (0 = без паузы)

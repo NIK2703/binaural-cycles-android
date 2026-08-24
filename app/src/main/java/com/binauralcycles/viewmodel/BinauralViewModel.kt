@@ -12,6 +12,7 @@ import com.binauralcycles.service.BinauralPlaybackService
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.BinauralPreset
+import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
@@ -353,13 +354,14 @@ class BinauralViewModel @Inject constructor(
             volume = state.volume,
             channelSwapEnabled = state.channelSwapSettings.enabled,
             channelSwapIntervalSeconds = state.channelSwapSettings.intervalSeconds,
+            channelSwapMode = state.channelSwapSettings.mode,
             channelSwapFadeEnabled = state.channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = state.channelSwapSettings.fadeDurationMs,
             channelSwapPauseDurationMs = state.channelSwapSettings.pauseDurationMs,
             normalizationType = state.volumeNormalizationSettings.type,
             volumeNormalizationStrength = state.volumeNormalizationSettings.strength
         )
-        
+
         val relaxationSettings = preset.relaxationModeSettings
         
         // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
@@ -1240,6 +1242,21 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
+     * Установить режим перестановки каналов (по таймеру / по тенденции графика)
+     */
+    fun setChannelSwapMode(mode: ChannelSwapMode) {
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val newSettings = state.channelSwapSettings.copy(mode = mode)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
+        }
+    }
+
+    /**
      * Установить интервал перестановки каналов
      */
     fun setChannelSwapInterval(seconds: Int) {
@@ -1354,6 +1371,7 @@ class BinauralViewModel @Inject constructor(
             volume = state.volume,
             channelSwapEnabled = channelSwapSettings.enabled,
             channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
+            channelSwapMode = channelSwapSettings.mode,
             channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
             channelSwapPauseDurationMs = channelSwapSettings.pauseDurationMs,

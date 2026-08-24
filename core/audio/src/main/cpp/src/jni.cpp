@@ -85,6 +85,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jfloat volume,
     jboolean channelSwapEnabled,
     jint channelSwapIntervalSec,
+    jint channelSwapMode,
     jboolean channelSwapFadeEnabled,
     jlong channelSwapFadeDurationMs,
     jlong channelSwapPauseDurationMs,
@@ -133,6 +134,9 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     config.volume = volume;
     config.channelSwapEnabled = channelSwapEnabled;
     config.channelSwapIntervalSec = channelSwapIntervalSec;
+    config.channelSwapMode = (channelSwapMode == 1)
+        ? binaural::ChannelSwapMode::TREND
+        : binaural::ChannelSwapMode::TIMER;
     config.channelSwapFadeEnabled = channelSwapFadeEnabled;
     config.channelSwapFadeDurationMs = channelSwapFadeDurationMs;
     config.channelSwapPauseDurationMs = channelSwapPauseDurationMs;
@@ -188,6 +192,9 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaying(
 ) {
     if (g_engine) {
         g_engine->setPlaying(playing, preserveTimeline == JNI_TRUE);
+        // Свежий старт в TREND-режиме может выставить swapped до первого буфера —
+        // обновляем зеркало сразу, чтобы UI-индикатор не показывал устаревшее значение
+        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
     }
 }
 

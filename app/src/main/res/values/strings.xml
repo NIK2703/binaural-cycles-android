@@ -50,8 +50,15 @@
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Авто-перестановка каналов</string>
     <string name="channel_swap_description">Каналы меняются местами для равномерной нагрузки</string>
+    <string name="channel_swap_now_normal">Сейчас: обычное расположение</string>
+    <string name="channel_swap_now_swapped">Сейчас: каналы переставлены</string>
     <string name="channel_swap_disabled">Выключено</string>
     <string name="swap_interval">Интервал перестановки</string>
+    <string name="swap_mode">Режим перестановки</string>
+    <string name="swap_mode_timer">По таймеру</string>
+    <string name="swap_mode_trend">По тенденции</string>
+    <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
+    <string name="swap_mode_trend_description">Рост частоты — обычное расположение каналов, спад — обратное; смена происходит на пиках и впадинах кривой</string>
     <string name="smooth_fade">Плавное затухание</string>
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
     <string name="instant_switch">Мгновенное переключение</string>
@@ -117,12 +124,14 @@
     <string name="wavetable_optimization_enabled_desc">Снижает нагрузку на процессор через табличный синтез</string>
     <string name="wavetable_optimization_disabled_desc">Прямой расчёт синусоиды в реальном времени</string>
     <string name="wavetable_size">Точность синтеза</string>
+    <string name="wavetable_size_samples">%1$d сэмплов</string>
     <string name="wavetable_size_description">Больше значение — точнее звук, но чуть больше потребление памяти</string>
     
     <!-- Settings Sections -->
     <string name="settings_section_comfort">Воспроизведение</string>
     <string name="settings_section_power">Энергопотребление</string>
     <string name="settings_section_interface">Интерфейс</string>
+    <string name="settings_section_debug">Отладка</string>
     
     <!-- Resume on Headset Connect -->
     <string name="resume_on_headset_connect">Возобновление при подключении</string>

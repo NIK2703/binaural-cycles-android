@@ -64,6 +64,7 @@ fun SettingsScreen(
                 channelSwapSettings = uiState.channelSwapSettings,
                 isChannelsSwapped = uiState.isChannelsSwapped,
                 onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
+                onChannelSwapModeChange = { viewModel.setChannelSwapMode(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
                 onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) }
@@ -139,7 +140,7 @@ fun SettingsScreen(
             if (BuildConfig.DEBUG) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
                 Text(
-                    text = "Отладка",
+                    text = stringResource(R.string.settings_section_debug),
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(vertical = 8.dp)

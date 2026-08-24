@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.data.preferences.R
+import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
@@ -61,17 +62,6 @@ data class SerializableFrequencyCurve(
 )
 
 /**
- * Сериализуемые настройки перестановки каналов
- */
-@Serializable
-data class SerializableChannelSwapSettings(
-    val enabled: Boolean = false,
-    val intervalSeconds: Int = 300,
-    val fadeEnabled: Boolean = true,
-    val fadeDurationMs: Long = 1000L
-)
-
-/**
  * Сериализуемые настройки нормализации громкости
  */
 @Serializable
@@ -106,7 +96,6 @@ data class SerializablePreset(
     val id: String,
     val name: String,
     val curve: SerializableFrequencyCurve,
-    val channelSwapSettings: SerializableChannelSwapSettings? = null,
     val volumeNormalizationSettings: SerializableVolumeNormalizationSettings? = null,
     val relaxationModeSettings: SerializableRelaxationModeSettings? = null,
     val createdAt: Long,
@@ -136,6 +125,7 @@ class BinauralPreferencesRepository @Inject constructor(
         // Настройки перестановки каналов
         private val CHANNEL_SWAP_ENABLED_KEY = booleanPreferencesKey("channel_swap_enabled")
         private val CHANNEL_SWAP_INTERVAL_KEY = intPreferencesKey("channel_swap_interval")
+        private val CHANNEL_SWAP_MODE_KEY = stringPreferencesKey("channel_swap_mode")
         private val CHANNEL_SWAP_FADE_ENABLED_KEY = booleanPreferencesKey("channel_swap_fade_enabled")
         private val CHANNEL_SWAP_FADE_DURATION_KEY = intPreferencesKey("channel_swap_fade_duration")
         private val CHANNEL_SWAP_PAUSE_DURATION_KEY = intPreferencesKey("channel_swap_pause_duration")
@@ -285,6 +275,9 @@ class BinauralPreferencesRepository @Inject constructor(
         return dataStore.data.map { preferences ->
             ChannelSwapSettings(
                 enabled = preferences[CHANNEL_SWAP_ENABLED_KEY] ?: false,
+                mode = preferences[CHANNEL_SWAP_MODE_KEY]?.let {
+                    try { ChannelSwapMode.valueOf(it) } catch (e: Exception) { ChannelSwapMode.TIMER }
+                } ?: ChannelSwapMode.TIMER,
                 intervalSeconds = preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60,
                 fadeEnabled = preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true,
                 fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L,
@@ -292,7 +285,7 @@ class BinauralPreferencesRepository @Inject constructor(
             )
         }
     }
-    
+
     /**
      * Сохранить все настройки перестановки каналов
      */
@@ -300,6 +293,7 @@ class BinauralPreferencesRepository @Inject constructor(
         dataStore.edit { preferences ->
             preferences[CHANNEL_SWAP_ENABLED_KEY] = settings.enabled
             preferences[CHANNEL_SWAP_INTERVAL_KEY] = settings.intervalSeconds
+            preferences[CHANNEL_SWAP_MODE_KEY] = settings.mode.name
             // fadeEnabled всегда true, не сохраняем
             preferences[CHANNEL_SWAP_FADE_DURATION_KEY] = settings.fadeDurationMs.toInt()
             preferences[CHANNEL_SWAP_PAUSE_DURATION_KEY] = settings.pauseDurationMs.toInt()

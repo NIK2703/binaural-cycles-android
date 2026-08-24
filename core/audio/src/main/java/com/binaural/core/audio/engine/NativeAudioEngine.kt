@@ -3,6 +3,7 @@ package com.binaural.core.audio.engine
 import android.util.Log
 import com.binaural.core.audio.BuildConfig
 import com.binaural.core.audio.model.BinauralConfig
+import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
@@ -80,6 +81,7 @@ class NativeAudioEngine {
         volume: Float,
         channelSwapEnabled: Boolean,
         channelSwapIntervalSec: Int,
+        channelSwapMode: Int,
         channelSwapFadeEnabled: Boolean,
         channelSwapFadeDurationMs: Long,
         channelSwapPauseDurationMs: Long,
@@ -212,6 +214,7 @@ class NativeAudioEngine {
             volume = 1.0f,  // Фиксированная громкость в нативном движке; мастер-громкость управляется через AudioTrack
             channelSwapEnabled = config.channelSwapEnabled,
             channelSwapIntervalSec = config.channelSwapIntervalSeconds,
+            channelSwapMode = if (config.channelSwapMode == ChannelSwapMode.TREND) 1 else 0,
             channelSwapFadeEnabled = config.channelSwapFadeEnabled,
             channelSwapFadeDurationMs = config.channelSwapFadeDurationMs,
             channelSwapPauseDurationMs = config.channelSwapPauseDurationMs,

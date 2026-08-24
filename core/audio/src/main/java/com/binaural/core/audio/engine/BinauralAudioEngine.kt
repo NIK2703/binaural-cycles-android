@@ -353,6 +353,26 @@ class BinauralAudioEngine(private val context: Context) {
         }
 
         Log.d(TAG, "startNewPlayback() - calling nativeEngine.resetState() and play()")
+
+        // Гонка со старым циклом генерации: startNewPlayback выполняется в
+        // вызывающем потоке, а generateAudioLoop живёт на audioHandler-потоке.
+        // Если цикл ещё не вышел (isActive уже false, но текущий
+        // nativeGenerateBufferDirect/запись в трек досматривается), resetState()+play()
+        // разорвут m_state нативного движка (фазы свопа, timeline, TREND-init).
+        // Ждём завершения цикла ограниченно; таймаут — деградация к прежнему
+        // поведению с предупреждением в лог.
+        if (isGenerating) {
+            val waitStartMs = System.currentTimeMillis()
+            while (isGenerating && System.currentTimeMillis() - waitStartMs < 1000) {
+                Thread.sleep(10)
+            }
+            if (isGenerating) {
+                Log.w(TAG, "startNewPlayback() - generation loop still running after 1s, proceeding anyway")
+            } else {
+                Log.d(TAG, "startNewPlayback() - waited ${System.currentTimeMillis() - waitStartMs}ms for old loop to finish")
+            }
+        }
+
         nativeEngine?.resetState()
         nativeEngine?.play()
         // НЕ обновляем частоты здесь - native engine может ещё не иметь актуальных данных.

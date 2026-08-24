@@ -50,8 +50,15 @@
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Auto channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
+    <string name="channel_swap_now_normal">Now: normal arrangement</string>
+    <string name="channel_swap_now_swapped">Now: channels swapped</string>
     <string name="channel_swap_disabled">Disabled</string>
     <string name="swap_interval">Swap interval</string>
+    <string name="swap_mode">Swap mode</string>
+    <string name="swap_mode_timer">Timer</string>
+    <string name="swap_mode_trend">Trend-based</string>
+    <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
+    <string name="swap_mode_trend_description">Rising frequency — normal channels, falling — swapped; flips occur at curve peaks and troughs</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>
@@ -117,12 +124,14 @@
     <string name="wavetable_optimization_enabled_desc">Reduces CPU load through table-based synthesis</string>
     <string name="wavetable_optimization_disabled_desc">Direct sine wave calculation in real-time</string>
     <string name="wavetable_size">Synthesis precision</string>
+    <string name="wavetable_size_samples">%1$d samples</string>
     <string name="wavetable_size_description">Higher value = more precise sound, slightly more memory usage</string>
     
     <!-- Settings Sections -->
     <string name="settings_section_comfort">Playback</string>
     <string name="settings_section_power">Power Consumption</string>
     <string name="settings_section_interface">Interface</string>
+    <string name="settings_section_debug">Debug</string>
     
     <!-- Resume on Headset Connect -->
     <string name="resume_on_headset_connect">Resume on connect</string>

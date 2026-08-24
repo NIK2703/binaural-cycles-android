@@ -1,10 +1,81 @@
 #pragma once
 
 #include "Config.h"
+#include "Interpolation.h"
 #include <vector>
 #include <algorithm>
+#include <cmath>
 
 namespace binaural {
+
+// ============================================================================
+// РЕЖИМ ПЕРЕСТАНОВКИ КАНАЛОВ ПО ТЕНДЕНЦИИ ГРАФИКА (ChannelSwapMode::TREND)
+//
+// Желаемое состояние в момент t определяется знаком производной НЕСУЩЕЙ
+// частоты кривой:
+//   рост   (Δf > 0) → обычное расположение каналов (swapped = false)
+//   спад   (Δf < 0) → обратное расположение           (swapped = true)
+//   плато  (|Δf| ≤ ε) → состояние не меняется (гистерезис против дребезга)
+// Производная оценивается конечной разностью по lookup-таблице кривой.
+// ============================================================================
+
+// Полуокно оценки производной: Δf = carrier(t+h) − carrier(t−h)
+constexpr float kTrendHalfWindowSec = 60.0f;
+// Мёртвая зона: |Δf| за окно 2*h ниже порога считается плато
+constexpr float kTrendDeadbandHz = 0.05f;
+// Шаг сканирования кривой вперёд при поиске смены тренда
+constexpr float kTrendScanStepSec = 15.0f;
+// Если переходов нет — предельная длина SOLID до переоценки (30 минут)
+constexpr int64_t kTrendMaxSolidMs = 1800000LL;
+
+/**
+ * Знакопеременный прирост несущей частоты в точке t (Гц за окно 2*h).
+ */
+inline float trendCarrierDeltaAt(const FrequencyCurve& curve, float tSec) {
+    const FrequencyTableResult plus = curve.getChannelFrequenciesAt(tSec + kTrendHalfWindowSec);
+    const FrequencyTableResult minus = curve.getChannelFrequenciesAt(tSec - kTrendHalfWindowSec);
+    // carrier = (upper + lower)/2 → разность носителей = половина разности сумм
+    return ((plus.upperFreq + plus.lowerFreq) - (minus.upperFreq + minus.lowerFreq)) * 0.5f;
+}
+
+/**
+ * Желаемое состояние перестановки с гистерезисом в мёртвой зоне.
+ */
+inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
+    if (carrierDeltaHz > kTrendDeadbandHz)  return false; // рост → прямое расположение
+    if (carrierDeltaHz < -kTrendDeadbandHz) return true;  // убывание → обратное
+    return currentlySwapped;                              // плато → без изменений
+}
+
+/**
+ * Длительность SOLID-фазы в TREND-режиме: время до ближайшей смены тренда.
+ * Единственная защита от дребезга — мёртвая зона производной (kTrendDeadbandHz);
+ * искусственных минимальных пауз между сменами нет по требованию продукта.
+ *
+ * Оси времени: скан идёт по ОСИ КРИВОЙ (сек суток), а длительности фаз живут
+ * на АУДИО-ОСИ (мс). При timeScale>1 (debug virtual time) кривая обгоняет
+ * аудио, поэтому найденное смещение делится на масштаб.
+ */
+inline int64_t trendSolidDurationMs(
+    const FrequencyCurve& curve,
+    float curvePosSec,
+    bool currentlySwapped,
+    float timeScale = 1.0f
+) {
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
+
+    for (float offset = 0.0f; offset < dayF; offset += kTrendScanStepSec) {
+        const float t = std::fmod(curvePosSec + offset, dayF);
+        const float delta = trendCarrierDeltaAt(curve, t);
+        if (trendDesiredSwapped(currentlySwapped, delta) != currentlySwapped) {
+            // Смещение по кривой -> длительность аудио-фазы с учётом масштаба
+            const int64_t dtMs = static_cast<int64_t>(offset * 1000.0f / ts);
+            return std::min(dtMs, kTrendMaxSolidMs);
+        }
+    }
+    return kTrendMaxSolidMs; // переходов за сутки нет — переоценка позже
+}
 
 /**
  * Планировщик пакетов буферов
@@ -34,16 +105,22 @@ class BufferPackagePlanner {
 public:
     /**
      * Спланировать пакет буферов
-     * 
+     *
      * @param packageDurationMs Длительность пакета в мс
      * @param config Конфигурация с параметрами swap
      * @param state Текущее состояние (изменяется для продолжения с места остановки)
+     * @param curveStartSeconds Позиция кривой (сек суток) в начале пакета — нужна
+     *        для TREND-режима; < 0 → TREND откатывается к TIMER-поведению
+     * @param timeScale Множитель скорости кривой относительно аудио-времени
+     *        (debug virtual time; в release всегда 1.0)
      * @return План пакета с последовательностью сегментов
      */
     PackagePlan planPackage(
         int64_t packageDurationMs,
         const BinauralConfig& config,
-        GeneratorState& state
+        GeneratorState& state,
+        float curveStartSeconds = -1.0f,
+        float timeScale = 1.0f
     );
     
     /**
@@ -87,18 +164,20 @@ private:
 inline PackagePlan BufferPackagePlanner::planPackage(
     int64_t packageDurationMs,
     const BinauralConfig& config,
-    GeneratorState& state
+    GeneratorState& state,
+    float curveStartSeconds,
+    float timeScale
 ) {
     PackagePlan plan;
     plan.totalDurationMs = 0;
     plan.endsMidCycle = false;
-    
+
     LOGD_PLANNER("planPackage: duration=%lldms, swapEnabled=%d, fadeEnabled=%d, fadeDuration=%lldms",
                  (long long)packageDurationMs,
                  config.channelSwapEnabled ? 1 : 0,
                  config.channelSwapFadeEnabled ? 1 : 0,
                  (long long)config.channelSwapFadeDurationMs);
-    
+
     // Без swap: один сплошной буфер на весь пакет
     // Без свапа: дробим на 100-мс подсегменты ВСЕГДА (раньше был ОДИН
     // SOLID на весь пакет, затем 1 с). Это: (а) кривая частот следует с шагом
@@ -122,18 +201,53 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         }
         return plan;
     }
-    
+
+    // Контекст TREND-режима. curveStartSeconds < 0 (не передан вызывающим)
+    // → откат к TIMER-поведению через флаг trendMode.
+    const bool trendMode = config.channelSwapMode == ChannelSwapMode::TREND &&
+                           curveStartSeconds >= 0.0f;
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    float trendCurvePosSec = 0.0f;   // позиция кривой внутри плана (сек суток)
+    bool projectedSwapped = state.channelsSwapped; // проекция состояния после запланированных swap
+    if (trendMode) {
+        // Стартовая позиция кривой от движка (иначе скан пойдёт от полуночи)
+        trendCurvePosSec = std::fmod(curveStartSeconds, dayF);
+        if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
+    }
+
+    // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены тренда),
+    // для остальных и TIMER — константа из конфига.
+    auto startPhaseDuration = [&](SwapPhase phase) -> int64_t {
+        if (trendMode && phase == SwapPhase::SOLID) {
+            return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped, timeScale);
+        }
+        return phaseDuration(phase, config);
+    };
+
+    // Продвижение TREND-контекста вдоль запланированного аудио
+    auto advanceTrendContext = [&](const BufferSegment& segment) {
+        if (segment.swapAfterSegment) {
+            projectedSwapped = !projectedSwapped;
+        }
+        if (trendMode) {
+            trendCurvePosSec = std::fmod(
+                trendCurvePosSec +
+                static_cast<float>(segment.durationMs) * 0.001f * timeScale, dayF);
+            if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
+        }
+    };
+
     int64_t remainingTime = packageDurationMs;
     SwapPhase currentPhase = state.swapPhase;
     int64_t phaseTimeRemaining = state.phaseRemainingMs;
-    
+
     LOGD_PLANNER("  initial state: phase=%d, phaseRemaining=%lldms, channelsSwapped=%d",
                  static_cast<int>(currentPhase), (long long)phaseTimeRemaining,
                  state.channelsSwapped ? 1 : 0);
-    
+
     // Если phaseRemainingMs == 0, начинаем новую фазу
     if (phaseTimeRemaining == 0) {
-        phaseTimeRemaining = phaseDuration(currentPhase, config);
+        phaseTimeRemaining = startPhaseDuration(currentPhase);
         LOGD_PLANNER("  starting new phase: phase=%d, duration=%lldms",
                      static_cast<int>(currentPhase), (long long)phaseTimeRemaining);
     }
@@ -155,7 +269,7 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         // Пропускаем фазы с нулевой длительностью (например, если fade отключён)
         if (phaseTimeRemaining == 0) {
             currentPhase = nextPhase(currentPhase);
-            phaseTimeRemaining = phaseDuration(currentPhase, config);
+            phaseTimeRemaining = startPhaseDuration(currentPhase);
             LOGD_PLANNER("  skip to next phase: phase=%d, duration=%lldms",
                          static_cast<int>(currentPhase), (long long)phaseTimeRemaining);
             continue;
@@ -171,18 +285,19 @@ inline PackagePlan BufferPackagePlanner::planPackage(
             int64_t solidRemaining = segmentDuration;
             while (solidRemaining > 0 && remainingTime > 0) {
                 int64_t subSegmentDuration = std::min({solidRemaining, remainingTime, SOLID_SUBSEGMENT_MS});
-                
+
                 BufferSegment subSegment;
                 subSegment.type = BufferType::SOLID;
                 subSegment.durationMs = subSegmentDuration;
                 subSegment.swapAfterSegment = false;  // КРИТИЧНО: явно инициализируем false
-                
+
                 plan.segments.push_back(subSegment);
                 plan.totalDurationMs += subSegmentDuration;
+                advanceTrendContext(subSegment);
                 solidRemaining -= subSegmentDuration;
                 remainingTime -= subSegmentDuration;
                 phaseTimeRemaining -= subSegmentDuration;
-                
+
                 LOGD_PLANNER("  segment[%d]: type=SOLID_SUB, duration=%lldms, swapAfter=0",
                              segmentIndex, (long long)subSegment.durationMs);
                 segmentIndex++;
@@ -192,13 +307,13 @@ inline PackagePlan BufferPackagePlanner::planPackage(
             BufferSegment segment;
             segment.type = toBufferType(currentPhase);
             segment.durationMs = segmentDuration;
-            
+
             // Swap происходит после полного FADE_OUT (перед PAUSE)
             // Это обеспечивает: SOLID → FADE_OUT → swap → PAUSE → FADE_IN → SOLID
             // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
             segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
                                         segmentDuration == phaseTimeRemaining);
-            
+
             // Позиция внутри ПОЛНОГО фейда: если фейд разрезан границей пакета,
             // генератор продолжит кривую затухания/нарастания с правильного места
             // вместо рестарта с offset=0 (щелчок + скачок частот).
@@ -207,22 +322,23 @@ inline PackagePlan BufferPackagePlanner::planPackage(
                 segment.fadeTotalMs  = fullPhaseDur;
                 segment.fadeOffsetMs = fullPhaseDur - phaseTimeRemaining; // уже сгенерировано до этого сегмента
             }
-            
+
             plan.segments.push_back(segment);
             plan.totalDurationMs += segmentDuration;
+            advanceTrendContext(segment);
             remainingTime -= segmentDuration;
             phaseTimeRemaining -= segmentDuration;
-            
+
             LOGD_PLANNER("  segment[%d]: type=%d, duration=%lldms, swapAfter=%d",
                          segmentIndex, static_cast<int>(segment.type),
                          (long long)segment.durationMs, segment.swapAfterSegment ? 1 : 0);
             segmentIndex++;
         }
-        
+
         // Переход к следующей фазе
         if (phaseTimeRemaining == 0) {
             currentPhase = nextPhase(currentPhase);
-            phaseTimeRemaining = phaseDuration(currentPhase, config);
+            phaseTimeRemaining = startPhaseDuration(currentPhase);
         }
     }
     

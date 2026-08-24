@@ -8,7 +8,7 @@ An Android app for creating and listening to dynamic binaural beats aligned with
 
 - **Customizable presets** — Create and listen to binaural beat presets with precise carrier and beat frequency distribution throughout the day
 - **Interpolation modes** — Linear or cubic interpolation between frequency points
-- **Auto channel swap** — Periodic left/right channel switching for balanced stimulation
+- **Auto channel swap** — Periodic left/right channel switching for balanced stimulation, or trend-based mode: rising carrier frequency keeps the normal arrangement, falling reverses it (flips at curve peaks and troughs)
 - **Volume normalization** — Automatic volume balancing between channels based on frequency ratio
 
 ## How Binaural Beats Work

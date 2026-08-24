@@ -13,6 +13,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
@@ -244,6 +245,7 @@ fun ChannelSwapSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
     isChannelsSwapped: Boolean,
     onChannelSwapEnabledChange: (Boolean) -> Unit,
+    onChannelSwapModeChange: (ChannelSwapMode) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onChannelSwapPauseDurationChange: (Long) -> Unit
@@ -255,8 +257,21 @@ fun ChannelSwapSettingsCard(
         // Авто-перестановка каналов
         ListItem(
             headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
-            supportingContent = { 
-                Text(if (channelSwapSettings.enabled) stringResource(R.string.channel_swap_description) else stringResource(R.string.channel_swap_disabled))
+            supportingContent = {
+                Text(
+                    if (!channelSwapSettings.enabled) {
+                        stringResource(R.string.channel_swap_disabled)
+                    } else {
+                        // Живой индикатор текущего расположения каналов:
+                        // особенно важен в TREND-режиме на плоских участках кривой,
+                        // где смены могут не происходить долго
+                        stringResource(R.string.channel_swap_description) + "\n" +
+                            stringResource(
+                                if (isChannelsSwapped) R.string.channel_swap_now_swapped
+                                else R.string.channel_swap_now_normal
+                            )
+                    }
+                )
             },
             trailingContent = {
                 Switch(
@@ -265,17 +280,67 @@ fun ChannelSwapSettingsCard(
                 )
             }
         )
-        
-        // Слайдер интервала перестановки (показываем только когда включено)
+
         if (channelSwapSettings.enabled) {
-            DiscreteSlider(
-                label = stringResource(R.string.swap_interval),
-                value = channelSwapSettings.intervalSeconds,
-                values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
-                formatValue = { seconds -> formatInterval(seconds) },
-                onValueChange = onChannelSwapIntervalChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+            // Режим перестановки: по таймеру / по тенденции графика
+            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                Text(
+                    text = stringResource(R.string.swap_mode),
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    text = when (channelSwapSettings.mode) {
+                        ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
+                        ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = channelSwapSettings.mode == ChannelSwapMode.TIMER,
+                        onClick = { onChannelSwapModeChange(ChannelSwapMode.TIMER) },
+                        label = {
+                            Text(
+                                stringResource(R.string.swap_mode_timer),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = channelSwapSettings.mode == ChannelSwapMode.TREND,
+                        onClick = { onChannelSwapModeChange(ChannelSwapMode.TREND) },
+                        label = {
+                            Text(
+                                stringResource(R.string.swap_mode_trend),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            // Слайдер интервала перестановки: только в TIMER-режиме
+            // (в TREND интервал не участвует — частота смен определяется
+            // мёртвой зоной производной кривой)
+            if (channelSwapSettings.mode == ChannelSwapMode.TIMER) {
+                DiscreteSlider(
+                    label = stringResource(R.string.swap_interval),
+                    value = channelSwapSettings.intervalSeconds,
+                    values = listOf(30, 60, 120, 300, 600, 900, 1800, 3600),
+                    formatValue = { seconds -> formatInterval(seconds) },
+                    onValueChange = onChannelSwapIntervalChange,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
             
             // Слайдер длительности затухания (всегда показываем, т.к. fadeEnabled всегда true)
             DiscreteSliderLong(
@@ -674,7 +739,7 @@ fun DiscreteSliderWavetableSize(
  */
 @Composable
 fun formatWavetableSize(size: Int): String {
-    return "$size samples"
+    return stringResource(R.string.wavetable_size_samples, size)
 }
 
 /**

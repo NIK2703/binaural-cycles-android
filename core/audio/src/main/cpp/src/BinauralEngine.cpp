@@ -140,12 +140,9 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         config = m_config;
     }
     
-    // Планируем пакет буферов
-    BufferPackagePlanner planner;
-    PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state);
-    
     // Точное время для начала буфера (float для сохранения дробной части)
     // КРИТИЧНО: используем float вместо int32_t для бесшовных переходов между пакетами
+    // Вычисляется ДО планирования: нужно планировщику для TREND-режима перестановки
     float timeSeconds = computePlaybackTimeSeconds();
 
     // Множитель скорости виртуального времени. В debug-режиме (VirtualClock
@@ -155,6 +152,11 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
 #else
     const float timeScale = 1.0f;
 #endif
+
+    // Планируем пакет буферов
+    BufferPackagePlanner planner;
+    PackagePlan plan = planner.planPackage(packageDurationMs, config, m_state,
+                                           timeSeconds, timeScale);
 
     const int64_t elapsedMs = static_cast<int64_t>(
         m_elapsedSeconds.load(std::memory_order_relaxed)
@@ -275,6 +277,37 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
             // прошедшее за паузу, не экстраполировалось в будущее. Span=0 — до
             // следующего пакета UI стоит на текущей позиции (пакет сгенерируется сразу).
             const float resumeTime = computePlaybackTimeSeconds();
+
+            // Коррекция расположения каналов при возобновлении:
+            // 1) выключенный swap не должен «залипать» в переставленном состоянии
+            //    (настройка менялась в паузе без рестарта воспроизведения);
+            // 2) TREND-режим выравнивает расположение по текущему тренду
+            //    (идемпотентно; TIMER не трогаем — его состоянием владеет фазовая машина).
+            {
+                BinauralConfig resumeCfg;
+                {
+                    std::shared_lock<std::shared_mutex> lock(m_configMutex);
+                    resumeCfg = m_config;
+                }
+                if (!resumeCfg.channelSwapEnabled) {
+                    if (m_state.channelsSwapped) {
+                        LOGD("setPlaying(resume): swap disabled while paused -> force normal");
+                        m_state.channelsSwapped = false;
+                    }
+                } else if (resumeCfg.channelSwapMode == ChannelSwapMode::TREND &&
+                           !resumeCfg.curve.lowerFreqTable.empty() &&
+                           !resumeCfg.curve.upperFreqTable.empty()) {
+                    const bool aligned = trendDesiredSwapped(
+                        m_state.channelsSwapped,
+                        trendCarrierDeltaAt(resumeCfg.curve, resumeTime));
+                    if (aligned != m_state.channelsSwapped) {
+                        LOGD("setPlaying(resume): TREND realign swapped %d -> %d",
+                             m_state.channelsSwapped ? 1 : 0, aligned ? 1 : 0);
+                        m_state.channelsSwapped = aligned;
+                    }
+                }
+            }
+
             anchorUiTimeline(resumeTime, resumeTime);
             return;
         }
@@ -318,6 +351,29 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // Span=0 — до первого пакета UI стоит на базе; первый пакет
         // сгенерируется немедленно и расширит диапазон.
         const float freshStart = computePlaybackTimeSeconds();
+
+        // TREND-режим перестановки: начальное расположение каналов по знаку
+        // тренда в точке старта (спад → сразу обратное). До первого сэмпла —
+        // бесщёлочно; не ждём первого fade-цикла.
+        {
+            BinauralConfig startCfg;
+            {
+                std::shared_lock<std::shared_mutex> lock(m_configMutex);
+                startCfg = m_config;
+            }
+            if (startCfg.channelSwapEnabled &&
+                startCfg.channelSwapMode == ChannelSwapMode::TREND &&
+                !startCfg.curve.lowerFreqTable.empty() &&
+                !startCfg.curve.upperFreqTable.empty()) {
+                m_state.channelsSwapped = trendDesiredSwapped(
+                    /*currentlySwapped=*/false,
+                    trendCarrierDeltaAt(startCfg.curve, freshStart));
+                LOGD("setPlaying(true): trend initial swap=%d (delta=%.3f Hz)",
+                     m_state.channelsSwapped ? 1 : 0,
+                     trendCarrierDeltaAt(startCfg.curve, freshStart));
+            }
+        }
+
         anchorUiTimeline(freshStart, freshStart);
     }
 }
@@ -473,8 +529,10 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     
     // НОВАЯ АРХИТЕКТУРА: Используем планировщик пакетов
     // Планируем пакет буферов на основе текущего состояния
+    // TREND-режиму перестановки нужны позиция кривой и масштаб времени
     BufferPackagePlanner planner;
-    PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state);
+    PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state,
+                                           timeSeconds, timeScale);
     
     // Диагностика стыка: сравниваем частоты кривой в конце прошлого пакета
     // и в начале текущего. Если различаются при dt≈0 — скачок времени/конфига.
@@ -772,6 +830,12 @@ void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
 
 void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
+    // Гвардия: scrub двигает таймлайн из вызывающего потока и может гоняться
+    // с in-flight генерацией. В реальном режиме (virtual clock выключен) скраб
+    // перезаписал бы живой real-таймлайн — запрещаем; польза только в virtual.
+    if (!m_virtualClock.isEnabled()) {
+        return;
+    }
     // Сдвигаем базис таймлайна, сбрасываем накопленное аудио → без скачка скорости.
     const float wrapped = normalizeTimeOfDay(timeOfDaySeconds);
     m_virtualBaseTimeSeconds.store(wrapped, std::memory_order_relaxed);

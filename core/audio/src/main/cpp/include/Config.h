@@ -107,6 +107,16 @@ private:
 };
 
 /**
+ * Режим автоматической перестановки каналов
+ */
+enum class ChannelSwapMode : int8_t {
+    TIMER = 0,   // По таймеру: swap каждые channelSwapIntervalSec секунд
+    TREND = 1    // По тенденции графика: рост несущей — прямое расположение,
+                 // убывание — обратное; интервал не участвует, частота смен
+                 // ограничена только мёртвой зоной производной
+};
+
+/**
  * Конфигурация бинаурального ритма
  */
 struct BinauralConfig {
@@ -115,7 +125,8 @@ struct BinauralConfig {
     
     // Настройки перестановки каналов
     bool channelSwapEnabled = false;
-    int32_t channelSwapIntervalSec = 300;  // 5 минут
+    int32_t channelSwapIntervalSec = 300;  // 5 минут (только TIMER; в TREND не участвует)
+    ChannelSwapMode channelSwapMode = ChannelSwapMode::TIMER;
     bool channelSwapFadeEnabled = true;
     int64_t channelSwapFadeDurationMs = 1000;
     int64_t channelSwapPauseDurationMs = 0;  // Пауза между fade-out и fade-in (0 = без паузы)
