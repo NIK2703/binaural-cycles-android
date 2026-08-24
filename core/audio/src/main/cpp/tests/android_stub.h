@@ -33,11 +33,23 @@ inline int __android_log_print(int prio, const char* tag, const char* fmt, ...) 
 
 // Заглушка для localtime_r
 #include <ctime>
+#include <cstring>
+#include <mutex>
 inline struct tm* localtime_r(const time_t* timep, struct tm* result) {
 #ifdef _WIN32
     localtime_s(result, timep);
-    return result;
 #else
-    return localtime_r(timep, result);
+    // POSIX: прежний вариант вызывал сам себя (бесконечная рекурсия).
+    // Реализуем потокобезопасно через localtime(): она возвращает указатель
+    // на статический буфер, поэтому копируем результат под мьютексом.
+    static std::mutex s_localtimeMutex;
+    const std::lock_guard<std::mutex> lock(s_localtimeMutex);
+    const std::tm* tmp = std::localtime(timep);
+    if (tmp != nullptr) {
+        *result = *tmp;
+    } else {
+        std::memset(result, 0, sizeof(*result));
+    }
 #endif
+    return result;
 }

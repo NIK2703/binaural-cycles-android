@@ -462,115 +462,8 @@ private fun createRelaxationVirtualPoints(
     interpolationType: InterpolationType,
     splineTension: Float
 ): List<FrequencyPoint> {
-    if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
-    
-    return when (relaxationModeSettings.mode) {
-        RelaxationMode.STEP -> createStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-        RelaxationMode.SMOOTH -> createSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-    }
-}
-
-private fun createStepVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    
-    val gapSeconds = relaxationModeSettings.gapBetweenRelaxationMinutes * 60L
-    val transitionSeconds = relaxationModeSettings.transitionPeriodMinutes * 60L
-    val durationSeconds = relaxationModeSettings.relaxationDurationMinutes * 60L
-    
-    val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-    val daySeconds = 24 * 3600L
-    
-    var periodStartSeconds = 0L
-    
-    while (periodStartSeconds < daySeconds) {
-        val t1 = periodStartSeconds
-        val time1 = LocalTime.fromSecondOfDay((t1 % daySeconds).toInt())
-        val carrier1 = interpolateCarrierFrequencyMini(points, time1, interpolationType, splineTension)
-        val beat1 = interpolateBeatFrequencyMini(points, time1, interpolationType, splineTension)
-        virtualPoints.add(FrequencyPoint(time1, carrier1, beat1))
-        
-        val t2 = periodStartSeconds + transitionSeconds
-        if (t2 < daySeconds) {
-            val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
-            val baseCarrier2 = interpolateCarrierFrequencyMini(points, time2, interpolationType, splineTension)
-            val baseBeat2 = interpolateBeatFrequencyMini(points, time2, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(
-                time2,
-                baseCarrier2 * (1.0f - carrierReduction),
-                baseBeat2 * (1.0f - beatReduction)
-            ))
-        }
-        
-        val t3 = periodStartSeconds + transitionSeconds + durationSeconds
-        if (t3 < daySeconds) {
-            val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
-            val baseCarrier3 = interpolateCarrierFrequencyMini(points, time3, interpolationType, splineTension)
-            val baseBeat3 = interpolateBeatFrequencyMini(points, time3, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(
-                time3,
-                baseCarrier3 * (1.0f - carrierReduction),
-                baseBeat3 * (1.0f - beatReduction)
-            ))
-        }
-        
-        val t4 = periodStartSeconds + fullPeriodSeconds
-        if (t4 < daySeconds) {
-            val time4 = LocalTime.fromSecondOfDay((t4 % daySeconds).toInt())
-            val carrier4 = interpolateCarrierFrequencyMini(points, time4, interpolationType, splineTension)
-            val beat4 = interpolateBeatFrequencyMini(points, time4, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(time4, carrier4, beat4))
-        }
-        
-        periodStartSeconds += fullPeriodSeconds + gapSeconds
-    }
-    
-    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
-}
-
-private fun createSmoothVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    val intervalSeconds = relaxationModeSettings.smoothIntervalMinutes * 60L
-    val daySeconds = 24 * 3600L
-    
-    var currentTimeSeconds = 0L
-    var isRelaxationPoint = false
-    
-    while (currentTimeSeconds < daySeconds) {
-        val time = LocalTime.fromSecondOfDay((currentTimeSeconds % daySeconds).toInt())
-        val baseCarrier = interpolateCarrierFrequencyMini(points, time, interpolationType, splineTension)
-        val baseBeat = interpolateBeatFrequencyMini(points, time, interpolationType, splineTension)
-        
-        if (isRelaxationPoint) {
-            virtualPoints.add(FrequencyPoint(
-                time,
-                baseCarrier * (1.0f - carrierReduction),
-                baseBeat * (1.0f - beatReduction)
-            ))
-        } else {
-            virtualPoints.add(FrequencyPoint(time, baseCarrier, baseBeat))
-        }
-        
-        isRelaxationPoint = !isRelaxationPoint
-        currentTimeSeconds += intervalSeconds
-    }
-    
-    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+    // Единая реализация в core-модели (RelaxationModeSettings)
+    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension)
 }
 
 // Функции вычисления путей
@@ -583,27 +476,30 @@ private fun computeCarrierPath(
 ): Path {
     val carrierPath = Path()
     val width = params.widthPx.toFloat()
-    
+
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
-    val startY = params.carrierToY(startCarrier)
+    // Линия несущей отображается как (l+u)/2 от канальных кривых — как в движке
+    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
+        sortedPoints, startTime, interpolationType, splineTension
+    )
+    val startY = params.carrierToY((startLowerFreq + startUpperFreq) / 2.0f)
     carrierPath.moveTo(0f, startY)
-    
+
     if (interpolationType == InterpolationType.STEP) {
         val firstPointX = params.timeToX(sortedPoints.first().time)
         val lastCarrierY = params.carrierToY(sortedPoints.last().carrierFrequency)
-        
+
         carrierPath.lineTo(firstPointX, lastCarrierY)
-        
+
         for (i in 0 until sortedPoints.size) {
             val currentPoint = sortedPoints[i]
             val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
-            
+
             val currentX = params.timeToX(currentPoint.time)
             val nextX = if (i == sortedPoints.size - 1) width else params.timeToX(nextPoint.time)
-            
+
             val currentCarrierY = params.carrierToY(currentPoint.carrierFrequency)
-            
+
             carrierPath.lineTo(currentX, currentCarrierY)
             carrierPath.lineTo(nextX, currentCarrierY)
         }
@@ -612,13 +508,15 @@ private fun computeCarrierPath(
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
-            val y = params.carrierToY(carrier)
+            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension
+            )
+            val y = params.carrierToY((lowerFreq + upperFreq) / 2.0f)
             val x = t * width
             carrierPath.lineTo(x, y)
         }
     }
-    
+
     return carrierPath
 }
 
@@ -633,31 +531,33 @@ private fun computeBeatPaths(
     
     val upperPath = Path()
     val lowerPath = Path()
-    
+
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
-    val startBeat = interpolateBeatFrequencyMini(sortedPoints, startTime, interpolationType, splineTension)
-    
-    upperPath.moveTo(0f, params.beatUpperY(startCarrier, startBeat))
-    lowerPath.moveTo(0f, params.beatLowerY(startCarrier, startBeat))
-    
+    // Канальные кривые интерполируются напрямую — как в движке
+    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
+        sortedPoints, startTime, interpolationType, splineTension
+    )
+
+    upperPath.moveTo(0f, params.carrierToY(startUpperFreq))
+    lowerPath.moveTo(0f, params.carrierToY(startLowerFreq))
+
     if (interpolationType == InterpolationType.STEP) {
         val firstPointX = params.timeToX(sortedPoints.first().time)
         val lastPoint = sortedPoints.last()
-        
+
         upperPath.lineTo(firstPointX, params.beatUpperY(lastPoint.carrierFrequency, lastPoint.beatFrequency))
         lowerPath.lineTo(firstPointX, params.beatLowerY(lastPoint.carrierFrequency, lastPoint.beatFrequency))
-        
+
         for (i in 0 until sortedPoints.size) {
             val currentPoint = sortedPoints[i]
             val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
-            
+
             val currentX = params.timeToX(currentPoint.time)
             val nextX = if (i == sortedPoints.size - 1) width else params.timeToX(nextPoint.time)
-            
+
             val upperY = params.beatUpperY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
             val lowerY = params.beatLowerY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
-            
+
             upperPath.lineTo(currentX, upperY)
             upperPath.lineTo(nextX, upperY)
             lowerPath.lineTo(currentX, lowerY)
@@ -667,140 +567,28 @@ private fun computeBeatPaths(
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
-            val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension
+            )
             val x = t * width
-            upperPath.lineTo(x, params.beatUpperY(carrier, beat))
-            lowerPath.lineTo(x, params.beatLowerY(carrier, beat))
+            upperPath.lineTo(x, params.carrierToY(upperFreq))
+            lowerPath.lineTo(x, params.carrierToY(lowerFreq))
         }
     }
-    
+
     val combinedPath = Path()
     combinedPath.addPath(upperPath)
-    
+
     for (i in numSamples downTo 0) {
         val t = i.toFloat() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequencyMini(sortedPoints, time, interpolationType, splineTension)
-        val beat = interpolateBeatFrequencyMini(sortedPoints, time, interpolationType, splineTension)
+        val (lowerFreq, _) = Interpolation.interpolateChannels(
+            sortedPoints, time, interpolationType, splineTension
+        )
         val x = t * width
-        combinedPath.lineTo(x, params.beatLowerY(carrier, beat))
+        combinedPath.lineTo(x, params.carrierToY(lowerFreq))
     }
     combinedPath.close()
-    
+
     return Triple(upperPath, lowerPath, combinedPath)
-}
-
-// Функции интерполяции
-
-private fun interpolateCarrierFrequencyMini(
-    points: List<FrequencyPoint>,
-    time: LocalTime,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): Float = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.carrierFrequency }
-
-private fun interpolateBeatFrequencyMini(
-    points: List<FrequencyPoint>,
-    time: LocalTime,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): Float = interpolateFrequencyMini(points, time, interpolationType, splineTension) { it.beatFrequency }
-
-private fun interpolateFrequencyMini(
-    points: List<FrequencyPoint>,
-    time: LocalTime,
-    interpolationType: InterpolationType,
-    splineTension: Float,
-    frequencySelector: (FrequencyPoint) -> Float
-): Float {
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    if (sortedPoints.isEmpty()) return 0.0f
-    if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
-    
-    val targetSeconds = time.toSecondOfDay()
-    
-    var intervalIndex = -1
-    for (i in 0 until sortedPoints.size - 1) {
-        val current = sortedPoints[i].time.toSecondOfDay()
-        val next = sortedPoints[i + 1].time.toSecondOfDay()
-        if (targetSeconds in current..next) {
-            intervalIndex = i
-            break
-        }
-    }
-    
-    if (intervalIndex == -1) {
-        return interpolateBetweenPointsMini(
-            sortedPoints,
-            sortedPoints.size - 1,
-            0,
-            time,
-            frequencySelector,
-            interpolationType,
-            splineTension,
-            isWrapping = true
-        )
-    }
-    
-    return interpolateBetweenPointsMini(
-        sortedPoints,
-        intervalIndex,
-        intervalIndex + 1,
-        time,
-        frequencySelector,
-        interpolationType,
-        splineTension,
-        isWrapping = false
-    )
-}
-
-private fun interpolateBetweenPointsMini(
-    sortedPoints: List<FrequencyPoint>,
-    leftIndex: Int,
-    rightIndex: Int,
-    time: LocalTime,
-    frequencySelector: (FrequencyPoint) -> Float,
-    interpolationType: InterpolationType,
-    splineTension: Float,
-    isWrapping: Boolean
-): Float {
-    val leftPoint = sortedPoints[leftIndex]
-    val rightPoint = sortedPoints[rightIndex]
-    
-    val t1 = leftPoint.time.toSecondOfDay()
-    val t2 = if (isWrapping) {
-        rightPoint.time.toSecondOfDay() + 24 * 3600
-    } else {
-        rightPoint.time.toSecondOfDay()
-    }
-    val t = if (time.toSecondOfDay() < t1 && isWrapping) {
-        time.toSecondOfDay() + 24 * 3600
-    } else {
-        time.toSecondOfDay()
-    }
-    
-    if (t2 == t1) return frequencySelector(leftPoint)
-    
-    val ratio = (t - t1).toFloat() / (t2 - t1)
-    
-    val p0 = getNeighborPointMini(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)
-    val p1 = frequencySelector(leftPoint)
-    val p2 = frequencySelector(rightPoint)
-    val p3 = getNeighborPointMini(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
-    
-    return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
-}
-
-private fun getNeighborPointMini(
-    points: List<FrequencyPoint>,
-    currentIndex: Int,
-    offset: Int,
-    frequencySelector: (FrequencyPoint) -> Float,
-    isWrapping: Boolean
-): Float {
-    val size = points.size
-    // Циклический доступ — согласован с C++ (wrap-соседи всегда по модулю size)
-    val neighborIndex = ((currentIndex + offset) % size + size) % size
-    return frequencySelector(points[neighborIndex])
 }

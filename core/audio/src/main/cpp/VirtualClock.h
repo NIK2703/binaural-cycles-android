@@ -102,12 +102,11 @@ private:
         if (!m_running) {
             return normalize(m_anchorVirtualSeconds);
         }
-        const double elapsedRealSeconds =
-            static_cast<double>(steadyNowNs() - m_anchorSteadyNs) / 1e9;
-        const double virtualSeconds =
-            static_cast<double>(m_anchorVirtualSeconds) +
-            static_cast<double>(m_timeScale) * elapsedRealSeconds;
-        return normalize(static_cast<float>(virtualSeconds));
+        const int64_t elapsedNs = steadyNowNs() - m_anchorSteadyNs;
+        const float elapsedRealSeconds = static_cast<float>(elapsedNs) * 1e-9f;
+        const float virtualSeconds =
+            m_anchorVirtualSeconds + m_timeScale * elapsedRealSeconds;
+        return normalize(virtualSeconds);
     }
 
     static float normalize(float s) {
@@ -121,17 +120,23 @@ private:
             std::chrono::steady_clock::now().time_since_epoch()).count();
     }
 
-    // Реальное локальное время суток (как в getCurrentTimeSeconds).
+    // Реальное локальное время суток с миллисекундной дробью.
+    // Целая и дробная части из ОДНОГО снимка часов (согласовано с
+    // BinauralEngine::realTimeOfDaySeconds).
     static float realTimeOfDaySeconds() {
         const auto now = std::chrono::system_clock::now();
-        const std::time_t t = std::chrono::system_clock::to_time_t(now);
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+        const std::time_t t = static_cast<std::time_t>(nowMs / 1000);
         std::tm tmInfo{};
 #if defined(_WIN32)
         localtime_s(&tmInfo, &t);
 #else
         localtime_r(&t, &tmInfo);
 #endif
-        return static_cast<float>(tmInfo.tm_hour * 3600 + tmInfo.tm_min * 60 + tmInfo.tm_sec);
+        const float whole = static_cast<float>(
+            tmInfo.tm_hour * 3600 + tmInfo.tm_min * 60 + tmInfo.tm_sec);
+        return whole + static_cast<float>(nowMs % 1000) / 1000.0f;
     }
 
     mutable std::mutex m_mutex;

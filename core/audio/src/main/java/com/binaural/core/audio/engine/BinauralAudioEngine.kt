@@ -47,28 +47,29 @@ class BinauralAudioEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "BinauralAudioEngine"
-        private const val BUFFER_SIZE_MS = 1000
+        // Запас 3 секунды (фикс Qwen, P3): генерация следующего пакета занимает
+        // ~30 мс CPU-спайком; при буфере в 1 с любой спайк/GC со стороны другого
+        // процесса или системы даёт underrun на границе пакетов (слышимый стык).
+        private const val BUFFER_SIZE_MS = 3000
         private const val WAKE_LOCK_TAG = "BinauralBeats:PlaybackWakeLock"
         private const val THREAD_NAME = "BinauralAudioThread"
         private const val MIN_VOLUME = 0.001f
         private const val PLAYBACK_FADE_DURATION_MS = 250L
+        // C5: короткий fade-in при resume из мягкой паузы (защита от щелчка)
+        private const val RESUME_FADE_DURATION_MS = 150L
 
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
 
-        // Максимальный размер буфера в минутах (ограничен памятью Android)
-        // При 22050 Гц: 10 мин = 13,230,000 сэмплов × 2 канала × 4 байта = ~106 МБ
-        private const val MAX_BUFFER_MINUTES = 10
+        // C2: максимальный размер буфера в минутах — разрешённый UI диапазон 1-60 мин
+        private const val MAX_BUFFER_MINUTES = 60
 
-        // Максимальный размер буфера в байтах (дополнительная защита)
-        // ~500 МБ - безопасный лимит для современных Android устройств
-        private const val MAX_BUFFER_BYTES = 500 * 1024 * 1024
+        // C2: жёсткий байтовый кап на direct-буфер (применяется и в старте, и при реаллокации).
+        // При 48000 Гц стерео float: 8 байт/с на сэмпл-канал => ~11.6 мин аудио
+        private const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
 
         // Токен для отмены callbacks при переключении частоты дискретизации
         private val RESTART_PLAYBACK_TOKEN = Any()
-        
-        // Токен для отмены callback завершения fade-in
-        private val FADE_IN_COMPLETE_TOKEN = Any()
     }
     
     // Атомарные ссылки для потокобезопасного доступа
@@ -82,6 +83,18 @@ class BinauralAudioEngine(private val context: Context) {
     private val pauseWithFadeRequested = AtomicBoolean(false)
     private val presetSwitchRequested = AtomicReference<BinauralConfig?>(null)
 
+    // C7: запрос на перестроение нативной конфигурации после живого редактирования кривой
+    private val pendingCurveUpdate = AtomicBoolean(false)
+
+    // C7: последние применённые настройки релаксации — нужны для корректной
+    // развёртки виртуальных точек при отложенном применении кривой
+    @Volatile
+    private var lastRelaxationSettings = RelaxationModeSettings()
+
+    // Пресет, ожидающий применения через fade-перезапуск (см. checkFadeRequests)
+    @Volatile
+    private var pendingPresetConfig: BinauralConfig? = null
+
     // Флаг для отслеживания запланированной операции перезапуска после смены частоты
     @Volatile
     private var restartPlaybackScheduled = false
@@ -91,7 +104,15 @@ class BinauralAudioEngine(private val context: Context) {
 
     // Текущие настройки
     private var sampleRate: Int = SampleRate.MEDIUM.value
-    private var frequencyUpdateIntervalMs: Int = 10000
+    private var frequencyUpdateIntervalMs: Int = 600_000
+
+    // C4: последний пользовательский интервал (для восстановления после debug-времени)
+    @Volatile
+    private var lastUserIntervalMs: Int = 600_000
+
+    // C4: включён ли debug-виртуальный таймлайн (интервал форсируется в 250 мс)
+    @Volatile
+    private var debugVirtualTimeEnabled = false
 
     // DirectByteBuffer для zero-copy генерации
     // Запись в AudioTrack выполняется порциями не больше audioTrackBufferSize
@@ -106,7 +127,8 @@ class BinauralAudioEngine(private val context: Context) {
     private var audioHandler: Handler? = null
     private var isGenerating = false
 
-    // WakeLock для предотвращения засыпания
+    // WakeLock для предотвращения засыпания (K5: volatile — доступ из 3 потоков)
+    @Volatile
     private var wakeLock: PowerManager.WakeLock? = null
 
     // VolumeShaper для плавного изменения громкости при старте/остановке
@@ -120,12 +142,22 @@ class BinauralAudioEngine(private val context: Context) {
     // Текущая громкость (0.0 - 1.0) - используется для отслеживания состояния fade
     private var currentVolume: Float = 1.0f
     
-    // Трекинг параметров fade
+    // Трекинг параметров fade (C12: доступны из разных потоков)
+    @Volatile
     private var fadeStartTime: Long = 0L
+    @Volatile
     private var fadeDurationMs: Long = 0L
+    @Volatile
     private var fadeStartVolume: Float = 0.0f
+    @Volatile
     private var fadeTargetVolume: Float = 1.0f
+    @Volatile
     private var isFadeInProgress: Boolean = false
+
+    // F5: epoch-ms, когда fade-in шейпер можно закрыть; 0 = активного fade-in нет.
+    // Заменяет отложенные токены: посты в audioHandler не доставляются из живого цикла.
+    @Volatile
+    private var fadeShaperCloseAtMs: Long = 0L
 
     // Время начала воспроизведения
     private var playbackStartTime = 0L
@@ -197,7 +229,15 @@ class BinauralAudioEngine(private val context: Context) {
         nativeEngine = NativeAudioEngine()
         nativeEngine?.initialize()
         nativeEngine?.setSampleRate(sampleRate)
-        
+
+        // Отпечаток версии: позволяет убедиться, что на устройстве НОВАЯ сборка
+        runCatching {
+            val pi = context.packageManager.getPackageInfo(context.packageName, 0)
+            val vc = if (Build.VERSION.SDK_INT >= 28) pi.longVersionCode
+                     else @Suppress("DEPRECATION") pi.versionCode.toLong()
+            Log.i(TAG, "ENGINE_INIT: pkg=${context.packageName} ver=${pi.versionName} code=$vc")
+        }
+
         Log.d(TAG, "Audio engine initialized on thread: ${audioThread?.name}")
     }
 
@@ -205,8 +245,14 @@ class BinauralAudioEngine(private val context: Context) {
      * Обновить конфигурацию (потокобезопасно)
      */
     fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
+        // Диагностика стыков: кто подменяет конфиг во время воспроизведения?
+        // Стек покажет триггер (relaxation / Flow / UI), если частоты скачут.
+        if (isActive.get()) {
+            Log.w(TAG, "updateConfig() while playing", Throwable("updateConfig stacktrace"))
+        }
         configRef.set(config)
         _currentConfig.value = config
+        lastRelaxationSettings = relaxationSettings
         // ВАЖНО: НЕ обновляем userVolume из config.volume!
         // userVolume управляется ТОЛЬКО через setVolume() от слайдера пользователя.
         // VolumeShaper используется исключительно для плавного затухания/восстановления
@@ -221,16 +267,19 @@ class BinauralAudioEngine(private val context: Context) {
      * Обновить настройки режима расслабления (потокобезопасно)
      */
     fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
+        lastRelaxationSettings = settings
         nativeEngine?.updateRelaxationModeSettings(settings)
     }
 
     /**
-     * Обновить кривую частот (потокобезопасно)
+     * Обновить кривую частот (потокобезопасно).
+     * C7: нативная конфигурация перестраивается в generateAudioLoop (pendingCurveUpdate).
      */
     fun updateFrequencyCurve(curve: FrequencyCurve) {
         val currentConfig = configRef.get()
         configRef.set(currentConfig.copy(frequencyCurve = curve))
         _currentConfig.value = configRef.get()
+        pendingCurveUpdate.set(true)
     }
 
     /**
@@ -294,6 +343,15 @@ class BinauralAudioEngine(private val context: Context) {
         isActive.set(true)
         playbackStartTime = System.currentTimeMillis()
 
+        // Применяем отложенный пресет (смена через fade-перезапуск, F5)
+        pendingPresetConfig?.let { cfg ->
+            nativeEngine?.updateConfig(cfg, lastRelaxationSettings)
+            configRef.set(cfg)
+            _currentConfig.value = cfg
+            pendingPresetConfig = null
+            Log.d(TAG, "startNewPlayback(): applied pending preset config")
+        }
+
         Log.d(TAG, "startNewPlayback() - calling nativeEngine.resetState() and play()")
         nativeEngine?.resetState()
         nativeEngine?.play()
@@ -308,7 +366,10 @@ class BinauralAudioEngine(private val context: Context) {
         handler.post(::startPlayback)
     }
 
-    @Synchronized
+    // Вызывается только через handler.post на единственном аудио-потоке —
+    // сериализация обеспечена лупером; @Synchronized здесь создавал дедлок:
+    // монитор удерживался всю сессию (включая sleep паузы), а
+    // acquireWakeLock из resumeWithFade (main/binder) ждал бы вечно.
     private fun startPlayback() {
         Log.d(TAG, "startPlayback() called, isActive=${isActive.get()}")
 
@@ -336,7 +397,13 @@ class BinauralAudioEngine(private val context: Context) {
             // Вычисляем размер буфера на основе эффективного интервала с ограничением
             val requestedSamplesPerChannel = (sampleRate.toLong() * effectiveIntervalMs / 1000).toInt()
             val samplesPerChannel = minOf(requestedSamplesPerChannel, maxSamplesPerChannelLimit)
-            
+
+            // F7: честность капа — реальный интервал урезан лимитом буфера
+            val effectiveBufferIntervalMs = samplesPerChannel * 1000L / sampleRate
+            if (effectiveBufferIntervalMs < effectiveIntervalMs - 999) {
+                Log.w(TAG, "Buffer interval capped by buffer limit: requested=${effectiveIntervalMs}ms, effective=${effectiveBufferIntervalMs}ms")
+            }
+
             // Создаём DirectByteBuffer для zero-copy генерации
             // Размер: samplesPerChannel * 2 канала * 4 байта на float
             // Дополнительно ограничиваем MAX_BUFFER_BYTES для защиты от OOM
@@ -344,11 +411,14 @@ class BinauralAudioEngine(private val context: Context) {
                 samplesPerChannel * 2 * 4,
                 MAX_BUFFER_BYTES
             )
-            
+
             if (directAudioBuffer == null || directAudioBuffer!!.capacity() < directBufferSize) {
-                directAudioBuffer = java.nio.ByteBuffer.allocateDirect(directBufferSize)
-                    .order(java.nio.ByteOrder.nativeOrder())
-                Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes (${directBufferSize / 1024 / 1024} MB) for interval ${effectiveIntervalMs}ms")
+                directAudioBuffer = allocateDirectBuffer(directBufferSize, sampleRate)
+                if (directAudioBuffer != null) {
+                    Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes (${directBufferSize / 1024 / 1024} MB) for interval ${effectiveBufferIntervalMs}ms")
+                } else {
+                    Log.e(TAG, "Failed to allocate DirectByteBuffer ($directBufferSize bytes)")
+                }
             }
             
             createAudioTrack()
@@ -366,14 +436,9 @@ class BinauralAudioEngine(private val context: Context) {
             // к userVolume, и после завершения шейпера просто освобождаем ресурсы.
             // Громкость установлена через AudioTrack.setVolume(userVolume) в createAudioTrack()
             // или через setVolume() от слайдера пользователя.
-            audioHandler?.postAtTime({
-                if (isActive.get()) {
-                    volumeShaper?.close()
-                    volumeShaper = null
-                    isFadeInProgress = false
-                    Log.d(TAG, "Fade-in completed, userVolume=$userVolume")
-                }
-            }, FADE_IN_COMPLETE_TOKEN, System.currentTimeMillis() + PLAYBACK_FADE_DURATION_MS + 50)
+            // F6: закрытие шейпера после fade-in выполняет generateAudioLoop
+            // (fadeShaperCloseAtMs) — посты в audioHandler не доставляются из живого цикла.
+            fadeShaperCloseAtMs = System.currentTimeMillis() + PLAYBACK_FADE_DURATION_MS + 50
             
             generateAudioLoop()
             Log.d(TAG, "startPlayback() - generateAudioLoop() completed normally")
@@ -427,6 +492,26 @@ class BinauralAudioEngine(private val context: Context) {
         audioTrack?.setVolume(userVolume)
         audioTrackBufferSize = bufferSize
         Log.d(TAG, "AudioTrack created: sampleRate=$sampleRate, bufferSize=$bufferSize")
+    }
+
+    /**
+     * F8: аллокация direct-буфера с защитой от OOM — при нехватке памяти размер
+     * уменьшается вдвое до минимума max(audioTrackBufferSize, 1с аудио).
+     * @return буфер или null, если недоступен даже минимальный размер
+     */
+    private fun allocateDirectBuffer(sizeBytes: Int, rateHz: Int): java.nio.ByteBuffer? {
+        val minSize = maxOf(audioTrackBufferSize, rateHz * 2 * 4)
+        var size = sizeBytes
+        while (true) {
+            try {
+                return java.nio.ByteBuffer.allocateDirect(size)
+                    .order(java.nio.ByteOrder.nativeOrder())
+            } catch (e: OutOfMemoryError) {
+                Log.e(TAG, "OutOfMemoryError allocating ${size / 1024 / 1024} MB direct buffer")
+                if (size <= minSize) return null
+                size = maxOf(minSize, size / 2)
+            }
+        }
     }
     
     private fun getVolumeFromShaper(): Float {
@@ -522,36 +607,93 @@ class BinauralAudioEngine(private val context: Context) {
         val localSampleRate = sampleRate
         // Максимальный размер буфера в сэмплах (из MAX_BUFFER_MINUTES)
         val maxSamplesPerChannelLimit = localSampleRate * 60 * MAX_BUFFER_MINUTES
+        // C2: тот же байтовый кап, что и в startPlayback — стерео float = 8 байт/сэмпл
+        val maxSamplesByBytesLimit = MAX_BUFFER_BYTES / 8
 
         var currentIntervalMs = frequencyUpdateIntervalMs
         var samplesPerChannel = minOf(
             (localSampleRate.toLong() * currentIntervalMs / 1000).toInt(),
-            maxSamplesPerChannelLimit
+            maxSamplesPerChannelLimit,
+            maxSamplesByBytesLimit
         )
 
         isGenerating = true
         Log.d(TAG, "generateAudioLoop() - entering main loop, isActive=${isActive.get()}, audioTrack=$audioTrack")
 
         while (isActive.get() && audioTrack != null) {
+            // C6: признак ожидающих изменений собираем ДО их потребления,
+            // чтобы эта итерация сгенерировала короткий пакет (~1 с) и
+            // изменение прозвучало быстро, а не через полный интервал.
+            val hasPendingChanges = pendingSampleRate.get() != null ||
+                pendingFrequencyUpdateIntervalMs.get() != null ||
+                pendingCurveUpdate.get() ||
+                presetSwitchRequested.get() != null ||
+                pendingPresetConfig != null ||
+                stopWithFadeRequested.get() ||
+                pauseWithFadeRequested.get()
+
             applyPendingSettings()
 
             if (frequencyUpdateIntervalMs != currentIntervalMs) {
                 currentIntervalMs = frequencyUpdateIntervalMs
                 samplesPerChannel = minOf(
                     (localSampleRate.toLong() * currentIntervalMs / 1000).toInt(),
-                    maxSamplesPerChannelLimit
+                    maxSamplesPerChannelLimit,
+                    maxSamplesByBytesLimit
                 )
+
+                // F7: честность капа — реальный интервал урезан лимитом буфера
+                val effectiveBufferIntervalMs = samplesPerChannel * 1000L / localSampleRate
+                if (effectiveBufferIntervalMs < currentIntervalMs - 999) {
+                    Log.w(TAG, "Buffer interval capped by buffer limit: requested=${currentIntervalMs}ms, effective=${effectiveBufferIntervalMs}ms")
+                }
 
                 // Пересоздаём буфер если нужно больше места
                 val requiredSize = samplesPerChannel * 2 * 4
                 if (directAudioBuffer == null || directAudioBuffer!!.capacity() < requiredSize) {
-                    directAudioBuffer = java.nio.ByteBuffer.allocateDirect(requiredSize)
-                        .order(java.nio.ByteOrder.nativeOrder())
-                    Log.d(TAG, "Resized DirectByteBuffer: $requiredSize bytes (${requiredSize / 1024 / 1024} MB)")
+                    directAudioBuffer = allocateDirectBuffer(requiredSize, localSampleRate)
+                    if (directAudioBuffer != null) {
+                        Log.d(TAG, "Resized DirectByteBuffer: $requiredSize bytes (${requiredSize / 1024 / 1024} MB) for interval ${effectiveBufferIntervalMs}ms")
+                    } else {
+                        Log.e(TAG, "Failed to resize DirectByteBuffer ($requiredSize bytes)")
+                    }
                 }
             }
 
             checkFadeRequests()
+
+            // F5: закрываем шейпер завершённого fade-in. ВАЖНО: выше guard-sleep,
+            // иначе брошенный (например резюмом) шейпер не закрылся бы на паузе
+            val shaperCloseAtMs = fadeShaperCloseAtMs
+            if (shaperCloseAtMs > 0 && System.currentTimeMillis() >= shaperCloseAtMs) {
+                volumeShaper?.close()
+                volumeShaper = null
+                isFadeInProgress = false
+                fadeShaperCloseAtMs = 0L
+                Log.d(TAG, "Fade-in completed, shaper closed")
+            }
+
+            // Мягкая пауза: трек уже на паузе — запись в него заблокирует WRITE_BLOCKING.
+            // Держим цикл живым для мягкого resume, но не генерируем и не пишем.
+            if (!_isPlaying.value) {
+                try {
+                    Thread.sleep(50)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+                continue
+            }
+
+            // C6: короткий пакет при ожидающих изменениях. Таймлайн непрерывен:
+            // движок генерирует ровно effectiveSamples по sample-driven оси.
+            val effectiveSamples = if (hasPendingChanges) {
+                minOf(samplesPerChannel, localSampleRate)
+            } else {
+                samplesPerChannel
+            }
+
+            // C8: продление WakeLock на длинных сессиях
+            acquireWakeLock()
 
             // Получаем актуальный буфер (может измениться при ресайзе)
             val directBuffer = directAudioBuffer
@@ -560,12 +702,15 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            // Zero-copy генерация через DirectByteBuffer
+            // Zero-copy генерация через DirectByteBuffer.
+            // ВАЖНО: generated может быть немного меньше samplesPerChannel
+            // (целочисленное округление длительностей сегментов в нативном
+            // планировщике). Ниже пишем в AudioTrack ровно generated сэмплов.
             directBuffer.clear()
-            val success = engine.generateBufferDirect(directBuffer, samplesPerChannel)
+            val generated = engine.generateBufferDirect(directBuffer, effectiveSamples)
             
-            if (!success) {
-                Log.e(TAG, "Native buffer generation failed")
+            if (generated <= 0) {
+                Log.e(TAG, "Native buffer generation failed or not playing")
                 break
             }
 
@@ -593,20 +738,47 @@ class BinauralAudioEngine(private val context: Context) {
                 break
             }
 
-            // Запись в AudioTrack через DirectByteBuffer
-            directBuffer.flip()
-            val sizeInBytes = samplesPerChannel * 2 * 4
-            
+            // Запись в AudioTrack через DirectByteBuffer.
+            // КРИТИЧНО: пишем ровно generated сэмплов (generated * 2 канала * 4 байта),
+            // а не полный размер буфера. Остаток буфера содержит мусор от прошлого
+            // пакета — его запись и была причиной щелчка + скачка частот на стыке.
+            directBuffer.position(0)
+            val sizeInBytes = generated * 2 * 4
+
+            // Диагностика HAL: позиция головы воспроизведения и underrun'ы
+            // до/после записи пакета.
+            val headBefore = currentAudioTrack.playbackHeadPosition
+            val underrunBefore = currentAudioTrack.underrunCount
+
             val writeResult = try {
                 // Записываем порциями не больше audioTrackBufferSize
                 var totalWritten = 0
+                var interruptedByRequest = false
                 while (totalWritten < sizeInBytes && isActive.get()) {
+                    // C3: управление должно работать посреди досыпки пакета,
+                    // а не после дренирования всех 10 минут. Недописанный остаток
+                    // доигрывает буфер AudioTrack сам, флаги потребит
+                    // checkFadeRequests следующей итерации.
+                    if (pauseWithFadeRequested.get() ||
+                        stopWithFadeRequested.get() ||
+                        presetSwitchRequested.get() != null
+                    ) {
+                        interruptedByRequest = true
+                        Log.i(TAG, "PKG_WRITE interrupted by control request: " +
+                              "$totalWritten/$sizeInBytes bytes")
+                        break
+                    }
                     val remaining = sizeInBytes - totalWritten
-                    val chunkSize = minOf(remaining, audioTrackBufferSize)
-                    
+                    // Кап чанка ~1с аудио — гранулярность реакции на флаги
+                    val chunkSize = minOf(
+                        remaining,
+                        audioTrackBufferSize,
+                        localSampleRate * 2 * 4
+                    )
+
                     directBuffer.position(totalWritten)
                     directBuffer.limit(totalWritten + chunkSize)
-                    
+
                     val written = currentAudioTrack.write(directBuffer, chunkSize, AudioTrack.WRITE_BLOCKING)
                     if (written < 0) {
                         Log.e(TAG, "DirectByteBuffer write failed at offset $totalWritten: $written")
@@ -614,8 +786,14 @@ class BinauralAudioEngine(private val context: Context) {
                     }
                     totalWritten += written
                 }
-                
-                if (totalWritten == sizeInBytes) sizeInBytes else -1
+
+                // Частичная запись по запросу управления — НЕ ошибка:
+                // иначе разрыв внешнего цикла убивал сессию без fade/pause
+                when {
+                    interruptedByRequest -> totalWritten
+                    totalWritten == sizeInBytes -> sizeInBytes
+                    else -> -1
+                }
             } catch (e: IllegalStateException) {
                 Log.e(TAG, "AudioTrack write error: ${e.message}")
                 -1
@@ -628,6 +806,14 @@ class BinauralAudioEngine(private val context: Context) {
                 Log.d(TAG, "Write failed, result=$writeResult")
                 break
             }
+
+            // Диагностика HAL после записи пакета
+            val headAfter = currentAudioTrack.playbackHeadPosition
+            val underrunAfter = currentAudioTrack.underrunCount
+            Log.i(TAG, "PKG_WRITE: gen=$generated headDelta=${headAfter - headBefore} " +
+                  "underrun=$underrunBefore->$underrunAfter " +
+                  "capFrames=${currentAudioTrack.bufferCapacityInFrames} " +
+                  "trackSr=${currentAudioTrack.sampleRate} sysMs=${System.currentTimeMillis()}")
         }
 
         isGenerating = false
@@ -637,68 +823,108 @@ class BinauralAudioEngine(private val context: Context) {
     private fun checkFadeRequests() {
         if (stopWithFadeRequested.get()) {
             Log.d(TAG, "Starting fade-out for stop")
-            startFadeOut(PLAYBACK_FADE_DURATION_MS) {
-                if (isActive.get()) {
-                    isActive.set(false)
-                    audioHandler?.post(::stopPlayback)
+            // F1/F3: фейд и остановка выполняются инлайн — посты из живого
+            // цикла генерации не доставляются (лупер занят startPlayback)
+            runFadeOutInline(PLAYBACK_FADE_DURATION_MS)
+            if (isActive.get()) {
+                isActive.set(false)
+                if (pendingPresetConfig != null) {
+                    // Если ждала смена пресета — после fade-out перезапускаем
+                    // с новым конфигом (свежий таймлайн), а не останавливаемся.
+                    // Цикл выйдет по !isActive, после чего пост будет доставлен.
+                    audioHandler?.post { play() }
+                } else {
+                    stopPlayback()
                 }
             }
             stopWithFadeRequested.set(false)
             return
         }
-        
+
         if (pauseWithFadeRequested.get()) {
             Log.d(TAG, "Starting fade-out for pause")
-            startFadeOut(PLAYBACK_FADE_DURATION_MS) {
-                if (isActive.get()) {
-                    executePause()
-                }
+            // F1/F2: фейд и пауза выполняются инлайн, без мёртвых постов
+            runFadeOutInline(PLAYBACK_FADE_DURATION_MS)
+            if (isActive.get()) {
+                executePause()
             }
             pauseWithFadeRequested.set(false)
             return
         }
         
         presetSwitchRequested.getAndSet(null)?.let { newConfig ->
-            nativeEngine?.updateConfig(newConfig)
-            configRef.set(newConfig)
-            _currentConfig.value = newConfig
-            Log.d(TAG, "Preset switched")
+            // НЕ применяем конфиг мгновенно на границе пакетов — это давало
+            // резкую смену частот без перехода. Маршрутизируем через fade-out →
+            // перезапуск: конфиг применится в startNewPlayback().
+            Log.w(TAG, "PRESET_SWITCH requested -> will apply via fade-restart at sysTimeMs=${System.currentTimeMillis()}")
+            pendingPresetConfig = newConfig
+            stopWithFadeRequested.set(true)
         }
     }
     
-    private fun startFadeOut(durationMs: Long, callback: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            currentVolume = getVolumeFromShaper()
-            
-            val adjustedDuration = if (currentVolume <= MIN_VOLUME) {
-                0L
-            } else {
-                (durationMs * currentVolume).toLong().coerceAtLeast(50)
-            }
-            
-            createVolumeShaper(durationMs, targetVolume = 0.0f)
-            startVolumeShaper()
-            
-            if (adjustedDuration == 0L) {
-                audioHandler?.post(callback)
-            } else {
-                audioHandler?.postDelayed(callback, adjustedDuration)
-            }
+    /**
+     * F1: инлайн fade-out — создаёт и запускает VolumeShaper синхронно
+     * в вызывающем потоке и ждёт окончания затухания. Пост-колбэк здесь
+     * недопустим: он не доставлялся бы из живого цикла генерации.
+     */
+    private fun runFadeOutInline(durationMs: Long) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+
+        currentVolume = getVolumeFromShaper()
+
+        val adjustedDuration = if (currentVolume <= MIN_VOLUME) {
+            0L
         } else {
-            callback()
+            (durationMs * currentVolume).toLong().coerceAtLeast(50)
+        }
+
+        createVolumeShaper(durationMs, targetVolume = 0.0f)
+        startVolumeShaper()
+
+        try {
+            Thread.sleep(adjustedDuration + 50)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
     }
-    
+
     private fun executePause() {
+        // C2: resume успел выполниться в UI-потоке, пока мы спали в
+        // runFadeOutInline — отменяем паузу и прибираем брошенный шейпер.
+        if (_isPlaying.value) {
+            Log.d(TAG, "executePause: resume won the race during inline fade, pausing aborted")
+            try {
+                volumeShaper?.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing orphaned shaper: ${e.message}")
+            }
+            volumeShaper = null
+            isFadeInProgress = false
+            fadeShaperCloseAtMs = 0L
+            try {
+                audioTrack?.setVolume(userVolume)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error restoring volume: ${e.message}")
+            }
+            currentVolume = userVolume
+            return
+        }
+
         _isPlaying.value = false
-        
+
         val currentSessionMs = System.currentTimeMillis() - playbackStartTime
         accumulatedElapsedMs += currentSessionMs
         Log.d(TAG, "executePause: accumulatedElapsedMs=$accumulatedElapsedMs")
-        
-        audioHandler?.post {
+
+        // F2: прямой вызов — пост в audioHandler не доставился бы из живого цикла
+        try {
             audioTrack?.pause()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error pausing AudioTrack: ${e.message}")
         }
+
+        // Пауза не должна держать WakeLock до истечения TTL; resume перевыделяет
+        releaseWakeLock()
     }
     
     private fun applyPendingSettings() {
@@ -713,6 +939,13 @@ class BinauralAudioEngine(private val context: Context) {
             frequencyUpdateIntervalMs = newInterval
             Log.d(TAG, "Applied pending frequency update interval: ${newInterval}ms")
         }
+
+        // C7: перестройка нативной lookup-таблицы между записями в AudioTrack —
+        // live-редактирование кривой активного пресета становится слышимым
+        if (pendingCurveUpdate.compareAndSet(true, false)) {
+            nativeEngine?.updateConfig(configRef.get(), lastRelaxationSettings)
+            Log.d(TAG, "Applied pending curve update")
+        }
     }
 
     /**
@@ -725,10 +958,7 @@ class BinauralAudioEngine(private val context: Context) {
         _isPlaying.value = false
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
-        
-        // Отменяем callback завершения fade-in
-        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
-        
+
         try {
             audioTrack?.stop()
         } catch (e: Exception) {
@@ -744,11 +974,7 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun stopWithFade() {
         Log.d(TAG, "stopWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
-        
-        // Отменяем callback завершения fade-in, чтобы он не выполнился
-        // на новом AudioTrack после перезапуска воспроизведения
-        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
-        
+
         // Проверяем isActive, а не _isPlaying!
         // isActive остаётся true во время fade-out, что предотвращает
         // накопление нескольких fade-out операций при быстрых переключениях
@@ -756,62 +982,14 @@ class BinauralAudioEngine(private val context: Context) {
             Log.d(TAG, "stopWithFade() - not active, returning")
             return
         }
-        
+
         currentVolume = getVolumeFromShaper()
         _isPlaying.value = false
-        startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
-            isActive.set(false)
-            stopPlayback()
-        }
+        // K2: через флаг — checkFadeRequests в следующей (сокращённой до ~1с)
+        // итерации запустит fade-out; completion не голодает на длинном пакете
+        stopWithFadeRequested.set(true)
     }
-    
-    private fun startFadeOutImmediate(durationMs: Long, onComplete: () -> Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                val startVolume = currentVolume.coerceIn(MIN_VOLUME, 1.0f)
-                
-                if (startVolume <= MIN_VOLUME) {
-                    onComplete()
-                    return
-                }
-                
-                val adjustedDuration = (durationMs * startVolume).toLong().coerceAtLeast(50)
-                
-                volumeShaper?.close()
-                volumeShaper = null
-                
-                val config = VolumeShaper.Configuration.Builder()
-                    .setDuration(adjustedDuration)
-                    .setCurve(floatArrayOf(0f, 1f), floatArrayOf(startVolume, 0.0f))
-                    .setInterpolatorType(VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR)
-                    .build()
-                
-                val track = audioTrack
-                if (track != null) {
-                    volumeShaper = track.createVolumeShaper(config)
-                    volumeShaper?.apply(VolumeShaper.Operation.PLAY)
-                    
-                    fadeStartTime = System.currentTimeMillis()
-                    fadeDurationMs = adjustedDuration
-                    fadeStartVolume = startVolume
-                    fadeTargetVolume = 0.0f
-                    isFadeInProgress = true
-                    
-                    audioHandler?.postDelayed({
-                        onComplete()
-                    }, adjustedDuration + 50)
-                } else {
-                    onComplete()
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "startFadeOutImmediate error: ${e.message}")
-                onComplete()
-            }
-        } else {
-            onComplete()
-        }
-    }
-    
+
     private fun stopPlayback() {
         audioTrack?.stop()
         audioTrack?.release()
@@ -819,11 +997,17 @@ class BinauralAudioEngine(private val context: Context) {
         volumeShaper?.close()
         volumeShaper = null
         isFadeInProgress = false
+        fadeShaperCloseAtMs = 0L
         
         // Восстанавливаем currentVolume до userVolume для корректного
         // последующего перезапуска. userVolume - единственный источник истины.
         currentVolume = userVolume
-        
+
+        // Сброс нативного m_isPlaying: без него флаг остаётся true до следующего
+        // startNewPlayback — окно рассинхрона getCurrentTimeOfDaySeconds/J4.
+        // Безопасно: setPlaying(false,*) меняет только атомик, таймлайн не трогает.
+        nativeEngine?.stop()
+
         releaseWakeLock()
         resetState()
         
@@ -840,13 +1024,16 @@ class BinauralAudioEngine(private val context: Context) {
         audioTrack?.stop()
         audioTrack?.release()
         audioTrack = null
-        
+        volumeShaper?.close()
+        volumeShaper = null
+
         releaseWakeLock()
         
         _isPlaying.value = false
         isActive.set(false)
         isGenerating = false
         isFadeInProgress = false
+        fadeShaperCloseAtMs = 0L
         stopWithFadeRequested.set(false)
         pauseWithFadeRequested.set(false)
         
@@ -868,33 +1055,52 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun pauseWithFade() {
         Log.d(TAG, "pauseWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
-        
-        // Отменяем callback завершения fade-in, чтобы он не выполнился
-        // на новом AudioTrack после возобновления воспроизведения
-        audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
-        
+
         // Проверяем isActive, а не _isPlaying - аналогично stopWithFade()
         if (!isActive.get()) {
             Log.d(TAG, "pauseWithFade() - not active, returning")
             return
         }
-        
-        // Немедленно запускаем fade-out, не дожидаясь цикла генерации
+
         currentVolume = getVolumeFromShaper()
         _isPlaying.value = false
-        
-        startFadeOutImmediate(PLAYBACK_FADE_DURATION_MS) {
-            executePause()
-        }
+        // K2: через флаг — checkFadeRequests в следующей (сокращённой до ~1с)
+        // итерации запустит fade-out и executePause без голодания лупера
+        pauseWithFadeRequested.set(true)
     }
 
     /**
      * Возобновить воспроизведение с плавным нарастанием
      */
     fun resumeWithFade() {
-        Log.d(TAG, "resumeWithFade() called")
+        Log.d(TAG, "resumeWithFade() called, isActive=${isActive.get()}")
         
         if (_isPlaying.value) return
+        
+        // МЯГКАЯ ПАУЗА (isActive==true, трек на паузе, цикл генерации жив):
+        // продолжаем с ТОГО ЖЕ места кривой и той же фазой — без resetState и
+        // без ре-янкора таймлайна на wall-clock (иначе скачок частот + щелчок).
+        // F4: всё последовательно в вызывающем потоке, без постов в audioHandler
+        // (они не доставлялись бы из живого цикла генерации).
+        if (isActive.get()) {
+            _isPlaying.value = true
+
+            // F9: восстанавливаем опорную точку таймлайна перед снятием нативной паузы
+            playbackStartTime = System.currentTimeMillis() - accumulatedElapsedMs
+            nativeEngine?.setPlaybackStartTime(playbackStartTime)
+
+            nativeEngine?.play(preserveTimeline = true)
+            audioTrack?.play()
+            // C5: после fade-out currentVolume==0 — резкий старт даст щелчок
+            // (особенно после scrub-в-паузе, когда частота кривой сменилась).
+            currentVolume = MIN_VOLUME
+            createVolumeShaper(RESUME_FADE_DURATION_MS, targetVolume = 1.0f)
+            startVolumeShaper()
+            // F5: закрытие шейпера выполнит generateAudioLoop (посты недоставляемы)
+            fadeShaperCloseAtMs = System.currentTimeMillis() + RESUME_FADE_DURATION_MS + 50
+            acquireWakeLock()
+            return
+        }
         
         play()
     }
@@ -1008,9 +1214,6 @@ class BinauralAudioEngine(private val context: Context) {
             _isPlaying.value = false
             restartPlaybackScheduled = true
 
-            // Отменяем callback завершения fade-in
-            audioHandler?.removeCallbacksAndMessages(FADE_IN_COMPLETE_TOKEN)
-            
             // Отменяем все запланированные операции restart с другим токеном
             audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
 
@@ -1063,6 +1266,11 @@ class BinauralAudioEngine(private val context: Context) {
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         // Максимум 60 минут = 3,600,000 мс
         val clampedInterval = intervalMs.coerceIn(1000, 60 * 60 * 1000)
+        // C4: запоминаем пользовательский выбор — debug-время форсирует 250 мс,
+        // и без этого восстановление вернуло бы не то, что выбрал пользователь
+        if (!debugVirtualTimeEnabled) {
+            lastUserIntervalMs = clampedInterval
+        }
         pendingFrequencyUpdateIntervalMs.set(clampedInterval)
         Log.d(TAG, "Buffer generation interval set to $clampedInterval ms (${clampedInterval / 60000} min)")
     }
@@ -1102,20 +1310,30 @@ class BinauralAudioEngine(private val context: Context) {
         }
     }
 
-    private fun acquireWakeLock() {
+    // C1: отдельный лок для WakeLock — @Synchronized(this) блокировал бы
+    // вызывающий поток resume на весь монитор сессии (ANR)
+    private val wakeLockLock = Any()
+
+    private fun acquireWakeLock() = synchronized(wakeLockLock) {
         try {
             if (wakeLock == null) {
                 val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
                 wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
             }
-            wakeLock?.acquire(10 * 60 * 1000L)
-            Log.d(TAG, "WakeLock acquired")
+            // K3: TTL должен покрывать запись пакета целиком (до 60 мин),
+            // иначе лок истекает в середине длинной записи
+            val ttlMs = maxOf(10 * 60 * 1000L, frequencyUpdateIntervalMs.toLong() + 120_000L)
+            // C8: продлеваем только когда истёк — сессии дольше 10 минут остаются защищёнными
+            if (wakeLock?.isHeld != true) {
+                wakeLock?.acquire(ttlMs)
+                Log.d(TAG, "WakeLock acquired for ${ttlMs}ms")
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock", e)
         }
     }
-    
-    private fun releaseWakeLock() {
+
+    private fun releaseWakeLock() = synchronized(wakeLockLock) {
         try {
             wakeLock?.let {
                 if (it.isHeld) {
@@ -1143,14 +1361,17 @@ class BinauralAudioEngine(private val context: Context) {
     fun debugSetVirtualTimeEnabled(enabled: Boolean) {
         nativeEngine?.debugSetVirtualTimeEnabled(enabled)
         if (enabled) {
+            debugVirtualTimeEnabled = true
+            lastUserIntervalMs = frequencyUpdateIntervalMs
             // 250 мс: низкая латентность scrub + плотное следование кривой при scale до 60
             // (каждый буфер покрывает лишь scale*0.25 виртуальных секунд линейного рампа).
             pendingFrequencyUpdateIntervalMs.set(250)
             // Отключаем батч-генерацию, чтобы не было больших "замороженных" кусков.
             nativeEngine?.setBatchDurationMinutes(0)
         } else {
-            // Возврат к дефолтному интервалу.
-            pendingFrequencyUpdateIntervalMs.set(10000)
+            debugVirtualTimeEnabled = false
+            // C4: возврат к ПОЛЬЗОВАТЕЛЬСКОМУ интервалу (не хардкод)
+            pendingFrequencyUpdateIntervalMs.set(lastUserIntervalMs)
         }
     }
 

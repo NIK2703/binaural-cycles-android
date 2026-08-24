@@ -1,9 +1,11 @@
 package com.binaural.core.audio.model
 
+import kotlinx.datetime.LocalTime
+
 /**
  * Объект, содержащий алгоритмы интерполяции для расчёта частот между точками.
  * Используется как для генерации аудио, так и для отрисовки графика.
- * 
+ *
  * ТИПЫ ИНТЕРПОЛЯЦИИ:
  * - LINEAR: простая линейная интерполяция, без overshoot
  * - CARDINAL: кубический сплайн с параметром tension (0=Catmull-Rom плавный, 1=почти линейный)
@@ -135,5 +137,76 @@ object Interpolation {
             InterpolationType.STEP -> step(p1)
         }
         return result.coerceAtLeast(0.0f)
+    }
+
+    /**
+     * Канальная оценка частот — единая с аудио-движком (Interpolation.h::buildLookupTableInternal).
+     * Значения каналов вычисляются В КАЖДОЙ контрольной точке (carrier∓beat/2),
+     * затем каждая канальная кривая интерполируется сплайном выбранного типа отдельно.
+     * Wrap через полночь [последняя → первая + 24ч], hold-last для STEP,
+     * ratio клампится [0,1], результат каждого канала >= 0 Гц.
+     *
+     * @param points контрольные точки (сортируются внутри)
+     * @param time время суток
+     * @param type тип интерполяции
+     * @param tension натяжение для CARDINAL
+     * @return Pair(нижний канал, верхний канал); отображаемые carrier=(l+u)/2, beat=u−l
+     */
+    fun interpolateChannels(
+        points: List<FrequencyPoint>,
+        time: LocalTime,
+        type: InterpolationType,
+        tension: Float = 0.0f
+    ): Pair<Float, Float> {
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        if (sortedPoints.isEmpty()) return 0.0f to 0.0f
+
+        val lowerSelector: (FrequencyPoint) -> Float = { it.carrierFrequency - it.beatFrequency / 2.0f }
+        val upperSelector: (FrequencyPoint) -> Float = { it.carrierFrequency + it.beatFrequency / 2.0f }
+
+        if (sortedPoints.size == 1) {
+            val p = sortedPoints[0]
+            return lowerSelector(p).coerceAtLeast(0.0f) to upperSelector(p).coerceAtLeast(0.0f)
+        }
+
+        // Выбор интервала как в C++: время до первой точки принадлежит
+        // wrap-интервалу [последняя точка → первая + 24ч]
+        val numPoints = sortedPoints.size
+        val targetSeconds = time.toSecondOfDay()
+        var leftIndex = 0
+        val isWrapping: Boolean
+        if (targetSeconds < sortedPoints[0].time.toSecondOfDay()) {
+            leftIndex = numPoints - 1
+            isWrapping = true
+        } else {
+            while (leftIndex < numPoints - 1 &&
+                sortedPoints[leftIndex + 1].time.toSecondOfDay() <= targetSeconds) {
+                leftIndex++
+            }
+            isWrapping = leftIndex == numPoints - 1
+        }
+        val rightIndex = (leftIndex + 1) % numPoints
+
+        val t1 = sortedPoints[leftIndex].time.toSecondOfDay().toFloat()
+        var t2 = sortedPoints[rightIndex].time.toSecondOfDay().toFloat()
+        if (isWrapping) t2 += 24f * 3600f
+        var t = targetSeconds.toFloat()
+        if (isWrapping && t < t1) t += 24f * 3600f
+
+        val ratio = if (t2 != t1) ((t - t1) / (t2 - t1)).coerceIn(0.0f, 1.0f) else 0.0f
+
+        // Циклические соседи — согласовано с C++
+        val prevIndex = (leftIndex - 1 + numPoints) % numPoints
+        val nextNextIndex = (rightIndex + 1) % numPoints
+
+        fun evaluate(selector: (FrequencyPoint) -> Float): Float {
+            val p0 = selector(sortedPoints[prevIndex])
+            val p1 = selector(sortedPoints[leftIndex])
+            val p2 = selector(sortedPoints[rightIndex])
+            val p3 = selector(sortedPoints[nextNextIndex])
+            return interpolate(type, p0, p1, p2, p3, ratio, tension)
+        }
+
+        return evaluate(lowerSelector) to evaluate(upperSelector)
     }
 }

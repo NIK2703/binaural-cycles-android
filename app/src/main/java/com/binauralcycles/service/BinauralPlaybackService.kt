@@ -24,6 +24,7 @@ import android.media.AudioDeviceInfo
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import com.binauralcycles.BuildConfig
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.engine.BinauralAudioEngine
@@ -118,11 +119,14 @@ class BinauralPlaybackService : Service() {
     // Флаг: воспроизведение было остановлено из-за отключения гарнитуры
     private var wasStoppedByHeadsetDisconnect: Boolean = false
     
+    // Флаг: воспроизведение приостановлено из-за временной потери аудиофокуса
+    private var wasPausedByTransientFocus: Boolean = false
+    
     private val binder = LocalBinder()
     private var serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     
     // Интервал обновления частот (из настроек)
-    private val _frequencyUpdateIntervalMs = MutableStateFlow(10000) // По умолчанию 10 секунд
+    private val _frequencyUpdateIntervalMs = MutableStateFlow(600_000) // По умолчанию 10 минут
     
     // Следим за изменением интервала для перезапуска notificationUpdateJob
     private var notificationIntervalObserver: Job? = null
@@ -130,14 +134,25 @@ class BinauralPlaybackService : Service() {
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus = false
-    
+
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
                 hasAudioFocus = true
+                if (wasPausedByTransientFocus && !_isPlaying.value) {
+                    wasPausedByTransientFocus = false
+                    audioEngine?.resumeWithFade()
+                }
                 audioEngine?.setVolume(audioEngine?.currentConfig?.value?.volume ?: 0.7f)
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
+                // Другой экземпляр (или другое приложение) забрало фокус.
+                // Обязаны остановиться, чтобы не играть одновременно —
+                // иначе слышны «скачки частоты» от смешивания двух потоков.
+                android.util.Log.w(
+                    "BinauralPlaybackService",
+                    "AUDIOFOCUS_LOSS: stopping playback (another app/instance took focus)"
+                )
                 hasAudioFocus = false
                 audioEngine?.stop()
                 // Обновляем notification только при изменении состояния
@@ -145,7 +160,23 @@ class BinauralPlaybackService : Service() {
                 updateNotificationImmediately()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                // Временная потеря - можно приостановить
+                // Временная потеря фокуса (звонок, навигатор) - пауза с затуханием
+                if (_isPlaying.value) {
+                    android.util.Log.d(
+                        "BinauralPlaybackService",
+                        "AUDIOFOCUS_LOSS_TRANSIENT: pausing playback"
+                    )
+                    audioEngine?.pauseWithFade()
+                    _isPlaying.value = false
+                    updateNotificationImmediately()
+                    wasPausedByTransientFocus = true
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // Приглушение: временно снижаем громкость,
+                // восстановление - в AUDIOFOCUS_GAIN
+                val volume = audioEngine?.currentConfig?.value?.volume ?: 0.7f
+                audioEngine?.setVolume(volume * 0.2f)
             }
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
                 // Восстановление после временной потери
@@ -239,7 +270,16 @@ class BinauralPlaybackService : Service() {
         
         when (intent?.action) {
             ACTION_START -> {
-                startPlayback()
+                // Защита от двойного запуска: если уже играем — игнорируем повторный START,
+                // чтобы второй экземпляр/интент не создал второй аудио-поток.
+                if (_isPlaying.value) {
+                    android.util.Log.w(
+                        "BinauralPlaybackService",
+                        "onStartCommand: already playing, ignoring duplicate ACTION_START"
+                    )
+                } else {
+                    startPlayback()
+                }
             }
             ACTION_STOP -> {
                 stopPlayback()
@@ -783,11 +823,12 @@ class BinauralPlaybackService : Service() {
         if (!requestAudioFocus()) {
             android.util.Log.w("BinauralPlaybackService", "Could not gain audio focus")
         }
-        
+
         if (_isPlaying.value) {
             return
         }
-        
+
+
         // Запускаем foreground service
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -906,6 +947,7 @@ class BinauralPlaybackService : Service() {
     }
 
     fun debugScrub(timeSeconds: Int) {
+        if (!BuildConfig.DEBUG) return
         audioEngine?.debugScrub(timeSeconds)
         _currentTimeOfDaySeconds.value = timeSeconds
     }
@@ -947,7 +989,7 @@ class BinauralPlaybackService : Service() {
             audioEngine?.resumeWithFade()
         }
     }
-    
+
     fun play() {
         // Сбрасываем флаг при ручном запуске
         android.util.Log.d("BinauralPlaybackService", "play() - wasStoppedByHeadsetDisconnect = false")
@@ -1063,6 +1105,8 @@ class BinauralPlaybackService : Service() {
         _currentCarrierFrequency.value = 0.0f
         _isChannelsSwapped.value = false
         _elapsedSeconds.value = 0
+        _currentTimeOfDaySeconds.value = 0
+        _debugTimeEnabled.value = false
         
         super.onDestroy()
     }

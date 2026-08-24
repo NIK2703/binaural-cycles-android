@@ -7,6 +7,7 @@
 #include <cmath>
 #include <vector>
 #include <functional>
+#include <utility>   // std::pair (канальные частоты / амплитуды)
 
 namespace binaural {
 
@@ -14,6 +15,7 @@ namespace binaural {
  * Результат генерации буфера
  */
 struct GenerateResult {
+    // intentionally ignored by engine (reserved for diagnostics)
     bool fadePhaseCompleted = false;
     bool channelsSwapped = false;
     float currentBeatFreq = 0.0;
@@ -269,12 +271,16 @@ private:
     );
     
     /**
-     * Обновление фаз без генерации звука (для паузы)
+     * Обновление фаз без генерации звука (для паузы).
+     * Принимает start И end omega: фазы продвигаются по линейной рампе,
+     * как в SOLID-сегментах, иначе после паузы возникает фазовый скачок.
      */
     void updatePhasesOnly(
         int samples,
-        float leftOmega,
-        float rightOmega,
+        float startLeftOmega,
+        float startRightOmega,
+        float endLeftOmega,
+        float endRightOmega,
         GeneratorState& state
     );
 

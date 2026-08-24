@@ -10,7 +10,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.R
 
-private const val MIN_AUDIBLE_FREQUENCY = 20.0
+// Движок клампит частоту канала к >= 0 Гц; ниже 0 Гц канал замолкает,
+// и отображаемое значение перестаёт соответствовать звуку
+private const val MIN_CHANNEL_FREQUENCY = 0.0
 
 @Composable
 fun CurrentFrequenciesCard(
@@ -19,7 +21,7 @@ fun CurrentFrequenciesCard(
     isPlaying: Boolean
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
-    val isLeftChannelTooLow = leftChannelFreq < MIN_AUDIBLE_FREQUENCY
+    val isLeftChannelTooLow = leftChannelFreq < MIN_CHANNEL_FREQUENCY
     
     // Локализованные строки
     val beatLabel = stringResource(R.string.beat_frequency)

@@ -81,8 +81,15 @@ public:
     static inline float fastSin(float phase) {
         // Масштабируем фазу в индекс таблицы
         const float phaseScaled = phase * s_scaleFactor;
-        const int index = static_cast<int>(phaseScaled) & s_tableSizeMask;
-        const float fraction = phaseScaled - static_cast<float>(index);
+        const int scaledInt = static_cast<int>(phaseScaled);
+        float fraction = phaseScaled - static_cast<float>(scaledInt);
+        int index = scaledInt & s_tableSizeMask;
+        if (fraction < 0.0f) {
+            // Фаза вне [0, 2π): индекс и fraction берём от нижней границы ячейки,
+            // иначе интерполяция уходит за пределы пары значений таблицы
+            fraction += 1.0f;
+            index = (index - 1) & s_tableSizeMask;
+        }
         
         // Линейная интерполяция: y = y0 + (y1 - y0) * fraction
         // FMA-friendly форма: y = y0 + fraction * (y1 - y0)
@@ -108,29 +115,20 @@ public:
      * NEON-оптимизированная генерация 4 синусов одновременно
      * Полностью векторизованная версия
      * 
-     * ARMv8: использует vrndmq_f32 и vfmaq_f32 (FMA)
-     * ARMv7: использует совместимую реализацию без расширенных intrinsics
-     * 
+     * Единая реализация для ARMv7/ARMv8 (без vrndmq_f32); FMA используется на ARMv8
+     *
      * @param phasesScaled масштабированные фазы (phase * scaleFactor)
      * @return 4 значения синуса в NEON регистре
      */
     static inline float32x4_t fastSinNeon(float32x4_t phasesScaled) {
-        // Получаем целые части как индексы
-        int32x4_t indices = vcvtq_s32_f32(phasesScaled);
-        
-        // Применяем маску для wraparound (branchless)
-        indices = vandq_s32(indices, vdupq_n_s32(s_tableSizeMask));
-        
-        // Дробные части: frac = scaled - floor(scaled)
-#ifdef USE_NEON_ARMV8
-        // ARMv8: используем vrndmq_f32 для floor
-        float32x4_t floored = vrndmq_f32(phasesScaled);
-#else
-        // ARMv7: floor через truncate (для положительных чисел truncate = floor)
-        // phasesScaled всегда положительный, так что vcvt работает как floor
-        float32x4_t floored = vcvtq_f32_s32(vcvtq_s32_f32(phasesScaled));
-#endif
-        float32x4_t fractions = vsubq_f32(phasesScaled, floored);
+        // Индекс и дробная часть от одной целой части (усечение);
+        // для отрицательных фаз сдвигаемся к нижней границе ячейки (branchless)
+        const int32x4_t ints = vcvtq_s32_f32(phasesScaled);
+        float32x4_t fractions = vsubq_f32(phasesScaled, vcvtq_f32_s32(ints));
+        const uint32x4_t negMask = vcltq_f32(fractions, vdupq_n_f32(0.0f));
+        const int32x4_t adj = vreinterpretq_s32_u32(vandq_u32(negMask, vdupq_n_u32(1)));
+        const int32x4_t indices = vandq_s32(vsubq_s32(ints, adj), vdupq_n_s32(s_tableSizeMask));
+        fractions = vaddq_f32(fractions, vcvtq_f32_s32(adj));
         
         // Извлекаем индексы для загрузки
         int idx[4] __attribute__((aligned(16)));
@@ -186,15 +184,17 @@ public:
      * @return 4 значения синуса в SSE регистре
      */
     static inline __m128 fastSinSse(__m128 phasesScaled) {
-        // Получаем целые части как индексы
-        __m128i indices = _mm_cvttps_epi32(phasesScaled);
-        
-        // Применяем маску для wraparound
-        indices = _mm_and_si128(indices, _mm_set1_epi32(s_tableSizeMask));
-        
-        // Дробные части: frac = scaled - floor(scaled)
-        __m128 floored = _mm_cvtepi32_ps(_mm_cvttps_epi32(phasesScaled));
-        __m128 fractions = _mm_sub_ps(phasesScaled, floored);
+        // Индекс и дробная часть от одной целой части (усечение);
+        // для отрицательных фаз сдвигаемся к нижней границе ячейки (branchless)
+        const __m128i ints = _mm_cvttps_epi32(phasesScaled);
+        __m128 fractions = _mm_sub_ps(phasesScaled, _mm_cvtepi32_ps(ints));
+        const __m128i adj = _mm_and_si128(
+            _mm_castps_si128(_mm_cmplt_ps(fractions, _mm_setzero_ps())),
+            _mm_set1_epi32(1));
+        const __m128i indices = _mm_and_si128(
+            _mm_sub_epi32(ints, adj),
+            _mm_set1_epi32(s_tableSizeMask));
+        fractions = _mm_add_ps(fractions, _mm_cvtepi32_ps(adj));
         
         // Извлекаем индексы для загрузки
         int idx[4] __attribute__((aligned(16)));

@@ -248,32 +248,41 @@ TEST_F(BufferPackagePlannerTest, SingleSolidBufferWithoutSwap) {
     
     PackagePlan plan = planner.planPackage(10000, config, state);  // 10 секунд
     
-    EXPECT_EQ(plan.segments.size(), 1);
-    EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan.segments[0].durationMs, 10000);
-    EXPECT_FALSE(plan.segments[0].swapAfterSegment);
+    // Планировщик ВСЕГДА дробит no-swap пакеты на 100-мс SOLID подсегменты
+    // (см. SOLID_SUBSEGMENT_MS в planPackage), а не один буфер на весь пакет.
+    EXPECT_EQ(plan.segments.size(), 100u);  // 10000мс / 100мс
+    EXPECT_EQ(plan.totalDurationMs, 10000);
+    for (const auto& seg : plan.segments) {
+        EXPECT_EQ(seg.type, BufferType::SOLID);
+        EXPECT_EQ(seg.durationMs, 100);
+        EXPECT_FALSE(seg.swapAfterSegment);
+    }
 }
 
 TEST_F(BufferPackagePlannerTest, SwapCyclePlanning) {
     BinauralConfig config = createTestConfig(200.0f, 10.0f, true, 30, 1000);
     
-    // Планируем 32 секунды - должно быть: SOLID(30s) + FADE_OUT(1s) + FADE_IN(1s)
+    // Планируем 32 секунды: SOLID(30s) дробится на 300×100мс + FADE_OUT(1s) + FADE_IN(1s)
     PackagePlan plan = planner.planPackage(32000, config, state);
     
-    EXPECT_GE(plan.segments.size(), 3) << "Expected at least 3 segments for swap cycle";
+    ASSERT_EQ(plan.segments.size(), 302u) << "Expected 300 SOLID subsegments (100ms) + FADE_OUT + FADE_IN";
+    EXPECT_EQ(plan.totalDurationMs, 32000);
     
-    // Первый сегмент должен быть SOLID
-    EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan.segments[0].durationMs, 30000);
+    // Первые 300 сегментов - SOLID подсегменты по 100мс (дробление SOLID фазы)
+    for (size_t i = 0; i < 300; ++i) {
+        EXPECT_EQ(plan.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan.segments[i].durationMs, 100) << "Segment " << i;
+        EXPECT_FALSE(plan.segments[i].swapAfterSegment) << "Segment " << i;
+    }
     
-    // Второй сегмент должен быть FADE_OUT
-    EXPECT_EQ(plan.segments[1].type, BufferType::FADE_OUT);
-    EXPECT_EQ(plan.segments[1].durationMs, 1000);
-    EXPECT_TRUE(plan.segments[1].swapAfterSegment);
+    // FADE_OUT идёт после всех SOLID подсегментов
+    EXPECT_EQ(plan.segments[300].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan.segments[300].durationMs, 1000);
+    EXPECT_TRUE(plan.segments[300].swapAfterSegment);
     
-    // Третий сегмент должен быть FADE_IN
-    EXPECT_EQ(plan.segments[2].type, BufferType::FADE_IN);
-    EXPECT_EQ(plan.segments[2].durationMs, 1000);
+    // Замыкает цикл FADE_IN
+    EXPECT_EQ(plan.segments[301].type, BufferType::FADE_IN);
+    EXPECT_EQ(plan.segments[301].durationMs, 1000);
 }
 
 TEST_F(BufferPackagePlannerTest, ContinuationAcrossPackages) {
@@ -2203,9 +2212,13 @@ TEST_F(AllCombinationsTest, NoSwap_OnlySolid) {
     for (int p = 0; p < 3; ++p) {
         PackagePlan plan = planner.planPackage(5000, config, state);
 
-        EXPECT_EQ(plan.segments.size(), 1);
-        EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-        EXPECT_EQ(plan.segments[0].durationMs, 5000);
+        // No-swap пакет дробится на 100-мс SOLID подсегменты
+        EXPECT_EQ(plan.segments.size(), 50u);  // 5000мс / 100мс
+        EXPECT_EQ(plan.totalDurationMs, 5000);
+        for (const auto& seg : plan.segments) {
+            EXPECT_EQ(seg.type, BufferType::SOLID);
+            EXPECT_EQ(seg.durationMs, 100);
+        }
 
         const int samples = (5000 * SAMPLE_RATE) / 1000;
         std::vector<float> buffer(samples * 2);
@@ -2229,27 +2242,31 @@ TEST_F(AllCombinationsTest, FullCycleWithFade_NoPause) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: SOLID (2с) + FADE_OUT (0.5с) = 2.5с
+    // Пакет 1: SOLID 2с дробится на 20×100мс + FADE_OUT (0.5с) = 2.5с
     PackagePlan plan1 = planner.planPackage(2500, config, state);
 
-    EXPECT_EQ(plan1.segments.size(), 2);
-    EXPECT_EQ(plan1.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan1.segments[0].durationMs, 2000);
-    EXPECT_EQ(plan1.segments[1].type, BufferType::FADE_OUT);
-    EXPECT_EQ(plan1.segments[1].durationMs, 500);
-    EXPECT_TRUE(plan1.segments[1].swapAfterSegment);
+    ASSERT_EQ(plan1.segments.size(), 21u);  // 20×SOLID(100мс) + FADE_OUT
+    for (size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(plan1.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan1.segments[i].durationMs, 100) << "Segment " << i;
+    }
+    EXPECT_EQ(plan1.segments[20].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan1.segments[20].durationMs, 500);
+    EXPECT_TRUE(plan1.segments[20].swapAfterSegment);
 
     // Состояние после: должны быть в PAUSE (0 мс)
     EXPECT_EQ(state.swapPhase, SwapPhase::PAUSE);
 
-    // Пакет 2: FADE_IN (0.5с) + SOLID (1.5с) = 2с
+    // Пакет 2: FADE_IN (0.5с) + SOLID (1.5с -> 15×100мс) = 2с
     PackagePlan plan2 = planner.planPackage(2000, config, state);
 
-    EXPECT_EQ(plan2.segments.size(), 2);
+    ASSERT_EQ(plan2.segments.size(), 16u);  // FADE_IN + 15×SOLID(100мс)
     EXPECT_EQ(plan2.segments[0].type, BufferType::FADE_IN);
     EXPECT_EQ(plan2.segments[0].durationMs, 500);
-    EXPECT_EQ(plan2.segments[1].type, BufferType::SOLID);
-    EXPECT_EQ(plan2.segments[1].durationMs, 1500);
+    for (size_t i = 1; i < 16; ++i) {
+        EXPECT_EQ(plan2.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan2.segments[i].durationMs, 100) << "Segment " << i;
+    }
 }
 
 // ============================================================================
@@ -2263,30 +2280,34 @@ TEST_F(AllCombinationsTest, FullCycleWithFade_AndPause) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: SOLID (2с) + FADE_OUT (0.5с) + PAUSE (0.2с) = 2.7с
+    // Пакет 1: SOLID 2с -> 20×100мс + FADE_OUT (0.5с) + PAUSE (0.2с) = 2.7с
     PackagePlan plan1 = planner.planPackage(2700, config, state);
 
-    EXPECT_EQ(plan1.segments.size(), 3);
-    EXPECT_EQ(plan1.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan1.segments[0].durationMs, 2000);
-    EXPECT_EQ(plan1.segments[1].type, BufferType::FADE_OUT);
-    EXPECT_EQ(plan1.segments[1].durationMs, 500);
-    EXPECT_TRUE(plan1.segments[1].swapAfterSegment);
-    EXPECT_EQ(plan1.segments[2].type, BufferType::PAUSE);
-    EXPECT_EQ(plan1.segments[2].durationMs, 200);
+    ASSERT_EQ(plan1.segments.size(), 22u);  // 20×SOLID(100мс) + FADE_OUT + PAUSE
+    for (size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(plan1.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan1.segments[i].durationMs, 100) << "Segment " << i;
+    }
+    EXPECT_EQ(plan1.segments[20].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan1.segments[20].durationMs, 500);
+    EXPECT_TRUE(plan1.segments[20].swapAfterSegment);
+    EXPECT_EQ(plan1.segments[21].type, BufferType::PAUSE);
+    EXPECT_EQ(plan1.segments[21].durationMs, 200);
 
     // Состояние после: должны быть в FADE_IN
     EXPECT_EQ(state.swapPhase, SwapPhase::FADE_IN);
     EXPECT_EQ(state.phaseRemainingMs, 500);
 
-    // Пакет 2: FADE_IN (0.5с) + SOLID (1.5с) = 2с
+    // Пакет 2: FADE_IN (0.5с) + SOLID (1.5с -> 15×100мс) = 2с
     PackagePlan plan2 = planner.planPackage(2000, config, state);
 
-    EXPECT_EQ(plan2.segments.size(), 2);
+    ASSERT_EQ(plan2.segments.size(), 16u);  // FADE_IN + 15×SOLID(100мс)
     EXPECT_EQ(plan2.segments[0].type, BufferType::FADE_IN);
     EXPECT_EQ(plan2.segments[0].durationMs, 500);
-    EXPECT_EQ(plan2.segments[1].type, BufferType::SOLID);
-    EXPECT_EQ(plan2.segments[1].durationMs, 1500);
+    for (size_t i = 1; i < 16; ++i) {
+        EXPECT_EQ(plan2.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan2.segments[i].durationMs, 100) << "Segment " << i;
+    }
 }
 
 // ============================================================================
@@ -2294,31 +2315,38 @@ TEST_F(AllCombinationsTest, FullCycleWithFade_AndPause) {
 // ============================================================================
 
 TEST_F(AllCombinationsTest, NoFade_NoPause_AbruptTransition) {
-    // Сценарий: SOLID -> FADE_OUT(0ms) -> PAUSE(0ms) -> FADE_IN(0ms) -> SOLID
-    // Fade отключён, swap происходит мгновенно
+    // Сценарий: SOLID -> FADE_OUT(min 15мс) -> PAUSE(0мс) -> FADE_IN(min 15мс) -> SOLID
+    // Fade отключён, но планировщик гарантирует минимальный рамп 15мс
+    // (MIN_SWAP_FADE_MS), иначе swap-фазы исчезали бы полностью.
     BinauralConfig config = createConfig(true, false, 2, 500, 0);
 
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: SOLID (2с)
+    // Пакет 1: SOLID 2с дробится на 20×100мс (FADE_OUT уходит в следующий пакет)
     PackagePlan plan1 = planner.planPackage(2000, config, state);
 
-    EXPECT_EQ(plan1.segments.size(), 1);
-    EXPECT_EQ(plan1.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan1.segments[0].durationMs, 2000);
+    ASSERT_EQ(plan1.segments.size(), 20u);  // 2с / 100мс
+    for (size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(plan1.segments[i].type, BufferType::SOLID);
+        EXPECT_EQ(plan1.segments[i].durationMs, 100);
+    }
 
-    // Состояние после: переходим к FADE_OUT (0ms), затем к PAUSE
-    // Но phaseRemainingMs = 0, поэтому на следующем planPackage будет переход
+    // Состояние после: FADE_OUT с минимальной длительностью 15мс
     EXPECT_EQ(state.swapPhase, SwapPhase::FADE_OUT);
-    EXPECT_EQ(state.phaseRemainingMs, 0);  // FADE_OUT имеет 0 длительность
+    EXPECT_EQ(state.phaseRemainingMs, 15);
 
-    // Пакет 2: FADE_OUT(0ms) -> PAUSE(0ms) -> FADE_IN(0ms) -> SOLID
+    // Пакет 2: FADE_OUT(15мс) + FADE_IN(15мс) -> SOLID (остаток 1970мс дробится
+    // по 100мс; последний кусок — неполные 70мс)
     PackagePlan plan2 = planner.planPackage(2000, config, state);
 
-    // Т.к. FADE_OUT и PAUSE и FADE_IN имеют 0 длительность, сразу переходим к SOLID
-    EXPECT_EQ(plan2.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan2.segments[0].durationMs, 2000);
+    ASSERT_GE(plan2.segments.size(), 3u);
+    EXPECT_EQ(plan2.segments[0].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan2.segments[0].durationMs, 15);
+    EXPECT_TRUE(plan2.segments[0].swapAfterSegment);
+    EXPECT_EQ(plan2.segments[1].type, BufferType::FADE_IN);
+    EXPECT_EQ(plan2.segments[1].durationMs, 15);
+    EXPECT_EQ(plan2.segments[2].type, BufferType::SOLID);
 }
 
 // ============================================================================
@@ -2326,28 +2354,31 @@ TEST_F(AllCombinationsTest, NoFade_NoPause_AbruptTransition) {
 // ============================================================================
 
 TEST_F(AllCombinationsTest, NoFade_WithPause) {
-    // Сценарий: SOLID -> FADE_OUT(0ms) -> PAUSE -> FADE_IN(0ms) -> SOLID
+    // Сценарий: SOLID -> FADE_OUT(min 15мс) -> PAUSE -> FADE_IN(min 15мс) -> SOLID
     BinauralConfig config = createConfig(true, false, 2, 500, 300);
 
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: SOLID (2с) + PAUSE (0.3с) = 2.3с
-    // FADE_OUT имеет 0 длительность, поэтому не включается
+    // Пакет 1: SOLID 2с -> 20×100мс + FADE_OUT (минимальные 15мс) + PAUSE (285 из 300)
     PackagePlan plan1 = planner.planPackage(2300, config, state);
 
-    EXPECT_EQ(plan1.segments.size(), 2);
-    EXPECT_EQ(plan1.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan1.segments[0].durationMs, 2000);
-    // swapAfterSegment = false, т.к. FADE_OUT не включается (0 мс)
-    EXPECT_FALSE(plan1.segments[0].swapAfterSegment);
-    EXPECT_EQ(plan1.segments[1].type, BufferType::PAUSE);
-    EXPECT_EQ(plan1.segments[1].durationMs, 300);
+    ASSERT_EQ(plan1.segments.size(), 22u);  // 20×SOLID(100мс) + FADE_OUT + PAUSE
+    for (size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(plan1.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan1.segments[i].durationMs, 100) << "Segment " << i;
+    }
+    EXPECT_EQ(plan1.segments[20].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan1.segments[20].durationMs, 15);  // MIN_SWAP_FADE_MS
+    EXPECT_TRUE(plan1.segments[20].swapAfterSegment);
+    EXPECT_EQ(plan1.segments[21].type, BufferType::PAUSE);
+    EXPECT_EQ(plan1.segments[21].durationMs, 285);
 
-    // Состояние после: FADE_IN (0 мс) -> SOLID
-    // phaseRemainingMs = 0, т.к. FADE_IN имеет 0 длительность
-    EXPECT_EQ(state.swapPhase, SwapPhase::FADE_IN);
-    EXPECT_EQ(state.phaseRemainingMs, 0);
+    // Состояние после: PAUSE с остатком 15 мс — пакет 2300мс закончился
+    // внутри паузы (потрачено 285 из 300); перенос на FADE_IN произойдёт
+    // в начале следующего пакета
+    EXPECT_EQ(state.swapPhase, SwapPhase::PAUSE);
+    EXPECT_EQ(state.phaseRemainingMs, 15);
 }
 
 // ============================================================================
@@ -2361,22 +2392,24 @@ TEST_F(AllCombinationsTest, VeryShortPackage_LessThanFadeDuration) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: 500 мс (меньше FADE_OUT = 1000 мс)
+    // Пакет 1: 500 мс (меньше FADE_OUT = 1000 мс); SOLID дробится на 5×100мс
     PackagePlan plan1 = planner.planPackage(500, config, state);
 
-    EXPECT_EQ(plan1.segments.size(), 1);
-    EXPECT_EQ(plan1.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan1.segments[0].durationMs, 500);
+    EXPECT_EQ(plan1.segments.size(), 5u);  // 500мс / 100мс
+    for (const auto& seg : plan1.segments) {
+        EXPECT_EQ(seg.type, BufferType::SOLID);
+        EXPECT_EQ(seg.durationMs, 100);
+    }
 
     // Состояние: продолжаем SOLID
     EXPECT_EQ(state.swapPhase, SwapPhase::SOLID);
     EXPECT_EQ(state.phaseRemainingMs, 29500);  // 30000 - 500
 
-    // Пакет 2: ещё 500 мс
+    // Пакет 2: ещё 500 мс (тоже 5×100мс)
     PackagePlan plan2 = planner.planPackage(500, config, state);
 
     EXPECT_EQ(plan2.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan2.segments[0].durationMs, 500);
+    EXPECT_EQ(plan2.segments[0].durationMs, 100);
 }
 
 // ============================================================================
@@ -2390,14 +2423,16 @@ TEST_F(AllCombinationsTest, PackageCrossingSwapBoundary) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет: 1.2с (SOLID 1с + FADE_OUT 0.2с)
+    // Пакет: 1.2с (SOLID 1с -> 10×100мс + FADE_OUT 0.2с)
     PackagePlan plan = planner.planPackage(1200, config, state);
 
-    EXPECT_EQ(plan.segments.size(), 2);
-    EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan.segments[0].durationMs, 1000);
-    EXPECT_EQ(plan.segments[1].type, BufferType::FADE_OUT);
-    EXPECT_EQ(plan.segments[1].durationMs, 200);
+    EXPECT_EQ(plan.segments.size(), 11u);  // 10×SOLID(100мс) + FADE_OUT
+    for (size_t i = 0; i < 10; ++i) {
+        EXPECT_EQ(plan.segments[i].type, BufferType::SOLID);
+        EXPECT_EQ(plan.segments[i].durationMs, 100);
+    }
+    EXPECT_EQ(plan.segments[10].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan.segments[10].durationMs, 200);
 
     // Генерируем и проверяем непрерывность частоты
     const int totalSamples = (1200 * SAMPLE_RATE) / 1000;
@@ -2444,17 +2479,19 @@ TEST_F(AllCombinationsTest, MultiplePackagesAcrossSwapBoundary) {
         buffers.push_back(buffer);
     }
 
-    // Пакет 1: SOLID(400) - остаётся SOLID
-    // Пакет 2: SOLID(400) - остаётся SOLID  
-    // Пакет 3: SOLID(200) + FADE_OUT(200) - переход к FADE_OUT
-    // Пакет 4: FADE_OUT(300) + PAUSE(100) - переход к PAUSE
-    // Пакет 5: FADE_IN(400) - переход к SOLID
+    // Пакет 1: SOLID(400 -> 4×100мс) - остаётся SOLID
+    // Пакет 2: SOLID(400 -> 4×100мс) - остаётся SOLID
+    // Пакет 3: SOLID(200 -> 2×100мс) + FADE_OUT(200 из 500) - начало фейда
+    //          в этом же пакете (остаток пакета не исчерпан)
+    // Пакет 4: FADE_OUT(300, swap, offset=200) + PAUSE(100)
+    // Пакет 5: FADE_IN(400 из 500) - единственный сегмент, фаза не закрыта
     std::vector<BufferType> expectedSequence = {
-        BufferType::SOLID,   // Пакет 1
-        BufferType::SOLID,   // Пакет 2
-        BufferType::SOLID, BufferType::FADE_OUT,  // Пакет 3
-        BufferType::FADE_OUT, BufferType::PAUSE,  // Пакет 4
-        BufferType::FADE_IN   // Пакет 5
+        BufferType::SOLID, BufferType::SOLID, BufferType::SOLID, BufferType::SOLID,  // Пакет 1
+        BufferType::SOLID, BufferType::SOLID, BufferType::SOLID, BufferType::SOLID,  // Пакет 2
+        BufferType::SOLID, BufferType::SOLID,                                        // Пакет 3 (SOLID-часть)
+        BufferType::FADE_OUT,                                                        // Пакет 3: хвост FO(200)
+        BufferType::FADE_OUT, BufferType::PAUSE,                                     // Пакет 4: FO(300)+PAUSE(100)
+        BufferType::FADE_IN                                                          // Пакет 5: FI(400), незакрытый
     };
 
     int segIndex = 0;
@@ -2481,13 +2518,13 @@ TEST_F(AllCombinationsTest, ConfigChangeOnTheFly) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет 1: с swap
+    // Пакет 1: с swap (SOLID 2с -> 20×100мс + FADE_OUT)
     PackagePlan plan1 = planner.planPackage(2500, config1, state);
-    EXPECT_EQ(plan1.segments.size(), 2);  // SOLID + FADE_OUT
+    EXPECT_EQ(plan1.segments.size(), 21u);  // 20×SOLID(100мс) + FADE_OUT
 
     // Пакет 2: без swap (изменение конфигурации)
     PackagePlan plan2 = planner.planPackage(1000, config2, state);
-    EXPECT_EQ(plan2.segments.size(), 1);  // Только SOLID
+    EXPECT_EQ(plan2.segments.size(), 10u);  // SOLID дробится на 10×100мс
     EXPECT_EQ(plan2.segments[0].type, BufferType::SOLID);
 }
 
@@ -2502,12 +2539,15 @@ TEST_F(AllCombinationsTest, PackageEqualsSolidInterval) {
     GeneratorState state;
     planner.resetState(state);
 
-    // Пакет = 2с (точно SOLID)
+    // Пакет = 2с (точно SOLID): SOLID фаза дробится на 20×100мс
     PackagePlan plan = planner.planPackage(2000, config, state);
 
-    EXPECT_EQ(plan.segments.size(), 1);
-    EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan.segments[0].durationMs, 2000);
+    ASSERT_EQ(plan.segments.size(), 20u);  // 2с / 100мс
+    for (size_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(plan.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan.segments[i].durationMs, 100) << "Segment " << i;
+    }
+    EXPECT_EQ(plan.totalDurationMs, 2000);
 
     // Состояние: переходим к FADE_OUT
     EXPECT_EQ(state.swapPhase, SwapPhase::FADE_OUT);
@@ -2529,21 +2569,23 @@ TEST_F(AllCombinationsTest, PackageLongerThanFullCycle) {
     // Пакет = 2с (длиннее цикла 1.7с)
     PackagePlan plan = planner.planPackage(2000, config, state);
 
-    // Ожидаем: SOLID(1с) + FADE_OUT(0.3с) + PAUSE(0.1с) + FADE_IN(0.3с) + SOLID(0.3с)
+    // Ожидаем: SOLID(1с -> 10×100мс) + FADE_OUT(0.3с) + PAUSE(0.1с) + FADE_IN(0.3с) + SOLID(0.3с -> 3×100мс)
     EXPECT_GE(plan.segments.size(), 5);
     EXPECT_EQ(plan.totalDurationMs, 2000);
 
     // Проверяем последовательность
-    EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-    EXPECT_EQ(plan.segments[0].durationMs, 1000);
-    EXPECT_EQ(plan.segments[1].type, BufferType::FADE_OUT);
-    EXPECT_EQ(plan.segments[1].durationMs, 300);
-    EXPECT_TRUE(plan.segments[1].swapAfterSegment);
-    EXPECT_EQ(plan.segments[2].type, BufferType::PAUSE);
-    EXPECT_EQ(plan.segments[2].durationMs, 100);
-    EXPECT_EQ(plan.segments[3].type, BufferType::FADE_IN);
-    EXPECT_EQ(plan.segments[3].durationMs, 300);
-    EXPECT_EQ(plan.segments[4].type, BufferType::SOLID);
+    for (size_t i = 0; i < 10; ++i) {
+        EXPECT_EQ(plan.segments[i].type, BufferType::SOLID) << "Segment " << i;
+        EXPECT_EQ(plan.segments[i].durationMs, 100) << "Segment " << i;
+    }
+    EXPECT_EQ(plan.segments[10].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan.segments[10].durationMs, 300);
+    EXPECT_TRUE(plan.segments[10].swapAfterSegment);
+    EXPECT_EQ(plan.segments[11].type, BufferType::PAUSE);
+    EXPECT_EQ(plan.segments[11].durationMs, 100);
+    EXPECT_EQ(plan.segments[12].type, BufferType::FADE_IN);
+    EXPECT_EQ(plan.segments[12].durationMs, 300);
+    EXPECT_EQ(plan.segments[13].type, BufferType::SOLID);
 }
 
 // ============================================================================
@@ -2687,9 +2729,11 @@ TEST_F(AllCombinationsTest, VeryLongSolidInterval) {
     for (int i = 0; i < 10; ++i) {
         PackagePlan plan = planner.planPackage(1000, config, state);
 
-        EXPECT_EQ(plan.segments.size(), 1);
-        EXPECT_EQ(plan.segments[0].type, BufferType::SOLID);
-        EXPECT_EQ(plan.segments[0].durationMs, 1000);
+        EXPECT_EQ(plan.segments.size(), 10u);  // 1000мс / 100мс
+        for (const auto& seg : plan.segments) {
+            EXPECT_EQ(seg.type, BufferType::SOLID);
+            EXPECT_EQ(seg.durationMs, 100);
+        }
     }
 
     // Всё ещё в SOLID фазе
@@ -3260,6 +3304,427 @@ TEST_F(SolidFadeTransitionTest, ConfigChangeAcrossPackages) {
     // Частота должна измениться (но фаза может быть непрерывной)
     float freqChange = std::abs(start2.leftFreq - end1.leftFreq);
     EXPECT_GT(freqChange, 40.0f) << "Frequency should change between configs";
+}
+
+// ============================================================================
+// ENGINE-УРОВЕНЬ: эталон (один пакет) vs рантайм (N пакетов) + частотные окна
+// Ловит скачок частоты на границе пакетов, который амплитудный детектор не видит.
+// ============================================================================
+
+namespace {
+
+// Оценка частоты канала по восходящим zero-crossings с суб-сэмплерной интерполяцией
+static float estimateChannelFreq(const float* buf, int startSample, int count, int ch, int fs) {
+    std::vector<float> cross; // позиции в сэмплах
+    for (int i = startSample + 1; i < startSample + count; ++i) {
+        float a = buf[(i - 1) * 2 + ch];
+        float b = buf[i * 2 + ch];
+        if (a < 0.0f && b >= 0.0f) {
+            float frac = (b - a) > 1e-9f ? (-a) / (b - a) : 0.0f;
+            cross.push_back(static_cast<float>(i - 1) + frac);
+        }
+    }
+    if (cross.size() < 3) return -1.0f;
+    float span = cross.back() - cross.front();
+    if (span <= 0) return -1.0f;
+    float cycles = static_cast<float>(cross.size() - 1);
+    return cycles / (span / static_cast<float>(fs));
+}
+
+static float rmsChannel(const float* buf, int startSample, int count, int ch) {
+    float s = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        float v = buf[(startSample + i) * 2 + ch];
+        s += v * v;
+    }
+    return std::sqrt(s / static_cast<float>(count));
+}
+
+// Эмуляция рантайма: единый float-таймлайн, состояние переносится между пакетами
+struct PkgGen {
+    AudioGenerator gen;
+    GeneratorState state;
+    BufferPackagePlanner planner;
+    float curTime = 0.0f;
+    int64_t elapsedMs = 0;
+
+    int emit(std::vector<float>& out, int64_t pkgMs, const BinauralConfig& cfg, int fs) {
+        gen.setSampleRate(fs);
+        PackagePlan plan = planner.planPackage(pkgMs, cfg, state);
+        int maxSamples = static_cast<int>(pkgMs * fs / 1000) + fs; // с запасом
+        std::vector<float> tmp(static_cast<size_t>(maxSamples) * 2, 0.0f);
+        GenerateResult r = gen.generatePackage(tmp.data(), plan, cfg, state,
+                                               curTime, elapsedMs, 1.0f);
+        int n = r.samplesGenerated;
+        out.insert(out.end(), tmp.begin(), tmp.begin() + static_cast<long>(n) * 2);
+        curTime += static_cast<float>(n) / static_cast<float>(fs);
+        elapsedMs += pkgMs;
+        return n;
+    }
+};
+
+static BinauralConfig makeEngineTestConfig(bool swapEnabled) {
+    BinauralConfig cfg;
+    // Кривая с медленным линейным ростом — скачок частоты заметен в окнах
+    FrequencyPoint p1; p1.timeSeconds = 0;     p1.carrierFrequency = 200.0f; p1.beatFrequency = 6.0f;
+    FrequencyPoint p2; p2.timeSeconds = 3600;  p2.carrierFrequency = 250.0f; p2.beatFrequency = 8.0f;
+    FrequencyPoint p3; p3.timeSeconds = 86399; p3.carrierFrequency = 210.0f; p3.beatFrequency = 5.0f;
+    cfg.curve.points = {p1, p2, p3};
+    cfg.curve.interpolationType = InterpolationType::LINEAR;
+    cfg.channelSwapEnabled = swapEnabled;
+    cfg.channelSwapIntervalSec = 30;
+    cfg.channelSwapFadeEnabled = true;
+    cfg.channelSwapFadeDurationMs = 1000;
+    cfg.channelSwapPauseDurationMs = 0;
+    cfg.normalizationType = NormalizationType::TEMPORAL;
+    cfg.volumeNormalizationStrength = 0.5f;
+    cfg.curve.updateCache();
+    return cfg;
+}
+
+// Сценарий: пакеты ПРОИЗВОЛЬНОЙ длительности из pkgMsSeq; побитное сравнение
+// с эталоном + частотные окна 50 мс до/после каждой границы (сравнение
+// отсортированной пары частот — устойчиво к легитимному свопу через ноль).
+static bool runPackageSequenceScenario(const char* name,
+                                       const std::vector<int64_t>& pkgMsSeq,
+                                       int fs,
+                                       bool swapEnabled = true) {
+    int64_t totalMs = 0;
+    for (int64_t ms : pkgMsSeq) totalMs += ms;
+    const int totalSamples = static_cast<int>(totalMs * fs / 1000);
+
+    BinauralConfig cfg = makeEngineTestConfig(swapEnabled);
+
+    // Эталон: вся длительность одним пакетом, свежее состояние
+    std::vector<float> ref;
+    {
+        PkgGen g;
+        g.emit(ref, totalMs, cfg, fs);
+    }
+
+    // Рантайм: пакеты переменной длины, состояние переносится
+    std::vector<float> test;
+    std::vector<int> boundaries;
+    {
+        PkgGen g;
+        for (size_t p = 0; p < pkgMsSeq.size(); ++p) {
+            int before = static_cast<int>(test.size() / 2);
+            g.emit(test, pkgMsSeq[p], cfg, fs);
+            if (p > 0) boundaries.push_back(before);
+        }
+    }
+
+    bool ok = true;
+
+    // 1a) Инфо: побитное сравнение с эталоном. При РАЗНОМ разбиении на подсегменты
+    // омега-рампы имеют разные точки излома -> накопленная фазовая разница неизбежна
+    // и НЕслышима; поэтому расхождение печатается, но не фейлит тест.
+    int cmpN = std::min({totalSamples,
+                         static_cast<int>(ref.size() / 2),
+                         static_cast<int>(test.size() / 2)});
+    float maxDiff = 0.0f; int worstIdx = -1;
+    for (int i = 0; i < cmpN; ++i) {
+        for (int ch = 0; ch < 2; ++ch) {
+            float d = std::fabs(ref[static_cast<size_t>(i) * 2 + ch] -
+                                test[static_cast<size_t>(i) * 2 + ch]);
+            if (d > maxDiff) { maxDiff = d; worstIdx = i; }
+        }
+    }
+    printf("[%s] info: maxDiff vs reference=%.6f at sample=%d\n",
+           name, maxDiff, worstIdx);
+
+    // 1b) РЕШАЮЩИЙ критерий: детектор ЩЕЛЧКОВ в самом тестовом сигнале —
+    // скачок |x[n]-x[n-1]| > 0.02 (для синуса 200Гц амп. 0.35 максимум
+    // естественной дельты ~0.01; рестарт fade даёт дельту до полной амплитуды).
+    int clicks = 0;
+    int firstClickIdx = -1;
+    float firstClickDelta = 0.0f;
+    for (int i = 1; i < cmpN; ++i) {
+        for (int ch = 0; ch < 2; ++ch) {
+            float d = std::fabs(test[static_cast<size_t>(i) * 2 + ch] -
+                                test[static_cast<size_t>(i - 1) * 2 + ch]);
+            if (d > 0.02f) {
+                ++clicks;
+                if (firstClickIdx < 0) {
+                    firstClickIdx = i;
+                    firstClickDelta = d;
+                }
+            }
+        }
+    }
+    printf("[%s] amplitude clicks (>0.02): %d", name, clicks);
+    if (firstClickIdx >= 0) {
+        printf(", first at sample=%d (%.3fs) delta=%.4f",
+               firstClickIdx, static_cast<float>(firstClickIdx) / fs, firstClickDelta);
+    }
+    printf("\n");
+    if (clicks > 0) {
+        ok = false;
+        printf("  ^^^ CLICK DETECTED (fade restart or unfaded swap)\n");
+    }
+
+    // 2) Частотные окна 50 мс до/после каждой границы
+    const int win = static_cast<int>(0.050f * fs);
+    for (int b : boundaries) {
+        if (b - win < 0 || b + win >= cmpN) continue;
+        float fB[2], fA[2];
+        bool lowAmp = false;
+        for (int ch = 0; ch < 2; ++ch) {
+            if (rmsChannel(test.data(), b - win, win, ch) < 1e-3f) lowAmp = true;
+            fB[ch] = estimateChannelFreq(test.data(), b - win, win, ch, fs);
+            fA[ch] = estimateChannelFreq(test.data(), b, win, ch, fs);
+        }
+        if (lowAmp) continue; // тишина (фейд/пауза) — частота не определена, это ОК
+        std::sort(fB, fB + 2);
+        std::sort(fA, fA + 2);
+        float dLow = std::fabs(fB[0] - fA[0]);
+        float dHigh = std::fabs(fB[1] - fA[1]);
+        if (dLow > 0.5f || dHigh > 0.5f) {
+            ok = false;
+            printf("[%s] FREQ JUMP at boundary sample=%d: before=[%.2f,%.2f] "
+                   "after=[%.2f,%.2f] d=[%.2f,%.2f]\n",
+                   name, b, fB[0], fB[1], fA[0], fA[1], dLow, dHigh);
+        }
+    }
+
+    printf("[%s] %s\n\n", name, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+// Обёртка: N одинаковых пакетов по pkgMs
+static bool runEngineScenario(const char* name, int64_t pkgMs, int nPkgs, int fs,
+                              bool swapEnabled = true) {
+    return runPackageSequenceScenario(name,
+                                      std::vector<int64_t>(static_cast<size_t>(nPkgs), pkgMs),
+                                      fs, swapEnabled);
+}
+
+} // namespace
+
+TEST_F(MultiPackageTest, EngineLevel_AlignedPackages_FrequencyContinuity) {
+    // Граница пакета совпадает со свопом (30с/30с): фейд целиком в начале
+    // следующего пакета — должен быть непрерывным.
+    EXPECT_TRUE(runEngineScenario("aligned pkg=30000 swap=30000", 30000, 5, SAMPLE_RATE));
+}
+
+TEST_F(MultiPackageTest, EngineLevel_SplitFade_FrequencyContinuity) {
+    // Граница пакета РЕЖЕТ фейд (30.5с при свапе 30с) — ловит рестарт fade.
+    EXPECT_TRUE(runEngineScenario("splitFade pkg=30500 swap=30000", 30500, 5, SAMPLE_RATE));
+}
+
+TEST_F(MultiPackageTest, EngineLevel_NoSwap_FrequencyContinuity) {
+    // Путь БЕЗ свапа (дефолт пресетов!): раньше это был ОДИН SOLID на весь
+    // пакет — путь, не покрытый тестами. Теперь дробится на 100-мс подсегменты.
+    EXPECT_TRUE(runEngineScenario("noSwap pkg=30000", 30000, 5, SAMPLE_RATE,
+                                  /*swapEnabled=*/false));
+}
+
+// ============================================================================
+// ТЕСТЫ СТЫКОВ: пакеты переменной длины, разрезанный фейд, переход через полночь
+// ============================================================================
+
+TEST_F(MultiPackageTest, MixedLengthPackages_SeamsContinuous) {
+    // Стыки пакетов РАЗНОЙ длины: 30с (полный SOLID) -> 1с (FADE_OUT) -> 30с.
+    // Оба стыка: без щелчков (детектор амплитуды по всему сигналу) и без
+    // скачков частоты (частотные окна 50мс до/после каждой границы пакета).
+    EXPECT_TRUE(runPackageSequenceScenario("mixed pkg 30000/1000/30000",
+                                           {30000, 1000, 30000}, SAMPLE_RATE));
+}
+
+TEST_F(MultiPackageTest, ShortPackageInsideFadeOut_FadeContinuation) {
+    // Короткий 1с пакет РЕЖЕТ FADE_OUT свопа: план должен пометить продолжение
+    // через fadeOffsetMs, а генератор — продолжить кривую затухания с этой
+    // позиции вместо рестарта фейда с полной громкости.
+    BinauralConfig config = makeEngineTestConfig(true);
+
+    GeneratorState state;
+    planner.resetState(state);
+
+    // Пакет 1: 300×SOLID(100мс) + первые 500мс FADE_OUT (из 1000)
+    PackagePlan plan1 = planner.planPackage(30500, config, state);
+    ASSERT_EQ(plan1.segments.size(), 301u);
+    const BufferSegment& fo1 = plan1.segments[300];
+    EXPECT_EQ(fo1.type, BufferType::FADE_OUT);
+    EXPECT_EQ(fo1.durationMs, 500);
+    EXPECT_FALSE(fo1.swapAfterSegment);
+    EXPECT_EQ(fo1.fadeTotalMs, 1000);
+    EXPECT_EQ(fo1.fadeOffsetMs, 0);
+
+    // Пакет 2: вторая половина FADE_OUT (offset=500) + первые 500мс FADE_IN
+    PackagePlan plan2 = planner.planPackage(1000, config, state);
+    ASSERT_EQ(plan2.segments.size(), 2u);
+    EXPECT_EQ(plan2.segments[0].type, BufferType::FADE_OUT);
+    EXPECT_EQ(plan2.segments[0].durationMs, 500);
+    EXPECT_TRUE(plan2.segments[0].swapAfterSegment);
+    EXPECT_EQ(plan2.segments[0].fadeTotalMs, 1000);
+    EXPECT_EQ(plan2.segments[0].fadeOffsetMs, 500);  // продолжение разрезанного фейда
+    EXPECT_EQ(plan2.segments[1].type, BufferType::FADE_IN);
+
+    // Сигнал на стыке 30.5с: рестарт фейда дал бы скачок амплитуды (щелчок),
+    // детектор кликов в runPackageSequenceScenario ловит его по всему сигналу.
+    EXPECT_TRUE(runPackageSequenceScenario("shortPkg cuts fadeOut 30500/1000",
+                                           {30500, 1000}, SAMPLE_RATE));
+}
+
+TEST_F(MultiPackageTest, MidnightWrapSeam_FrequencyContinuity) {
+    // Стык через полночь: кривая пересекает 86400с. Wrap-интервал
+    // [последняя точка -> первая точка + 24ч] должен давать непрерывные частоты
+    // по обе стороны от полуночи (без застревания/клампа на границе суток).
+    BinauralConfig config;
+    FrequencyPoint late;  late.timeSeconds  = 86398; late.carrierFrequency  = 200.0f; late.beatFrequency  = 10.0f;  // L=195 R=205
+    FrequencyPoint early; early.timeSeconds = 10;    early.carrierFrequency = 210.0f; early.beatFrequency = 10.0f;  // L=205 R=215
+    config.curve.points.push_back(late);
+    config.curve.points.push_back(early);
+    config.curve.interpolationType = InterpolationType::LINEAR;
+    config.channelSwapEnabled = false;
+    config.volume = 0.7f;
+    config.curve.updateCache();
+
+    // Старт за 3с до полуночи, 6 секунд звука через стык 86399|0000
+    PkgGen g;
+    g.curTime = 86397.0f;
+    std::vector<float> signal;
+    const int generated = g.emit(signal, 6000, config, SAMPLE_RATE);
+    ASSERT_EQ(generated, 6 * SAMPLE_RATE);
+
+    const float windowSec = 0.25f;
+    const int windowSamples = static_cast<int>(windowSec * SAMPLE_RATE);
+    auto freqAtTimeline = [&](float centerTimelineSec, int channel) {
+        const int startSample =
+            static_cast<int>(centerTimelineSec * SAMPLE_RATE) - windowSamples / 2;
+        return measureFrequencyInWindow(signal.data(), generated, startSample,
+                                        windowSamples, channel, SAMPLE_RATE);
+    };
+
+    // Центры окон: за 0.5с до полуночи и через 0.5с после
+    const float beforeL = freqAtTimeline(2.5f, 0);
+    const float beforeR = freqAtTimeline(2.5f, 1);
+    const float afterL  = freqAtTimeline(3.5f, 0);
+    const float afterR  = freqAtTimeline(3.5f, 1);
+
+    // Эталон — та же lookup-таблица кривой, что использует генератор
+    const FrequencyTableResult expBefore = config.curve.getChannelFrequenciesAt(86399.5f);
+    const FrequencyTableResult expAfter  = config.curve.getChannelFrequenciesAt(0.5f);
+
+    printf("\nMidnight wrap seam:\n");
+    printf("  before midnight: L=%.2f Hz (exp %.2f), R=%.2f Hz (exp %.2f)\n",
+           beforeL, expBefore.lowerFreq, beforeR, expBefore.upperFreq);
+    printf("  after  midnight: L=%.2f Hz (exp %.2f), R=%.2f Hz (exp %.2f)\n",
+           afterL, expAfter.lowerFreq, afterR, expAfter.upperFreq);
+
+    // Wrap [последняя -> первая+24ч]: измеренные частоты совпадают с кривой;
+    // баг.wrap (застревание на последней точке) дал бы ошибку в единицы Гц.
+    constexpr float WRAP_TOLERANCE = 0.3f;
+    EXPECT_NEAR(beforeL, expBefore.lowerFreq, WRAP_TOLERANCE);
+    EXPECT_NEAR(beforeR, expBefore.upperFreq, WRAP_TOLERANCE);
+    EXPECT_NEAR(afterL,  expAfter.lowerFreq,  WRAP_TOLERANCE);
+    EXPECT_NEAR(afterR,  expAfter.upperFreq,  WRAP_TOLERANCE);
+}
+
+// ============================================================================
+// STEP-ИНТЕРПОЛЯЦИЯ НА СТЫКАХ СЕГМЕНТОВ
+// ============================================================================
+
+class StepInterpolationTest : public ::testing::Test {
+protected:
+    AudioGenerator generator;
+    BufferPackagePlanner planner;
+    static constexpr int SAMPLE_RATE = 44100;
+    // Кусочки STEP-кривой — чистые тоны постоянной частоты, допуск жёсткий
+    static constexpr float FREQ_TOLERANCE = 0.2f;
+
+    void SetUp() override {
+        generator.setSampleRate(SAMPLE_RATE);
+    }
+
+    // Кривая из двух точек со ступенью в stepAtSec:
+    // до ступени (carrierA, beatA), после — (carrierB, beatB)
+    BinauralConfig createStepConfig(int32_t stepAtSec,
+                                    float carrierA, float beatA,
+                                    float carrierB, float beatB) {
+        BinauralConfig config;
+        FrequencyPoint pa; pa.timeSeconds = 0;         pa.carrierFrequency = carrierA; pa.beatFrequency = beatA;
+        FrequencyPoint pb; pb.timeSeconds = stepAtSec; pb.carrierFrequency = carrierB; pb.beatFrequency = beatB;
+        config.curve.points.push_back(pa);
+        config.curve.points.push_back(pb);
+        config.curve.interpolationType = InterpolationType::STEP;
+        config.channelSwapEnabled = false;
+        config.volume = 0.7f;
+        config.curve.updateCache();
+        return config;
+    }
+
+    float measureLeftFreqAt(const std::vector<float>& buffer,
+                            float centerSec, float windowSec) {
+        const int windowSize = static_cast<int>(windowSec * SAMPLE_RATE);
+        const int startSample =
+            static_cast<int>(centerSec * SAMPLE_RATE) - windowSize / 2;
+        return measureFrequencyInWindow(buffer.data(),
+                                        static_cast<int>(buffer.size() / 2),
+                                        startSample, windowSize, 0, SAMPLE_RATE);
+    }
+};
+
+TEST_F(StepInterpolationTest, StepInterpolationAcrossSegmentBoundary) {
+    // Ступень на t=1с попадает ТОЧНО НА ГРАНИЦУ подсегментов SOLID по 100мс
+    // ([0.9с..1.0с] | [1.0с..1.1с]; таймлайн сдвинут на 0.5с относительно
+    // целых секунд): подсегмент до ступени целиком держит старое значение
+    // (G1-hold), следующий сразу даёт новое, БЕЗ линейного рампа между ними.
+    // A: carrier=200, beat=10 -> L=195; B: carrier=260, beat=20 -> L=250
+    BinauralConfig config = createStepConfig(1, 200.0f, 10.0f, 260.0f, 20.0f);
+
+    GeneratorState state;
+    PackagePlan plan = planner.planPackage(3000, config, state);  // SOLID 3с -> 30×100мс
+
+    std::vector<float> signal(3 * SAMPLE_RATE * 2);
+    GenerateResult result =
+        generator.generatePackage(signal.data(), plan, config, state, 0.5f, 0);
+    ASSERT_EQ(result.samplesGenerated, 3 * SAMPLE_RATE);
+
+    printf("\nSTEP inside segment [0.5s..1.5s], step at t=1s:\n");
+    printf("  t=0.75s: L=%.2f Hz (exp 195)\n", measureLeftFreqAt(signal, 0.75f, 0.25f));
+    printf("  t=1.25s: L=%.2f Hz (exp 250)\n", measureLeftFreqAt(signal, 1.25f, 0.25f));
+    printf("  t=2.00s: L=%.2f Hz (exp 250)\n", measureLeftFreqAt(signal, 2.00f, 0.25f));
+
+    // До и после ступени — плато константной частоты
+    EXPECT_NEAR(measureLeftFreqAt(signal, 0.75f, 0.25f), 195.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(measureLeftFreqAt(signal, 1.25f, 0.25f), 250.0f, FREQ_TOLERANCE);
+
+    // Узкие окна у самого среза: скачок мгновенный, промежуточных значений нет
+    EXPECT_NEAR(measureLeftFreqAt(signal, 0.90f, 0.15f), 195.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(measureLeftFreqAt(signal, 1.10f, 0.15f), 250.0f, FREQ_TOLERANCE);
+
+    // Следующий сегмент продолжает новое значение без дрейфа
+    EXPECT_NEAR(measureLeftFreqAt(signal, 2.00f, 0.25f), 250.0f, FREQ_TOLERANCE);
+}
+
+TEST_F(StepInterpolationTest, StepPointAtSegmentEnd_HoldsOldValueUntilBoundary) {
+    // Контрольная точка ровно на конце сегмента (t=2с при дроблении по 100мс):
+    // ИНВАРИАНТ — весь сегмент держит СТАРОЕ значение; fallback-портаменто
+    // (линейный рамп A->B внутри сегмента) недопустимо. Фикс портаменто
+    // выполняется параллельно другим агентом — тест фиксирует целевое поведение.
+    // A: carrier=200, beat=10 -> L=195; B: carrier=260, beat=20 -> L=250
+    BinauralConfig config = createStepConfig(2, 200.0f, 10.0f, 260.0f, 20.0f);
+
+    GeneratorState state;
+    PackagePlan plan = planner.planPackage(4000, config, state);  // SOLID 4с -> 40×100мс
+    ASSERT_EQ(plan.segments.size(), 40u);
+
+    std::vector<float> signal(4 * SAMPLE_RATE * 2);
+    GenerateResult result =
+        generator.generatePackage(signal.data(), plan, config, state, 0.0f, 0);
+    ASSERT_EQ(result.samplesGenerated, 4 * SAMPLE_RATE);
+
+    printf("\nSTEP point exactly at segment end (t=2s):\n");
+    printf("  mid of segment [1s..2s]: L=%.2f Hz (exp 195)\n",
+           measureLeftFreqAt(signal, 1.5f, 0.3f));
+    printf("  mid of segment [2s..3s]: L=%.2f Hz (exp 250)\n",
+           measureLeftFreqAt(signal, 2.5f, 0.3f));
+
+    // Весь сегмент [1с..2с] — старое значение
+    EXPECT_NEAR(measureLeftFreqAt(signal, 1.5f, 0.3f), 195.0f, FREQ_TOLERANCE);
+    // Сегмент после границы — уже новое значение
+    EXPECT_NEAR(measureLeftFreqAt(signal, 2.5f, 0.3f), 250.0f, FREQ_TOLERANCE);
 }
 
 } // namespace test

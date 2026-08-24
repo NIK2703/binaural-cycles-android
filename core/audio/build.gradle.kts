@@ -6,6 +6,15 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
 }
 
+import java.util.Properties
+import java.io.FileInputStream
+
+// Выбор архитектур сборки через -PabiFilter=arm64-v8a[,x86_64] (см. build_debug.sh --abi).
+val abiFilterProp = (project.findProperty("abiFilter") as String?)
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+
 android {
     namespace = "com.binaural.core.audio"
     compileSdk = 34
@@ -14,10 +23,14 @@ android {
         minSdk = 26
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
-        
-        // NDK конфигурация - все архитектуры
+
+        // NDK конфигурация - все архитектуры (или только выбранные через -PabiFilter)
         ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            abiFilters += if (abiFilterProp.isNullOrEmpty()) {
+                listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            } else {
+                abiFilterProp
+            }
         }
         
         externalNativeBuild {

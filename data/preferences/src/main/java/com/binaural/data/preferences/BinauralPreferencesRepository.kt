@@ -286,7 +286,7 @@ class BinauralPreferencesRepository @Inject constructor(
             ChannelSwapSettings(
                 enabled = preferences[CHANNEL_SWAP_ENABLED_KEY] ?: false,
                 intervalSeconds = preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60,
-                fadeEnabled = true, // Всегда включено
+                fadeEnabled = preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true,
                 fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L,
                 pauseDurationMs = preferences[CHANNEL_SWAP_PAUSE_DURATION_KEY]?.toLong() ?: 0L
             )

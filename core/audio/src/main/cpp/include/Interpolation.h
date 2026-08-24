@@ -176,8 +176,23 @@ inline void FrequencyCurve::buildLookupTableInternal() {
     // Фиксированный размер таблицы
     const int tableSize = FREQUENCY_TABLE_SIZE;
     
-    // Сортированные точки (предполагаем, что уже отсортированы по времени)
-    const auto& sortedPoints = points;
+    // Сортируем копию стабильно по времени; при равных временах оставляем последнюю точку
+    std::vector<FrequencyPoint> sortedPoints = points;
+    std::stable_sort(sortedPoints.begin(), sortedPoints.end(),
+        [](const FrequencyPoint& a, const FrequencyPoint& b) {
+            return a.timeSeconds < b.timeSeconds;
+        });
+    {
+        size_t outIndex = 0;
+        for (size_t i = 0; i < sortedPoints.size(); ++i) {
+            if (i + 1 < sortedPoints.size() &&
+                sortedPoints[i].timeSeconds == sortedPoints[i + 1].timeSeconds) {
+                continue;
+            }
+            sortedPoints[outIndex++] = sortedPoints[i];
+        }
+        sortedPoints.resize(outIndex);
+    }
     const int numPoints = static_cast<int>(sortedPoints.size());
     
     // Выделяем память
@@ -203,14 +218,19 @@ inline void FrequencyCurve::buildLookupTableInternal() {
     int leftIndex = 0;
 
     for (int tableIndex = 0; tableIndex < tableSize; ++tableIndex) {
-        // Конвертируем индекс таблицы в секунды суток
-        // FREQUENCY_TABLE_INTERVAL_MS = 100, поэтому шаг = 0.1 секунды
-        // tableIndex * 100 / 1000 = tableIndex / 10 (секунды)
-        const int timeSeconds = tableIndex * FREQUENCY_TABLE_INTERVAL_MS / 1000;
+        // Конвертируем индекс таблицы в секунды суток.
+        // ФИКС: было `tableIndex * FREQUENCY_TABLE_INTERVAL_MS / 1000` —
+        // ЦЕЛОЧИСЛЕННОЕ деление отбрасывало доли секунды, и таблица строилась
+        // с шагом 1 секунда (10 одинаковых ячеек подряд) вместо заявленных
+        // 100 мс. Из-за этого частоты в UI стояли на месте до секунды,
+        // а при крутых кривых «ступеньки» были слышны и в отчётах частот.
+        const float timeSecondsF =
+            static_cast<float>(tableIndex) *
+            (static_cast<float>(FREQUENCY_TABLE_INTERVAL_MS) / 1000.0f);
 
         // Выбираем левый индекс интервала для данной записи.
         int effectiveLeftIndex;
-        if (timeSeconds < firstPointTime) {
+        if (timeSecondsF < static_cast<float>(firstPointTime)) {
             // Начальный wrap-участок [0, firstPointTime): интервал
             // [points[last], points[0] + 86400].
             effectiveLeftIndex = numPoints - 1;
@@ -220,7 +240,8 @@ inline void FrequencyCurve::buildLookupTableInternal() {
             // не строился, и для времени после последней точки происходила экстраполяция
             // с ratio > 1.0. Теперь leftIndex достигает numPoints - 1 (wrap-интервал).
             // Short-circuit && гарантирует отсутствие доступа к sortedPoints[numPoints].
-            while (leftIndex < numPoints - 1 && sortedPoints[leftIndex + 1].timeSeconds <= timeSeconds) {
+            while (leftIndex < numPoints - 1 &&
+                   static_cast<float>(sortedPoints[leftIndex + 1].timeSeconds) <= timeSecondsF) {
                 ++leftIndex;
             }
             effectiveLeftIndex = leftIndex;
@@ -232,23 +253,23 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         const auto& rightPoint = sortedPoints[rightIndex];
 
         // Вычисляем нормализованную позицию t в интервале [0, 1]
-        int t1 = leftPoint.timeSeconds;
-        int t2 = rightPoint.timeSeconds;
+        const float t1 = static_cast<float>(leftPoint.timeSeconds);
+        float t2 = static_cast<float>(rightPoint.timeSeconds);
 
         // Обработка перехода через полночь
         const bool isWrapping = (effectiveLeftIndex == numPoints - 1);
         if (isWrapping) {
-            t2 += SECONDS_PER_DAY;
+            t2 += static_cast<float>(SECONDS_PER_DAY);
         }
 
-        int t = timeSeconds;
+        float t = timeSecondsF;
         if (isWrapping && t < t1) {
-            t += SECONDS_PER_DAY;
+            t += static_cast<float>(SECONDS_PER_DAY);
         }
 
-        float ratio = 0.0;
+        float ratio = 0.0f;
         if (t2 != t1) {
-            ratio = static_cast<float>(t - t1) / (t2 - t1);
+            ratio = (t - t1) / (t2 - t1);
         }
         // Защитный clamp — согласованность с jni.cpp (nativeGenerateInterpolatedCurve)
         ratio = std::clamp(ratio, 0.0f, 1.0f);

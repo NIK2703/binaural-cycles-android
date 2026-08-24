@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <utility>
 
 #ifdef USE_NEON
 #include <arm_neon.h>
@@ -38,6 +39,23 @@ namespace binaural {
 // Предвычисленные константы для оптимизации
 static constexpr float ONE_OVER_TWO_PI = 1.0f / AudioGenerator::TWO_PI;
 
+// ===== Бисекция: debug.binaural.constant_freq=1 → постоянная частота мимо кривой.
+// Если щелчки на границах пакетов исчезают — виновата кривая/таймлайн/нормализация;
+// если остаются — свап/амплитуда/AudioTrack/запись.
+#if defined(ANDROID) && !defined(AUDIO_TEST_BUILD)
+#include <sys/system_properties.h>
+#endif
+
+namespace {
+inline bool bisectionConstantFreq() {
+#if defined(ANDROID) && !defined(AUDIO_TEST_BUILD)
+    char v[PROP_VALUE_MAX] = {0};
+    if (__system_property_get("debug.binaural.constant_freq", v) > 0 && v[0] == '1') return true;
+#endif
+    return false;
+}
+} // namespace
+
 // ========================================================================
 // ПРЕДВЫЧИСЛЕННАЯ ТАБЛИЦА ДЛЯ FADE КРИВОЙ (косинусная интерполяция)
 // ========================================================================
@@ -58,7 +76,13 @@ struct FadeCurveTable {
         const float scaledIndex = clampedProgress * TABLE_SIZE;
         const int index = static_cast<int>(scaledIndex);
         const float fraction = scaledIndex - index;
-        
+
+        // G2: progress==1.0 даёт index==TABLE_SIZE — чтение values[index+1]
+        // вышло бы за границу массива
+        if (index >= TABLE_SIZE) {
+            return values[TABLE_SIZE];
+        }
+
         const float y0 = values[index];
         const float y1 = values[index + 1];
         return y0 + fraction * (y1 - y0);
@@ -66,6 +90,40 @@ struct FadeCurveTable {
 };
 
 static const FadeCurveTable s_fadeCurveTable;
+
+// Границы (в сэмплах от начала сегмента) контрольных точек STEP-кривой внутри сегмента
+static std::vector<int> collectStepBoundaries(
+    const FrequencyCurve& curve,
+    double startTimeSeconds,
+    double secPerSample,
+    int samples
+) {
+    std::vector<int> bounds;
+    if (samples <= 1 || !(secPerSample > 0.0)) {
+        return bounds;
+    }
+    const double endTime = startTimeSeconds + secPerSample * samples;
+    const double day = static_cast<double>(SECONDS_PER_DAY);
+    for (const auto& p : curve.points) {
+        const double pt = static_cast<double>(p.timeSeconds);
+        const int64_t kFirst = static_cast<int64_t>(std::floor((startTimeSeconds - pt) / day)) - 1;
+        const int64_t kLast = static_cast<int64_t>(std::ceil((endTime - pt) / day)) + 1;
+        for (int64_t k = kFirst; k <= kLast; ++k) {
+            const double occurrence = pt + static_cast<double>(k) * day;
+            if (occurrence <= startTimeSeconds || occurrence >= endTime) {
+                continue;
+            }
+            const int n = static_cast<int>(
+                std::ceil((occurrence - startTimeSeconds) / secPerSample));
+            if (n > 0 && n < samples) {
+                bounds.push_back(n);
+            }
+        }
+    }
+    std::sort(bounds.begin(), bounds.end());
+    bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
+    return bounds;
+}
 
 AudioGenerator::AudioGenerator() {
     Wavetable::initialize();
@@ -180,6 +238,7 @@ void AudioGenerator::generateSolidBuffer(
     // omega(n) = startOmega + omegaStep * n, где omega(samples-1) = endOmega
     // omegaStep = (endOmega - startOmega) / (samples - 1)
     // phase(n) = sum(omega(i)) для i=0..n-1 = startOmega * n + omegaStep * n*(n-1)/2
+    // samples <= 1: omegaStep = 0 — константная частота старта, деления на ноль нет
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
 
@@ -194,9 +253,15 @@ void AudioGenerator::generateSolidBuffer(
 
             state.leftPhase += leftOmega;
             state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+            if (state.leftPhase < 0.0f) {
+                state.leftPhase += TWO_PI;
+            }
 
             state.rightPhase += rightOmega;
             state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+            if (state.rightPhase < 0.0f) {
+                state.rightPhase += TWO_PI;
+            }
 
             buffer[i * 2] = rightSample * (baseVolumeFactor * rightNormAmp);
             buffer[i * 2 + 1] = leftSample * (baseVolumeFactor * leftNormAmp);
@@ -215,9 +280,15 @@ void AudioGenerator::generateSolidBuffer(
 
             state.leftPhase += leftOmega;
             state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+            if (state.leftPhase < 0.0f) {
+                state.leftPhase += TWO_PI;
+            }
 
             state.rightPhase += rightOmega;
             state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+            if (state.rightPhase < 0.0f) {
+                state.rightPhase += TWO_PI;
+            }
 
             buffer[i * 2] = leftSample * (baseVolumeFactor * leftNormAmp);
             buffer[i * 2 + 1] = rightSample * (baseVolumeFactor * rightNormAmp);
@@ -282,9 +353,15 @@ bool AudioGenerator::generateFadeBuffer(
 
         state.leftPhase += leftOmega;
         state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
 
         state.rightPhase += rightOmega;
         state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
 
         const float baseAmp = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmp * leftAmplitude;
@@ -307,16 +384,36 @@ bool AudioGenerator::generateFadeBuffer(
 
 void AudioGenerator::updatePhasesOnly(
     int samples,
-    float leftOmega,
-    float rightOmega,
+    float startLeftOmega,
+    float startRightOmega,
+    float endLeftOmega,
+    float endRightOmega,
     GeneratorState& state
 ) {
+    // Фикс (Qwen, P3): линейная рампа omega вместо константы — та же модель
+    // фазового накопления, что в SOLID-сегментах (omega(samples-1) == endOmega).
+    // Иначе после PAUSE фаза не совпадает с непрерывной кривой частот.
+    const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
+    const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
+
+    float leftOmega = startLeftOmega;
+    float rightOmega = startRightOmega;
+
     for (int i = 0; i < samples; ++i) {
         state.leftPhase += leftOmega;
         state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
 
         state.rightPhase += rightOmega;
         state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
+
+        leftOmega += leftOmegaStep;
+        rightOmega += rightOmegaStep;
     }
 }
 
@@ -411,8 +508,14 @@ void AudioGenerator::generateSolidBufferNeon(
             // Сначала обновляем фазу с текущими значениями omega
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            if (leftPhaseBase < 0.0f) {
+                leftPhaseBase += static_cast<float>(TWO_PI);
+            }
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            if (rightPhaseBase < 0.0f) {
+                rightPhaseBase += static_cast<float>(TWO_PI);
+            }
             
             // Затем обновляем omega для следующей итерации
             leftOmega += leftOmegaStep * 4;
@@ -466,8 +569,14 @@ void AudioGenerator::generateSolidBufferNeon(
             
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            if (leftPhaseBase < 0.0f) {
+                leftPhaseBase += static_cast<float>(TWO_PI);
+            }
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            if (rightPhaseBase < 0.0f) {
+                rightPhaseBase += static_cast<float>(TWO_PI);
+            }
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -488,9 +597,15 @@ void AudioGenerator::generateSolidBufferNeon(
         
         state.leftPhase += leftOmega;
         state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
         
         state.rightPhase += rightOmega;
         state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
         
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
@@ -560,7 +675,7 @@ bool AudioGenerator::generateFadeBufferNeon(
     // Логируем первый fadeMultiplier для отладки стыков
     if (fadeStartOffset == 0) {
         const float firstProgress = 0.0f;
-        const float firstCosProgress = 0.5f * (1.0f - std::cos(firstProgress * static_cast<float>(M_PI)));
+        const float firstCosProgress = s_fadeCurveTable.get(firstProgress);
         const float firstFadeMult = fadingOut ? (1.0f - firstCosProgress) : firstCosProgress;
         LOG_SEG("FADE_FIRST_MULT: fadingOut=%d, fadeMult=%.6f, amp=[%.4f, %.4f], phase=[%.4f, %.4f]",
              fadingOut ? 1 : 0, firstFadeMult,
@@ -597,10 +712,10 @@ bool AudioGenerator::generateFadeBufferNeon(
             const int fadeProgress = fadeStartOffset + i + j;
             if (fadeProgress >= fadeDuration) {
                 fadeMultipliers[j] = fadingOut ? 0.0f : 1.0f;
-                if (j == 0) fadeCompleted = true;
+                fadeCompleted = true;
             } else if (fadeProgress >= 0) {
                 const float progress = static_cast<float>(fadeProgress) * invFadeDuration;
-                const float cosProgress = 0.5f * (1.0f - std::cos(progress * static_cast<float>(M_PI)));
+                const float cosProgress = s_fadeCurveTable.get(progress);
                 fadeMultipliers[j] = fadingOut ? (1.0f - cosProgress) : cosProgress;
             } else {
                 fadeMultipliers[j] = 1.0f;
@@ -627,8 +742,14 @@ bool AudioGenerator::generateFadeBufferNeon(
         
         leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
         leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+        if (leftPhaseBase < 0.0f) {
+            leftPhaseBase += static_cast<float>(TWO_PI);
+        }
         rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
         rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+        if (rightPhaseBase < 0.0f) {
+            rightPhaseBase += static_cast<float>(TWO_PI);
+        }
         
         leftOmega += leftOmegaStep * 4;
         rightOmega += rightOmegaStep * 4;
@@ -664,7 +785,7 @@ bool AudioGenerator::generateFadeBufferNeon(
             fadeCompleted = true;
         } else if (fadeProgress >= 0) {
             const float progress = static_cast<float>(fadeProgress) * invFadeDuration;
-            const float cosProgress = 0.5f * (1.0f - std::cos(progress * static_cast<float>(M_PI)));
+            const float cosProgress = s_fadeCurveTable.get(progress);
             fadeMultiplier = fadingOut ? (1.0f - cosProgress) : cosProgress;
         }
         
@@ -673,9 +794,15 @@ bool AudioGenerator::generateFadeBufferNeon(
         
         state.leftPhase += leftOmega;
         state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
         
         state.rightPhase += rightOmega;
         state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
         
         const float baseAmp = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmp * leftAmplitude;
@@ -784,8 +911,14 @@ void AudioGenerator::generateSolidBufferSse(
             
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            if (leftPhaseBase < 0.0f) {
+                leftPhaseBase += static_cast<float>(TWO_PI);
+            }
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            if (rightPhaseBase < 0.0f) {
+                rightPhaseBase += static_cast<float>(TWO_PI);
+            }
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -840,8 +973,14 @@ void AudioGenerator::generateSolidBufferSse(
             
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
             leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+            if (leftPhaseBase < 0.0f) {
+                leftPhaseBase += static_cast<float>(TWO_PI);
+            }
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
             rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+            if (rightPhaseBase < 0.0f) {
+                rightPhaseBase += static_cast<float>(TWO_PI);
+            }
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -869,9 +1008,15 @@ void AudioGenerator::generateSolidBufferSse(
         
         state.leftPhase += leftOmega;
         state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
         
         state.rightPhase += rightOmega;
         state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
         
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
@@ -967,10 +1112,10 @@ bool AudioGenerator::generateFadeBufferSse(
             const int fadeProgress = fadeStartOffset + i + j;
             if (fadeProgress >= fadeDuration) {
                 fadeMultipliers[j] = fadingOut ? 0.0f : 1.0f;
-                if (j == 0) fadeCompleted = true;
+                fadeCompleted = true;
             } else if (fadeProgress >= 0) {
                 const float progress = static_cast<float>(fadeProgress) * invFadeDuration;
-                const float cosProgress = 0.5f * (1.0f - std::cos(progress * static_cast<float>(M_PI)));
+                const float cosProgress = s_fadeCurveTable.get(progress);
                 fadeMultipliers[j] = fadingOut ? (1.0f - cosProgress) : cosProgress;
             } else {
                 fadeMultipliers[j] = 1.0f;
@@ -992,8 +1137,14 @@ bool AudioGenerator::generateFadeBufferSse(
         
         leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
         leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
+        if (leftPhaseBase < 0.0f) {
+            leftPhaseBase += static_cast<float>(TWO_PI);
+        }
         rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
         rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
+        if (rightPhaseBase < 0.0f) {
+            rightPhaseBase += static_cast<float>(TWO_PI);
+        }
         
         leftOmega += leftOmegaStep * 4;
         rightOmega += rightOmegaStep * 4;
@@ -1029,7 +1180,7 @@ bool AudioGenerator::generateFadeBufferSse(
             fadeCompleted = true;
         } else if (fadeProgress >= 0) {
             const float progress = static_cast<float>(fadeProgress) * invFadeDuration;
-            const float cosProgress = 0.5f * (1.0f - std::cos(progress * static_cast<float>(M_PI)));
+            const float cosProgress = s_fadeCurveTable.get(progress);
             fadeMultiplier = fadingOut ? (1.0f - cosProgress) : cosProgress;
         }
         
@@ -1038,9 +1189,15 @@ bool AudioGenerator::generateFadeBufferSse(
         
         state.leftPhase += leftOmega;
         state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
+        }
         
         state.rightPhase += rightOmega;
         state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
+        }
         
         const float baseAmp = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmp * leftAmplitude;
@@ -1083,10 +1240,12 @@ GenerateResult AudioGenerator::generatePackage(
         return result;
     }
     
+    const bool constantFreq = bisectionConstantFreq();
+    
     const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
     
     int currentSample = 0;
-    float currentTime = startTimeSeconds;
+    double currentTime = static_cast<double>(startTimeSeconds);
     int64_t currentElapsedMs = elapsedMs;
     
     float lastLeftFreq = 0.0f;
@@ -1116,16 +1275,24 @@ GenerateResult AudioGenerator::generatePackage(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, currentTime);
+        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
+            config.curve, static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec * timeScale
+            config.curve,
+            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
-        
+
+        if (constantFreq) {
+            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
+            startLeftFreq = endLeftFreq = 200.0f;
+            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
+        }
+
         LOG_SEG("SEGMENT_FREQS: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
              startLeftFreq, startRightFreq,
@@ -1146,6 +1313,57 @@ GenerateResult AudioGenerator::generatePackage(
         
         switch (segment.type) {
             case BufferType::SOLID:
+                // STEP: ступенька должна быть мгновенной — режем сегмент по границам
+                // контрольных точек, в каждом под-кусочке частота константна (Δω=0)
+                if (!constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1) {
+                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                    const std::vector<int> stepBounds = collectStepBoundaries(
+                        config.curve, currentTime, stepSecPerSample, samples);
+                    if (!stepBounds.empty()) {
+                        int pieceStart = 0;
+                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
+                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
+                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
+                                config.curve,
+                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            );
+                            const float pieceLeftFreq = pieceFreq.lowerFreq;
+                            const float pieceRightFreq = pieceFreq.upperFreq;
+                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
+                                pieceLeftFreq, pieceRightFreq, config, config.curve
+                            );
+                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
+                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
+                            generateSolidBuffer(
+                                buffer + (currentSample + pieceStart) * 2,
+                                pieceEnd - pieceStart,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftAmp, pieceRightAmp,
+                                pieceLeftAmp, pieceRightAmp,
+                                state.channelsSwapped,
+                                state
+                            );
+                            pieceStart = pieceEnd;
+                        }
+                        break;
+                    }
+                    // G1: граница ступени совпала с концом сегмента — держим
+                    // частоту старта (Δω=0), а не портаменто к постступенчатому значению
+                    generateSolidBuffer(
+                        buffer + currentSample * 2,
+                        samples,
+                        startLeftOmega, startRightOmega,
+                        startLeftOmega, startRightOmega,
+                        startLeftAmp, startRightAmp,
+                        endLeftAmp, endRightAmp,
+                        state.channelsSwapped,
+                        state
+                    );
+                    break;
+                }
                 generateSolidBuffer(
                     buffer + currentSample * 2,
                     samples,
@@ -1158,22 +1376,31 @@ GenerateResult AudioGenerator::generatePackage(
                 );
                 break;
                 
-            case BufferType::FADE_OUT:
-                generateFadeBuffer(
+            case BufferType::FADE_OUT: {
+                // Позиция внутри ПОЛНОГО фейда из плана: разрезанный границей
+                // пакета фейд продолжается с правильной амплитуды (без щелчка).
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBuffer(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     true,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
-                
+            }
+
             case BufferType::PAUSE:
                 // Пауза: тишина, но фазы продолжают обновляться
                 // Это обеспечивает бесшовное продолжение после паузы
@@ -1181,27 +1408,36 @@ GenerateResult AudioGenerator::generatePackage(
                     samples,
                     startLeftOmega,
                     startRightOmega,
+                    endLeftOmega,
+                    endRightOmega,
                     state
                 );
                 // Заполняем буфер тишиной
                 std::memset(buffer + currentSample * 2, 0, samples * 2 * sizeof(float));
                 break;
                 
-            case BufferType::FADE_IN:
-                generateFadeBuffer(
+            case BufferType::FADE_IN: {
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBuffer(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     false,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
+            }
         }
         
         // Логируем последние сэмплы текущего сегмента
@@ -1223,8 +1459,9 @@ GenerateResult AudioGenerator::generatePackage(
         }
         
         currentSample += samples;
-        currentTime += durationSec * timeScale;
-        currentElapsedMs += segment.durationMs;
+        currentTime += static_cast<double>(durationSec) * timeScale;
+        // Ось расписания из фактических сэмплов — без дрейфа против аудио
+        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;
@@ -1255,10 +1492,12 @@ GenerateResult AudioGenerator::generatePackageNeon(
         return result;
     }
     
+    const bool constantFreq = bisectionConstantFreq();
+    
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
     int currentSample = 0;
-    float currentTime = startTimeSeconds;
+    double currentTime = static_cast<double>(startTimeSeconds);
     int64_t currentElapsedMs = elapsedMs;
     
     float lastLeftFreq = 0.0f;
@@ -1279,16 +1518,24 @@ GenerateResult AudioGenerator::generatePackageNeon(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, currentTime);
+        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
+            config.curve, static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec * timeScale
+            config.curve,
+            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
-        
+
+        if (constantFreq) {
+            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
+            startLeftFreq = endLeftFreq = 200.0f;
+            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
+        }
+
         LOG_SEG("SEGMENT_FREQS_NEON: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
              startLeftFreq, startRightFreq,
@@ -1317,6 +1564,55 @@ GenerateResult AudioGenerator::generatePackageNeon(
         
         switch (segment.type) {
             case BufferType::SOLID:
+                // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
+                if (!constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1) {
+                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                    const std::vector<int> stepBounds = collectStepBoundaries(
+                        config.curve, currentTime, stepSecPerSample, samples);
+                    if (!stepBounds.empty()) {
+                        int pieceStart = 0;
+                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
+                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
+                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
+                                config.curve,
+                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            );
+                            const float pieceLeftFreq = pieceFreq.lowerFreq;
+                            const float pieceRightFreq = pieceFreq.upperFreq;
+                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
+                                pieceLeftFreq, pieceRightFreq, config, config.curve
+                            );
+                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
+                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
+                            generateSolidBufferNeon(
+                                buffer + (currentSample + pieceStart) * 2,
+                                pieceEnd - pieceStart,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftAmp, pieceRightAmp,
+                                pieceLeftAmp, pieceRightAmp,
+                                state.channelsSwapped,
+                                state
+                            );
+                            pieceStart = pieceEnd;
+                        }
+                        break;
+                    }
+                    // G1: см. скалярный путь — держим частоту старта
+                    generateSolidBufferNeon(
+                        buffer + currentSample * 2,
+                        samples,
+                        startLeftOmega, startRightOmega,
+                        startLeftOmega, startRightOmega,
+                        startLeftAmp, startRightAmp,
+                        endLeftAmp, endRightAmp,
+                        state.channelsSwapped,
+                        state
+                    );
+                    break;
+                }
                 generateSolidBufferNeon(
                     buffer + currentSample * 2,
                     samples,
@@ -1329,47 +1625,64 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 );
                 break;
                 
-            case BufferType::FADE_OUT:
-                generateFadeBufferNeon(
+            case BufferType::FADE_OUT: {
+                // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBufferNeon(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     true,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
+            }
                 
             case BufferType::PAUSE:
                 updatePhasesOnly(
                     samples,
                     startLeftOmega,
                     startRightOmega,
+                    endLeftOmega,
+                    endRightOmega,
                     state
                 );
                 std::memset(buffer + currentSample * 2, 0, samples * 2 * sizeof(float));
                 break;
-                
-            case BufferType::FADE_IN:
-                generateFadeBufferNeon(
+
+            case BufferType::FADE_IN: {
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBufferNeon(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     false,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
+            }
         }
         
         // Логируем первый и последний сэмплы сегмента
@@ -1378,9 +1691,18 @@ GenerateResult AudioGenerator::generatePackageNeon(
         float lastLeftSample = buffer[(currentSample + samples - 1) * 2];
         float lastRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
         
-        // Вычисляем ожидаемый первый сэмпл через фазу
-        float expectedFirstLeft = Wavetable::fastSin(state.leftPhase);
-        float expectedFirstRight = Wavetable::fastSin(state.rightPhase);
+        // Вычисляем ожидаемый первый сэмпл СЛЕДУЮЩЕГО сегмента через фазу.
+        // Фикс (Qwen, P2): учитываем амплитуду (baseVolumeFactor × endAmp),
+        // иначе сравнение с фактическим first вводит в заблуждение:
+        // сырой sin(phase) больше реального сэмпла в 1/(0.5·amp) раз.
+        constexpr float baseVolumeFactor = 0.5f;
+        float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * baseVolumeFactor * endLeftAmp;
+        float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * baseVolumeFactor * endRightAmp;
+
+        // При активном свапе каналы в буфере меняются местами
+        if (state.channelsSwapped) {
+            std::swap(expectedFirstLeft, expectedFirstRight);
+        }
         
         // Логируем фазу ПОСЛЕ генерации сегмента
         LOG_SEG("SEG_END_NEON: type=%d, leftPhase=%.4f, rightPhase=%.4f, first=[%.4f, %.4f], last=[%.4f, %.4f], expectedFirst=[%.4f, %.4f]",
@@ -1399,8 +1721,9 @@ GenerateResult AudioGenerator::generatePackageNeon(
         }
         
         currentSample += samples;
-        currentTime += durationSec * timeScale;
-        currentElapsedMs += segment.durationMs;
+        currentTime += static_cast<double>(durationSec) * timeScale;
+        // Ось расписания из фактических сэмплов — без дрейфа против аудио
+        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;
@@ -1432,10 +1755,12 @@ GenerateResult AudioGenerator::generatePackageSse(
         return result;
     }
     
+    const bool constantFreq = bisectionConstantFreq();
+    
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
     int currentSample = 0;
-    float currentTime = startTimeSeconds;
+    double currentTime = static_cast<double>(startTimeSeconds);
     int64_t currentElapsedMs = elapsedMs;
     
     float lastLeftFreq = 0.0f;
@@ -1456,16 +1781,24 @@ GenerateResult AudioGenerator::generatePackageSse(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(config.curve, currentTime);
+        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
+            config.curve, static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
         FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve, currentTime + durationSec * timeScale
+            config.curve,
+            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
-        
+
+        if (constantFreq) {
+            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
+            startLeftFreq = endLeftFreq = 200.0f;
+            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
+        }
+
         LOG_SEG("SEGMENT_FREQS_SSE: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
              startLeftFreq, startRightFreq,
@@ -1486,6 +1819,55 @@ GenerateResult AudioGenerator::generatePackageSse(
         
         switch (segment.type) {
             case BufferType::SOLID:
+                // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
+                if (!constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1) {
+                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                    const std::vector<int> stepBounds = collectStepBoundaries(
+                        config.curve, currentTime, stepSecPerSample, samples);
+                    if (!stepBounds.empty()) {
+                        int pieceStart = 0;
+                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
+                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
+                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
+                                config.curve,
+                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            );
+                            const float pieceLeftFreq = pieceFreq.lowerFreq;
+                            const float pieceRightFreq = pieceFreq.upperFreq;
+                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
+                                pieceLeftFreq, pieceRightFreq, config, config.curve
+                            );
+                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
+                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
+                            generateSolidBufferSse(
+                                buffer + (currentSample + pieceStart) * 2,
+                                pieceEnd - pieceStart,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftOmega, pieceRightOmega,
+                                pieceLeftAmp, pieceRightAmp,
+                                pieceLeftAmp, pieceRightAmp,
+                                state.channelsSwapped,
+                                state
+                            );
+                            pieceStart = pieceEnd;
+                        }
+                        break;
+                    }
+                    // G1: см. скалярный путь — держим частоту старта
+                    generateSolidBufferSse(
+                        buffer + currentSample * 2,
+                        samples,
+                        startLeftOmega, startRightOmega,
+                        startLeftOmega, startRightOmega,
+                        startLeftAmp, startRightAmp,
+                        endLeftAmp, endRightAmp,
+                        state.channelsSwapped,
+                        state
+                    );
+                    break;
+                }
                 generateSolidBufferSse(
                     buffer + currentSample * 2,
                     samples,
@@ -1498,47 +1880,64 @@ GenerateResult AudioGenerator::generatePackageSse(
                 );
                 break;
                 
-            case BufferType::FADE_OUT:
-                generateFadeBufferSse(
+            case BufferType::FADE_OUT: {
+                // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBufferSse(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     true,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
+            }
                 
             case BufferType::PAUSE:
                 updatePhasesOnly(
                     samples,
                     startLeftOmega,
                     startRightOmega,
+                    endLeftOmega,
+                    endRightOmega,
                     state
                 );
                 std::memset(buffer + currentSample * 2, 0, samples * 2 * sizeof(float));
                 break;
-                
-            case BufferType::FADE_IN:
-                generateFadeBufferSse(
+
+            case BufferType::FADE_IN: {
+                const int fadeOffsetSamples = static_cast<int>(
+                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                const int fadeTotalSamples = static_cast<int>(
+                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
+                if (generateFadeBufferSse(
                     buffer + currentSample * 2,
                     samples,
                     startLeftOmega, startRightOmega,
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    0,
-                    samples,
+                    fadeOffsetSamples,
+                    fadeTotalSamples,
                     false,
                     state.channelsSwapped,
                     state
-                );
+                )) {
+                    result.fadePhaseCompleted = true;
+                }
                 break;
+            }
         }
         
         // Логируем фазу ПОСЛЕ генерации сегмента
@@ -1555,8 +1954,9 @@ GenerateResult AudioGenerator::generatePackageSse(
         }
         
         currentSample += samples;
-        currentTime += durationSec * timeScale;
-        currentElapsedMs += segment.durationMs;
+        currentTime += static_cast<double>(durationSec) * timeScale;
+        // Ось расписания из фактических сэмплов — без дрейфа против аудио
+        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;

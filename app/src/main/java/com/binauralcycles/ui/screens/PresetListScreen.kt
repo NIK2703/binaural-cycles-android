@@ -125,8 +125,10 @@ fun PresetListScreen(
                         val isActivePreset = uiState.activePreset?.id == preset.id
                         // Используем методы BinauralPreset для учёта виртуальных точек расслабления
                         // Время: единое из uiState (реальное в release, виртуальное в debug)
-                        val carrierFreq = preset.getCarrierFrequencyAt(uiState.currentTime)
-                        val beatFreq = preset.getBeatFrequencyAt(uiState.currentTime)
+                        // Канальная оценка как в движке: carrier=(l+u)/2, beat=u−l
+                        val (lowerFreq, upperFreq) = preset.getChannelFrequenciesAt(uiState.currentTime)
+                        val carrierFreq = (lowerFreq + upperFreq) / 2.0f
+                        val beatFreq = upperFreq - lowerFreq
                         
                         PresetCard(
                             presetId = preset.id,

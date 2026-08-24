@@ -10,6 +10,14 @@ plugins {
 import java.util.Properties
 import java.io.FileInputStream
 
+// Выбор архитектур сборки через -PabiFilter=arm64-v8a[,x86_64] (см. build_debug.sh --abi).
+val abiFilterProp = (project.findProperty("abiFilter") as String?)
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+
+val allAbis = arrayOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+
 val keystorePropertiesFile = rootProject.file("keystore.properties")
 val keystoreProperties = Properties()
 var hasKeystore = false
@@ -52,7 +60,7 @@ android {
         abi {
             isEnable = true
             reset()
-            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            include(*(abiFilterProp?.toTypedArray() ?: allAbis))
             isUniversalApk = false
         }
     }

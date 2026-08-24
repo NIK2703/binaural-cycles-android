@@ -98,6 +98,13 @@ class BinauralViewModel @Inject constructor(
     
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
+
+    // Single-flight для playPreset: отмена предыдущей корутины при быстрых тапах по пресетам
+    private var playPresetJob: kotlinx.coroutines.Job? = null
+
+    // Guard: идёт переключение пресета с фейдом - updateAudioConfig отложен до его завершения
+    @Volatile
+    private var isPresetSwitchInProgress = false
     
     // ServiceConnection для привязки к сервису
     private val serviceConnection = object : ServiceConnection {
@@ -265,6 +272,12 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
             }
         }
+        // Автоматическое расширение границ графика при редактировании
+        viewModelScope.launch {
+            preferencesRepository.getAutoExpandGraphRange().collect { enabled ->
+                _uiState.update { it.copy(autoExpandGraphRange = enabled) }
+            }
+        }
     }
 
     private fun observePlaybackState() {
@@ -313,9 +326,14 @@ class BinauralViewModel @Inject constructor(
             playbackService?.stopWithFade()
             return
         }
-        
+
+        // Single-flight: отменяем предыдущую незавершённую корутину переключения,
+        // чтобы исключить interleaving и двойной fade при быстрых тапах
+        playPresetJob?.cancel()
+        isPresetSwitchInProgress = false
+
         // Устанавливаем активный пресет
-        _uiState.update { 
+        _uiState.update {
             it.copy(
                 activePreset = preset,
                 carrierRange = preset.frequencyCurve.carrierRange,
@@ -347,16 +365,20 @@ class BinauralViewModel @Inject constructor(
         // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
         // Сначала fade-out на старом пресете, затем fade-in на новом
         if (state.isPlaying) {
+            // Guard от гонки с коллектором пресетов: пока идёт фейд, updateAudioConfig
+            // не должен применять конфиг к ещё звучащему старому пресету
+            isPresetSwitchInProgress = true
             // Сначала останавливаем с fade-out на старом пресете
             playbackService?.stopWithFade()
             // Ждем завершения fade-out (250мс + запас), затем запускаем новый пресет
-            viewModelScope.launch {
+            playPresetJob = viewModelScope.launch {
                 kotlinx.coroutines.delay(300)
                 // Применяем новый конфиг
                 playbackService?.updateConfig(config, relaxationSettings)
                 // Запускаем воспроизведение с fade-in
                 playbackService?.play()
             }
+            playPresetJob?.invokeOnCompletion { isPresetSwitchInProgress = false }
         } else {
             // Не воспроизводится - просто обновляем конфиг и запускаем
             playbackService?.updateConfig(config, relaxationSettings)
@@ -544,6 +566,8 @@ class BinauralViewModel @Inject constructor(
         // Если удаляем активный пресет - останавливаем воспроизведение с затуханием
         if (_uiState.value.activePreset?.id == presetId) {
             playbackService?.stopWithFade()
+            // Сбрасываем имя активного пресета в уведомлении
+            playbackService?.setCurrentPresetName(null)
             _uiState.update { it.copy(activePreset = null) }
             lastActivePresetId = null
             viewModelScope.launch {
@@ -559,6 +583,15 @@ class BinauralViewModel @Inject constructor(
     // ============= Методы для редактирования кривой =============
 
     fun togglePlayback() {
+        // Активна серия restartWithFade (fade-out идёт, isPlaying уже false):
+        // нажатие "паузы" должно отменить серию и завершить паузой, а не резюмить звук
+        if (restartJob?.isActive == true) {
+            restartJob?.cancel()
+            playbackService?.pauseWithFade()
+            _uiState.update { it.copy(isPlaying = false) }
+            return
+        }
+
         val state = _uiState.value
         
         if (state.isPlaying) {
@@ -1082,29 +1115,34 @@ class BinauralViewModel @Inject constructor(
      * Перезапустить воспроизведение с затуханием при изменении настроек.
      * Если воспроизводится - делает fade-out, применяет изменения, затем fade-in.
      * Если не воспроизводится - просто применяет изменения.
-     * 
-     * ВАЖНО: При быстром переключении настроек отменяет предыдущий перезапуск,
-     * чтобы избежать накопления нескольких корутин и гонки fade-операций.
+     *
+     * Каждое событие перезапускает ЕДИНСТВЕННЫЙ trailing-job: предыдущий отменяется,
+     * новый после delay применяет изменения и возобновляет звук.
+     * Это гарантирует возобновление звука после ЛЮБОЙ серии событий (например, drag слайдера).
      */
     private fun restartWithFadeIfNeeded(applyChanges: () -> Unit) {
-        // Отменяем предыдущий перезапуск - это ключ к решению проблемы с громкостью!
-        // При быстром переключении настроек старая корутина отменяется,
-        // предотвращая гонку между несколькими fade-операциями
+        // Незавершённый job означает продолжение серии событий:
+        // воспроизведение было активным до её начала (во время fade-out isPlaying уже false)
+        val hasPendingRestart = restartJob?.isActive == true
+        val wasPlaying = hasPendingRestart ||
+            (_uiState.value.isPlaying && _uiState.value.isServiceConnected)
+
         restartJob?.cancel()
-        
-        val state = _uiState.value
-        
-        if (state.isPlaying && state.isServiceConnected) {
-            playbackService?.stopWithFade()
-            
-            restartJob = viewModelScope.launch {
-                kotlinx.coroutines.delay(300) // Ждём завершения fade-out
-                applyChanges()
-                playbackService?.play()
-            }
-        } else {
+
+        if (!wasPlaying) {
             // Не воспроизводится - просто применяем изменения
             applyChanges()
+            return
+        }
+
+        // Fade-out запускаем один раз на серию событий
+        if (!hasPendingRestart) {
+            playbackService?.stopWithFade()
+        }
+        restartJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(300) // Ждём завершения fade-out
+            applyChanges()
+            playbackService?.play()
         }
     }
     
@@ -1286,6 +1324,10 @@ class BinauralViewModel @Inject constructor(
     }
 
     private fun updateAudioConfig() {
+        // Во время переключения пресета с фейдом конфиг применит сама корутина playPreset;
+        // досрочное применение здесь вызвало бы скачок частот в хвосте fade-out
+        if (isPresetSwitchInProgress) return
+
         val state = _uiState.value
         
         // Используем настройки из редактируемого пресета если редактируется активный
@@ -1506,6 +1548,8 @@ class BinauralViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        // Зануляем callback, чтобы сервис не держал ссылку на уничтоженный ViewModel
+        playbackService?.onPresetSwitch = null
         try {
             context.unbindService(serviceConnection)
         } catch (e: Exception) {

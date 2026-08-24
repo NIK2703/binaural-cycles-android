@@ -14,12 +14,27 @@ object NativeInterpolation {
     
     private const val TAG = "NativeInterpolation"
     
+    @Volatile
+    private var libraryLoadFailed = false
+    
+    @Volatile
+    private var failureLogged = false
+    
     init {
         try {
             System.loadLibrary("binaural-engine")
             Log.d(TAG, "Native library loaded for interpolation")
         } catch (e: UnsatisfiedLinkError) {
+            libraryLoadFailed = true
             Log.e(TAG, "Failed to load native library", e)
+        }
+    }
+    
+    // C9: одноразовое предупреждение при недоступной библиотеке
+    private fun logFallback() {
+        if (!failureLogged) {
+            failureLogged = true
+            Log.w(TAG, "Native interpolation unavailable, using Kotlin fallback")
         }
     }
     
@@ -63,7 +78,14 @@ object NativeInterpolation {
             InterpolationType.MONOTONE -> 2
             InterpolationType.STEP -> 3
         }
-        return nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension)
+        return try {
+            nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension)
+        } catch (e: UnsatisfiedLinkError) {
+            logFallback()
+            com.binaural.core.audio.model.Interpolation.interpolate(
+                interpolationType, p0, p1, p2, p3, t, tension
+            )
+        }
     }
     
     /**
@@ -91,6 +113,11 @@ object NativeInterpolation {
             InterpolationType.MONOTONE -> 2
             InterpolationType.STEP -> 3
         }
-        return nativeGenerateInterpolatedCurve(timePoints, values, numOutputPoints, typeInt, tension)
+        return try {
+            nativeGenerateInterpolatedCurve(timePoints, values, numOutputPoints, typeInt, tension)
+        } catch (e: UnsatisfiedLinkError) {
+            logFallback()
+            null
+        }
     }
 }

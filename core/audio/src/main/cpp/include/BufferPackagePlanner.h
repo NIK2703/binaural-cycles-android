@@ -100,13 +100,26 @@ inline PackagePlan BufferPackagePlanner::planPackage(
                  (long long)config.channelSwapFadeDurationMs);
     
     // Без swap: один сплошной буфер на весь пакет
+    // Без свапа: дробим на 100-мс подсегменты ВСЕГДА (раньше был ОДИН
+    // SOLID на весь пакет, затем 1 с). Это: (а) кривая частот следует с шагом
+    // 100 мс вместо кусочно-линейных рампов по 10 мин; (б) рантайм идёт тем
+    // же путём, что покрыт standalone-тестами генератора.
     if (!config.channelSwapEnabled) {
-        BufferSegment segment;
-        segment.type = BufferType::SOLID;
-        segment.durationMs = packageDurationMs;
-        segment.swapAfterSegment = false;
-        plan.segments.push_back(segment);
-        plan.totalDurationMs = packageDurationMs;
+        constexpr int64_t SOLID_SUBSEGMENT_MS = 100;
+        int64_t remaining = packageDurationMs;
+        // Точная оценка: план состоит только из подсегментов длительностью <= T
+        plan.segments.reserve(static_cast<size_t>(
+            (remaining + SOLID_SUBSEGMENT_MS - 1) / SOLID_SUBSEGMENT_MS));
+        while (remaining > 0) {
+            const int64_t segDur = std::min(remaining, SOLID_SUBSEGMENT_MS);
+            BufferSegment segment;
+            segment.type = BufferType::SOLID;
+            segment.durationMs = segDur;
+            segment.swapAfterSegment = false;
+            plan.segments.push_back(segment);
+            plan.totalDurationMs += segDur;
+            remaining -= segDur;
+        }
         return plan;
     }
     
@@ -125,10 +138,18 @@ inline PackagePlan BufferPackagePlanner::planPackage(
                      static_cast<int>(currentPhase), (long long)phaseTimeRemaining);
     }
     
-    // Константа для разбиения SOLID на мелкие сегменты (1 сек)
-    // Это обеспечивает корректное вычисление частот из таблицы для каждого подсегмента
-    constexpr int64_t SOLID_SUBSEGMENT_MS = 1000;
-    
+    // Константа для разбиения SOLID на мелкие подсегменты (T=100 мс).
+    // Мгновенная частота внутри кусочка аппроксимируется хордой
+    // lookup(концов): ошибка ε ≈ |f″|·T²/8 квадратична по T — при T=1000 мс
+    // крутые S-кривые уплощаются до единиц–десятков Гц. T=100 мс снижает ε
+    // в 100 раз; стоимость ~10× O(1)-lookup в секунду аудио ничтожна.
+    constexpr int64_t SOLID_SUBSEGMENT_MS = 100;
+
+    // Грубая оценка ёмкости: ~T-кусочки SOLID + запас под фазовые сегменты
+    // (FADE_OUT/PAUSE/FADE_IN и их разрезания границей пакета)
+    plan.segments.reserve(
+        static_cast<size_t>(remainingTime / SOLID_SUBSEGMENT_MS + 4));
+
     int segmentIndex = 0;
     while (remainingTime > 0) {
         // Пропускаем фазы с нулевой длительностью (например, если fade отключён)
@@ -143,7 +164,8 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         // Определяем длительность текущего сегмента
         int64_t segmentDuration = std::min(remainingTime, phaseTimeRemaining);
         
-        // Для SOLID фазы разбиваем на подсегменты по 1 сек для точного вычисления частот
+        // Для SOLID фазы разбиваем на подсегменты по SOLID_SUBSEGMENT_MS
+        // для точного вычисления частот из таблицы
         if (currentPhase == SwapPhase::SOLID && segmentDuration > SOLID_SUBSEGMENT_MS) {
             // Создаём подсегменты по SOLID_SUBSEGMENT_MS
             int64_t solidRemaining = segmentDuration;
@@ -176,6 +198,15 @@ inline PackagePlan BufferPackagePlanner::planPackage(
             // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
             segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
                                         segmentDuration == phaseTimeRemaining);
+            
+            // Позиция внутри ПОЛНОГО фейда: если фейд разрезан границей пакета,
+            // генератор продолжит кривую затухания/нарастания с правильного места
+            // вместо рестарта с offset=0 (щелчок + скачок частот).
+            if (currentPhase == SwapPhase::FADE_OUT || currentPhase == SwapPhase::FADE_IN) {
+                const int64_t fullPhaseDur = phaseDuration(currentPhase, config);
+                segment.fadeTotalMs  = fullPhaseDur;
+                segment.fadeOffsetMs = fullPhaseDur - phaseTimeRemaining; // уже сгенерировано до этого сегмента
+            }
             
             plan.segments.push_back(segment);
             plan.totalDurationMs += segmentDuration;
@@ -238,14 +269,19 @@ inline int64_t BufferPackagePlanner::phaseDuration(SwapPhase phase, const Binaur
     switch (phase) {
         case SwapPhase::SOLID:    return config.channelSwapIntervalSec * 1000LL;
         case SwapPhase::FADE_OUT:
-            // Если fade отключён, пропускаем фазы затухания/возрастания
-            return config.channelSwapFadeEnabled ? config.channelSwapFadeDurationMs : 0;
+        case SwapPhase::FADE_IN: {
+            // Гарантированный рамп от щелчка: при выключенном fade фаза не должна
+            // «исчезать» (иначе FADE_OUT сегмент не создаётся и swap не происходит
+            // вовсе, а переходы SOLID→PAUSE→SOLID режутся жёстко).
+            constexpr int64_t MIN_SWAP_FADE_MS = 15;
+            if (!config.channelSwapFadeEnabled) {
+                return MIN_SWAP_FADE_MS;
+            }
+            return std::max(config.channelSwapFadeDurationMs, MIN_SWAP_FADE_MS);
+        }
         case SwapPhase::PAUSE:
             // Пауза между fade-out и fade-in
             return config.channelSwapPauseDurationMs;
-        case SwapPhase::FADE_IN:
-            // Если fade отключён, пропускаем фазы затухания/возрастания
-            return config.channelSwapFadeEnabled ? config.channelSwapFadeDurationMs : 0;
     }
     return 0;
 }

@@ -7,8 +7,14 @@
 #   - aapt2/zipalign  для aarch64 (Termux android-tools)
 #
 # Использование:
-#   ./build_debug.sh                       # собрать debug (4 ABI)
-#   ./build_debug.sh --arm64               # собрать debug и скопировать arm64-v8a APK в ~/storage/downloads
+#   ./build_debug.sh                               # собрать debug (4 ABI)
+#   ./build_debug.sh --arm64                       # debug, только arm64-v8a + копия в ~/storage/downloads
+#   ./build_debug.sh --abi arm64 :app:assembleRelease   # release, только arm64-v8a + копия в загрузки
+#   ./build_debug.sh --abi arm64,x86_64 :app:assembleDebug
+#
+# --abi SPEC: arm64 | armv7 | x86 | x86_64 (или полные имена ABI), можно несколько через запятую.
+#   Передаётся в Gradle как -PabiFilter=... — нативный код собирается ТОЛЬКО для выбранных ABI.
+#   Собранные APK выбранных ABI автоматически копируются в ~/storage/downloads.
 #   ./build_debug.sh <gradle-task>...      # выполнить произвольные Gradle-задачи (env настроен)
 #   Примеры:
 #   ./build_debug.sh :core:audio:externalNativeBuildRelease
@@ -27,15 +33,46 @@ NDK="$TOOLS/android-ndk-r29"
 GRADLE_HOME="$TOOLS/gradle-home"
 JAVA_HOME_="${JAVA_HOME:-$PREFIX_/lib/jvm/java-17-openjdk}"
 
+map_abi() { # короткое имя -> полное имя ABI
+    case "$1" in
+        arm64|arm64-v8a)  echo "arm64-v8a" ;;
+        armv7|arm32|arm|armeabi-v7a) echo "armeabi-v7a" ;;
+        x86)              echo "x86" ;;
+        x64|x86_64)       echo "x86_64" ;;
+        *)                echo "" ;;
+    esac
+}
+
 # По умолчанию собираем debug APK; любые не-флаговые аргументы — это Gradle-задачи.
 TASKS=()
 COPY_ARM64=0
-for arg in "$@"; do
-    case "$arg" in
-        --arm64) COPY_ARM64=1 ;;
-        *) TASKS+=("$arg") ;;
+ABI_SPEC=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --arm64) COPY_ARM64=1; ABI_SPEC="${ABI_SPEC:+$ABI_SPEC,}arm64" ;;
+        --abi) shift; ABI_SPEC="${ABI_SPEC:+$ABI_SPEC,}$1" ;;
+        --abi=*) ABI_SPEC="${ABI_SPEC:+$ABI_SPEC,}${1#--abi=}" ;;
+        *) TASKS+=("$1") ;;
     esac
+    shift
 done
+
+GRADLE_PROPS=()
+COPY_APKS=0
+if [ -n "$ABI_SPEC" ]; then
+    ABIS=""
+    IFS=',' read -ra PARTS <<< "$ABI_SPEC"
+    for p in "${PARTS[@]}"; do
+        FULL=$(map_abi "$(echo "$p" | tr -d '[:space:]')")
+        if [ -z "$FULL" ]; then
+            echo "❌ Неизвестная архитектура: '$p' (доступны: arm64, armv7, x86, x86_64)"
+            exit 1
+        fi
+        ABIS="${ABIS:+$ABIS,}$FULL"
+    done
+    GRADLE_PROPS+=("-PabiFilter=$ABIS")
+    COPY_APKS=1
+fi
 [ "${#TASKS[@]}" -eq 0 ] && TASKS=(":app:assembleDebug")
 
 GRADLE_BIN=$(find "$GRADLE_HOME/wrapper/dists" -maxdepth 5 -type f -path '*/gradle-9.2.1/bin/gradle' 2>/dev/null | head -1)
@@ -94,10 +131,11 @@ echo "🔨 BinauralBeats Build"
 echo "=============================================="
 echo "📦 Gradle: $GRADLE_BIN"
 echo "🏗️  Tasks: ${TASKS[*]}"
+[ "${#GRADLE_PROPS[@]}" -gt 0 ] && echo "🎯 ABI: ${GRADLE_PROPS[0]#-PabiFilter=}"
 echo "=============================================="
 
 cd "$SCRIPT_DIR"
-"$GRADLE_BIN" "${TASKS[@]}" --no-daemon --console=plain 2>&1 | tail -40
+"$GRADLE_BIN" "${GRADLE_PROPS[@]}" "${TASKS[@]}" --no-daemon --console=plain 2>&1 | tail -40
 EXIT="${PIPESTATUS[0]}"
 
 if [ "$EXIT" -ne 0 ]; then
@@ -111,12 +149,18 @@ find "$SCRIPT_DIR/app/build/outputs/apk" -name 'app-*-debug.apk' -o -name 'app-*
     echo "   📦 $apk  ($(du -h "$apk" | cut -f1))"
 done
 
-if [ "$COPY_ARM64" = "1" ]; then
-    APK_ARM64="$SCRIPT_DIR/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk"
-    if [ -f "$APK_ARM64" ]; then
-        DEST="$TERMUX_HOME/storage/downloads/app-arm64-v8a-debug.apk"
-        cp "$APK_ARM64" "$DEST"
-        echo "   🗂️ Скопировано в: $DEST"
-    fi
+if [ "$COPY_APKS" -eq 1 ]; then
+    DEST="$TERMUX_HOME/storage/downloads"
+    mkdir -p "$DEST"
+    IFS=',' read -ra COPY_ABIS <<< "$ABIS"
+    for abi in "${COPY_ABIS[@]}"; do
+        for variant in release debug; do
+            APK="$SCRIPT_DIR/app/build/outputs/apk/$variant/app-$abi-$variant.apk"
+            if [ -f "$APK" ]; then
+                cp "$APK" "$DEST/"
+                echo "   🗂️ Скопировано в $DEST: app-$abi-$variant.apk ($(du -h "$APK" | cut -f1))"
+            fi
+        done
+    done
 fi
 exit "$EXIT"

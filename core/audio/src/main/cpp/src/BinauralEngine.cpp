@@ -1,6 +1,7 @@
 #include "BinauralEngine.h"
 #include "BufferPackagePlanner.h"
 #include <chrono>
+#include <ctime>
 #include <algorithm>
 #include <cmath>
 #include <atomic>
@@ -23,7 +24,7 @@
 #include <immintrin.h>
 #endif
 
-// Логирование только в DEBUG сборках
+// Логирование только в DEBUG сборках. PKG_BOUNDARY — ВСЕГДА (диагностика стыков).
 #ifdef AUDIO_DEBUG
 #define LOG_TAG "BinauralEngine"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -31,21 +32,49 @@
 #define LOGD(...) ((void)0)
 #endif
 
+// Всегда включённый лог стыков пакетов (release тоже): снимается через
+// adb logcat -s PKG_BOUNDARY — показывает, ЧТО прыгает на границе.
+#if defined(ANDROID) && !defined(AUDIO_TEST_BUILD)
+#define PKG_LOG(...) __android_log_print(ANDROID_LOG_INFO, "PKG_BOUNDARY", __VA_ARGS__)
+#else
+#define PKG_LOG(...) ((void)0)
+#endif
+
 namespace binaural {
 
-// Нормализация времени суток в [0, 86400). double — для точности при больших total*scale.
+// Нормализация времени суток в [0, 86400). Только float — единая ось времени.
 namespace {
-constexpr double kSecondsPerDayD = 86400.0;
-inline float normalizeTimeOfDay(double t) {
-    double r = std::fmod(t, kSecondsPerDayD);
-    if (r < 0.0) r += kSecondsPerDayD;
-    return static_cast<float>(r);
+constexpr float kSecondsPerDayF = 86400.0f;
+inline float normalizeTimeOfDay(float t) {
+    float r = std::fmod(t, kSecondsPerDayF);
+    if (r < 0.0f) r += kSecondsPerDayF;
+    return r;
 }
+
+inline int64_t nowWallClockMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// ===== Диагностика стыков пакетов (видна в debug-сборке через LOGD) =====
+// Конец предыдущего пакета (сек суток) и версия конфига (инкремент на setConfig).
+std::atomic<float>    s_lastPkgEnd{-1.0f};
+std::atomic<uint32_t> s_cfgVersion{0};
+
+// PKG_SEAM: контентный контроль стыка — последние сэмплы пакета N vs первые N+1
+std::atomic<float> s_seamPrevLastL{0.0f};
+std::atomic<float> s_seamPrevLastR{0.0f};
+std::atomic<float> s_seamPrevEndLower{0.0f};
+std::atomic<float> s_seamPrevEndUpper{0.0f};
+std::atomic<bool>  s_seamHasPrev{false};
 } // namespace
 
 BinauralEngine::BinauralEngine() {
     // Инициализация конфигурации по умолчанию
     m_config.curve.updateCache();
+
+    // Отпечаток сборки: если дата в логе старая — на устройстве СТАРЫЙ APK.
+    PKG_LOG("ENGINE_BUILD: compiled %s %s (seam-diag v1)", __DATE__, __TIME__);
     
 #ifdef USE_NEON
     LOGD("BinauralEngine initialized with NEON SIMD + FMA optimization");
@@ -64,13 +93,20 @@ void BinauralEngine::setCallbacks(EngineCallbacks callbacks) {
 
 void BinauralEngine::setConfig(const BinauralConfig& config) {
     // Быстрый путь: обновляем конфигурацию с минимальной блокировкой
-    // Копируем и строим lookup table вне мьютекса
+    // Копируем и строим кэш ВНЕ мьютекса.
+    // P1: именно updateCache (а не голый buildLookupTable): TEMPORAL-нормализация
+    // читает min/max-кэш кривой — без него амплитуды обнуляются (тишина).
     BinauralConfig newConfig = config;
-    newConfig.curve.buildLookupTable();
+    newConfig.curve.updateCache();
     
     // Эксклюзивная блокировка для записи
     std::unique_lock<std::shared_mutex> lock(m_configMutex);
     m_config = std::move(newConfig);
+    
+    // Диагностика: версия конфига растёт при каждой подмене — по логам
+    // PKG_BOUNDARY видно, если кривая меняется между пакетами.
+    const uint32_t cfgVer = s_cfgVersion.fetch_add(1, std::memory_order_relaxed) + 1;
+    PKG_LOG("CONFIG_CHANGED: cfgVer=%u", cfgVer);
 }
 
 void BinauralEngine::setSampleRate(int sampleRate) {
@@ -88,9 +124,15 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     }
     
     const int sampleRate = m_generator.getSampleRate();
-    const int64_t packageDurationMs = static_cast<int64_t>(m_batchDurationMinutes) * 60 * 1000LL;
+    // План строим под ФАКТИЧЕСКИЙ лимит буфера, а не под полный батч:
+    // генератор пишет ровно plan-длительность — расхождение = переполнение буфера
     const int maxSamples = m_batchDurationMinutes * 60 * sampleRate;
     const int samplesToGenerate = std::min(maxSamples, maxSamplesPerChannel);
+    if (samplesToGenerate <= 0) {
+        return 0;
+    }
+    const int64_t packageDurationMs =
+        static_cast<int64_t>(samplesToGenerate) * 1000 / std::max(1, sampleRate);
     
     BinauralConfig config;
     {
@@ -152,14 +194,45 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
 #endif
     
     // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
-    // double — для точности при долгих сессиях (total*scale может быть большим).
-    const double batchDurationSeconds =
-        static_cast<double>(result.samplesGenerated) / static_cast<double>(sampleRate);
+    // Только float — единая ось времени с генератором.
+    const float batchDurationSeconds =
+        static_cast<float>(result.samplesGenerated) / static_cast<float>(sampleRate);
     m_totalBufferTimeSeconds.store(
         m_totalBufferTimeSeconds.load(std::memory_order_relaxed) + batchDurationSeconds,
         std::memory_order_relaxed
     );
-    
+
+    // Фикс (Qwen, P1): продвигаем единый носитель времени кривой — как в
+    // generateAudioBuffer. Без этого в real-time режиме computePlaybackTimeSeconds()
+    // возвращал бы одно и то же время при повторных вызовах generateBatch
+    // (замороженная кривая частот между батчами).
+    m_curveTimeSeconds.store(
+        normalizeTimeOfDay(m_curveTimeSeconds.load(std::memory_order_relaxed) +
+                           batchDurationSeconds * timeScale),
+        std::memory_order_relaxed);
+
+    // Якорь UI-таймлайна (аналогично generateAudioBuffer).
+    anchorUiTimeline(timeSeconds, timeSeconds + batchDurationSeconds * timeScale);
+
+    // E5: коррекция дрейфа swap-цикла (как в generateAudioBuffer): планировщик
+    // планировал packageDurationMs, реально сгенерировано samplesGenerated —
+    // вычитаем разницу из остатка фазы свопа, иначе ms-ось планировщика
+    // убегает от сэмпловой после серий коротких/нецелых пакетов.
+    {
+        const float plannedMs   = static_cast<float>(packageDurationMs);
+        const float generatedMs = 1000.0f * batchDurationSeconds;
+        const float deltaMs     = plannedMs - generatedMs;
+        if (deltaMs > 0.0f && m_state.phaseRemainingMs > 0) {
+            m_state.phaseRemainingMs -= static_cast<int64_t>(deltaMs + 0.5f);
+            if (m_state.phaseRemainingMs < 0) m_state.phaseRemainingMs = 0;
+        }
+    }
+
+    // E5: обновление s_lastPkgEnd для seam-диагностики — как в buffer-пути.
+    s_lastPkgEnd.store(
+        normalizeTimeOfDay(timeSeconds + batchDurationSeconds * timeScale),
+        std::memory_order_relaxed);
+
     // Обновляем атомарные значения для Java
     const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq, std::memory_order_relaxed);
     m_currentCarrierFreq.store(result.currentCarrierFreq, std::memory_order_relaxed);
@@ -178,13 +251,33 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
     }
     
-    return samplesToGenerate;
+    // Контракт как у generateAudioBuffer: возвращаем РЕАЛЬНО сгенерированное
+    // количество — вызывающая сторона обязана записать в AudioTrack ровно его
+    return result.samplesGenerated;
 }
 
 void BinauralEngine::setPlaying(bool playing) {
+    setPlaying(playing, /*preserveTimeline=*/false);
+}
+
+void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
     m_isPlaying.store(playing, std::memory_order_release);
     
     if (playing) {
+        if (preserveTimeline) {
+            // RESUME: продолжаем с того же места кривой и той же фазой.
+            // НЕ трогаем m_baseTimeSeconds / m_totalBufferTimeSeconds / фазы —
+            // иначе кривая прыгает к wall-clock и слышен щелчок на resume.
+            LOGD("setPlaying(true, resume): timeline preserved base=%d total=%.3f",
+                 m_baseTimeSeconds.load(std::memory_order_relaxed),
+                 m_totalBufferTimeSeconds.load(std::memory_order_relaxed));
+            // Переякоряем UI-таймлайн на текущую позицию кривой, чтобы wall-время,
+            // прошедшее за паузу, не экстраполировалось в будущее. Span=0 — до
+            // следующего пакета UI стоит на текущей позиции (пакет сгенерируется сразу).
+            const float resumeTime = computePlaybackTimeSeconds();
+            anchorUiTimeline(resumeTime, resumeTime);
+            return;
+        }
         BufferPackagePlanner planner;
         planner.resetState(m_state);
         m_state.lastSwapElapsedMs = 0;
@@ -196,19 +289,36 @@ void BinauralEngine::setPlaying(bool playing) {
             // И fresh-play, и resume в Kotlin идут через setPlaying(true);
             // сброс total откатил бы виртуальное время и вернул стык.
             // Таймлайн устанавливается в enable/scrub/setScale/reset.
+            m_curveTimeSeconds.store(
+                normalizeTimeOfDay(m_virtualBaseTimeSeconds.load(std::memory_order_relaxed)),
+                std::memory_order_relaxed);
             LOGD("setPlaying(true): virtual timeline preserved (base=%.2f, total=%.3f)",
                  m_virtualBaseTimeSeconds.load(std::memory_order_relaxed),
                  m_totalBufferTimeSeconds.load(std::memory_order_relaxed));
         } else {
-            m_baseTimeSeconds = getCurrentTimeSeconds();
-            m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
-            LOGD("setPlaying(true): baseTime=%d", m_baseTimeSeconds);
+            // E1: дробный якорь свежего play (int32 терял долю секунды).
+            const float baseF = realTimeOfDaySeconds();
+            m_baseTimeSeconds.store(static_cast<int32_t>(baseF), std::memory_order_relaxed); // legacy/диагностика
+            m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+            m_curveTimeSeconds.store(normalizeTimeOfDay(baseF),
+                                     std::memory_order_relaxed);
+            LOGD("setPlaying(true): baseTime=%.3f", baseF);
         }
 #else
-        m_baseTimeSeconds = getCurrentTimeSeconds();
-        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
-        LOGD("setPlaying(true): baseTime=%d", m_baseTimeSeconds);
+        // E1: дробный якорь свежего play (int32 терял долю секунды).
+        const float baseF = realTimeOfDaySeconds();
+        m_baseTimeSeconds.store(static_cast<int32_t>(baseF), std::memory_order_relaxed); // legacy/диагностика
+        m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+        m_curveTimeSeconds.store(normalizeTimeOfDay(baseF),
+                                 std::memory_order_relaxed);
+        LOGD("setPlaying(true): baseTime=%.3f", baseF);
 #endif
+
+        // Свежий старт: якорим UI-таймлайн на базовую точку кривой.
+        // Span=0 — до первого пакета UI стоит на базе; первый пакет
+        // сгенерируется немедленно и расширит диапазон.
+        const float freshStart = computePlaybackTimeSeconds();
+        anchorUiTimeline(freshStart, freshStart);
     }
 }
 
@@ -222,6 +332,15 @@ void BinauralEngine::resetState() {
     m_elapsedSeconds.store(0, std::memory_order_relaxed);
     m_currentBeatFreq.store(0.0f, std::memory_order_relaxed);
     m_currentCarrierFreq.store(0.0f, std::memory_order_relaxed);
+
+    // UI-таймлайн больше не валиден: после stop показываем реальное время суток
+    m_uiAnchorWallMs.store(0, std::memory_order_relaxed);
+    m_uiLastUiTimeSec.store(0.0f, std::memory_order_relaxed);
+}
+
+bool BinauralEngine::isCurveConfigured() const {
+    std::shared_lock<std::shared_mutex> lock(m_configMutex);
+    return !m_config.curve.lowerFreqTable.empty() && !m_config.curve.upperFreqTable.empty();
 }
 
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
@@ -250,9 +369,27 @@ int32_t BinauralEngine::getCurrentTimeSeconds() const {
 #endif
 }
 
+// E1: дробное ЛОКАЛЬНОЕ время суток. Целочисленный геттер терял долю секунды
+// (смещение старта кривой до 1с). Мс — одним снимком system_clock; локальная
+// ось через localtime_r (как в getCurrentTimeSeconds/VirtualClock), т.к.
+// сырой %86400000 от эпохи дал бы UTC-сутки, а не локальные.
+float BinauralEngine::realTimeOfDaySeconds() {
+    const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    const std::time_t sec = static_cast<std::time_t>(nowMs / 1000);
+    struct tm tmInfo;
+    localtime_r(&sec, &tmInfo);
+    const int32_t whole = tmInfo.tm_hour * 3600 + tmInfo.tm_min * 60 + tmInfo.tm_sec;
+    return static_cast<float>(whole) +
+           static_cast<float>(nowMs % 1000) / 1000.0f;
+}
+
 std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
-    // Получаем текущее время суток в секундах — тот же таймлайн, что и генерация.
-    const float currentSeconds = computePlaybackTimeSeconds();
+    // Получаем ТЕКУЩЕЕ время кривой для UI: плавная экстраполяция по wall-clock
+    // в пределах сгенерированного диапазона. computePlaybackTimeSeconds() здесь
+    // НЕ годится — он продвигается только при генерации пакета, из-за чего
+    // частоты на экране «стояли» раз в интервал генерации.
+    const float currentSeconds = computeUiTimeSeconds();
     
     // Читаем конфигурацию с shared_lock
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
@@ -299,10 +436,10 @@ void BinauralEngine::updateElapsedTime() {
     }
 }
 
-bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
+int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // Быстрая проверка без блокировки
     if (!m_isPlaying.load(std::memory_order_acquire)) {
-        return false;
+        return 0;
     }
     
     // Вычисляем точное время для интерполяции
@@ -338,6 +475,33 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // Планируем пакет буферов на основе текущего состояния
     BufferPackagePlanner planner;
     PackagePlan plan = planner.planPackage(bufferDurationMs, config, m_state);
+    
+    // Диагностика стыка: сравниваем частоты кривой в конце прошлого пакета
+    // и в начале текущего. Если различаются при dt≈0 — скачок времени/конфига.
+    // Фикс (Qwen, P2): сохраняем prevEnd ДО генерации и обновления s_lastPkgEnd,
+    // чтобы PKG_SEAM ниже считал dt относительно реального конца прошлого пакета
+    // (иначе dt всегда равен -длительности пакета и вводит в заблуждение).
+    const float prevEndForSeam = s_lastPkgEnd.load(std::memory_order_relaxed);
+    {
+        const float prevEnd = prevEndForSeam;
+        FrequencyTableResult fS = config.curve.getChannelFrequenciesAt(timeSeconds);
+        FrequencyTableResult fP;
+        fP.lowerFreq = 0.0f; fP.upperFreq = 0.0f;
+        if (prevEnd >= 0.0f) {
+            fP = config.curve.getChannelFrequenciesAt(prevEnd);
+        }
+        PKG_LOG("PKG_BOUNDARY: prevEnd=%.4f start=%.4f dt=%.6f | "
+             "f@prevEnd=[%.3f,%.3f] f@start=[%.3f,%.3f] | cfgVer=%u swapped=%d "
+             "swapPhase=%d phaseRemMs=%lld totalBuf=%.4f baseTime=%d",
+             prevEnd, timeSeconds, timeSeconds - prevEnd,
+             fP.lowerFreq, fP.upperFreq, fS.lowerFreq, fS.upperFreq,
+             s_cfgVersion.load(std::memory_order_relaxed),
+             m_state.channelsSwapped ? 1 : 0,
+             static_cast<int>(m_state.swapPhase),
+             (long long)m_state.phaseRemainingMs,
+             m_totalBufferTimeSeconds.load(std::memory_order_relaxed),
+             m_baseTimeSeconds.load(std::memory_order_relaxed));
+    }
     
     // Используем SIMD-оптимизированную версию если доступна
 #if defined(USE_NEON)
@@ -391,20 +555,106 @@ bool BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     }
     
     // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
-    // double — для точности при долгих сессиях (total*scale может быть большим).
-    const double actualDurationSeconds =
-        static_cast<double>(result.samplesGenerated) / static_cast<double>(sampleRate);
+    // Только float — единая ось времени с генератором.
+    const float actualDurationSeconds =
+        static_cast<float>(result.samplesGenerated) / static_cast<float>(sampleRate);
     m_totalBufferTimeSeconds.store(
         m_totalBufferTimeSeconds.load(std::memory_order_relaxed) + actualDurationSeconds,
         std::memory_order_relaxed
     );
+    // E4: кривая реально продвигается на dur*timeScale — учитываем масштаб и тут,
+    // иначе dt на стыке в virtual-режиме лжёт (dt = D*(scale-1)).
+    s_lastPkgEnd.store(
+        normalizeTimeOfDay(timeSeconds + actualDurationSeconds * timeScale),
+        std::memory_order_relaxed);
+
+    // === PKG_SEAM: сравнение последних сэмплов пакета N с первыми пакета N+1 ===
+    // |dL|,|dR| < 0.02 → данные непрерывны (щелчок вносит AudioTrack/HAL);
+    // > 0.05 → разрыв В ДАННЫХ: смотрим dF/dt/cfgVer.
+    if (result.samplesGenerated > 1) {
+        const float firstL = buffer[0];
+        const float firstR = buffer[1];
+        const float lastL  = buffer[(result.samplesGenerated - 1) * 2];
+        const float lastR  = buffer[(result.samplesGenerated - 1) * 2 + 1];
+
+        const bool  hasPrev = s_seamHasPrev.load(std::memory_order_relaxed);
+        const float dL = hasPrev ? firstL - s_seamPrevLastL.load(std::memory_order_relaxed) : 0.0f;
+        const float dR = hasPrev ? firstR - s_seamPrevLastR.load(std::memory_order_relaxed) : 0.0f;
+
+        const FrequencyTableResult curStart = config.curve.getChannelFrequenciesAt(timeSeconds);
+        const float peL = s_seamPrevEndLower.load(std::memory_order_relaxed);
+        const float peU = s_seamPrevEndUpper.load(std::memory_order_relaxed);
+
+        PKG_LOG("PKG_SEAM: dL=%+.4f dR=%+.4f | prevEnd=[%.3f,%.3f] curStart=[%.3f,%.3f] "
+                "dF=[%+.3f,%+.3f] | cfgVer=%u dt=%.6f swapped=%d gen=%d phase=[%.3f,%.3f]",
+                dL, dR,
+                peL, peU, curStart.lowerFreq, curStart.upperFreq,
+                curStart.lowerFreq - peL, curStart.upperFreq - peU,
+                s_cfgVersion.load(std::memory_order_relaxed),
+                timeSeconds - prevEndForSeam,
+                m_state.channelsSwapped ? 1 : 0,
+                result.samplesGenerated,
+                m_state.leftPhase, m_state.rightPhase);
+
+        s_seamPrevLastL.store(lastL, std::memory_order_relaxed);
+        s_seamPrevLastR.store(lastR, std::memory_order_relaxed);
+        s_seamPrevEndLower.store(result.currentCarrierFreq - result.currentBeatFreq * 0.5f,
+                                 std::memory_order_relaxed);
+        s_seamPrevEndUpper.store(result.currentCarrierFreq + result.currentBeatFreq * 0.5f,
+                                 std::memory_order_relaxed);
+        s_seamHasPrev.store(true, std::memory_order_relaxed);
+    }
+
+    // Фикс 2 (Qwen): единый носитель времени кривой — продвигаем на столько,
+    // на сколько реально продвинулся генератор (в virtual-режиме — с масштабом).
+    // Старт следующего пакета станет ТОЙ ЖЕ float-величиной, что и этот конец.
+    m_curveTimeSeconds.store(
+        normalizeTimeOfDay(m_curveTimeSeconds.load(std::memory_order_relaxed) +
+                           actualDurationSeconds * timeScale),
+        std::memory_order_relaxed);
+
+    // Якорь UI-таймлайна: частоты для UI экстраполируются от старта этого пакета
+    // по wall-clock в пределах [start, start+duration] — плавное следование
+    // графику между пакетами вместо ступеньки раз в интервал генерации.
+    anchorUiTimeline(timeSeconds, timeSeconds + actualDurationSeconds * timeScale);
+
+    // Фикс 3 (Qwen): коррекция дрейфа swap-цикла. Планировщик двигал фазу на
+    // ЗАПЛАНИРОВАННЫЕ bufferDurationMs, а аудио продвинулось на ФАКТИЧЕСКИЕ
+    // samplesGenerated. При нецелосекундных сегментах цикл убегает вперёд.
+    {
+        const float plannedMs   = static_cast<float>(bufferDurationMs);
+        const float generatedMs = 1000.0f * static_cast<float>(result.samplesGenerated) /
+                                  static_cast<float>(sampleRate);
+        const float deltaMs     = plannedMs - generatedMs;
+        if (deltaMs > 0.0f && m_state.phaseRemainingMs > 0) {
+            m_state.phaseRemainingMs -= static_cast<int64_t>(deltaMs + 0.5f);
+            if (m_state.phaseRemainingMs < 0) m_state.phaseRemainingMs = 0;
+        }
+    }
     
-    return true;
+    // Возвращаем РЕАЛЬНОЕ число сэмплов: вызывающая сторона обязана записать в
+    // AudioTrack ровно его, иначе на стыке пакетов звучит мусорный "хвост"
+    // (щелчок + резкая смена частот из прошлого пакета).
+    return result.samplesGenerated;
 }
 
 // ============ Debug virtual time ============
 
 int32_t BinauralEngine::getCurrentTimeOfDaySeconds() const {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    if (m_virtualClock.isEnabled()) {
+        return static_cast<int32_t>(computePlaybackTimeSeconds());
+    }
+#endif
+    // J4: ЕДИНЫЙ источник с частотами UI (getFrequenciesAtCurrentTime ->
+    // computeUiTimeSeconds -> m_uiLastUiTimeSec): пока играем — та же плавная
+    // экстраполяция по якорю пакета, при паузе/остановке записи — то же
+    // замороженное значение конца сгенерированного диапазона. Оси X и Y
+    // индикатора рассинхронизироваться не могут по построению.
+    // До первого якоря — реальное время суток.
+    if (m_uiAnchorWallMs.load(std::memory_order_relaxed) != 0) {
+        return static_cast<int32_t>(m_uiLastUiTimeSec.load(std::memory_order_relaxed));
+    }
     return getCurrentTimeSeconds();
 }
 
@@ -415,36 +665,103 @@ float BinauralEngine::computePlaybackTimeSeconds() const {
         //   audioTime = normalize(base + totalSamples * scale)
         // Это устраняет скачок при включении/выключении virtual clock и при
         // смене scale/scrub — время всегда монотонно и непрерывно.
-        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
-        const double scale = m_virtualClock.getTimeScale();
-        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        const float total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const float scale = m_virtualClock.getTimeScale();
+        const float base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
         return normalizeTimeOfDay(base + total * scale);
     }
 #endif
-    // Существующая логика (real-time): base + накопленное реальное аудио
-    const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
-    return normalizeTimeOfDay(static_cast<double>(m_baseTimeSeconds) + total);
+    // Реал-тайм: ЕДИНЫЙ НОСИТЕЛЬ времени кривой (как curTime в харнессе).
+    // Старт пакета N+1 = та же float-величина, что и конец пакета N.
+    return normalizeTimeOfDay(m_curveTimeSeconds.load(std::memory_order_relaxed));
+}
+
+// ============ UI-таймлайн кривой ============
+
+void BinauralEngine::anchorUiTimeline(float startSec, float endSec) {
+    // Храним «сырые» значения (end может быть > 86400 при переходе через полночь):
+    // span ниже считается через normalizeTimeOfDay(end - start), что корректно
+    // обрабатывает переход через полночь.
+    m_uiAnchorStartSec.store(startSec, std::memory_order_relaxed);
+    m_uiAnchorEndSec.store(endSec, std::memory_order_relaxed);
+    m_uiAnchorWallMs.store(nowWallClockMs(), std::memory_order_relaxed);
+}
+
+float BinauralEngine::computeUiTimeSeconds() {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float scale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
+#else
+    const float scale = 1.0f;
+#endif
+
+    // Не играем — UI замирает на последнем показанном времени кривой
+    // (при soft-pause генерация продолжается и m_isPlaying остаётся true,
+    // поэтому UI продолжает двигаться вместе с аудио-таймлайном).
+    if (!m_isPlaying.load(std::memory_order_relaxed)) {
+        return m_uiLastUiTimeSec.load(std::memory_order_relaxed);
+    }
+
+    const int64_t wallMs = m_uiAnchorWallMs.load(std::memory_order_relaxed);
+    if (wallMs == 0) {
+        // Ещё не якорили (нет ни одного пакета) — прежнее поведение.
+        const float t = computePlaybackTimeSeconds();
+        m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
+        return t;
+    }
+
+    const float start = m_uiAnchorStartSec.load(std::memory_order_relaxed);
+    const float end   = m_uiAnchorEndSec.load(std::memory_order_relaxed);
+    const float span  = normalizeTimeOfDay(end - start);
+
+    // Экстраполяция по wall-clock от старта пакета, с ограничением сверху
+    // концом СГЕНЕРИРОВАННОГО диапазона (не выбегаем за уже сгенерированное аудио).
+    float elapsed = static_cast<float>(nowWallClockMs() - wallMs) / 1000.0f * scale;
+    if (elapsed < 0.0f) elapsed = 0.0f;
+    if (elapsed > span) elapsed = span;
+
+    const float t = normalizeTimeOfDay(start + elapsed);
+    m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
+    return t;
 }
 
 void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
+    // E2: позиция кривой захвачена ДО включения (формула времени ещё старая).
+    const float posBeforeEnable = computePlaybackTimeSeconds();
+    const bool alreadyPlayed =
+        m_uiAnchorWallMs.load(std::memory_order_relaxed) != 0 ||
+        m_totalBufferTimeSeconds.load(std::memory_order_relaxed) > 0.0f;
+
     // Сначала заякорить VirtualClock на реальное время, затем прочитать его.
     m_virtualClock.setEnabled(enabled);
     if (enabled) {
-        // Seed sample-driven таймлайна текущим реальным временем суток.
-        // setEnabled() только что заякорил VirtualClock на реальное время,
-        // поэтому getTimeOfDaySeconds() == реальное время суток.
-        m_virtualBaseTimeSeconds.store(m_virtualClock.getTimeOfDaySeconds(),
-                                       std::memory_order_relaxed);
-        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+        if (alreadyPlayed) {
+            // E2: движок уже играл/якорён — сеем виртуальный базис ТЕКУЩЕЙ
+            // позицией кривой вместо wall, иначе включение virtual посреди
+            // игры сбрасывает позицию (после scrub на 23:00) на реальные часы.
+            m_virtualBaseTimeSeconds.store(posBeforeEnable,
+                                           std::memory_order_relaxed);
+        } else {
+            // Seed sample-driven таймлайна текущим реальным временем суток.
+            // setEnabled() только что заякорил VirtualClock на реальное время,
+            // поэтому getTimeOfDaySeconds() == реальное время суток.
+            m_virtualBaseTimeSeconds.store(m_virtualClock.getTimeOfDaySeconds(),
+                                           std::memory_order_relaxed);
+        }
+        m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+        m_curveTimeSeconds.store(
+            normalizeTimeOfDay(m_virtualBaseTimeSeconds.load(std::memory_order_relaxed)),
+            std::memory_order_relaxed);
     } else {
         // Перед выключением синхронизируем реальный базис с текущим виртуальным
         // временем генерации, чтобы реальный режим продолжился без скачка.
-        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
-        const double scale = m_virtualClock.getTimeScale();
-        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
-        m_baseTimeSeconds = static_cast<int32_t>(normalizeTimeOfDay(base + total * scale));
-        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+        const float total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const float scale = m_virtualClock.getTimeScale();
+        const float base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        const float resumed = normalizeTimeOfDay(base + total * scale);
+        m_baseTimeSeconds.store(static_cast<int32_t>(resumed), std::memory_order_relaxed);
+        m_curveTimeSeconds.store(resumed, std::memory_order_relaxed);
+        m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
         m_virtualClock.setEnabled(false);
     }
     LOGD("setVirtualTimeEnabled(%d)", enabled ? 1 : 0);
@@ -456,9 +773,14 @@ void BinauralEngine::setVirtualTimeEnabled(bool enabled) {
 void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     // Сдвигаем базис таймлайна, сбрасываем накопленное аудио → без скачка скорости.
-    m_virtualBaseTimeSeconds.store(std::fmod(timeOfDaySeconds, 86400.0f),
-                                   std::memory_order_relaxed);
-    m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+    const float wrapped = normalizeTimeOfDay(timeOfDaySeconds);
+    m_virtualBaseTimeSeconds.store(wrapped, std::memory_order_relaxed);
+    m_curveTimeSeconds.store(wrapped, std::memory_order_relaxed);
+    m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+    // E3: переякоряем UI-таймлайн на новую позицию, иначе до следующего пакета
+    // указатель экстраполируется от СТАРОГО якоря (зависший указатель).
+    const float newPos = computePlaybackTimeSeconds();
+    anchorUiTimeline(newPos, newPos);
 #else
     (void)timeOfDaySeconds;
 #endif
@@ -467,18 +789,22 @@ void BinauralEngine::scrubVirtualTime(float timeOfDaySeconds) {
 void BinauralEngine::setVirtualTimeScale(float scale) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     const float clamped = std::clamp(scale, 1.0f, 60.0f);
-    // Если уже бежит — сохраняем текущее аудио-время при смене масштаба
-    // (переносим base, сбрасываем накопленное), чтобы не было скачка.
-    if (m_virtualClock.isEnabled() && m_virtualClock.isRunning()) {
-        const double total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
-        const double oldScale = m_virtualClock.getTimeScale();
-        const double base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
-        const double current = normalizeTimeOfDay(base + total * oldScale);
-        m_virtualBaseTimeSeconds.store(static_cast<float>(current),
+    // Сохраняем текущее аудио-время при смене масштаба (переносим base,
+    // сбрасываем накопленное) — в том числе на виртуальной паузе, иначе
+    // позиция прыгнула бы по формуле base+total*новыйScale.
+    if (m_virtualClock.isEnabled()) {
+        const float total = m_totalBufferTimeSeconds.load(std::memory_order_relaxed);
+        const float oldScale = m_virtualClock.getTimeScale();
+        const float base = m_virtualBaseTimeSeconds.load(std::memory_order_relaxed);
+        const float current = normalizeTimeOfDay(base + total * oldScale);
+        m_virtualBaseTimeSeconds.store(current,
                                        std::memory_order_relaxed);
-        m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+        m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
     }
     m_virtualClock.setTimeScale(clamped);
+    // E3: переякоряем UI-таймлайн под новый масштаб (см. scrubVirtualTime).
+    const float newPos = computePlaybackTimeSeconds();
+    anchorUiTimeline(newPos, newPos);
     LOGD("setVirtualTimeScale(%.2f)", clamped);
 #else
     (void)scale;
@@ -500,9 +826,10 @@ void BinauralEngine::resetVirtualTimeToReal() {
     m_virtualClock.resetToRealTime();
     // Пересадка на реальное время суток (после resetToRealTime getTimeOfDaySeconds()
     // возвращает реальное время, а не sample-driven ось UI).
-    m_virtualBaseTimeSeconds.store(m_virtualClock.getTimeOfDaySeconds(),
-                                    std::memory_order_relaxed);
-    m_totalBufferTimeSeconds.store(0.0, std::memory_order_relaxed);
+    const float realTime = normalizeTimeOfDay(m_virtualClock.getTimeOfDaySeconds());
+    m_virtualBaseTimeSeconds.store(realTime, std::memory_order_relaxed);
+    m_curveTimeSeconds.store(realTime, std::memory_order_relaxed);
+    m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
 #endif
 }
 

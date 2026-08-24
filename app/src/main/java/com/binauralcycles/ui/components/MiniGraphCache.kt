@@ -62,11 +62,32 @@ data class CachedGraphGeometry(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
-        return true  // Упрощённое сравнение по ссылке
+        other as CachedGraphGeometry
+        // Path не имеет value-equality - сравниваем по ссылке
+        if (carrierPath !== other.carrierPath) return false
+        if (upperBeatPath !== other.upperBeatPath) return false
+        if (lowerBeatPath !== other.lowerBeatPath) return false
+        if (combinedBeatPath !== other.combinedBeatPath) return false
+        if (baseCarrierPath !== other.baseCarrierPath) return false
+        if (!pointPositions.contentEquals(other.pointPositions)) return false
+        if (labelTexts != other.labelTexts) return false
+        if (!virtualPointPositions.contentEquals(other.virtualPointPositions)) return false
+        if (isRelaxationMode != other.isRelaxationMode) return false
+        return maxBeat == other.maxBeat
     }
-    
+
     override fun hashCode(): Int {
-        return System.identityHashCode(this)
+        var result = System.identityHashCode(carrierPath)
+        result = 31 * result + System.identityHashCode(upperBeatPath)
+        result = 31 * result + System.identityHashCode(lowerBeatPath)
+        result = 31 * result + System.identityHashCode(combinedBeatPath)
+        result = 31 * result + System.identityHashCode(baseCarrierPath)
+        result = 31 * result + pointPositions.contentHashCode()
+        result = 31 * result + labelTexts.hashCode()
+        result = 31 * result + virtualPointPositions.contentHashCode()
+        result = 31 * result + isRelaxationMode.hashCode()
+        result = 31 * result + maxBeat.toRawBits()
+        return result
     }
 }
 
@@ -173,8 +194,10 @@ object MiniGraphCache {
         var hash = 17
         for (point in points) {
             hash = 31 * hash + point.time.toSecondOfDay()
-            hash = 31 * hash + (point.carrierFrequency * 100).toInt()
-            hash = 31 * hash + (point.beatFrequency * 100).toInt()
+            // Полная точность частот (без усечения до 0.01 Гц) - иначе коллизии ключей
+            // дают устаревший reuse геометрии для разных пресетов
+            hash = 31 * hash + point.carrierFrequency.toRawBits()
+            hash = 31 * hash + point.beatFrequency.toRawBits()
         }
         return hash
     }

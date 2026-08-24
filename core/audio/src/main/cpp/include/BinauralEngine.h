@@ -11,6 +11,7 @@
 #include <functional>
 #include <atomic>
 #include <shared_mutex>
+#include <utility>   // std::pair (getFrequenciesAtCurrentTime)
 
 namespace binaural {
 
@@ -88,7 +89,20 @@ public:
      * @param samplesPerChannel количество сэмплов на канал
      * @return true если генерация успешна
      */
-    bool generateAudioBuffer(float* buffer, int samplesPerChannel);
+    /**
+     * Сгенерировать буфер аудио
+     * Вызывается из AudioTrack в Java
+     *
+     * @param buffer выходной буфер (float*, interleaved stereo)
+     * @param samplesPerChannel количество сэмплов на канал (запрошено)
+     * @return РЕАЛЬНО сгенерированное количество сэмплов на канал.
+     *         Из-за целочисленного округления длительностей сегментов оно может
+     *         отличаться от samplesPerChannel. Вызывающая сторона ОБЯЗАНА
+     *         записать в AudioTrack ровно это значение, иначе на стыке пакетов
+     *         прозвучит мусорный "хвост" (щелчок + резкая смена частот).
+     *         0 — воспроизведение не активно.
+     */
+    int generateAudioBuffer(float* buffer, int samplesPerChannel);
     
     /**
      * Получить текущее состояние проигрывания
@@ -100,6 +114,14 @@ public:
      * При начале воспроизведения сбрасывает состояние перестановки каналов
      */
     void setPlaying(bool playing);
+
+    /**
+     * Расширенная версия: preserveTimeline=true (RESUME) продолжает с того же
+     * места кривой и той же фазой — НЕ сбрасывает m_baseTimeSeconds /
+     * m_totalBufferTimeSeconds / фазы генератора. Иначе pause→resume даёт
+     * скачок кривой к wall-clock и фазовый щелчок.
+     */
+    void setPlaying(bool playing, bool preserveTimeline);
     
     /**
      * Получить текущую частоту биений
@@ -138,6 +160,20 @@ public:
      */
     std::pair<float, float> getFrequenciesAtCurrentTime();
 
+    // Кривая сконфигурирована (lookup-таблица построена). Позволяет JNI-слою
+    // отличать «конфиг не установлен» от легитимной точки 0/0 Гц.
+    bool isCurveConfigured() const;
+
+    // ===== UI-таймлайн кривой (плавное следование частот за графиком) =====
+    // Генерация остаётся sample-driven (m_curveTimeSeconds продвигается только
+    // при генерации пакета), поэтому прямое использование computePlaybackTimeSeconds()
+    // в UI даёт «ступеньку» раз в интервал генерации: частоты на экране стоят
+    // на месте до минуты, пока указатель времени ползёт по графику.
+    // UI-время экстраполируется от якоря последнего пакета по wall-clock
+    // и ограничивается сгенерированным диапазоном [start, end].
+    void anchorUiTimeline(float startSec, float endSec);
+    float computeUiTimeSeconds();
+
     // ====== НОВОЕ: публичный доступ к текущему времени суток ======
     // Учитывает виртуальный режим (в release всегда возвращает реальное время).
     int32_t getCurrentTimeOfDaySeconds() const;
@@ -169,12 +205,18 @@ private:
     int m_batchDurationMinutes = 0;
     
     // Точная интерполяция времени между буферами
-    int32_t m_baseTimeSeconds = 0;          // Время начала воспроизведения
+    // atomic: пишется из binder-потока (fresh-play/disable), читается аудио-потоком в PKG_BOUNDARY
+    std::atomic<int32_t> m_baseTimeSeconds{0};   // Время начала воспроизведения (legacy/диагностика)
 
     // Накопленная РЕАЛЬНАЯ длительность сгенерированного аудио (сек).
-    // double — для точности при долгих сессиях (total*scale может быть большим).
+    // float — единая ось времени с генератором (без конверсий double<->float).
     // atomic — читается UI-потоком (getCurrentTimeSeconds) и пишется аудио-потоком.
-    std::atomic<double> m_totalBufferTimeSeconds{0.0};
+    std::atomic<float> m_totalBufferTimeSeconds{0.0f};
+
+    // ЕДИНЫЙ НОСИТЕЛЬ времени кривой (аналог curTime в тестовом харнессе):
+    // старт пакета N+1 — ТА ЖЕ САМАЯ float-величина, что и конец пакета N,
+    // без пересчёта base+total (исключает любое расхождение на стыке).
+    std::atomic<float> m_curveTimeSeconds{0.0f};
 
     /**
      * Получить текущее время суток в секундах
@@ -182,10 +224,21 @@ private:
     int32_t getCurrentTimeSeconds() const;
 
     /**
+     * Дробное локальное время суток в секундах (E1: якорь свежего play без
+     * потери доли секунды; чистая функция от часов — потокобезопасна)
+     */
+    static float realTimeOfDaySeconds();
+
+    /**
      * Вычислить время суток для генерации буфера
      * (virtual clock, если включён; иначе старая формула на основе baseTime + накопленного аудио)
      */
     float computePlaybackTimeSeconds() const;
+
+    std::atomic<float> m_uiAnchorStartSec{0.0f};   // кривая-время старта последнего пакета
+    std::atomic<float> m_uiAnchorEndSec{0.0f};     // кривая-время конца сгенерированного аудио
+    std::atomic<int64_t> m_uiAnchorWallMs{0};      // wall-clock якоря (0 = ещё не якорили)
+    std::atomic<float> m_uiLastUiTimeSec{0.0f};    // последнее показанное UI-время (стicky на паузе)
 
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     VirtualClock m_virtualClock;   // присутствует только в debug-сборке

@@ -130,8 +130,7 @@ private data class GraphParams(
 
 /**
  * Генерирует виртуальные точки режима расслабления.
- * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
- * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
+ * Единая реализация в core-модели (RelaxationModeSettings.generateVirtualPoints).
  */
 fun generateRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
@@ -139,147 +138,7 @@ fun generateRelaxationVirtualPoints(
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f
 ): List<FrequencyPoint> {
-    if (!relaxationModeSettings.enabled || points.size < 2) return emptyList()
-    
-    return when (relaxationModeSettings.mode) {
-        RelaxationMode.STEP -> generateStepVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-        RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
-    }
-}
-
-/**
- * Ступенчатый режим: генерация виртуальных точек по расписанию.
- * Создаётся группа из 4 точек для каждого периода расслабления:
- * - Точка 1: на базовой кривой (начало периода)
- * - Точка 2: сниженные частоты (после перехода)
- * - Точка 3: сниженные частоты (конец расслабления)
- * - Точка 4: на базовой кривой (после выхода)
- * 
- * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
- */
-private fun generateStepVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    
-    val gapSeconds = relaxationModeSettings.gapBetweenRelaxationMinutes * 60L
-    val transitionSeconds = relaxationModeSettings.transitionPeriodMinutes * 60L
-    val durationSeconds = relaxationModeSettings.relaxationDurationMinutes * 60L
-    
-    // Полный период расслабления = 2 * переход + длительность
-    val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-    
-    // Генерируем периоды расслабления от 00:00
-    val daySeconds = 24 * 3600L
-    
-    var periodStartSeconds = 0L
-    
-    while (periodStartSeconds < daySeconds) {
-        // Точка 1: начало периода (на базовой кривой)
-        val t1 = periodStartSeconds
-        val time1 = LocalTime.fromSecondOfDay((t1 % daySeconds).toInt())
-        val carrier1 = interpolateCarrierFrequency(points, time1, interpolationType, splineTension)
-        val beat1 = interpolateBeatFrequency(points, time1, interpolationType, splineTension)
-        virtualPoints.add(FrequencyPoint(time1, carrier1, beat1))
-        
-        // Точка 2: после перехода (сниженные частоты)
-        val t2 = periodStartSeconds + transitionSeconds
-        if (t2 < daySeconds) {
-            val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
-            val baseCarrier2 = interpolateCarrierFrequency(points, time2, interpolationType, splineTension)
-            val baseBeat2 = interpolateBeatFrequency(points, time2, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(
-                time2,
-                baseCarrier2 * (1.0f - carrierReduction),
-                baseBeat2 * (1.0f - beatReduction)
-            ))
-        }
-        
-        // Точка 3: конец расслабления (сниженные частоты)
-        val t3 = periodStartSeconds + transitionSeconds + durationSeconds
-        if (t3 < daySeconds) {
-            val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
-            val baseCarrier3 = interpolateCarrierFrequency(points, time3, interpolationType, splineTension)
-            val baseBeat3 = interpolateBeatFrequency(points, time3, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(
-                time3,
-                baseCarrier3 * (1.0f - carrierReduction),
-                baseBeat3 * (1.0f - beatReduction)
-            ))
-        }
-        
-        // Точка 4: после выхода (на базовой кривой)
-        val t4 = periodStartSeconds + fullPeriodSeconds
-        if (t4 < daySeconds) {
-            val time4 = LocalTime.fromSecondOfDay((t4 % daySeconds).toInt())
-            val carrier4 = interpolateCarrierFrequency(points, time4, interpolationType, splineTension)
-            val beat4 = interpolateBeatFrequency(points, time4, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(time4, carrier4, beat4))
-        }
-        
-        // Переходим к следующему периоду: полный период + пауза между периодами
-        periodStartSeconds += fullPeriodSeconds + gapSeconds
-    }
-    
-    // Сортируем по времени
-    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
-}
-
-/**
- * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
- * Интервал между точками регулируется параметром smoothIntervalMinutes.
- * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
- */
-private fun generateSmoothVirtualPoints(
-    points: List<FrequencyPoint>,
-    relaxationModeSettings: RelaxationModeSettings,
-    interpolationType: InterpolationType,
-    splineTension: Float
-): List<FrequencyPoint> {
-    val virtualPoints = mutableListOf<FrequencyPoint>()
-    
-    val carrierReduction = relaxationModeSettings.carrierReductionPercent / 100.0f
-    val beatReduction = relaxationModeSettings.beatReductionPercent / 100.0f
-    val intervalSeconds = relaxationModeSettings.smoothIntervalMinutes * 60L
-    val daySeconds = 24 * 3600L
-    
-    // Генерируем точки от 00:00 до 23:59 с заданным интервалом
-    // Чётные индексы (0, 2, 4...) - точки на базовой кривой
-    // Нечётные индексы (1, 3, 5...) - снижающие точки
-    
-    var currentSeconds = 0L
-    var index = 0
-    
-    while (currentSeconds < daySeconds) {
-        val time = LocalTime.fromSecondOfDay((currentSeconds % daySeconds).toInt())
-        
-        if (index % 2 == 0) {
-            // Чётный индекс - точка на базовой кривой
-            val carrier = interpolateCarrierFrequency(points, time, interpolationType, splineTension)
-            val beat = interpolateBeatFrequency(points, time, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(time, carrier, beat))
-        } else {
-            // Нечётный индекс - снижающая точка
-            val baseCarrier = interpolateCarrierFrequency(points, time, interpolationType, splineTension)
-            val baseBeat = interpolateBeatFrequency(points, time, interpolationType, splineTension)
-            virtualPoints.add(FrequencyPoint(
-                time,
-                baseCarrier * (1.0f - carrierReduction),
-                baseBeat * (1.0f - beatReduction)
-            ))
-        }
-        
-        currentSeconds += intervalSeconds
-        index++
-    }
-    
-    return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension)
 }
 
 @Composable
@@ -305,35 +164,18 @@ fun FrequencyGraph(
     modifier: Modifier = Modifier
 ) {
     val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-    val currentTime = remember { mutableStateOf(LocalTime(12, 0)) }
     var dragState by remember { mutableStateOf(PointDragState()) }
     var showRangeDialog by remember { mutableStateOf(false) }
     var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
     var tempRangeValue by remember { mutableStateOf("") }
-    
+
     // Локализованный формат Гц - объявляем здесь для использования во всём компоненте
     val hzFormat = stringResource(R.string.hz_value_format)
-    
-    // Инициализируем текущим временем сразу при первом отображении
-    LaunchedEffect(Unit) {
-        val now = Clock.System.now()
-        currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-    }
-    
-    // Обновляем время каждые 5 секунд при воспроизведении
-    // При паузе не обновляем, но и не сбрасываем в 12:00
-    LaunchedEffect(isPlaying) {
-        if (isPlaying) {
-            while (true) {
-                kotlinx.coroutines.delay(5000)
-                val now = Clock.System.now()
-                currentTime.value = now.toLocalDateTime(TimeZone.currentSystemDefault()).time
-            }
-        }
-        // При isPlaying = false НЕ сбрасываем время - оставляем текущее
-    }
-    
-    val currentLocalTime = externalCurrentTime ?: currentTime.value
+
+    // Единое время приходит из uiState.currentTime (StateFlow сервиса);
+    // приватный тикер удалён - график живёт тем же потоком данных, что и карточки
+    val currentLocalTime = externalCurrentTime
+        ?: Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).time
     val density = LocalDensity.current
 
     // Используем кэшированные sortedPoints если доступны (оптимизация)
@@ -399,11 +241,17 @@ fun FrequencyGraph(
                         detectTapGestures(
                             onDoubleTap = { offset ->
                                 // Добавляем точку при двойном нажатии
-                                val time = graphParams.xToTime(offset.x)
+                                // Снап к той же сетке 5 минут, что и при drag точки
+                                val stepSeconds = TIME_STEP_MINUTES * 60
+                                val snappedSeconds = (graphParams.xToTime(offset.x).toSecondOfDay() / stepSeconds) * stepSeconds
+                                val time = LocalTime.fromSecondOfDay(snappedSeconds)
                                 val carrier = graphParams.yToCarrier(offset.y)
-                                // Интерполируем частоту биения на основе соседних точек
+                                // Оценка частоты биений по канальным кривым (как в движке): beat = u - l
                                 val interpolatedBeat = if (displayPoints.size >= 2) {
-                                    kotlin.math.round(interpolateBeatFrequency(displayPoints, time, interpolationType, splineTension))
+                                    val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
+                                        displayPoints, time, interpolationType, splineTension
+                                    )
+                                    kotlin.math.round(upperFreq - lowerFreq)
                                         .coerceIn(beatRange.min, maxBeatForCarrier(carrier))
                                 } else {
                                     beatRange.min
@@ -647,9 +495,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     
     // Начинаем с левой границы
     val startTime = LocalTime.fromSecondOfDay(0)
-    // Интерполируем частоты каналов НАПРЯМУЮ - каждая кривая проходит через свои точки
-    val startUpperFreq = interpolateChannelFrequency(sortedPoints, startTime, interpolationType, splineTension, isUpper = true)
-    val startLowerFreq = interpolateChannelFrequency(sortedPoints, startTime, interpolationType, splineTension, isUpper = false)
+    // Канальные кривые интерполируются напрямую общей функцией (как в движке)
+    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
+        sortedPoints, startTime, interpolationType, splineTension
+    )
     val startUpperY = params.carrierToY(startUpperFreq)
     val startLowerY = params.carrierToY(startLowerFreq)
     
@@ -702,9 +551,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
         for (i in 1..numSamples) {
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            // Интерполируем частоты каналов НАПРЯМУЮ
-            val upperFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = true)
-            val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
+            // Канальные кривые через общую функцию (как в движке)
+            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension
+            )
             val upperY = params.carrierToY(upperFreq)
             val lowerY = params.carrierToY(lowerFreq)
             val x = (t * width).toFloat()
@@ -712,16 +562,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
             lowerPath.lineTo(x, lowerY)
         }
     }
-    
+
     // Замыкаем путь для заливки
     val combinedPath = Path()
     combinedPath.addPath(upperPath)
-    
+
     // Обратный путь по нижней границе
     for (i in numSamples downTo 0) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val lowerFreq = interpolateChannelFrequency(sortedPoints, time, interpolationType, splineTension, isUpper = false)
+        val (lowerFreq, _) = Interpolation.interpolateChannels(
+            sortedPoints, time, interpolationType, splineTension
+        )
         val lowerY = params.carrierToY(lowerFreq)
         val x = (t * width).toFloat()
         combinedPath.lineTo(x, lowerY)
@@ -745,11 +597,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
 ) {
     val width = size.width
     val carrierPath = Path()
-    
+
     // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(sortedPoints, startTime, interpolationType, splineTension)
-    val startY = params.carrierToY(startCarrier)
+    // Линия несущей отображается как (l+u)/2 от канальных кривых — как в движке
+    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
+        sortedPoints, startTime, interpolationType, splineTension
+    )
+    val startY = params.carrierToY((startLowerFreq + startUpperFreq) / 2.0f)
     carrierPath.moveTo(0f, startY)
     
     // Для ступенчатой интерполяции рисуем ступеньки напрямую по точкам
@@ -787,8 +642,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
         for (i in 1..numSamples) {
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val carrier = interpolateCarrierFrequency(sortedPoints, time, interpolationType, splineTension)
-            val y = params.carrierToY(carrier)
+            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension
+            )
+            val y = params.carrierToY((lowerFreq + upperFreq) / 2.0f)
             val x = (t * width).toFloat()
             carrierPath.lineTo(x, y)
         }
@@ -972,44 +829,17 @@ private fun calculateCarrierFromDrag(startCarrier: Float, dragY: Float, carrierR
 }
 
 // Функции интерполяции
+
+/**
+ * Интерполяция несущей частоты по базовой кривой (используется для пунктирной
+ * линии базовой кривой в режимах расслабления — каноническое правило оценки базовых кривых).
+ */
 fun interpolateCarrierFrequency(
-    points: List<FrequencyPoint>, 
-    time: LocalTime, 
+    points: List<FrequencyPoint>,
+    time: LocalTime,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f
 ): Float = interpolateFrequency(points, time, interpolationType, splineTension) { it.carrierFrequency }
-
-fun interpolateBeatFrequency(
-    points: List<FrequencyPoint>, 
-    time: LocalTime, 
-    interpolationType: InterpolationType = InterpolationType.LINEAR,
-    splineTension: Float = 0.0f
-): Float = interpolateFrequency(points, time, interpolationType, splineTension) { it.beatFrequency }
-
-/**
- * Интерполяция частоты канала (верхнего или нижнего)
- * Каждая кривая канала проходит через точки: carrier ± beat/2
- * Это означает что интерполяция применяется К КАЖДОЙ кривой отдельно
- * 
- * @param isUpper true = верхний канал (carrier + beat/2), false = нижний (carrier - beat/2)
- */
-fun interpolateChannelFrequency(
-    points: List<FrequencyPoint>, 
-    time: LocalTime, 
-    interpolationType: InterpolationType = InterpolationType.LINEAR,
-    splineTension: Float = 0.0f,
-    isUpper: Boolean
-): Float {
-    // Селектор, который вычисляет частоту канала для каждой точки
-    val channelSelector: (FrequencyPoint) -> Float = { point ->
-        if (isUpper) {
-            point.carrierFrequency + point.beatFrequency / 2.0f
-        } else {
-            point.carrierFrequency - point.beatFrequency / 2.0f
-        }
-    }
-    return interpolateFrequency(points, time, interpolationType, splineTension, channelSelector)
-}
 
 fun interpolateFrequency(
     points: List<FrequencyPoint>, 
@@ -1091,8 +921,9 @@ private fun interpolateBetweenPoints(
     }
     
     if (t2 == t1) return frequencySelector(leftPoint)
-    
-    val ratio = (t - t1).toFloat() / (t2 - t1)
+
+    // Кламп ratio [0,1] — согласовано с C++ (buildLookupTableInternal)
+    val ratio = ((t - t1).toFloat() / (t2 - t1)).coerceIn(0.0f, 1.0f)
     
     // Получаем 4 точки для интерполяции
     val p0 = getNeighborPoint(sortedPoints, leftIndex, -1, frequencySelector, isWrapping)

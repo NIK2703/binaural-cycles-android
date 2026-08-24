@@ -235,8 +235,9 @@ data class FrequencyCurve(
         }
         
         if (t2 == t1) return frequencySelector(leftPoint)
-        
-        val ratio = ((t - t1).toFloat() / (t2 - t1))
+
+        // Кламп ratio [0,1] — согласовано с C++ (buildLookupTableInternal)
+        val ratio = ((t - t1).toFloat() / (t2 - t1)).coerceIn(0.0f, 1.0f)
         
         // Получаем 4 точки для интерполяции
         val p0 = getNeighborPoint(leftIndex, -1, frequencySelector, isWrapping)
@@ -409,18 +410,36 @@ data class RelaxationModeSettings(
     }
     
     /**
-     * Генерирует виртуальные точки режима расслабления.
+     * Генерирует виртуальные точки режима расслабления по кривой.
      * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
      * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
-     * 
+     *
      * @param curve Базовая кривая частот (из основных точек)
      */
-    fun generateVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
-        if (!enabled || curve.points.size < 2) return emptyList()
-        
+    fun generateVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> =
+        generateVirtualPoints(curve.points, curve.interpolationType, curve.splineTension)
+
+    /**
+     * Генерирует виртуальные точки режима расслабления (единая реализация для UI и движка).
+     * Каноническое правило: базовые кривые carrier/beat оцениваются сплайном
+     * interpolationType+splineTension по исходным точкам.
+     */
+    fun generateVirtualPoints(
+        points: List<FrequencyPoint>,
+        interpolationType: InterpolationType,
+        splineTension: Float
+    ): List<FrequencyPoint> {
+        if (!enabled || points.size < 2) return emptyList()
+
+        val baseCurve = FrequencyCurve(
+            points = points,
+            interpolationType = interpolationType,
+            splineTension = splineTension
+        )
+
         return when (mode) {
-            RelaxationMode.STEP -> generateStepVirtualPoints(curve)
-            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(curve)
+            RelaxationMode.STEP -> generateStepVirtualPoints(baseCurve)
+            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(baseCurve)
         }
     }
     
@@ -448,10 +467,14 @@ data class RelaxationModeSettings(
         
         // Полный период расслабления = 2 * переход + длительность
         val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-        
+
         // Генерируем периоды расслабления от 00:00
         val daySeconds = 24 * 3600L
-        
+
+        // Guard от бесконечного цикла при неположительном шаге
+        val periodStepSeconds = fullPeriodSeconds + gapSeconds
+        if (periodStepSeconds <= 0L) return emptyList()
+
         var periodStartSeconds = 0L
         
         while (periodStartSeconds < daySeconds) {
@@ -498,7 +521,7 @@ data class RelaxationModeSettings(
             }
             
             // Переходим к следующему периоду: полный период + пауза между периодами
-            periodStartSeconds += fullPeriodSeconds + gapSeconds
+            periodStartSeconds += periodStepSeconds
         }
         
         // Сортируем по времени
@@ -516,18 +539,20 @@ data class RelaxationModeSettings(
         val carrierReduction = carrierReductionPercent / 100.0f
         val beatReduction = beatReductionPercent / 100.0f
         val intervalSeconds = smoothIntervalMinutes * 60L
+        // Guard от бесконечного цикла: неположительный интервал → дефолт 5 минут
+        val safeIntervalSeconds = if (intervalSeconds > 0L) intervalSeconds else 5 * 60L
         val daySeconds = 24 * 3600L
-        
+
         // Генерируем точки от 00:00 до 23:59 с заданным интервалом
         // Чётные индексы (0, 2, 4...) - точки на базовой кривой
         // Нечётные индексы (1, 3, 5...) - снижающие точки
-        
+
         var currentSeconds = 0L
         var index = 0
-        
+
         while (currentSeconds < daySeconds) {
             val time = LocalTime.fromSecondOfDay((currentSeconds % daySeconds).toInt())
-            
+
             if (index % 2 == 0) {
                 // Чётный индекс - точка на базовой кривой
                 val carrier = curve.getCarrierFrequencyAt(time)
@@ -543,8 +568,8 @@ data class RelaxationModeSettings(
                     baseBeat * (1.0f - beatReduction)
                 ))
             }
-            
-            currentSeconds += intervalSeconds
+
+            currentSeconds += safeIntervalSeconds
             index++
         }
         
@@ -627,6 +652,17 @@ data class BinauralPreset(
     fun getBeatFrequencyAt(time: LocalTime): Float {
         return curveWithRelaxation.getBeatFrequencyAt(time)
     }
+
+    /**
+     * Частоты каналов как в движке: каждая канальная кривая (carrier±beat/2)
+     * интерполируется отдельно по точкам кривой с учётом расслабления.
+     * Отображаемые carrier=(l+u)/2, beat=u−l.
+     */
+    fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
+        val curve = curveWithRelaxation
+        return curve.getLowerChannelFrequencyAt(time) to curve.getUpperChannelFrequencyAt(time)
+    }
+
     companion object {
         // Фиксированные ID для стандартных пресетов (важно для сохранения изменений)
         const val DEFAULT_PRESET_ID = "preset-circadian-rhythm"

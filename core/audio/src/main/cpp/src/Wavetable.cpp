@@ -1,5 +1,6 @@
 #include "Wavetable.h"
 #include <cstring>
+#include <mutex>
 
 #ifdef __ANDROID__
 #include <malloc.h>
@@ -15,18 +16,28 @@ float Wavetable::s_scaleFactor = static_cast<float>(DEFAULT_TABLE_SIZE) / TWO_PI
 size_t Wavetable::s_allocatedSize = 0;
 
 void Wavetable::initialize(int size) {
+    // Защита от конкурентной инициализации (release + malloc не атомарны)
+    static std::mutex initMutex;
+    std::lock_guard<std::mutex> lock(initMutex);
+
+    // Маска size-1 корректна только для степени двойки: округляем вверх, минимум 256
+    int tableSize = 256;
+    while (tableSize < size && tableSize < (1 << 30)) {
+        tableSize <<= 1;
+    }
+
     // Освобождаем предыдущую таблицу если есть
     release();
-    
-    s_tableSize = size;
-    s_tableSizeMask = size - 1;
-    s_scaleFactor = static_cast<float>(size) / TWO_PI;
-    
+
+    s_tableSize = tableSize;
+    s_tableSizeMask = tableSize - 1;
+    s_scaleFactor = static_cast<float>(tableSize) / TWO_PI;
+
     // Выделяем память с выравниванием 32 байта для оптимального SIMD доступа
     // Добавляем 4 дополнительных элемента для безопасной интерполяции (без mask)
-    const size_t numElements = size + 4;
+    const size_t numElements = tableSize + 4;
     s_allocatedSize = numElements * sizeof(float);
-    
+
 #ifdef __ANDROID__
     // Android: используем memalign для выравнивания
     s_sineTable = static_cast<float*>(memalign(32, s_allocatedSize));
@@ -36,21 +47,21 @@ void Wavetable::initialize(int size) {
     posix_memalign(&ptr, 32, s_allocatedSize);
     s_sineTable = static_cast<float*>(ptr);
 #endif
-    
+
     if (!s_sineTable) {
         // Fallback на обычный malloc если выравнивание не удалось
         s_sineTable = static_cast<float*>(std::malloc(s_allocatedSize));
     }
-    
+
     // Заполняем таблицу синусами
-    for (int i = 0; i < size; ++i) {
-        s_sineTable[i] = static_cast<float>(std::sin(TWO_PI * static_cast<double>(i) / size));
+    for (int i = 0; i < tableSize; ++i) {
+        s_sineTable[i] = std::sin(TWO_PI * static_cast<float>(i) / static_cast<float>(tableSize));
     }
-    
+
     // Дублируем первые 4 значения в конце для упрощения интерполяции
     // Это позволяет избежать masking при доступе к index + 1
     for (int i = 0; i < 4; ++i) {
-        s_sineTable[size + i] = s_sineTable[i];
+        s_sineTable[tableSize + i] = s_sineTable[i];
     }
 }
 
