@@ -63,8 +63,7 @@ fun SettingsScreen(
             ChannelSwapSettingsCard(
                 channelSwapSettings = uiState.channelSwapSettings,
                 isChannelsSwapped = uiState.isChannelsSwapped,
-                onChannelSwapEnabledChange = { viewModel.setChannelSwapEnabled(it) },
-                onChannelSwapModeChange = { viewModel.setChannelSwapMode(it) },
+                onChannelSwapSelect = { viewModel.setChannelSwapSelection(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
                 onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) }

@@ -1227,27 +1227,17 @@ class BinauralViewModel @Inject constructor(
     // ============= Методы для управления настройками перестановки каналов =============
     
     /**
-     * Включить/выключить перестановку каналов
+     * Выбрать режим автоперестановки каналов одним чипом:
+     * null = выключено, TIMER/TREND = включено с соответствующим режимом.
+     * Одно событие -> один fade-перезапуск (вместо пары enabled+mode).
      */
-    fun setChannelSwapEnabled(enabled: Boolean) {
+    fun setChannelSwapSelection(mode: ChannelSwapMode?) {
         restartWithFadeIfNeeded {
             val state = _uiState.value
-            val newSettings = state.channelSwapSettings.copy(enabled = enabled)
-            _uiState.update { it.copy(channelSwapSettings = newSettings) }
-            updateAudioConfig()
-            viewModelScope.launch {
-                preferencesRepository.saveChannelSwapSettings(newSettings)
-            }
-        }
-    }
-    
-    /**
-     * Установить режим перестановки каналов (по таймеру / по тенденции графика)
-     */
-    fun setChannelSwapMode(mode: ChannelSwapMode) {
-        restartWithFadeIfNeeded {
-            val state = _uiState.value
-            val newSettings = state.channelSwapSettings.copy(mode = mode)
+            val newSettings = state.channelSwapSettings.copy(
+                enabled = mode != null,
+                mode = mode ?: state.channelSwapSettings.mode
+            )
             _uiState.update { it.copy(channelSwapSettings = newSettings) }
             updateAudioConfig()
             viewModelScope.launch {

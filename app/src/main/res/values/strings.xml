@@ -54,7 +54,7 @@
     <string name="channel_swap_now_swapped">Сейчас: каналы переставлены</string>
     <string name="channel_swap_disabled">Выключено</string>
     <string name="swap_interval">Интервал перестановки</string>
-    <string name="swap_mode">Режим перестановки</string>
+    <string name="swap_mode_off_description">Каналы всегда в обычном расположении</string>
     <string name="swap_mode_timer">По таймеру</string>
     <string name="swap_mode_trend">По тенденции</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>

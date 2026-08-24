@@ -54,7 +54,7 @@
     <string name="channel_swap_now_swapped">Now: channels swapped</string>
     <string name="channel_swap_disabled">Disabled</string>
     <string name="swap_interval">Swap interval</string>
-    <string name="swap_mode">Swap mode</string>
+    <string name="swap_mode_off_description">Channels always in normal arrangement</string>
     <string name="swap_mode_timer">Timer</string>
     <string name="swap_mode_trend">Trend-based</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>

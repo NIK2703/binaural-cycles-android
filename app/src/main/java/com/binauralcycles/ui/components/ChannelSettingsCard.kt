@@ -244,90 +244,99 @@ fun VolumeNormalizationSettingsCard(
 fun ChannelSwapSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
     isChannelsSwapped: Boolean,
-    onChannelSwapEnabledChange: (Boolean) -> Unit,
-    onChannelSwapModeChange: (ChannelSwapMode) -> Unit,
+    onChannelSwapSelect: (ChannelSwapMode?) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
     onChannelSwapPauseDurationChange: (Long) -> Unit
 ) {
+    // null = выключено; иначе включено с выбранным режимом
+    val selection = when {
+        !channelSwapSettings.enabled -> null
+        channelSwapSettings.mode == ChannelSwapMode.TREND -> ChannelSwapMode.TREND
+        else -> ChannelSwapMode.TIMER
+    }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Авто-перестановка каналов
-        ListItem(
-            headlineContent = { Text(stringResource(R.string.auto_channel_swap)) },
-            supportingContent = {
-                Text(
-                    if (!channelSwapSettings.enabled) {
-                        stringResource(R.string.channel_swap_disabled)
-                    } else {
-                        // Живой индикатор текущего расположения каналов:
-                        // особенно важен в TREND-режиме на плоских участках кривой,
-                        // где смены могут не происходить долго
-                        stringResource(R.string.channel_swap_description) + "\n" +
+        // Авто-перестановка каналов: один ряд из трёх чипов (как у нормализации)
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = stringResource(R.string.auto_channel_swap),
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+            // Подсказка в зависимости от выбора + живой индикатор расположения
+            Text(
+                text = buildString {
+                    append(
+                        when (selection) {
+                            null -> stringResource(R.string.swap_mode_off_description)
+                            ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
+                            ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
+                        }
+                    )
+                    if (selection != null) {
+                        append("\n")
+                        append(
                             stringResource(
                                 if (isChannelsSwapped) R.string.channel_swap_now_swapped
                                 else R.string.channel_swap_now_normal
                             )
+                        )
                     }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+            ) {
+                FilterChip(
+                    selected = selection == null,
+                    onClick = { onChannelSwapSelect(null) },
+                    label = {
+                        Text(
+                            text = stringResource(R.string.channel_swap_disabled),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
                 )
-            },
-            trailingContent = {
-                Switch(
-                    checked = channelSwapSettings.enabled,
-                    onCheckedChange = onChannelSwapEnabledChange
+                FilterChip(
+                    selected = selection == ChannelSwapMode.TIMER,
+                    onClick = { onChannelSwapSelect(ChannelSwapMode.TIMER) },
+                    label = {
+                        Text(
+                            text = stringResource(R.string.swap_mode_timer),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = selection == ChannelSwapMode.TREND,
+                    onClick = { onChannelSwapSelect(ChannelSwapMode.TREND) },
+                    label = {
+                        Text(
+                            text = stringResource(R.string.swap_mode_trend),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    },
+                    modifier = Modifier.weight(1f)
                 )
             }
-        )
+        }
 
         if (channelSwapSettings.enabled) {
-            // Режим перестановки: по таймеру / по тенденции графика
-            Column(modifier = Modifier.padding(horizontal = 16.dp)) {
-                Text(
-                    text = stringResource(R.string.swap_mode),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = when (channelSwapSettings.mode) {
-                        ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
-                        ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = channelSwapSettings.mode == ChannelSwapMode.TIMER,
-                        onClick = { onChannelSwapModeChange(ChannelSwapMode.TIMER) },
-                        label = {
-                            Text(
-                                stringResource(R.string.swap_mode_timer),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = channelSwapSettings.mode == ChannelSwapMode.TREND,
-                        onClick = { onChannelSwapModeChange(ChannelSwapMode.TREND) },
-                        label = {
-                            Text(
-                                stringResource(R.string.swap_mode_trend),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-
             // Слайдер интервала перестановки: только в TIMER-режиме
             // (в TREND интервал не участвует — частота смен определяется
             // мёртвой зоной производной кривой)
