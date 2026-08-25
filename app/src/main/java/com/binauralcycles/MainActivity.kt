@@ -6,12 +6,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -56,7 +50,7 @@ class MainActivity : ComponentActivity() {
         
         enableEdgeToEdge()
         // Явно устанавливаем прозрачный цвет navigation bar
-        window.navigationBarColor = Color.Transparent.toArgb()
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
         // Отключаем принудительный контраст navigation bar (Android 10+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
@@ -64,13 +58,8 @@ class MainActivity : ComponentActivity() {
         
         setContent {
             BinauralTheme {
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    val navController = rememberNavController()
-                    BinauralNavigation(navController = navController)
-                }
+                val navController = rememberNavController()
+                BinauralNavigation(navController = navController)
             }
         }
     }

@@ -1,7 +1,6 @@
 package com.binauralcycles.ui.components
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -24,6 +23,7 @@ import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import android.graphics.Paint
 
 /**
@@ -65,9 +65,9 @@ private data class MiniGraphParams(
 fun MiniFrequencyGraph(
     frequencyCurve: FrequencyCurve,
     modifier: Modifier = Modifier,
-    primaryColor: Color = MaterialTheme.colorScheme.primary,
-    indicatorColor: Color = MaterialTheme.colorScheme.error,
-    relaxationColor: Color = MaterialTheme.colorScheme.tertiary,
+    primaryColor: Color = colorScheme.primary,
+    indicatorColor: Color = colorScheme.error,
+    relaxationColor: Color = colorScheme.tertiaryContainer,
     isPlaying: Boolean = false,
     currentTime: LocalTime = LocalTime(12, 0),
     currentCarrierFrequency: Float = 0.0f,

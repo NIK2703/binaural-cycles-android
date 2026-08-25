@@ -1,7 +1,8 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -9,6 +10,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.R
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 // Движок клампит частоту канала к >= 0 Гц; ниже 0 Гц канал замолкает,
 // и отображаемое значение перестаёт соответствовать звуку
@@ -22,18 +26,19 @@ fun CurrentFrequenciesCard(
 ) {
     val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
     val isLeftChannelTooLow = leftChannelFreq < MIN_CHANNEL_FREQUENCY
-    
+
     // Локализованные строки
     val beatLabel = stringResource(R.string.beat_frequency)
     val carrierLabel = stringResource(R.string.carrier_frequency)
     val hzDecimalFormat = stringResource(R.string.hz_value_format_decimal)
     val hzFormat = stringResource(R.string.hz_value_format)
-    
-    Surface(
+
+    Card(
         modifier = Modifier.fillMaxWidth(),
-        color = if (isPlaying) MaterialTheme.colorScheme.primaryContainer 
-                else MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.medium
+        colors = CardDefaults.defaultColors(
+            color = if (isPlaying) colorScheme.primaryContainer
+            else colorScheme.surfaceVariant
+        )
     ) {
         Row(
             modifier = Modifier
@@ -46,31 +51,31 @@ fun CurrentFrequenciesCard(
             FrequencyColumn(
                 label = beatLabel,
                 value = hzDecimalFormat.format(beatFrequency),
-                color = MaterialTheme.colorScheme.primary
+                valueColor = colorScheme.primary
             )
-            
-            VerticalDivider(
+
+            VerticalDividerBox(
                 modifier = Modifier.height(32.dp),
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                dividerColor = colorScheme.onSurfaceSecondary.copy(alpha = 0.3f)
             )
-            
+
             // Несущая частота
             FrequencyColumn(
                 label = carrierLabel,
                 value = hzFormat.format(carrierFrequency),
-                color = MaterialTheme.colorScheme.onSurface
+                valueColor = colorScheme.onSurface
             )
-            
+
             if (isLeftChannelTooLow) {
-                VerticalDivider(
+                VerticalDividerBox(
                     modifier = Modifier.height(32.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)
+                    dividerColor = colorScheme.onSurfaceSecondary.copy(alpha = 0.3f)
                 )
-                
+
                 Text(
                     text = "⚠",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.error
+                    style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
+                    color = colorScheme.error
                 )
             }
         }
@@ -81,19 +86,31 @@ fun CurrentFrequenciesCard(
 private fun FrequencyColumn(
     label: String,
     value: String,
-    color: androidx.compose.ui.graphics.Color
+    valueColor: androidx.compose.ui.graphics.Color
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Text(
             text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
+            color = colorScheme.onSurfaceSecondary
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.titleMedium,
+            style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
-            color = color
+            color = valueColor
         )
     }
+}
+
+@Composable
+private fun VerticalDividerBox(
+    modifier: Modifier = Modifier,
+    dividerColor: androidx.compose.ui.graphics.Color
+) {
+    Box(
+        modifier = modifier
+            .width(1.dp)
+            .background(dividerColor)
+    )
 }

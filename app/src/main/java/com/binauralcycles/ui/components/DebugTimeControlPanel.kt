@@ -10,16 +10,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -35,13 +27,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.viewmodel.BinauralViewModel
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.CardDefaults
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.basic.Switch
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 import kotlin.math.roundToInt
 
 /**
  * DEBUG-панель управления виртуальным временем суток.
  * Рендерится только в debug-сборке (гейтинг в месте вызова).
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
     val uiState by viewModel.uiState.collectAsState()
@@ -63,9 +61,7 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
-        )
+        colors = CardDefaults.defaultColors(color = colorScheme.errorContainer.copy(alpha = 0.4f))
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -76,7 +72,7 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                 text = "DEBUG: виртуальное время",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.error
+                color = colorScheme.error
             )
 
             // Вкл/выкл
@@ -113,9 +109,9 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                 // Быстрые пресеты времени
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(0, 6, 12, 18).forEach { hour ->
-                        AssistChip(
-                            onClick = { viewModel.debugScrubTime(hour * 3600) },
-                            label = { Text("%02d:00".format(hour)) }
+                        TextButton(
+                            text = "%02d:00".format(hour),
+                            onClick = { viewModel.debugScrubTime(hour * 3600) }
                         )
                     }
                 }
@@ -128,11 +124,11 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                 Slider(
                     value = scaleSlider,
                     onValueChange = { v ->
-                        scaleSlider = v
-                        viewModel.debugSetTimeScale(v.roundToInt().toFloat())
+                        val snapped = v.roundToInt().toFloat() // целые значения 1..60
+                        scaleSlider = snapped
+                        viewModel.debugSetTimeScale(snapped)
                     },
-                    valueRange = 1f..60f,
-                    steps = 58 // целые значения 1..60
+                    valueRange = 1f..60f
                 )
 
                 // Play/Pause виртуального времени + сброс
@@ -146,9 +142,10 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    OutlinedButton(onClick = { viewModel.debugResetToRealTime() }) {
-                        Text("К реальному времени")
-                    }
+                    TextButton(
+                        text = "К реальному времени",
+                        onClick = { viewModel.debugResetToRealTime() }
+                    )
                 }
             }
         }

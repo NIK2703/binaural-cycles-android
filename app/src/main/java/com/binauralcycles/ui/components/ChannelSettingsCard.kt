@@ -1,16 +1,12 @@
 package com.binauralcycles.ui.components
 
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapMode
@@ -21,12 +17,15 @@ import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binauralcycles.R
+import top.yukonga.miuix.kmp.basic.HorizontalDivider
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
+import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 /**
  * Блок настроек интерполяции для пресета
  * Нормализация громкости вынесена в глобальные настройки приложения
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PresetSettingsCard(
     interpolationType: InterpolationType,
@@ -38,86 +37,33 @@ fun PresetSettingsCard(
     ) {
         // Интерполяция по точкам
         Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.point_interpolation),
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            Text(
-                text = stringResource(R.string.interpolation_description),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            // Чипы интерполяции в две строки с уменьшенным расстоянием между строками
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
-                    .padding(top = 8.dp),
-                verticalArrangement = Arrangement.spacedBy((-8).dp)
-            ) {
-                // Первая строка: Ступенчатая, Линейная
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.STEP,
-                        onClick = { onInterpolationTypeChange(InterpolationType.STEP) },
-                        label = { 
-                            Text(
-                                text = stringResource(R.string.step),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            ) 
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.LINEAR,
-                        onClick = { onInterpolationTypeChange(InterpolationType.LINEAR) },
-                        label = { 
-                            Text(
-                                text = stringResource(R.string.linear),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            ) 
-                        },
-                        modifier = Modifier.weight(1f)
+            // Стандартный раскрывающийся список интерполяции
+            OverlayDropdownPreference(
+                items = listOf(
+                    stringResource(R.string.step),
+                    stringResource(R.string.linear),
+                    stringResource(R.string.monotone),
+                    stringResource(R.string.cardinal)
+                ),
+                selectedIndex = when (interpolationType) {
+                    InterpolationType.STEP -> 0
+                    InterpolationType.LINEAR -> 1
+                    InterpolationType.MONOTONE -> 2
+                    InterpolationType.CARDINAL -> 3
+                },
+                title = stringResource(R.string.point_interpolation),
+                summary = stringResource(R.string.interpolation_description),
+                onSelectedIndexChange = { index ->
+                    onInterpolationTypeChange(
+                        when (index) {
+                            0 -> InterpolationType.STEP
+                            1 -> InterpolationType.LINEAR
+                            2 -> InterpolationType.MONOTONE
+                            else -> InterpolationType.CARDINAL
+                        }
                     )
                 }
-                // Вторая строка: Монотонная, Кардинальная
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.MONOTONE,
-                        onClick = { onInterpolationTypeChange(InterpolationType.MONOTONE) },
-                        label = { 
-                            Text(
-                                text = stringResource(R.string.monotone),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            ) 
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                    FilterChip(
-                        selected = interpolationType == InterpolationType.CARDINAL,
-                        onClick = { onInterpolationTypeChange(InterpolationType.CARDINAL) },
-                        label = { 
-                            Text(
-                                text = stringResource(R.string.cardinal),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            ) 
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
+            )
         }
     }
 }
@@ -125,7 +71,6 @@ fun PresetSettingsCard(
 /**
  * Блок глобальных настроек нормализации громкости
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VolumeNormalizationSettingsCard(
     volumeNormalizationSettings: VolumeNormalizationSettings,
@@ -139,67 +84,34 @@ fun VolumeNormalizationSettingsCard(
     ) {
         // Нормализация громкости
         Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.volume_normalization),
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            // Подсказка в зависимости от выбранного типа
-            Text(
-                text = when (volumeNormalizationSettings.type) {
+            // Стандартный раскрывающийся список типа нормализации
+            OverlayDropdownPreference(
+                items = listOf(
+                    stringResource(R.string.normalization_none),
+                    stringResource(R.string.normalization_channel),
+                    stringResource(R.string.normalization_temporal)
+                ),
+                selectedIndex = when (volumeNormalizationSettings.type) {
+                    NormalizationType.NONE -> 0
+                    NormalizationType.CHANNEL -> 1
+                    NormalizationType.TEMPORAL -> 2
+                },
+                title = stringResource(R.string.volume_normalization),
+                summary = when (volumeNormalizationSettings.type) {
                     NormalizationType.NONE -> stringResource(R.string.normalization_none_description)
                     NormalizationType.CHANNEL -> stringResource(R.string.normalization_channel_description)
                     NormalizationType.TEMPORAL -> stringResource(R.string.normalization_temporal_description)
                 },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                onSelectedIndexChange = { index ->
+                    when (index) {
+                        0 -> onVolumeNormalizationEnabledChange(false)
+                        1 -> onVolumeNormalizationEnabledChange(true)
+                        else -> onTemporalNormalizationEnabledChange(true)
+                    }
+                }
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-            ) {
-                FilterChip(
-                    selected = volumeNormalizationSettings.type == NormalizationType.NONE,
-                    onClick = { onVolumeNormalizationEnabledChange(false) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.normalization_none),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = volumeNormalizationSettings.type == NormalizationType.CHANNEL,
-                    onClick = { onVolumeNormalizationEnabledChange(true) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.normalization_channel),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = volumeNormalizationSettings.type == NormalizationType.TEMPORAL,
-                    onClick = { onTemporalNormalizationEnabledChange(true) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.normalization_temporal),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
         }
-        
+
         // Слайдер силы нормализации (показываем для CHANNEL и TEMPORAL)
         if (volumeNormalizationSettings.type != NormalizationType.NONE) {
             // Локальное состояние для мгновенного отклика UI
@@ -219,7 +131,7 @@ fun VolumeNormalizationSettingsCard(
                     Text(
                         "${(localStrength * 100).toInt()}%",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = colorScheme.primary
                     )
                 }
                 Slider(
@@ -239,7 +151,6 @@ fun VolumeNormalizationSettingsCard(
 /**
  * Блок глобальных настроек перестановки каналов
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChannelSwapSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
@@ -260,86 +171,38 @@ fun ChannelSwapSettingsCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Авто-перестановка каналов: один ряд из трёх чипов (как у нормализации)
+        // Авто-перестановка каналов
         Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.auto_channel_swap),
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            // Подсказка в зависимости от выбора + живой индикатор расположения
-            Text(
-                text = buildString {
-                    append(
-                        when (selection) {
-                            null -> stringResource(R.string.swap_mode_off_description)
-                            ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
-                            ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
-                        }
-                    )
-                    if (selection != null) {
-                        append("\n")
-                        append(
-                            stringResource(
-                                if (isChannelsSwapped) R.string.channel_swap_now_swapped
-                                else R.string.channel_swap_now_normal
-                            )
-                        )
-                    }
+            // Стандартный раскрывающийся список режима перестановки
+            OverlayDropdownPreference(
+                items = listOf(
+                    stringResource(R.string.channel_swap_disabled),
+                    stringResource(R.string.swap_mode_timer),
+                    stringResource(R.string.swap_mode_trend)
+                ),
+                selectedIndex = when (selection) {
+                    null -> 0
+                    ChannelSwapMode.TIMER -> 1
+                    ChannelSwapMode.TREND -> 2
                 },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                title = stringResource(R.string.auto_channel_swap),
+                summary = when (selection) {
+                    null -> stringResource(R.string.swap_mode_off_description)
+                    ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
+                    ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
+                },
+                onSelectedIndexChange = { index ->
+                    when (index) {
+                        0 -> onChannelSwapSelect(null)
+                        1 -> onChannelSwapSelect(ChannelSwapMode.TIMER)
+                        else -> onChannelSwapSelect(ChannelSwapMode.TREND)
+                    }
+                }
             )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-            ) {
-                FilterChip(
-                    selected = selection == null,
-                    onClick = { onChannelSwapSelect(null) },
-                    label = {
-                        Text(
-                            text = stringResource(R.string.channel_swap_disabled),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = selection == ChannelSwapMode.TIMER,
-                    onClick = { onChannelSwapSelect(ChannelSwapMode.TIMER) },
-                    label = {
-                        Text(
-                            text = stringResource(R.string.swap_mode_timer),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = selection == ChannelSwapMode.TREND,
-                    onClick = { onChannelSwapSelect(ChannelSwapMode.TREND) },
-                    label = {
-                        Text(
-                            text = stringResource(R.string.swap_mode_trend),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
         }
 
         if (channelSwapSettings.enabled) {
             // Слайдер интервала перестановки: только в TIMER-режиме
-            // (в TREND интервал не участвует — частота смен определяется
-            // мёртвой зоной производной кривой)
             if (channelSwapSettings.mode == ChannelSwapMode.TIMER) {
                 DiscreteSlider(
                     label = stringResource(R.string.swap_interval),
@@ -350,18 +213,19 @@ fun ChannelSwapSettingsCard(
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
             }
-            
-            // Слайдер длительности затухания (всегда показываем, т.к. fadeEnabled всегда true)
+
+            // Слайдер длительности затухания (без рисок на дорожке)
             DiscreteSliderLong(
                 label = stringResource(R.string.fade_duration),
                 value = channelSwapSettings.fadeDurationMs,
                 values = listOf(1000L, 2000L, 3000L, 4000L, 5000L, 6000L, 7000L, 8000L, 9000L, 10000L, 11000L, 12000L, 13000L, 14000L, 15000L),
                 formatValue = { ms -> formatFadeDurationLabel(ms) },
                 onValueChange = onChannelSwapFadeDurationChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
+                modifier = Modifier.padding(horizontal = 16.dp),
+                showKeyPoints = false
             )
-            
-            // Слайдер длительности паузы при переключении (расширенный диапазон до 1 минуты)
+
+            // Слайдер длительности паузы при переключении
             DiscreteSliderLong(
                 label = stringResource(R.string.pause_on_switch),
                 value = channelSwapSettings.pauseDurationMs,
@@ -377,7 +241,6 @@ fun ChannelSwapSettingsCard(
 /**
  * Блок настроек энергопотребления (интервал генерации буфера, частота дискретизации)
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PowerSettingsCard(
     sampleRate: SampleRate,
@@ -398,7 +261,7 @@ fun PowerSettingsCard(
             Text(
                 text = stringResource(R.string.buffer_generation_description),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = colorScheme.onSurfaceSecondary
             )
             Spacer(modifier = Modifier.height(8.dp))
             DiscreteSlider(
@@ -410,9 +273,9 @@ fun PowerSettingsCard(
                 modifier = Modifier.fillMaxWidth()
             )
         }
-        
+
         HorizontalDivider()
-        
+
         // Качество аудио - строка чипов
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
@@ -423,77 +286,34 @@ fun PowerSettingsCard(
             Text(
                 text = stringResource(R.string.audio_quality_description),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = colorScheme.onSurfaceSecondary,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                FilterChip(
-                    selected = sampleRate == SampleRate.ULTRA_LOW,
-                    onClick = { onSampleRateChange(SampleRate.ULTRA_LOW) },
-                    label = { 
-                        Text(
-                            "8kHz", 
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = sampleRate == SampleRate.VERY_LOW,
-                    onClick = { onSampleRateChange(SampleRate.VERY_LOW) },
-                    label = { 
-                        Text(
-                            "16kHz", 
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = sampleRate == SampleRate.LOW,
-                    onClick = { onSampleRateChange(SampleRate.LOW) },
-                    label = { 
-                        Text(
-                            "22kHz", 
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = sampleRate == SampleRate.MEDIUM,
-                    onClick = { onSampleRateChange(SampleRate.MEDIUM) },
-                    label = { 
-                        Text(
-                            "44kHz", 
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = sampleRate == SampleRate.HIGH,
-                    onClick = { onSampleRateChange(SampleRate.HIGH) },
-                    label = { 
-                        Text(
-                            "48kHz", 
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
+            // Стандартный раскрывающийся список качества аудио
+            OverlayDropdownPreference(
+                items = listOf("8kHz", "16kHz", "22kHz", "44kHz", "48kHz"),
+                selectedIndex = when (sampleRate) {
+                    SampleRate.ULTRA_LOW -> 0
+                    SampleRate.VERY_LOW -> 1
+                    SampleRate.LOW -> 2
+                    SampleRate.MEDIUM -> 3
+                    SampleRate.HIGH -> 4
+                },
+                title = stringResource(R.string.audio_quality),
+                summary = stringResource(R.string.audio_quality_description),
+                onSelectedIndexChange = { index ->
+                    onSampleRateChange(
+                        when (index) {
+                            0 -> SampleRate.ULTRA_LOW
+                            1 -> SampleRate.VERY_LOW
+                            2 -> SampleRate.LOW
+                            3 -> SampleRate.MEDIUM
+                            else -> SampleRate.HIGH
+                        }
+                    )
+                }
+            )
         }
     }
 }
@@ -514,6 +334,8 @@ fun DiscreteSlider(
     // Локальное состояние для мгновенного отклика UI
     var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
 
+    val keyPoints = remember(values) { values.indices.map { it.toFloat() } }
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -526,7 +348,7 @@ fun DiscreteSlider(
             Text(
                 formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
+                color = colorScheme.primary
             )
         }
         Slider(
@@ -539,7 +361,9 @@ fun DiscreteSlider(
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
-            steps = values.size - 2
+            showKeyPoints = true,
+            keyPoints = keyPoints,
+            magnetThreshold = if (values.size > 1) 0.4f / (values.size - 1) else 0f
         )
     }
 }
@@ -555,10 +379,13 @@ fun DiscreteSliderLong(
     values: List<Long>,
     formatValue: @Composable (Long) -> String,
     onValueChange: (Long) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showKeyPoints: Boolean = true
 ) {
     // Локальное состояние для мгновенного отклика UI
     var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
+
+    val keyPoints = remember(values) { values.indices.map { it.toFloat() } }
 
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
@@ -572,7 +399,7 @@ fun DiscreteSliderLong(
             Text(
                 formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
+                color = colorScheme.primary
             )
         }
         Slider(
@@ -585,7 +412,9 @@ fun DiscreteSliderLong(
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
-            steps = values.size - 2
+            showKeyPoints = showKeyPoints,
+            keyPoints = keyPoints,
+            magnetThreshold = if (values.size > 1) 0.4f / (values.size - 1) else 0f
         )
     }
 }
@@ -598,7 +427,7 @@ fun formatInterval(seconds: Int): String {
     val secShort = stringResource(R.string.seconds_short)
     val minShort = stringResource(R.string.minutes_short)
     val hourShort = stringResource(R.string.hours_short)
-    
+
     return when {
         seconds < 60 -> "$seconds $secShort"
         seconds < 3600 -> {
@@ -623,7 +452,7 @@ fun formatFadeDuration(ms: Long): String {
     val millis = ms % 1000
     val msShort = stringResource(R.string.milliseconds_short)
     val secFull = stringResource(R.string.seconds_full)
-    
+
     return when {
         ms < 1000 -> "$millis $msShort"
         millis == 0L -> "$seconds $secFull"
@@ -651,7 +480,7 @@ fun formatPauseDurationLabel(ms: Long): String {
     }
     val secFull = stringResource(R.string.seconds_full)
     val minShort = stringResource(R.string.minutes_short)
-    
+
     return when {
         ms < 1000 -> "$ms ${stringResource(R.string.milliseconds_short)}"
         ms < 60000 -> {
@@ -686,7 +515,7 @@ fun formatUpdateInterval(ms: Int): String {
 fun formatBufferInterval(minutes: Int): String {
     val minShort = stringResource(R.string.minutes_short)
     val hourShort = stringResource(R.string.hours_short)
-    
+
     return when {
         minutes < 60 -> "$minutes $minShort"
         else -> {
@@ -713,6 +542,8 @@ fun DiscreteSliderWavetableSize(
     // Локальное состояние для мгновенного отклика UI
     var localIndex by remember(value) { mutableIntStateOf(values.indexOf(value).coerceAtLeast(0)) }
 
+    val keyPoints = remember(values) { values.indices.map { it.toFloat() } }
+
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -725,7 +556,7 @@ fun DiscreteSliderWavetableSize(
             Text(
                 formatValue(values[localIndex]),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.primary
+                color = colorScheme.primary
             )
         }
         Slider(
@@ -738,7 +569,9 @@ fun DiscreteSliderWavetableSize(
             },
             modifier = Modifier.fillMaxWidth(),
             valueRange = 0f..(values.size - 1).toFloat(),
-            steps = values.size - 2
+            showKeyPoints = true,
+            keyPoints = keyPoints,
+            magnetThreshold = if (values.size > 1) 0.4f / (values.size - 1) else 0f
         )
     }
 }
@@ -754,7 +587,6 @@ fun formatWavetableSize(size: Int): String {
 /**
  * Блок настроек режима расслабления
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RelaxationModeCard(
     relaxationModeSettings: RelaxationModeSettings,
@@ -771,84 +603,49 @@ fun RelaxationModeCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Выбор режима расслабления: 3 чипа в одной строке
+        // Режим расслабления
         Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.relaxation_mode),
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            // Описание текущего режима под заголовком
-            Text(
-                text = when {
+            // Стандартный раскрывающийся список режима расслабления
+            OverlayDropdownPreference(
+                items = listOf(
+                    stringResource(R.string.relaxation_mode_disabled),
+                    stringResource(R.string.relaxation_mode_step),
+                    stringResource(R.string.relaxation_mode_smooth)
+                ),
+                selectedIndex = when {
+                    !relaxationModeSettings.enabled -> 0
+                    relaxationModeSettings.mode == RelaxationMode.STEP -> 1
+                    else -> 2
+                },
+                title = stringResource(R.string.relaxation_mode),
+                summary = when {
                     !relaxationModeSettings.enabled -> stringResource(R.string.relaxation_mode_disabled_desc)
                     relaxationModeSettings.mode == RelaxationMode.STEP -> stringResource(R.string.relaxation_mode_step_desc)
                     else -> stringResource(R.string.relaxation_mode_smooth_desc)
                 },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp)
+                onSelectedIndexChange = { index ->
+                    when (index) {
+                        0 -> onRelaxationModeEnabledChange(false)
+                        1 -> {
+                            onRelaxationModeEnabledChange(true)
+                            onRelaxationModeChange(RelaxationMode.STEP)
+                        }
+                        else -> {
+                            onRelaxationModeEnabledChange(true)
+                            onRelaxationModeChange(RelaxationMode.SMOOTH)
+                        }
+                    }
+                }
             )
-            Spacer(modifier = Modifier.height(8.dp))
-            // Одна строка: Выкл, Расширенный, Плавный
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-            ) {
-                FilterChip(
-                    selected = !relaxationModeSettings.enabled,
-                    onClick = { onRelaxationModeEnabledChange(false) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_disabled),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP,
-                    onClick = { 
-                        onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.STEP)
-                    },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_step),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH,
-                    onClick = { 
-                        onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.SMOOTH)
-                    },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_smooth),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
         }
-        
+
         // Настройки режима (показываем только когда режим включен)
         if (relaxationModeSettings.enabled) {
             HorizontalDivider()
-            
+
             // Настройки ступенчатого режима
             if (relaxationModeSettings.mode == RelaxationMode.STEP) {
-                
+
                 // Интервал между периодами расслабления
                 DiscreteSlider(
                     label = stringResource(R.string.gap_between_relaxation),
@@ -858,7 +655,7 @@ fun RelaxationModeCard(
                     onValueChange = onRelaxationGapChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
+
                 // Длительность расслабления
                 DiscreteSlider(
                     label = stringResource(R.string.relaxation_duration),
@@ -868,7 +665,7 @@ fun RelaxationModeCard(
                     onValueChange = onRelaxationDurationChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
+
                 // Период перехода
                 DiscreteSlider(
                     label = stringResource(R.string.transition_period),
@@ -878,10 +675,10 @@ fun RelaxationModeCard(
                     onValueChange = onTransitionPeriodChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
+
                 HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
             }
-            
+
             // Настройки плавного режима
             if (relaxationModeSettings.mode == RelaxationMode.SMOOTH) {
                 // Интервал между точками
@@ -893,16 +690,16 @@ fun RelaxationModeCard(
                     onValueChange = onSmoothIntervalChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
+
                 HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
             }
-            
+
             // Слайдер снижения несущей частоты
             // Локальное состояние для мгновенного отклика UI
             var localCarrierReduction by remember(relaxationModeSettings.carrierReductionPercent) {
                 mutableIntStateOf(relaxationModeSettings.carrierReductionPercent)
             }
-            
+
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -915,7 +712,7 @@ fun RelaxationModeCard(
                     Text(
                         stringResource(R.string.reduction_percent_format, localCarrierReduction),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = colorScheme.primary
                     )
                 }
                 Slider(
@@ -928,13 +725,13 @@ fun RelaxationModeCard(
                     valueRange = 0f..50f
                 )
             }
-            
+
             // Слайдер снижения частоты биений
             // Локальное состояние для мгновенного отклика UI
             var localBeatReduction by remember(relaxationModeSettings.beatReductionPercent) {
                 mutableIntStateOf(relaxationModeSettings.beatReductionPercent)
             }
-            
+
             Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -947,7 +744,7 @@ fun RelaxationModeCard(
                     Text(
                         stringResource(R.string.reduction_percent_format, localBeatReduction),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.primary
+                        color = colorScheme.primary
                     )
                 }
                 Slider(

@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.kotlin.serialization)
@@ -17,7 +16,11 @@ val abiFilterProp = (project.findProperty("abiFilter") as String?)
 
 android {
     namespace = "com.binaural.core.audio"
-    compileSdk = 34
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
 
     defaultConfig {
         minSdk = 26
@@ -67,9 +70,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     
     // CMake конфигурация
     externalNativeBuild {
@@ -77,6 +77,12 @@ android {
             path = File("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 

@@ -8,7 +8,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +37,10 @@ import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
+import top.yukonga.miuix.kmp.basic.TextButton
+import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
+import top.yukonga.miuix.kmp.window.WindowDialog
 import kotlin.math.abs
 import kotlin.math.PI
 import kotlin.math.cos
@@ -189,8 +194,8 @@ fun FrequencyGraph(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+            .background(colorScheme.surface)
+            .border(1.dp, colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
             .padding(16.dp)
     ) {
         BoxWithConstraints(
@@ -202,9 +207,9 @@ fun FrequencyGraph(
                 GraphParams(widthPx, heightPx, carrierRange, beatRange)
             }
 
-            val primaryColor = MaterialTheme.colorScheme.primary
-            val errorColor = MaterialTheme.colorScheme.error
-            val relaxationColor = MaterialTheme.colorScheme.tertiary
+            val primaryColor = colorScheme.primary
+            val errorColor = colorScheme.error
+            val relaxationColor = colorScheme.tertiaryContainer
 
             // Объединяем реальные и виртуальные точки для отрисовки
             // В ADVANCED и SMOOTH режимах используем только виртуальные точки (кривая проходит только через них)
@@ -343,7 +348,10 @@ fun FrequencyGraph(
                     val previewYPx = graphParams.carrierToY(dragState.currentCarrier)
                     
                     Box(modifier = Modifier.offset { IntOffset(previewXPx.toInt() - 50, previewYPx.toInt() - 160) }) {
-                        Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .background(colorScheme.onBackground, RoundedCornerShape(8.dp))
+                        ) {
                             Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
                                     text = when (dragState.direction) {
@@ -353,7 +361,7 @@ fun FrequencyGraph(
                                     },
                                     style = MaterialTheme.typography.bodyLarge,
                                     fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.inverseOnSurface
+                                    color = colorScheme.background
                                 )
                             }
                         }
@@ -363,14 +371,18 @@ fun FrequencyGraph(
 
             // Ось Y
             Column(modifier = Modifier.align(Alignment.CenterStart).offset(x = (-8).dp)) {
-                Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
-                    modifier = Modifier.clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
+                Box(
+                    modifier = Modifier
+                        .background(primaryColor.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
                 Spacer(modifier = Modifier.weight(1f))
-                Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
-                    modifier = Modifier.clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
+                Box(
+                    modifier = Modifier
+                        .background(primaryColor.copy(alpha = 0.1f), RoundedCornerShape(4.dp))
+                        .clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
@@ -379,15 +391,15 @@ fun FrequencyGraph(
         
         // Ось X - отметки каждые 3 часа (ниже графика)
         Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text("0", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("3", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("6", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("9", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("12", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("15", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("18", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("21", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("24", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("0", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("3", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("6", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("9", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("12", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("15", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("18", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("21", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
+            Text("24", style = MaterialTheme.typography.labelSmall, color = colorScheme.onSurfaceSecondary)
         }
     }
     
@@ -399,26 +411,42 @@ fun FrequencyGraph(
     val cancelLabel = stringResource(R.string.cancel)
     
     if (showRangeDialog) {
-        AlertDialog(
-            onDismissRequest = { showRangeDialog = false },
-            title = { Text(if (editingRangeType == RangeType.MIN) minCarrierTitle else maxCarrierTitle) },
-            text = {
-                OutlinedTextField(value = tempRangeValue, onValueChange = { tempRangeValue = it }, label = { Text(frequencyLabel) }, singleLine = true)
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val value = tempRangeValue.toFloatOrNull()
-                    if (value != null && value >= MIN_AUDIBLE_FREQUENCY) {
-                        val newMin = if (editingRangeType == RangeType.MIN) value else carrierRange.min
-                        // Ограничиваем максимум значением 2000 Гц
-                        val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(MAX_FREQUENCY) else carrierRange.max
-                        if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
+        WindowDialog(
+            show = showRangeDialog,
+            title = if (editingRangeType == RangeType.MIN) minCarrierTitle else maxCarrierTitle,
+            onDismissRequest = { showRangeDialog = false }
+        ) {
+            TextField(
+                value = tempRangeValue,
+                onValueChange = { tempRangeValue = it },
+                label = frequencyLabel,
+                singleLine = true
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                TextButton(
+                    text = cancelLabel,
+                    onClick = { showRangeDialog = false }
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                TextButton(
+                    text = okLabel,
+                    onClick = {
+                        val value = tempRangeValue.toFloatOrNull()
+                        if (value != null && value >= MIN_AUDIBLE_FREQUENCY) {
+                            val newMin = if (editingRangeType == RangeType.MIN) value else carrierRange.min
+                            // Ограничиваем максимум значением 2000 Гц
+                            val newMax = if (editingRangeType == RangeType.MAX) value.coerceAtMost(MAX_FREQUENCY) else carrierRange.max
+                            if (newMin < newMax) onCarrierRangeChange(newMin, newMax)
+                        }
+                        showRangeDialog = false
                     }
-                    showRangeDialog = false
-                }) { Text(okLabel) }
-            },
-            dismissButton = { TextButton(onClick = { showRangeDialog = false }) { Text(cancelLabel) } }
-        )
+                )
+            }
+        }
     }
 }
 

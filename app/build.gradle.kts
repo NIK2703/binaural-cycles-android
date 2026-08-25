@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
@@ -29,7 +28,12 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.binauralcycles"
-    compileSdk = 34
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 0
+        }
+    }
+    buildToolsVersion = "36.0.0"
 
     signingConfigs {
         if (hasKeystore) {
@@ -87,10 +91,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-
     buildFeatures {
         compose = true
         buildConfig = true
@@ -100,6 +100,12 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -113,6 +119,9 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
+
+    // NavigationEvent (требуется MIUIX-попапам для LocalNavigationEventDispatcherOwner)
+    implementation(libs.androidx.navigationevent.compose)
     
     // Media library for notification
     implementation("androidx.media:media:1.7.0")
@@ -122,9 +131,16 @@ dependencies {
     implementation(libs.bundles.compose)
     implementation(libs.navigation.compose)
 
+    // MIUIX UI framework
+    implementation(libs.miuix.ui)
+    implementation(libs.miuix.icons)
+    implementation(libs.miuix.preference)
+
     // Hilt
     implementation(libs.bundles.hilt)
     ksp(libs.hilt.compiler)
+    // Поднимаем kotlin-metadata-jvm для чтения метаданных Kotlin 2.4 (классы MIUIX)
+    ksp("org.jetbrains.kotlin:kotlin-metadata-jvm:2.4.0")
 
     // Coroutines
     implementation(libs.bundles.coroutines)

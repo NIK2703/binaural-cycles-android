@@ -31,7 +31,7 @@ TOOLS="$TERMUX_HOME/tools"
 SDK="$TOOLS/android-sdk"
 NDK="$TOOLS/android-ndk-r29"
 GRADLE_HOME="$TOOLS/gradle-home"
-JAVA_HOME_="${JAVA_HOME:-$PREFIX_/lib/jvm/java-17-openjdk}"
+JAVA_HOME_="${JAVA_HOME:-$PREFIX_/lib/jvm/java-21-openjdk}"
 
 map_abi() { # короткое имя -> полное имя ABI
     case "$1" in
@@ -75,7 +75,12 @@ if [ -n "$ABI_SPEC" ]; then
 fi
 [ "${#TASKS[@]}" -eq 0 ] && TASKS=(":app:assembleDebug")
 
-GRADLE_BIN=$(find "$GRADLE_HOME/wrapper/dists" -maxdepth 5 -type f -path '*/gradle-9.2.1/bin/gradle' 2>/dev/null | head -1)
+# GRADLE_BIN можно задать вручную; иначе ищем самую новую версию Gradle в dists
+if [ -n "${GRADLE_BIN:-}" ] && [ -x "$GRADLE_BIN" ]; then
+    : # используем внешний путь
+else
+    GRADLE_BIN=$(find "$GRADLE_HOME/wrapper/dists" -maxdepth 6 -type f -path '*/gradle-9.*/bin/gradle' 2>/dev/null | sort -V | tail -1)
+fi
 
 if [ -z "$GRADLE_BIN" ] || [ ! -x "$GRADLE_BIN" ]; then
     echo "❌ Gradle 9.2.1 не найден в $GRADLE_HOME/wrapper/dists"
@@ -115,15 +120,17 @@ if [ -n "$AAPT2_JAR" ] && [ -f "$AAPT2" ]; then
     rm -rf "$TMP"
 fi
 
-# zipalign: AGP использует его из build-tools (для x86_64) -> заменяем на aarch64.
+# zipalign: AGP использует его из build-tools (для x86_64) -> заменяем на aarch64 во ВСЕХ версиях build-tools.
 ZIPALIGN="$PREFIX_/bin/zipalign"
-BT_ZIPALIGN="$SDK/build-tools/34.0.0/zipalign"
-if [ -f "$ZIPALIGN" ] && [ -f "$BT_ZIPALIGN" ] && [ "$(ELF_MACHINE "$BT_ZIPALIGN")" = "62" ]; then
-    cp "$BT_ZIPALIGN" "$BT_ZIPALIGN.x64-orig"
-    cp "$ZIPALIGN" "$BT_ZIPALIGN"
-    chmod +x "$BT_ZIPALIGN"
-    echo "🔧 zipalign в build-tools/34.0.0 заменён на aarch64"
-fi
+for BT_DIR in "$SDK"/build-tools/*/; do
+    BT_ZIPALIGN="$BT_DIR/zipalign"
+    if [ -f "$ZIPALIGN" ] && [ -f "$BT_ZIPALIGN" ] && [ "$(ELF_MACHINE "$BT_ZIPALIGN")" = "62" ]; then
+        cp "$BT_ZIPALIGN" "$BT_ZIPALIGN.x64-orig"
+        cp "$ZIPALIGN" "$BT_ZIPALIGN"
+        chmod +x "$BT_ZIPALIGN"
+        echo "🔧 zipalign в $(basename "$BT_DIR") заменён на aarch64"
+    fi
+done
 
 # === СБОРКА ===
 echo "=============================================="

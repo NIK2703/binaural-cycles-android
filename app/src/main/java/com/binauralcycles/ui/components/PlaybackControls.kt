@@ -1,15 +1,20 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.*
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.R
+import top.yukonga.miuix.kmp.basic.Slider
+import top.yukonga.miuix.kmp.theme.MiuixTheme.colorScheme
 
 @Composable
 fun VolumeSlider(
@@ -21,7 +26,7 @@ fun VolumeSlider(
     val volumeLabel = stringResource(R.string.volume)
     // Локальное состояние для мгновенного отклика UI
     var localVolume by remember(volume) { mutableFloatStateOf(volume) }
-    
+
     Row(
         modifier = modifier,
         verticalAlignment = Alignment.CenterVertically
@@ -29,12 +34,12 @@ fun VolumeSlider(
         Icon(
             Icons.Default.VolumeDown,
             contentDescription = volumeLabel,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = colorScheme.onSurfaceSecondary,
             modifier = Modifier.size(20.dp)
         )
         Slider(
             value = localVolume,
-            onValueChange = { 
+            onValueChange = {
                 localVolume = it
                 onVolumeChange(it) // Мгновенное применение к аудио-движку
             },
@@ -48,7 +53,7 @@ fun VolumeSlider(
         Icon(
             Icons.Default.VolumeUp,
             contentDescription = volumeLabel,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = colorScheme.onSurfaceSecondary,
             modifier = Modifier.size(20.dp)
         )
     }
@@ -61,18 +66,18 @@ fun PlayButton(
 ) {
     val playLabel = stringResource(R.string.play)
     val stopLabel = stringResource(R.string.stop)
-    
-    FilledIconButton(
-        onClick = onClick,
-        modifier = Modifier.size(56.dp),
-        colors = IconButtonDefaults.filledIconButtonColors(
-            containerColor = if (isPlaying) MaterialTheme.colorScheme.primary 
-                            else MaterialTheme.colorScheme.primary
-        )
+
+    Box(
+        modifier = Modifier
+            .size(56.dp)
+            .background(color = colorScheme.primary, shape = CircleShape)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
             contentDescription = if (isPlaying) stopLabel else playLabel,
+            tint = colorScheme.onPrimary,
             modifier = Modifier.size(28.dp)
         )
     }

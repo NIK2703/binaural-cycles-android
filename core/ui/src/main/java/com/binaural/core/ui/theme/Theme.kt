@@ -1,49 +1,47 @@
 package com.binaural.core.ui.theme
 
-import android.os.Build
+import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowInsetsControllerCompat
+import top.yukonga.miuix.kmp.theme.ColorSchemeMode
+import top.yukonga.miuix.kmp.theme.LocalContentColor
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeController
+import top.yukonga.miuix.kmp.theme.ThemePaletteStyle
 
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80,
-    background = BackgroundDark,
-    surface = SurfaceDark
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40,
-    background = BackgroundLight,
-    surface = SurfaceLight
-)
+// Фиксированный базовый цвет палитры (без Monet / динамических цветов).
+private val SeedColor = Color(0xFF7B5CFF)
 
 @Composable
 fun BinauralTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
-    }
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
+    val controller = ThemeController(
+        if (darkTheme) ColorSchemeMode.Dark else ColorSchemeMode.Light,
+        keyColor = SeedColor,
+        isDark = darkTheme,
+        paletteStyle = ThemePaletteStyle.TonalSpot,
     )
+
+    MiuixTheme(controller = controller) {
+        val context = LocalContext.current
+        LaunchedEffect(darkTheme) {
+            val window = (context as? Activity)?.window ?: return@LaunchedEffect
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                isAppearanceLightStatusBars = !darkTheme
+                isAppearanceLightNavigationBars = !darkTheme
+            }
+        }
+        CompositionLocalProvider(
+            LocalContentColor provides MiuixTheme.colorScheme.onBackground
+        ) {
+            content()
+        }
+    }
 }
