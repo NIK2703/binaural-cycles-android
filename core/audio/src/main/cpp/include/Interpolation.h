@@ -305,6 +305,156 @@ inline void FrequencyCurve::buildLookupTable() {
     buildLookupTableInternal();
 }
 
+// ============================================================================
+// ПРЕДВЫЧИСЛЕНИЕ НУЛЕЙ ТРЕНДОВОЙ ПРОИЗВОДНОЙ (режим ChannelSwapMode::TREND)
+//
+// Выполняется ОДИН РАЗ при финализации кривой (updateCache → вызов из
+// BinauralEngine::setConfig, т.е. при сохранении профиля / смене кривой),
+// дальше планировщик только ищет по готовому списку.
+//
+// Δf(t) = carrier(t+h) − carrier(t−h), h = TREND_HALF_WINDOW_SEC — непрерывная
+// периодическая функция по суткам; ноль со сменой знака = локальный экстремум
+// несущей = момент смены тенденции.
+// ============================================================================
+
+namespace TrendScanDetail {
+
+inline float trendDeltaSample(const FrequencyCurve& curve, float tSec) {
+    const FrequencyTableResult plus =
+        curve.getChannelFrequenciesAt(tSec + TREND_HALF_WINDOW_SEC);
+    const FrequencyTableResult minus =
+        curve.getChannelFrequenciesAt(tSec - TREND_HALF_WINDOW_SEC);
+    // carrier = (upper + lower)/2 → разность носителей = половина разности сумм
+    return ((plus.upperFreq + plus.lowerFreq) - (minus.upperFreq + minus.lowerFreq)) * 0.5f;
+}
+
+/**
+ * Уточнить ноль на бракете [lo, hi] с разными знаками Δf на концах.
+ * Бисекция: Δf кусочно-линейна с плотными узлами (таблица 100 мс), монотонность
+ * бракета не гарантирована, но смена знака есть — бисекция сходится всегда.
+ * Точность ~1e-4 c (0.1 мс оси кривой).
+ */
+inline float refineZero(const FrequencyCurve& curve, float lo, float hi) {
+    const float loSign = trendDeltaSample(curve, lo);
+    for (int it = 0; it < 40 && (hi - lo) > 1e-4f; ++it) {
+        const float mid = 0.5f * (lo + hi);
+        if ((trendDeltaSample(curve, mid) > 0.0f) == (loSign > 0.0f)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return 0.5f * (lo + hi);
+}
+
+} // namespace TrendScanDetail
+
+/**
+ * Найти все нули Δf за сутки методом «грубая сетка → уточнение».
+ * Свободная функция над const-кривой: используется и кэширующим членом
+ * buildTrendCrossings(), и fallback-путём планировщика без копии таблиц.
+ *
+ * Шаг сетки адаптивный: четверть минимального зазора между контрольными точками
+ * (включая wrap-зазор через полночь), кламп [0.25; 5] c — любой изгиб кривой
+ * масштаба контрольных точек разрешается сеткой, а влияние особенности несущей
+ * на Δf разливается минимум на ширину окна ±60 c и не может «спрятаться» между
+ * узлами. Плато (Δf == 0) переходов не создаёт; касание нуля без смены знака —
+ * тоже. Результат отсортирован по времени суток, направления чередуются.
+ */
+inline void computeTrendCrossings(const FrequencyCurve& curve,
+                                  std::vector<TrendCrossing>& out) {
+    out.clear();
+
+    if (curve.lowerFreqTable.empty() || curve.upperFreqTable.empty() ||
+        curve.points.size() < 2) {
+        return; // таблица/точки не заданы — переходов нет
+    }
+
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+
+    // Минимальный зазор между соседними точками (по циклу, включая wrap-участок)
+    std::vector<float> times;
+    times.reserve(curve.points.size());
+    for (const auto& p : curve.points) times.push_back(static_cast<float>(p.timeSeconds));
+    std::sort(times.begin(), times.end());
+    times.erase(std::unique(times.begin(), times.end()), times.end());
+    float minGap = dayF - times.back() + times.front(); // wrap-зазор
+    for (size_t i = 1; i < times.size(); ++i) {
+        minGap = std::min(minGap, times[i] - times[i - 1]);
+    }
+    minGap = std::max(minGap, 1.0f); // защита от вырождения (дубликаты уже слиты)
+
+    const float coarseStep = std::clamp(minGap * 0.25f, 0.25f, 5.0f);
+    const int gridN = static_cast<int>(std::ceil(dayF / coarseStep));
+    const float step = dayF / static_cast<float>(gridN);
+
+    // Обход узлов 0..gridN (узел gridN ≡ узел 0 через полночь). Нулевые узлы
+    // не участвуют в сравнении знаков напрямую: экстремум может попасть РОВНО
+    // на узел (симметричные кривые), и тогда соседние пары дают «+→0»/«0→−»
+    // без строгого переворота. Поэтому последний НЕнулевой знак переносится
+    // через нулевой участок, а бракетом для уточнения служит пара разноимённых
+    // ненулевых узлов. Плато (длинный нулевой участок) переходов не создаёт,
+    // если знак по обе стороны одинаков.
+    auto timeAt = [&](int i) -> float {
+        return (i >= gridN) ? dayF : static_cast<float>(i) * step;
+    };
+    auto sampleAt = [&](int i) -> float {
+        return TrendScanDetail::trendDeltaSample(curve, (i >= gridN) ? 0.0f
+                                              : static_cast<float>(i) * step);
+    };
+
+    out.reserve(16);
+    int lastSignedIdx = -1;
+    float lastSign = 0.0f;
+    int firstSignedIdx = -1;
+    float firstSign = 0.0f;
+    auto pushCrossing = [&](int loIdx, int hiIdx, float dHi) {
+        TrendCrossing crossing;
+        // hiIdx может быть gridN+dayWrap-расширенным: бракет через полночь
+        crossing.timeSec = std::fmod(
+            TrendScanDetail::refineZero(curve, timeAt(loIdx), timeAt(hiIdx)), dayF);
+        if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
+        crossing.toSwapped = (dHi < 0.0f); // после пика тренд убывает
+        out.push_back(crossing);
+    };
+    for (int i = 0; i <= gridN; ++i) {
+        const float d = sampleAt(i);
+        if (d == 0.0f) continue; // нулевой узел: знак не обновляется
+        if (lastSignedIdx >= 0 && ((d > 0.0f) != (lastSign > 0.0f))) {
+            pushCrossing(lastSignedIdx, i, d);
+        }
+        if (firstSignedIdx < 0) { firstSignedIdx = i; firstSign = d; }
+        lastSignedIdx = i;
+        lastSign = d;
+    }
+    // Циклическая смычка через полночь: экстремум на полуночи даёт нулевые узлы
+    // на ОБОИХ концах развёртки — знак последнего ненулевого узла сравнивается
+    // с первым (бракет продлевается за 86400).
+    if (firstSignedIdx >= 0 && lastSignedIdx >= 0 &&
+        firstSignedIdx != lastSignedIdx &&
+        ((firstSign > 0.0f) != (lastSign > 0.0f))) {
+        TrendCrossing crossing;
+        crossing.timeSec = std::fmod(TrendScanDetail::refineZero(
+            curve, timeAt(lastSignedIdx),
+            static_cast<float>(SECONDS_PER_DAY) + timeAt(firstSignedIdx)), dayF);
+        if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
+        crossing.toSwapped = (firstSign < 0.0f); // знак начала суток после перехода
+        out.push_back(crossing);
+    }
+}
+
+inline void FrequencyCurve::buildTrendCrossings() {
+    trendCrossingsValid = false;
+
+    if (lowerFreqTable.empty() || upperFreqTable.empty()) {
+        trendCrossings.clear();
+        return; // таблица не построена — тренд не определён, кэш невалиден
+    }
+
+    computeTrendCrossings(*this, trendCrossings);
+    trendCrossingsValid = true; // валиден даже при пустом списке (плоская кривая)
+}
+
 /**
  * Обновить кэш min/max частот и перестроить lookup table
  *
@@ -328,6 +478,11 @@ inline void FrequencyCurve::updateCache() {
     
     // Сначала строим lookup table
     buildLookupTable();
+
+    // Предвычисляем нули трендовой производной (экстремумы несущей).
+    // Один раз на финализацию кривой (сохранение профиля / смена кривой),
+    // планировщик TREND дальше только переиспользует список.
+    buildTrendCrossings();
     
     // Вычисляем min/max по lookup-таблице (учитывает интерполяцию)
     minLowerFreq = std::numeric_limits<float>::max();

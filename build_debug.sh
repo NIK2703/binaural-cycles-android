@@ -134,6 +134,17 @@ echo "🏗️  Tasks: ${TASKS[*]}"
 [ "${#GRADLE_PROPS[@]}" -gt 0 ] && echo "🎯 ABI: ${GRADLE_PROPS[0]#-PabiFilter=}"
 echo "=============================================="
 
+# Определяем варианты сборки (debug/release) ТОЛЬКО из явно заданных Gradle-задач,
+# чтобы не листать и не копировать СТАРЫЕ APK другого варианта из выходной папки.
+BUILT_VARIANTS=""
+for _t in "${TASKS[@]}"; do
+    case "$_t" in
+        *Release*) BUILT_VARIANTS="${BUILT_VARIANTS:+$BUILT_VARIANTS }release" ;;
+        *Debug*)   BUILT_VARIANTS="${BUILT_VARIANTS:+$BUILT_VARIANTS }debug" ;;
+    esac
+done
+[ -z "$BUILT_VARIANTS" ] && BUILT_VARIANTS="debug"
+
 cd "$SCRIPT_DIR"
 "$GRADLE_BIN" "${GRADLE_PROPS[@]}" "${TASKS[@]}" --no-daemon --console=plain 2>&1 | tail -40
 EXIT="${PIPESTATUS[0]}"
@@ -144,8 +155,10 @@ if [ "$EXIT" -ne 0 ]; then
 fi
 
 echo ""
-echo "✅ Сборка завершена. APK:"
-find "$SCRIPT_DIR/app/build/outputs/apk" -name 'app-*-debug.apk' -o -name 'app-*-release.apk' 2>/dev/null | while read -r apk; do
+echo "✅ Сборка завершена. APK (только собранный вариант: $BUILT_VARIANTS):"
+for _v in $BUILT_VARIANTS; do
+    find "$SCRIPT_DIR/app/build/outputs/apk/$_v" -name "app-*-$_v.apk" 2>/dev/null
+done | while read -r apk; do
     echo "   📦 $apk  ($(du -h "$apk" | cut -f1))"
 done
 
@@ -154,7 +167,7 @@ if [ "$COPY_APKS" -eq 1 ]; then
     mkdir -p "$DEST"
     IFS=',' read -ra COPY_ABIS <<< "$ABIS"
     for abi in "${COPY_ABIS[@]}"; do
-        for variant in release debug; do
+        for variant in $BUILT_VARIANTS; do
             APK="$SCRIPT_DIR/app/build/outputs/apk/$variant/app-$abi-$variant.apk"
             if [ -f "$APK" ]; then
                 cp "$APK" "$DEST/"
