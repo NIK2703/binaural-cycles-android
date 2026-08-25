@@ -3748,9 +3748,55 @@ FrequencyCurve makeTrendSawCurve() {
     return curve;
 }
 
+/**
+ * Симметричный треугольник: спад 400 -> 200 за [0, 12ч], рост по wrap-участку
+ * [12ч, 24ч] обратно к 400. Склоны равны по модулю => нули Df РОВНО в
+ * экстремумах: минимум 43200 c, максимум 0/86400 c. Идеальна для проверок
+ * центровки и перехода через полночь.
+ */
+FrequencyCurve makeTrendTriangleCurve() {
+    FrequencyCurve curve;
+    curve.points = {
+        {0,         400.0f, 10.0f},
+        {12 * 3600, 200.0f, 10.0f},
+    };
+    curve.interpolationType = InterpolationType::LINEAR;
+    return curve;
+}
+
+/**
+ * Плоское плато 200 Гц с широким симметричным бампом (полуширина > окна 60 c,
+ * чтобы Df имел настоящие нули со сменой знака у вершины).
+ */
+FrequencyCurve makeTrendWideBumpCurve(int32_t centerSec, int32_t halfWidthSec, float heightHz) {
+    FrequencyCurve curve;
+    curve.points = {
+        {0,                              200.0f,      10.0f},
+        {centerSec - halfWidthSec,       200.0f,      10.0f},
+        {centerSec,                      200.0f + heightHz, 10.0f},
+        {centerSec + halfWidthSec,       200.0f,      10.0f},
+    };
+    curve.interpolationType = InterpolationType::LINEAR;
+    return curve;
+}
+
+/** Плоская кривая (тренда нет вообще) */
+FrequencyCurve makeFlatTrendCurve() {
+    FrequencyCurve curve;
+    curve.points = {
+        {0,         200.0f, 10.0f},
+        {12 * 3600, 200.0f, 10.0f},
+    };
+    curve.interpolationType = InterpolationType::LINEAR;
+    return curve;
+}
+
 BinauralConfig makeTrendConfig(const FrequencyCurve& curve) {
     BinauralConfig config;
     config.curve = curve;
+    // Production-путь: движок финализирует кривую при setConfig — здесь то же самое,
+    // включая предвычисление нулей трендовой производной.
+    config.curve.updateCache();
     config.channelSwapEnabled = true;
     config.channelSwapMode = ChannelSwapMode::TREND;
     config.channelSwapIntervalSec = 30;   // в TREND не участвует
@@ -3776,17 +3822,42 @@ int64_t solidMsBeforeFirstSwap(const PackagePlan& plan) {
 
 } // namespace
 
-TEST(TrendSwapTest, TrendHelpers_SlopeSignAndDeadband) {
+TEST(TrendSwapTest, TrendHelpers_SlopeSignNoDeadband) {
     FrequencyCurve curve = makeTrendSawCurve();
     curve.updateCache();
 
-    EXPECT_GT(trendCarrierDeltaAt(curve, 6.0f * 3600.0f), kTrendDeadbandHz);   // подъём
-    EXPECT_LT(trendCarrierDeltaAt(curve, 18.0f * 3600.0f), -kTrendDeadbandHz); // спад
+    EXPECT_GT(trendCarrierDeltaAt(curve, 6.0f * 3600.0f), 0.0f);   // подъём
+    EXPECT_LT(trendCarrierDeltaAt(curve, 18.0f * 3600.0f), 0.0f); // спад
 
-    EXPECT_FALSE(trendDesiredSwapped(false, +1.0f)); // рост -> прямое
-    EXPECT_TRUE(trendDesiredSwapped(false, -1.0f));  // спад -> обратное
-    EXPECT_FALSE(trendDesiredSwapped(true, +1.0f));  // рост при обратном -> к прямым
-    EXPECT_TRUE(trendDesiredSwapped(true, 0.0f));    // плато -> состояние сохраняется
+    // Мёртвой зоны нет: сколь угодно малый ненулевой знак переключает
+    EXPECT_FALSE(trendDesiredSwapped(false, +1.0f));     // рост -> прямое
+    EXPECT_TRUE(trendDesiredSwapped(false, -1.0f));      // спад -> обратное
+    EXPECT_FALSE(trendDesiredSwapped(false, +1e-6f));    // микророст -> прямое
+    EXPECT_TRUE(trendDesiredSwapped(true, -1e-6f));      // микроспад -> обратное
+    EXPECT_FALSE(trendDesiredSwapped(true, +1.0f));      // рост при обратном -> к прямым
+    EXPECT_TRUE(trendDesiredSwapped(true, 0.0f));        // точный ноль (плато): состояние сохраняется
+    EXPECT_FALSE(trendDesiredSwapped(false, 0.0f));
+}
+
+TEST(TrendSwapTest, CrossingCache_PreciseExtremaTimes) {
+    FrequencyCurve curve = makeTrendSawCurve();
+    curve.updateCache();
+
+    ASSERT_TRUE(curve.trendCrossingsValid);
+    // Пила: пик у 12:00 (нуль Df смещён от вершины несимметрией склонов:
+    // аналитика Z1 = 43199.809 c) и впадина у полуночи на wrap-участке
+    // (Z2 = 86306.217 c). Ни то, ни другое не кратно старой сетке 15 c.
+    ASSERT_EQ(curve.trendCrossings.size(), 2u);
+    EXPECT_NEAR(curve.trendCrossings[0].timeSec, 43199.809f, 0.05f);
+    EXPECT_TRUE(curve.trendCrossings[0].toSwapped);   // после пика — спад
+    EXPECT_NEAR(curve.trendCrossings[1].timeSec, 86306.217f, 0.05f);
+    EXPECT_FALSE(curve.trendCrossings[1].toSwapped);  // после впадины — рост
+
+    const FrequencyCurve flat = makeFlatTrendCurve();
+    FrequencyCurve flatCached = flat;
+    flatCached.updateCache();
+    ASSERT_TRUE(flatCached.trendCrossingsValid);
+    EXPECT_TRUE(flatCached.trendCrossings.empty());   // плоская кривая: переходов нет
 }
 
 TEST(TrendSwapTest, Rising_NormalArrangement_NoSwapPlanned) {
@@ -3890,6 +3961,153 @@ TEST(TrendSwapTest, TimerMode_UnchangedByTrendCode) {
     EXPECT_TRUE(planHasSwapAfter(plan));
     EXPECT_EQ(solidMsBeforeFirstSwap(plan),
               static_cast<int64_t>(config.channelSwapIntervalSec) * 1000LL);
+}
+
+// ----------------------------------------------------------------------------
+// ЦЕНТРОВКА ПРОЦЕДУРЫ ПЕРЕСТАНОВКИ НА МОМЕНТ СМЕНЫ ТЕНДЕНЦИИ:
+// SOLID = (T* - now)/timeScale - lead(fade), прерывание потока — ровно на T*.
+// ----------------------------------------------------------------------------
+
+namespace {
+
+struct SwapTiming {
+    int64_t fadeOutStartMs = -1; // суммарная позиция начала FADE_OUT
+    int64_t swapEndMs = -1;      // суммарная позиция КОНЦА сегмента со свапом
+};
+
+SwapTiming measureSwapTiming(const PackagePlan& plan) {
+    SwapTiming timing;
+    int64_t acc = 0;
+    bool seenFadeOut = false;
+    for (const auto& s : plan.segments) {
+        if (!seenFadeOut && s.type == BufferType::FADE_OUT) {
+            timing.fadeOutStartMs = acc;
+            seenFadeOut = true;
+        }
+        acc += s.durationMs;
+        if (s.swapAfterSegment) {
+            timing.swapEndMs = acc;
+            break;
+        }
+    }
+    return timing;
+}
+
+} // namespace
+
+// Нуль Df между узлами старой 15-секундной сетки: SOLID субсекундной точности,
+// не кратен шагу прежнего скана.
+TEST(TrendSwapTest, ZeroBetweenCoarseGridNodes_SubSecondSolid) {
+    // Пила, старт 11:00 (рост, согласование). Нуль Df аналитически:
+    // Z1 = 43199.809 c -> rel = 3599.809 c кривой ->
+    // SOLID = trunc(3599.809*1000/60) - 1000 = 58996 мс аудио
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        400000, config, state, /*curveStartSeconds=*/11.0f * 3600.0f,
+        /*timeScale=*/60.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    const int64_t solid = solidMsBeforeFirstSwap(plan);
+    EXPECT_NEAR(solid, 58996, 20);
+    EXPECT_NE(solid % 15000, 0) << "SOLID выглядит как некорректируемый скан 15 c";
+}
+
+// Прерывание потока (конец FADE_OUT со свапом) приходится ровно на T*.
+TEST(TrendSwapTest, SwapCenteredAtTStar_PlanTiming) {
+    // Треугольник: спад [0..12ч], now=11:00, swapped=true (согласование).
+    // T*=43200c, timeScale=60: SOLID = (43200-39600)*1000/60 - 1000 = 59000 мс,
+    // FADE_OUT [59000..60000] — прерывание ровно на 60000 мс аудио.
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        70000, config, state, /*curveStartSeconds=*/39600.0f, /*timeScale=*/60.0f);
+
+    const SwapTiming timing = measureSwapTiming(plan);
+    ASSERT_GE(timing.swapEndMs, 0);
+    EXPECT_NEAR(timing.swapEndMs, 60000, 2);
+    EXPECT_NEAR(timing.fadeOutStartMs, 59000, 2);
+}
+
+// Переход ближе lead (фейд не укорачиваем): SOLID клампится в 0, вся процедура
+// уходит вправо, свап не теряется.
+TEST(TrendSwapTest, ImminentTransition_ClampsSolidToZero_ShiftsRight) {
+    // T* = 43200, now = 43199.5: raw SOLID = 500 - 1000 < 0
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        60000, config, state, /*curveStartSeconds=*/43199.5f);
+
+    ASSERT_FALSE(plan.segments.empty());
+    EXPECT_EQ(plan.segments[0].type, BufferType::FADE_OUT);
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);
+    EXPECT_TRUE(planHasSwapAfter(plan));
+}
+
+// Плоская кривая: тренда нет — переходов нет, SOLID упирается в кап переоценки.
+TEST(TrendSwapTest, FlatCurve_NoTransitions_SolidCappedAtMax) {
+    BinauralConfig config = makeTrendConfig(makeFlatTrendCurve());
+    GeneratorState state;
+
+    EXPECT_EQ(trendSolidDurationMs(config.curve, 12345.0f, false, 1.0f, 1000),
+              kTrendMaxSolidMs);
+
+    // Пакет заведомо КОРОЧЕ капа 30 мин: свапа быть не должно
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        600000, config, state, /*curveStartSeconds=*/0.0f);
+    EXPECT_FALSE(planHasSwapAfter(plan));
+}
+
+// Широкий бамп на плато: нуль Df ровно в вершине (симметрия), ловится один раз.
+TEST(TrendSwapTest, WideBump_DetectedExactlyAtPeak) {
+    // Бамп центр 7200, полуширина 120 c (> окна 60 c). Старт 3600 — плато Df=0.
+    // ts=10: SOLID = (7200-3600)*1000/10 - 1000 = 359000 мс.
+    BinauralConfig config = makeTrendConfig(
+        makeTrendWideBumpCurve(7200, 120, 25.0f));
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        800000, config, state, /*curveStartSeconds=*/3600.0f, /*timeScale=*/10.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(plan), 359000, 100);
+
+    int swaps = 0;
+    for (const auto& s : plan.segments) swaps += s.swapAfterSegment ? 1 : 0;
+    EXPECT_EQ(swaps, 1);
+}
+
+// Экстремум ровно на полуночи находится через wrap-бракет грубой сетки.
+TEST(TrendSwapTest, TransitionExactlyAtMidnight_FoundAcrossWrap) {
+    // Треугольник, максимум в 0c(=86400c). now=23:00, рост (согласование).
+    // ts=60: SOLID = ((86400-82800)*1000)/60 - 1000 = 59000 мс.
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        70000, config, state, /*curveStartSeconds=*/82800.0f, /*timeScale=*/60.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(plan), 59000, 100);
+}
+
+// Рассогласование важнее центровки: немедленный свап игнорирует и lead, и кап.
+TEST(TrendSwapTest, MismatchImmediateSwap_IgnoresLeadAndCap) {
+    // Спад уже начался (пик пилы на 43199.8), состояние ещё прямое:
+    // SOLID обязан быть 0, а не (далёкий следующий переход - lead).
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    GeneratorState state;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        60000, config, state, /*curveStartSeconds=*/43300.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);
 }
 
 } // namespace test

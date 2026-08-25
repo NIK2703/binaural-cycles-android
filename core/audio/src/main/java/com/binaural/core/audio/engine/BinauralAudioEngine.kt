@@ -54,9 +54,20 @@ class BinauralAudioEngine(private val context: Context) {
         private const val WAKE_LOCK_TAG = "BinauralBeats:PlaybackWakeLock"
         private const val THREAD_NAME = "BinauralAudioThread"
         private const val MIN_VOLUME = 0.001f
-        private const val PLAYBACK_FADE_DURATION_MS = 250L
-        // C5: короткий fade-in при resume из мягкой паузы (защита от щелчка)
-        private const val RESUME_FADE_DURATION_MS = 150L
+        // ЕДИНАЯ длительность всех программных фейдов: старт/resume (вход),
+        // стоп/пауза (выход), догоняющий подъём после отменённой паузы,
+        // duck/unduck и микро-рамп громкости. Вход == выход по длительности.
+        // (Фейды автоперестановки каналов настраиваются отдельно в нативном
+        // движке — channelSwapFadeDurationMs — и сюда не входят.)
+        private const val FADE_DURATION_MS = 250L
+        // Порог «скачка» громкости, требующего рампы вместо ступеньки
+        private const val VOLUME_JUMP_THRESHOLD = 0.08f
+        // Целевой уровень единичного множителя шейпера поверх базы трека
+        private const val FADE_IDENTITY = 1.0f
+        // |старт-цель| меньше порога = рамп неслышим, живой шейпер НЕ трогаем
+        private const val FADE_EQUALITY_EPSILON = 0.01f
+        // Запас сверх рампа до отложенного закрытия (доехать до 1.0 в микшере)
+        private const val SHAPER_CLOSE_MARGIN_MS = 50L
 
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
@@ -70,6 +81,10 @@ class BinauralAudioEngine(private val context: Context) {
 
         // Токен для отмены callbacks при переключении частоты дискретизации
         private val RESTART_PLAYBACK_TOKEN = Any()
+
+        // Выделенный токен отложенного освобождения умирающего AudioTrack:
+        // переживает точечные чистки очереди (null-чистки больше не применяем)
+        private val RELEASE_DYING_TRACK_TOKEN = Any()
     }
     
     // Атомарные ссылки для потокобезопасного доступа
@@ -125,6 +140,7 @@ class BinauralAudioEngine(private val context: Context) {
     // HandlerThread для генерации аудио
     private var audioThread: HandlerThread? = null
     private var audioHandler: Handler? = null
+    @Volatile
     private var isGenerating = false
 
     // WakeLock для предотвращения засыпания (K5: volatile — доступ из 3 потоков)
@@ -138,26 +154,67 @@ class BinauralAudioEngine(private val context: Context) {
     // Громкость, установленная пользователем (0.0 - 1.0)
     // Сохраняется между сессиями воспроизведения и не изменяется при fade
     private var userVolume: Float = 1.0f
-    
-    // Текущая громкость (0.0 - 1.0) - используется для отслеживания состояния fade
-    private var currentVolume: Float = 1.0f
-    
-    // Трекинг параметров fade (C12: доступны из разных потоков)
+
+    // ===== Универсальный фейд-механизм (столп 1) =====
+    // Живой шейпер - ЕДИНСТВЕННЫЙ источник текущего уровня (VolumeShaper.volume
+    // интерполирует в реальном времени). Софтверная интерполяция и двойная
+    // бухгалтерия currentVolume удалены как источник щелчков.
+
+    // Блокировка слота volumeShaper: инсталлы приходят с main/Default/аудио.
+    // Внутри лока запрещены sleep - только свопы ссылок.
+    private val shaperLock = Any()
+
+    // Атомарный снимок активного рампа (читатель видит старый или новый целиком).
+    private class ActiveFade(
+        @JvmField val startLevel: Float,
+        @JvmField val targetLevel: Float,
+        @JvmField val startedAtMs: Long,
+        @JvmField val durationMs: Long,
+    )
+
     @Volatile
-    private var fadeStartTime: Long = 0L
-    @Volatile
-    private var fadeDurationMs: Long = 0L
-    @Volatile
-    private var fadeStartVolume: Float = 0.0f
-    @Volatile
-    private var fadeTargetVolume: Float = 1.0f
+    private var activeFade: ActiveFade? = null
+
     @Volatile
     private var isFadeInProgress: Boolean = false
 
-    // F5: epoch-ms, когда fade-in шейпер можно закрыть; 0 = активного fade-in нет.
-    // Заменяет отложенные токены: посты в audioHandler не доставляются из живого цикла.
+    // ЭПОХА: каждый успешный инсталл увеличивает; отложенное закрытие действует
+    // только при совпадении поколений (stale-дедлайн не убьёт свежий шейпер).
+    private val fadeGeneration = java.util.concurrent.atomic.AtomicLong(0L)
+
+    // Отложенное закрытие (дедлайн, поколение); только для инсталлов на 1.0.
     @Volatile
-    private var fadeShaperCloseAtMs: Long = 0L
+    private var pendingShaperCloseDeadlineMs: Long = 0L
+    @Volatile
+    private var pendingShaperCloseGeneration: Long = 0L
+
+    // ===== Протокол владения сессией (столп 2) =====
+    // Инкремент РОВНО ОДИН РАЗ в каждой точке мутации playback-состояния.
+    // AtomicLong: ++ должен быть атомарным RMW (bump с Main и Default).
+    private val transitionGen = java.util.concurrent.atomic.AtomicLong(0L)
+
+    // Поколение СОБСТВЕННОЙ сессии: терминальные сбросы старого кадра цикла
+    // (stopPlayback/cleanupPlayback) не имеют права убивать уже перерождённую
+    // сессию (RC1: isGenerating=false выставляется ДО медленного cleanup,
+    // и старт, вклинившийся в этот зазор, оглушался его слепыми reset'ами).
+    @Volatile
+    private var activeSessionGen: Long = -1L
+
+    // Ворота bypass-teardown: глубина стека активных fadeOutStopBlocking.
+    // Быстрые тапы наслаивают вызовы; булев флаг первого finally ронял
+    // защиту, пока вторые ещё находились внутри.
+    private val teardownDepth = java.util.concurrent.atomic.AtomicInteger(0)
+
+    // Анти-щелчок: штамп завершения последнего инлайн fade-out. Внешние
+    // оркестрации (смена пресета, restart настроек) ждут его изменения вместо
+    // слепого delay(300), который гонится с фактической длительностью фейда.
+    @Volatile
+    var lastFadeOutCompletedAtMs: Long = 0L
+        private set
+
+    // Анти-щелчок: активен duck (CAN_DUCK / смена аудио-устройства).
+    @Volatile
+    private var isDucked: Boolean = false
 
     // Время начала воспроизведения
     private var playbackStartTime = 0L
@@ -297,30 +354,41 @@ class BinauralAudioEngine(private val context: Context) {
         // Если идёт fade-out, прерываем его
         if (isActive.get() && !_isPlaying.value) {
             Log.d(TAG, "Interrupting fade-out")
-            handler.removeCallbacksAndMessages(null)
+            // P0-протокол: bump ПЕРВЫМ делом - спящий в runFadeOutInline цикл
+            // по пробуждении увидит чужое поколение и не тронет состояние.
+            transitionGen.incrementAndGet()
+
+            // P3: точечные чистки вместо removeCallbacksAndMessages(null),
+            // который стирал отложенный dyingTrack.release().
+            handler.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+            handler.removeCallbacksAndMessages(SAMPLE_RATE_CHANGE_TOKEN)
             stopWithFadeRequested.set(false)
             pauseWithFadeRequested.set(false)
-            
-            // При прерывании восстанавливаем пользовательскую громкость
-            // (не currentVolume, которая может быть MIN_VOLUME)
+
+            // Порядок против щелчка: СНАЧАЛА глушим рендер (pause), затем
+            // закрываем шейпер. close() на середине фейда отдал бы полный
+            // gain на ещё звучащий буфер.
             try {
-                volumeShaper?.close()
-                volumeShaper = null
-                audioTrack?.setVolume(userVolume)
+                audioTrack?.pause()
             } catch (e: Exception) {
-                Log.e(TAG, "Error setting volume: ${e.message}")
+                Log.e(TAG, "Error pausing AudioTrack: ${e.message}")
             }
-            
-            currentVolume = userVolume
+            isDucked = false
+            synchronized(shaperLock) { retireShaperLocked() }
+
             isActive.set(false)
-            isFadeInProgress = false
             try {
                 audioTrack?.stop()
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping AudioTrack: ${e.message}")
             }
-            
-            handler.postDelayed({ startNewPlayback(handler) }, 100)
+
+            handler.postDelayed({
+                // Призрачный старт: сессию могли успеть похоронить за 100 мс
+                if (!isActive.get() && !_isPlaying.value) {
+                    startNewPlayback(handler)
+                }
+            }, 100)
             return
         }
         
@@ -339,8 +407,33 @@ class BinauralAudioEngine(private val context: Context) {
             Log.w(TAG, "startNewPlayback() - already active, returning")
             return
         }
-        
+
+        // P2: defer на время bypass-teardown (fadeOutStopBlocking). PLAY во
+        // время teardown - ожидание, а не конкуренция за нативное состояние.
+        val deferStartMs = System.currentTimeMillis()
+        while (teardownDepth.get() > 0 && System.currentTimeMillis() - deferStartMs < 400) {
+            try { Thread.sleep(15) } catch (e: InterruptedException) { break }
+        }
+        if (teardownDepth.get() > 0) {
+            Log.e(TAG, "startNewPlayback() - teardown still in progress after 400ms, aborting start")
+            return
+        }
+        // Пока ждали, могла родиться другая сессия
+        if (isActive.get()) {
+            Log.w(TAG, "startNewPlayback() - activated concurrently, returning")
+            return
+        }
+
+        // ===== SESSION BIRTH: bump -> scrub -> activate =====
+        // Призрачные флаги существуют только при isActive==false; рождение -
+        // единственный переход false->true, скраб в том же окне до активации.
+        transitionGen.incrementAndGet()
+        stopWithFadeRequested.set(false)
+        pauseWithFadeRequested.set(false)
         isActive.set(true)
+        // Фиксируем владение: только teardown этой же генерации вправе
+        // терминально сбрасывать флаги (см. stopPlayback/cleanupPlayback).
+        activeSessionGen = transitionGen.get()
         playbackStartTime = System.currentTimeMillis()
 
         // Применяем отложенный пресет (смена через fade-перезапуск, F5)
@@ -363,11 +456,11 @@ class BinauralAudioEngine(private val context: Context) {
         // поведению с предупреждением в лог.
         if (isGenerating) {
             val waitStartMs = System.currentTimeMillis()
-            while (isGenerating && System.currentTimeMillis() - waitStartMs < 1000) {
+            while (isGenerating && System.currentTimeMillis() - waitStartMs < 500) {
                 Thread.sleep(10)
             }
             if (isGenerating) {
-                Log.w(TAG, "startNewPlayback() - generation loop still running after 1s, proceeding anyway")
+                Log.w(TAG, "startNewPlayback() - generation loop still running after 500ms, proceeding anyway")
             } else {
                 Log.d(TAG, "startNewPlayback() - waited ${System.currentTimeMillis() - waitStartMs}ms for old loop to finish")
             }
@@ -445,10 +538,14 @@ class BinauralAudioEngine(private val context: Context) {
             // Fade-in от MIN_VOLUME до полной громкости (1.0 как множитель)
             // AudioTrack уже имеет базовую громкость userVolume,
             // VolumeShaper работает как множитель: итоговая = userVolume × VolumeShaper.value
-            currentVolume = MIN_VOLUME  // Начинаем с минимума для плавного нарастания
-            createVolumeShaper(PLAYBACK_FADE_DURATION_MS, targetVolume = 1.0f)
+            // Fade-in на СВЕЖЕМ треке: шейпера ещё нет -> старт задаём явно.
+            // Вооружаем ДО play(): окно между close(old)/arm(new) немо.
+            installFade(
+                targetMultiplier = FADE_IDENTITY,
+                fromMultiplier = MIN_VOLUME,
+                closeOnComplete = true,
+            )
             audioTrack?.play()
-            startVolumeShaper()
             
             // ВАЖНО: Не используем отложенный callback для установки userVolume!
             // Если пользователь изменит громкость во время fade-in, callback перезапишет
@@ -456,9 +553,8 @@ class BinauralAudioEngine(private val context: Context) {
             // к userVolume, и после завершения шейпера просто освобождаем ресурсы.
             // Громкость установлена через AudioTrack.setVolume(userVolume) в createAudioTrack()
             // или через setVolume() от слайдера пользователя.
-            // F6: закрытие шейпера после fade-in выполняет generateAudioLoop
-            // (fadeShaperCloseAtMs) — посты в audioHandler не доставляются из живого цикла.
-            fadeShaperCloseAtMs = System.currentTimeMillis() + PLAYBACK_FADE_DURATION_MS + 50
+            // F6: закрытие по завершении выполняет generateAudioLoop
+            // (поколение + дедлайн вооружены внутри installFade).
             
             generateAudioLoop()
             Log.d(TAG, "startPlayback() - generateAudioLoop() completed normally")
@@ -534,86 +630,168 @@ class BinauralAudioEngine(private val context: Context) {
         }
     }
     
-    private fun getVolumeFromShaper(): Float {
-        if (isFadeInProgress && fadeDurationMs > 0) {
-            val elapsed = System.currentTimeMillis() - fadeStartTime
-            val progress = (elapsed.toFloat() / fadeDurationMs).coerceIn(0f, 1f)
-            return fadeStartVolume + (fadeTargetVolume - fadeStartVolume) * progress
-        }
-        
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            try {
-                volumeShaper?.volume ?: currentVolume
-            } catch (e: Exception) {
-                currentVolume
-            }
-        } else {
-            currentVolume
-        }
-    }
-    
-    private fun createVolumeShaper(durationMs: Long, targetVolume: Float) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        
-        try {
-            volumeShaper?.close()
-            
-            val startVolume = currentVolume.coerceIn(MIN_VOLUME, 1.0f)
-            val clampedTarget = targetVolume.coerceIn(0.0f, 1.0f)
-            
-            if (kotlin.math.abs(startVolume - clampedTarget) < 0.01f) {
-                currentVolume = clampedTarget
-                isFadeInProgress = false
-                // При fade-in (target = 1.0) устанавливаем userVolume как базовую громкость
-                // При fade-out (target = 0.0) устанавливаем 0
-                val finalVolume = if (clampedTarget >= 0.99f) userVolume else clampedTarget
-                audioTrack?.setVolume(finalVolume)
-                return
-            }
-            
-            val volumeChange = kotlin.math.abs(clampedTarget - startVolume)
-            val adjustedDuration = (durationMs * volumeChange).toLong().coerceAtLeast(50)
-            
-            val config = VolumeShaper.Configuration.Builder()
-                .setDuration(adjustedDuration)
-                .setCurve(floatArrayOf(0f, 1f), floatArrayOf(startVolume, clampedTarget))
-                .setInterpolatorType(VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR)
-                .build()
-            
-            volumeShaper = audioTrack?.createVolumeShaper(config)
-            
-            fadeStartTime = System.currentTimeMillis()
-            fadeDurationMs = adjustedDuration
-            fadeStartVolume = startVolume
-            fadeTargetVolume = clampedTarget
-            
-            Log.d(TAG, "VolumeShaper created: $startVolume → $clampedTarget, duration=${adjustedDuration}ms")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to create VolumeShaper: ${e.message}")
-            volumeShaper = null
-            isFadeInProgress = false
-            audioTrack?.setVolume(targetVolume.coerceIn(0.0f, 1.0f))
-        }
-    }
-    
-    private fun startVolumeShaper() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        
-        try {
+    // ===== УНИВЕРСАЛЬНАЯ ТОЧКА ГРОМКОСТИ (installFade) =====
+
+    /** Живой множитель из активного шейпера. Вызывать под shaperLock. */
+    private fun readLiveMultiplierLocked(): Float {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val shaper = volumeShaper
             if (shaper != null) {
-                shaper.apply(VolumeShaper.Operation.PLAY)
-                isFadeInProgress = true
-                Log.d(TAG, "VolumeShaper started")
-            } else {
-                isFadeInProgress = false
+                return try {
+                    shaper.volume
+                } catch (e: Exception) {
+                    FADE_IDENTITY
+                }
             }
+        }
+        return FADE_IDENTITY
+    }
+
+    /** Потокобезопасное чтение слышимого множителя для оркестраций. */
+    private fun currentAudibleMultiplier(): Float =
+        synchronized(shaperLock) { readLiveMultiplierLocked() }
+
+    private fun armDeferredCloseLocked(durationMs: Long) {
+        pendingShaperCloseDeadlineMs =
+            System.currentTimeMillis() + durationMs + SHAPER_CLOSE_MARGIN_MS
+        pendingShaperCloseGeneration = fadeGeneration.get()
+    }
+
+    private fun resetFadeArmingLocked() {
+        pendingShaperCloseDeadlineMs = 0L
+        pendingShaperCloseGeneration = 0L
+    }
+
+    /** Закрыть текущий шейпер и обнулить fade-состояние. Только под локом. */
+    private fun retireShaperLocked() {
+        try {
+            volumeShaper?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start VolumeShaper: ${e.message}")
+            Log.e(TAG, "Error closing shaper: ${e.message}")
+        }
+        volumeShaper = null
+        activeFade = null
+        isFadeInProgress = false
+    }
+
+    /** Терминальный сброс (stop/cleanup/interrupt): инвалидирует armed-close поколением. */
+    private fun resetFadeBookkeeping() {
+        synchronized(shaperLock) {
+            fadeGeneration.incrementAndGet()
+            activeFade = null
             isFadeInProgress = false
+            resetFadeArmingLocked()
         }
     }
-    
+
+    /**
+     * ЕДИНАЯ точка установки ЛЮБОГО перехода громкости (fade-in/out, duck/
+     * unduck, микро-рамп слайдера, догон). Кликобезопасность по построению:
+     *  1. Старт всегда из живого состояния (volumeShaper.volume), либо явный
+     *     fromMultiplier - единственный случай: заведомо тихий новый трек.
+     *  2. Новый шейпер создаётся ДО закрытия старого.
+     *  3. Снимок рампа публикуется атомарно (один своп ссылки).
+     *  4. Поколение инвалидирует чужие armed-close мгновенно.
+     *  5. |старт-цель| < эпсилон => чистый no-op; живой шейпер НЕ закрывается.
+     *
+     * Политика базы: AudioTrack.setVolume держит ТОЛЬКО userVolume (слайдер);
+     * шейпер - только множитель. Базу этот метод не трогает (кроме фолбэка).
+     *
+     * @param closeOnComplete вооружить отложенное закрытие. Обязано быть false
+     *   при target≈0 (закрытие на нуле = взрыв до полного gain).
+     */
+    private fun installFade(
+        targetMultiplier: Float,
+        durationMs: Long = FADE_DURATION_MS,
+        cubic: Boolean = false,
+        fromMultiplier: Float? = null,
+        closeOnComplete: Boolean = false,
+    ): Boolean {
+        val target = targetMultiplier.coerceIn(0.0f, 1.0f)
+
+        synchronized(shaperLock) {
+            val track = audioTrack
+            if (track == null || !isActive.get()) {
+                activeFade = null
+                isFadeInProgress = false
+                resetFadeArmingLocked()
+                return false
+            }
+
+            val start = (fromMultiplier ?: readLiveMultiplierLocked())
+                .coerceIn(MIN_VOLUME, 1.0f)
+
+            // Неслышимый переход: ничего не трогаем. Сидящий шейпер уже выдаёт
+            // этот уровень. Прежний early-return здесь закрывал живой duck -
+            // детонация при следующем unduck; теперь - чистый no-op.
+            if (kotlin.math.abs(start - target) < FADE_EQUALITY_EPSILON) {
+                activeFade = null
+                isFadeInProgress = false
+                return true
+            }
+
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+                try {
+                    track.setVolume(userVolume * target)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Legacy volume apply failed: ${e.message}")
+                }
+                volumeShaper = null
+                activeFade = null
+                isFadeInProgress = false
+                resetFadeArmingLocked()
+                return true
+            }
+
+            return try {
+                val config = VolumeShaper.Configuration.Builder()
+                    .setDuration(durationMs)
+                    .setCurve(floatArrayOf(0f, 1f), floatArrayOf(start, target))
+                    .setInterpolatorType(
+                        if (cubic) VolumeShaper.Configuration.INTERPOLATOR_TYPE_CUBIC
+                        else VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR
+                    )
+                    .build()
+
+                // Создать-новый-ДО-закрытия-старого: щели с полным gain нет.
+                val newShaper = track.createVolumeShaper(config)
+                try {
+                    volumeShaper?.close()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error closing previous shaper: ${e.message}")
+                }
+                volumeShaper = newShaper
+
+                activeFade = ActiveFade(start, target, System.currentTimeMillis(), durationMs)
+                isFadeInProgress = true
+
+                fadeGeneration.incrementAndGet()
+
+                if (closeOnComplete) {
+                    armDeferredCloseLocked(durationMs)
+                } else {
+                    // Инсталл без автозакрытия (duck, fade-out) отменяет висящий
+                    // дедлайн: его шейпер должен ПЕРЕЖИТЬ рамп.
+                    resetFadeArmingLocked()
+                }
+
+                Log.d(TAG, "installFade: $start -> $target ${durationMs}ms gen=${fadeGeneration.get()} close=$closeOnComplete")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "installFade failed: ${e.message}")
+                // Провал инсталла = ОСТАВЛЯЕМ предыдущий шейпер работать:
+                // он всё ещё подключён и выдаёт корректный уровень, база
+                // трека не тронута => состояние остаётся согласованным
+                // (ни взрыва громкости, ни отравленной нулевой базы с
+                // последующей вечной тишиной после resume).
+                activeFade = null
+                isFadeInProgress = false
+                resetFadeArmingLocked()
+                false
+            }
+        }
+    }
+
     private fun generateAudioLoop() {
         Log.d(TAG, "generateAudioLoop() started, isActive=${isActive.get()}")
 
@@ -684,13 +862,25 @@ class BinauralAudioEngine(private val context: Context) {
 
             // F5: закрываем шейпер завершённого fade-in. ВАЖНО: выше guard-sleep,
             // иначе брошенный (например резюмом) шейпер не закрылся бы на паузе
-            val shaperCloseAtMs = fadeShaperCloseAtMs
-            if (shaperCloseAtMs > 0 && System.currentTimeMillis() >= shaperCloseAtMs) {
-                volumeShaper?.close()
-                volumeShaper = null
-                isFadeInProgress = false
-                fadeShaperCloseAtMs = 0L
-                Log.d(TAG, "Fade-in completed, shaper closed")
+            // Отложенное закрытие шейпера, доехавшего до identity. Действительно
+            // ТОЛЬКО при совпадении поколений: stale-дедлайн прошлой операции
+            // умирает молча, а не убивает свежий шейпер посреди рампа.
+            if (pendingShaperCloseDeadlineMs > 0L &&
+                System.currentTimeMillis() >= pendingShaperCloseDeadlineMs) {
+                synchronized(shaperLock) {
+                    // Время и поколение проверяем ТОЛЬКО под локом: иначе
+                    // инсталл, вклинившийся между чтением времени и локом,
+                    // получал close своего свежего шейпера посреди рампа.
+                    if (pendingShaperCloseGeneration == fadeGeneration.get() &&
+                        System.currentTimeMillis() >= pendingShaperCloseDeadlineMs
+                    ) {
+                        retireShaperLocked()
+                        Log.d(TAG, "Deferred shaper close: generation matched")
+                    } else {
+                        Log.d(TAG, "Deferred shaper close: stale, discarded")
+                    }
+                    resetFadeArmingLocked()
+                }
             }
 
             // Мягкая пауза: трек уже на паузе — запись в него заблокирует WRITE_BLOCKING.
@@ -845,17 +1035,25 @@ class BinauralAudioEngine(private val context: Context) {
             Log.d(TAG, "Starting fade-out for stop")
             // F1/F3: фейд и остановка выполняются инлайн — посты из живого
             // цикла генерации не доставляются (лупер занят startPlayback)
-            runFadeOutInline(PLAYBACK_FADE_DURATION_MS)
-            if (isActive.get()) {
+            val genAtFadeStart = transitionGen.get()
+            runFadeOutInline()
+
+            // POST-SLEEP RECHECK - симметричное C2 обобщение на STOP: пока мы
+            // спали, кто-то мутировал состояние (resume/play-interrupt/сторонний
+            // teardown) - решение о завершении остановки НЕ НАШЕ. Без этой
+            // проверки резюм поверх спящего стоп-фейда жёстко убивался циклом.
+            val stopSuperseded = transitionGen.get() != genAtFadeStart || !isActive.get()
+            if (!stopSuperseded) {
                 isActive.set(false)
                 if (pendingPresetConfig != null) {
                     // Если ждала смена пресета — после fade-out перезапускаем
                     // с новым конфигом (свежий таймлайн), а не останавливаемся.
-                    // Цикл выйдет по !isActive, после чего пост будет доставлен.
                     audioHandler?.post { play() }
                 } else {
                     stopPlayback()
                 }
+            } else {
+                Log.i(TAG, "STOP fade superseded mid-flight; aborting stop completion")
             }
             stopWithFadeRequested.set(false)
             return
@@ -864,9 +1062,16 @@ class BinauralAudioEngine(private val context: Context) {
         if (pauseWithFadeRequested.get()) {
             Log.d(TAG, "Starting fade-out for pause")
             // F1/F2: фейд и пауза выполняются инлайн, без мёртвых постов
-            runFadeOutInline(PLAYBACK_FADE_DURATION_MS)
-            if (isActive.get()) {
+            val genAtFadeStart = transitionGen.get()
+            runFadeOutInline()
+
+            // Двухуровневый C2: gen ловит кросс-сессионные суперседы,
+            // executePause сохраняет собственную проверку _isPlaying
+            val pauseSuperseded = transitionGen.get() != genAtFadeStart || !isActive.get()
+            if (!pauseSuperseded) {
                 executePause()
+            } else {
+                Log.i(TAG, "PAUSE fade superseded mid-flight; aborting pause")
             }
             pauseWithFadeRequested.set(false)
             return
@@ -887,25 +1092,37 @@ class BinauralAudioEngine(private val context: Context) {
      * в вызывающем потоке и ждёт окончания затухания. Пост-колбэк здесь
      * недопустим: он не доставлялся бы из живого цикла генерации.
      */
-    private fun runFadeOutInline(durationMs: Long) {
+    private fun runFadeOutInline() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
-        currentVolume = getVolumeFromShaper()
+        isDucked = false // активный duck поглощается фейдом остановки
 
-        val adjustedDuration = if (currentVolume <= MIN_VOLUME) {
-            0L
-        } else {
-            (durationMs * currentVolume).toLong().coerceAtLeast(50)
+        val level = currentAudibleMultiplier()
+        if (level > MIN_VOLUME) {
+            // closeOnComplete=false ОБЯЗАТЕЛЬНО: закрытие шейпера на нуле
+            // отдало бы полный gain. Трек гасится позже паузой/стопом.
+            val genAtFade = transitionGen.get()
+            installFade(targetMultiplier = 0.0f)
+            try {
+                Thread.sleep(FADE_DURATION_MS + 50)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            // RC2: нас перекрыли во сне (resume/play-interrupt восстановили
+            // громкость своим рампом). Оставленный нами нулевой шейпер
+            // похоронил бы их подъём => вечная тишина при играющем UI.
+            if (transitionGen.get() != genAtFade && _isPlaying.value) {
+                Log.i(TAG, "Orphaned fade-out superseded mid-sleep; restoring level")
+                installFade(targetMultiplier = FADE_IDENTITY, closeOnComplete = true)
+            }
         }
 
-        createVolumeShaper(durationMs, targetVolume = 0.0f)
-        startVolumeShaper()
-
-        try {
-            Thread.sleep(adjustedDuration + 50)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
+        // Фейд завершился; штамп - для внешних оркестраций и диагностики.
+        synchronized(shaperLock) {
+            activeFade = null
+            isFadeInProgress = false
         }
+        lastFadeOutCompletedAtMs = System.currentTimeMillis()
     }
 
     private fun executePause() {
@@ -913,20 +1130,9 @@ class BinauralAudioEngine(private val context: Context) {
         // runFadeOutInline — отменяем паузу и прибираем брошенный шейпер.
         if (_isPlaying.value) {
             Log.d(TAG, "executePause: resume won the race during inline fade, pausing aborted")
-            try {
-                volumeShaper?.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing orphaned shaper: ${e.message}")
-            }
-            volumeShaper = null
-            isFadeInProgress = false
-            fadeShaperCloseAtMs = 0L
-            try {
-                audioTrack?.setVolume(userVolume)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error restoring volume: ${e.message}")
-            }
-            currentVolume = userVolume
+            // Догоняющий подъём: старт - ЖИВОЙ уровень брошенного шейпера
+            // (середина отменённого fade-out). Никаких ручных close.
+            installFade(targetMultiplier = FADE_IDENTITY, closeOnComplete = true)
             return
         }
 
@@ -941,6 +1147,12 @@ class BinauralAudioEngine(private val context: Context) {
             audioTrack?.pause()
         } catch (e: Exception) {
             Log.e(TAG, "Error pausing AudioTrack: ${e.message}")
+        }
+        // RC2c: resume вклинился между _isPlaying=true и нашим pause() -
+        // иначе его track.play() упирается в нашу паузу и запись клинится
+        // в WRITE_BLOCKING при формально играющем UI.
+        if (_isPlaying.value) {
+            try { audioTrack?.play() } catch (e: Exception) { }
         }
 
         // Пауза не должна держать WakeLock до истечения TTL; resume перевыделяет
@@ -973,25 +1185,79 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun stop() {
         Log.d(TAG, "stop() called")
-        
-        isActive.set(false)
-        _isPlaying.value = false
-        stopWithFadeRequested.set(false)
-        pauseWithFadeRequested.set(false)
 
-        try {
-            audioTrack?.stop()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping AudioTrack: ${e.message}")
+        // INV-1: вход в жёсткую остановку инвалидирует параллельные
+        // инлайн-фейды цикла; INV-5: хоронит и отложенную смену пресета.
+        transitionGen.incrementAndGet()
+        pendingPresetConfig = null
+
+        if (!isActive.get()) {
+            // Ничего слышимого: идемпотентный teardown.
+            _isPlaying.value = false
+            stopWithFadeRequested.set(false)
+            pauseWithFadeRequested.set(false)
+            audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+            audioHandler?.removeCallbacksAndMessages(SAMPLE_RATE_CHANGE_TOKEN)
+            audioHandler?.removeCallbacksAndMessages(RELEASE_DYING_TRACK_TOKEN)
+            audioHandler?.post(::stopPlayback)
+            return
         }
-        
-        audioHandler?.removeCallbacksAndMessages(null)
-        audioHandler?.post(::stopPlayback)
+
+        if (Thread.currentThread() === audioThread) {
+            // Внутренний вызов из аудио-потока: делегировать циклу, который мы
+            // блокируем, невозможно - легаси-инлайн (вызывающий не Main).
+            runFadeOutInline()
+            isActive.set(false)
+            _isPlaying.value = false
+            stopWithFadeRequested.set(false)
+            pauseWithFadeRequested.set(false)
+            try {
+                audioTrack?.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping AudioTrack: ${e.message}")
+            }
+            audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+            audioHandler?.removeCallbacksAndMessages(SAMPLE_RATE_CHANGE_TOKEN)
+            audioHandler?.post(::stopPlayback)
+            return
+        }
+
+        // Off-thread (Main/Binder): делегируем слышимый фейд живому циклу через
+        // флаг - он гасит звук на АУДИО-потоке между чанками записи (C3).
+        // НОЛЬ блокировки Main (раньше здесь спали ~310 мс = 19 кадров jank).
+        stopWithFadeRequested.set(true)
+        pauseWithFadeRequested.set(false)   // stop сильнее висящей паузы
+        pendingPresetConfig = null          // stop сильнее отложенного пресета
+        _isPlaying.value = false            // UI/уведомление мгновенно;
+        // цикл съест флаг ДО guard-sleep псевдопаузы, голодания стопа нет
     }
     
     /**
      * Остановить воспроизведение с плавным затуханием
      */
+    /**
+     * INV-3 validated-set: флаг ставится только если сессия пережила запись.
+     * Закрывает TOCTOU: жест, прочитавший живую сессию, но записанный в мёртвую,
+     * больше не оставляет призрачный флаг следующей сессии.
+     */
+    private fun requestStopWithFadeValidated(): Boolean {
+        val genAtEntry = transitionGen.get()
+        stopWithFadeRequested.set(true)
+        if (isActive.get() && transitionGen.get() == genAtEntry) return true
+        stopWithFadeRequested.set(false)
+        Log.d(TAG, "stopWithFade request discarded: owning session ended during request")
+        return false
+    }
+
+    private fun requestPauseWithFadeValidated(): Boolean {
+        val genAtEntry = transitionGen.get()
+        pauseWithFadeRequested.set(true)
+        if (isActive.get() && transitionGen.get() == genAtEntry) return true
+        pauseWithFadeRequested.set(false)
+        Log.d(TAG, "pauseWithFade request discarded: owning session ended during request")
+        return false
+    }
+
     fun stopWithFade() {
         Log.d(TAG, "stopWithFade() called, isActive=${isActive.get()}, isPlaying=${_isPlaying.value}")
 
@@ -1003,11 +1269,11 @@ class BinauralAudioEngine(private val context: Context) {
             return
         }
 
-        currentVolume = getVolumeFromShaper()
+        if (!requestStopWithFadeValidated()) return
+
         _isPlaying.value = false
         // K2: через флаг — checkFadeRequests в следующей (сокращённой до ~1с)
         // итерации запустит fade-out; completion не голодает на длинном пакете
-        stopWithFadeRequested.set(true)
     }
 
     private fun stopPlayback() {
@@ -1016,12 +1282,11 @@ class BinauralAudioEngine(private val context: Context) {
         audioTrack = null
         volumeShaper?.close()
         volumeShaper = null
-        isFadeInProgress = false
-        fadeShaperCloseAtMs = 0L
-        
-        // Восстанавливаем currentVolume до userVolume для корректного
-        // последующего перезапуска. userVolume - единственный источник истины.
-        currentVolume = userVolume
+        isDucked = false
+        resetFadeBookkeeping()
+
+        // INV-5: отложенный пресет умирает вместе с сессией.
+        pendingPresetConfig = null
 
         // Сброс нативного m_isPlaying: без него флаг остаётся true до следующего
         // startNewPlayback — окно рассинхрона getCurrentTimeOfDaySeconds/J4.
@@ -1030,9 +1295,14 @@ class BinauralAudioEngine(private val context: Context) {
 
         releaseWakeLock()
         resetState()
-        
-        _isPlaying.value = false
-        isActive.set(false)
+
+        // RC1: гасим состояние ТОЛЬКО своей сессии. Если после коммита нашего
+        // стопа уже родилась новая (пользователь быстро нажал Play), её
+        // isActive/_isPlaying свергать нельзя - иначе старт оглушается.
+        if (transitionGen.get() == activeSessionGen) {
+            _isPlaying.value = false
+            isActive.set(false)
+        }
         
         Log.d(TAG, "stopPlayback() completed, userVolume=$userVolume")
     }
@@ -1048,18 +1318,18 @@ class BinauralAudioEngine(private val context: Context) {
         volumeShaper = null
 
         releaseWakeLock()
-        
-        _isPlaying.value = false
-        isActive.set(false)
-        isGenerating = false
-        isFadeInProgress = false
-        fadeShaperCloseAtMs = 0L
-        stopWithFadeRequested.set(false)
-        pauseWithFadeRequested.set(false)
-        
-        // Восстанавливаем currentVolume до userVolume для корректного
-        // последующего перезапуска. userVolume - единственный источник истины.
-        currentVolume = userVolume
+
+        // RC1: терминальные сбросы - только если это НЕ чужая новорождённая
+        // сессия; иначе ограничиваемся ресурсным хвостом (трек/шейпер выше).
+        if (transitionGen.get() == activeSessionGen) {
+            _isPlaying.value = false
+            isActive.set(false)
+            isDucked = false
+            resetFadeBookkeeping()
+            stopWithFadeRequested.set(false)
+            pauseWithFadeRequested.set(false)
+            pendingPresetConfig = null
+        }
         
         Log.d(TAG, "cleanupPlayback() completed, userVolume=$userVolume")
     }
@@ -1082,11 +1352,11 @@ class BinauralAudioEngine(private val context: Context) {
             return
         }
 
-        currentVolume = getVolumeFromShaper()
+        if (!requestPauseWithFadeValidated()) return
+
         _isPlaying.value = false
         // K2: через флаг — checkFadeRequests в следующей (сокращённой до ~1с)
         // итерации запустит fade-out и executePause без голодания лупера
-        pauseWithFadeRequested.set(true)
     }
 
     /**
@@ -1103,21 +1373,46 @@ class BinauralAudioEngine(private val context: Context) {
         // F4: всё последовательно в вызывающем потоке, без постов в audioHandler
         // (они не доставлялись бы из живого цикла генерации).
         if (isActive.get()) {
+            // INV-1: мягкий resume мутирует playback-состояние - инвалидирует
+            // все спящие инлайн-фейды (P0: спящий STOP-фейд больше не убьёт
+            // возобновлённую сессию; PAUSE-ветка получит supersede по gen).
+            transitionGen.incrementAndGet()
+
+            // Микро-перепроверка: teardown успел между чтением isActive и бампом
+            if (!isActive.get()) {
+                Log.d(TAG, "resumeWithFade: session torn down concurrently, falling back to play()")
+                play()
+                return
+            }
+
             _isPlaying.value = true
+
+            // Устаревшие запросы стопа/паузы аннулируем: resume отменяет их,
+            // а консумеры флагов вдобавок защищены gen-recheck.
+            stopWithFadeRequested.set(false)
+            pauseWithFadeRequested.set(false)
+            // Отложенный пресет был причиной отменённого стопа - resume его
+            // хоронит (иначе вечные ~1с пакеты hasPendingChanges + сюрприз-
+            // рестарт чужого пресета при следующем stopWithFade).
+            pendingPresetConfig = null
 
             // F9: восстанавливаем опорную точку таймлайна перед снятием нативной паузы
             playbackStartTime = System.currentTimeMillis() - accumulatedElapsedMs
             nativeEngine?.setPlaybackStartTime(playbackStartTime)
 
             nativeEngine?.play(preserveTimeline = true)
+            // C5: рамп от живого уровня сидящего шейпера (после fade-out ~0),
+            // армим ДО track.play(): на паузе рендера нет, щель нема.
+            isDucked = false
+            val rampArmed = installFade(targetMultiplier = FADE_IDENTITY, closeOnComplete = true)
+            if (!rampArmed && currentAudibleMultiplier() <= MIN_VOLUME) {
+                // Рамп не встал, а сидящий шейпер молчит - иначе вечная тишина
+                // под играющим UI. Жёстко восстанавливаем слышимость.
+                Log.w(TAG, "resumeWithFade: fade install failed at silence; hard restore")
+                synchronized(shaperLock) { retireShaperLocked() }
+                try { audioTrack?.setVolume(userVolume) } catch (e: Exception) { }
+            }
             audioTrack?.play()
-            // C5: после fade-out currentVolume==0 — резкий старт даст щелчок
-            // (особенно после scrub-в-паузе, когда частота кривой сменилась).
-            currentVolume = MIN_VOLUME
-            createVolumeShaper(RESUME_FADE_DURATION_MS, targetVolume = 1.0f)
-            startVolumeShaper()
-            // F5: закрытие шейпера выполнит generateAudioLoop (посты недоставляемы)
-            fadeShaperCloseAtMs = System.currentTimeMillis() + RESUME_FADE_DURATION_MS + 50
             acquireWakeLock()
             return
         }
@@ -1130,40 +1425,235 @@ class BinauralAudioEngine(private val context: Context) {
      */
     fun switchPresetWithFade(config: BinauralConfig) {
         Log.d(TAG, "switchPresetWithFade() called")
-        
+
         if (!isActive.get()) {
             updateConfig(config)
             return
         }
-        
+
         presetSwitchRequested.set(config)
     }
 
     /**
+     * Анти-щелчок: фейд остановки/паузы ещё не дошёл до тишины
+     * (запрошен или выполняется). Позволяет внешним оркестрациям
+     * ждать фактическое завершение вместо слепых задержек.
+     */
+    fun isStopFadePending(): Boolean =
+        isActive.get() || stopWithFadeRequested.get() || pauseWithFadeRequested.get()
+
+    /**
+     * БЫСТРЫЙ клик-безопасный рестарт для смены настроек/пресета.
+     *
+     * Полностью независим от цикла генерации (его задержки на больших буферах
+     * и порождали лаги и гонки):
+     *   1) асинхронный рамп громкости в ноль единой длительности FADE_DURATION_MS;
+     *   2) ожидание рампа обычным сном ВЫЗЫВАЮЩЕГО потока (не цикла);
+     *   3) детерминированная остановка: сброс запросов, пауза+стоп трека
+     *      ДО закрытия шейпера (без всплеска громкости), снятие постов;
+     *   4) work() применяется в гарантированной тишине.
+     *
+     * Старт НЕТ: вызывающая сторона решает сама (позволяет отмене серии
+     * оставить звук выключенным). Старый трек освобождается отложенно
+     * (после распрямления цикла генерации).
+     */
+    /**
+     * @return false только при abort по суперседу (resume/стоп вмешались в
+     * рамп): вызывающая серия обязана повторить попытку, иначе её work() и
+     * выбор настройки будут молча потеряны.
+     */
+    fun fadeOutStopBlocking(work: (() -> Unit)? = null): Boolean {
+        return fadeOutStopBlockingInternal(work)
+    }
+
+    private fun fadeOutStopBlockingInternal(work: (() -> Unit)? = null): Boolean {
+        val wasAudible = isActive.get() && _isPlaying.value
+        // INV-4: ворота bypass-teardown для startNewPlayback
+        teardownDepth.incrementAndGet()
+        // RC6: сериализуем ПЕРЕКРЫВАЮЩИЕСЯ teardown'ы. Второй параллельный вызов
+        // (вторая серия пресета/настроек) не должен стартовать второй слышимый
+        // fade-out поверх живого звука - это и есть щелчок смены пресета.
+        // Возвращаем false сразу, без сна: проигравшая серия повторит попытку
+        // после завершения первой (итог - единичный последовательный fade).
+        if (teardownDepth.get() > 1) {
+            teardownDepth.decrementAndGet()
+            return false
+        }
+        try {
+            val genAtEntry = transitionGen.get()
+
+            if (wasAudible) {
+                isDucked = false
+                if (currentAudibleMultiplier() > MIN_VOLUME) {
+                    installFade(targetMultiplier = 0.0f)
+                    try {
+                        Thread.sleep(FADE_DURATION_MS + 60)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    }
+                }
+
+                // POST-SLEEP RECHECK: резюм/play успели вмешаться в сон - сессия
+                // осталась жить, teardown ОТМЕНЯЕТСЯ целиком (до коммита мы
+                // тронули только громкость, которую resume уже восстанавливает).
+                if (transitionGen.get() != genAtEntry || !isActive.get()) {
+                    Log.i(TAG, "fadeOutStopBlocking: superseded mid-fade, aborting teardown")
+                    return false
+                }
+            }
+
+            // ================= COMMIT POINT =================
+            // INV-1: инвалидируем параллельные инлайн-фейды цикла;
+            // validated-setter'ы после этого момента корректно откатятся.
+            transitionGen.incrementAndGet()
+            // Порядок важен: resume проверяет сперва _isPlaying - инверсия
+            // оставляла окно, где тап резюма тихо терялся.
+            _isPlaying.value = false
+            isActive.set(false)
+            stopWithFadeRequested.set(false)
+            pauseWithFadeRequested.set(false)
+
+            val dyingTrack = audioTrack
+            audioTrack = null
+            try {
+                dyingTrack?.pause()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error pausing dying track: ${e.message}")
+            }
+            synchronized(shaperLock) { retireShaperLocked() }
+            isDucked = false
+            try {
+                dyingTrack?.stop()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping dying track: ${e.message}")
+            }
+            // Точечная чистка чужих токенов; свой релиз - под выделенным токеном,
+            // чтобы никакая широкая чистка его не сняла (утечка AudioTrack).
+            audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+            audioHandler?.removeCallbacksAndMessages(SAMPLE_RATE_CHANGE_TOKEN)
+            if (dyingTrack != null) {
+                audioHandler?.postDelayed({
+                    try {
+                        dyingTrack.release()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error releasing dying track: ${e.message}")
+                    }
+                }, RELEASE_DYING_TRACK_TOKEN, 1500L)
+            }
+
+            // Нативный стоп под двойной защитой: defer по teardownDepth
+            // и gen-guard - чужое нативное состояние не перечёркиваем.
+            if (transitionGen.get() == genAtEntry + 1) {
+                nativeEngine?.stop()
+            } else {
+                Log.w(TAG, "fadeOutStopBlocking: skipping nativeEngine.stop(), superseded")
+            }
+
+            releaseWakeLock()
+            resetState()
+
+            // INV-5: отложенный пресет умирает вместе с сессией; work() накатит
+            // актуальный конфиг поверх чистого состояния.
+            pendingPresetConfig = null
+
+            // Работа последней: ensureActive() первой строкой лямбды выбрасывает
+            // CancellationException ДО мутаций конфига; движок к этому моменту
+            // уже согласованно остановлен - исключение оставляет валидную тишину.
+            work?.invoke()
+            return true
+        } finally {
+            teardownDepth.decrementAndGet()
+        }
+    }
+
+    /**
+     * Плавно приглушить громкость (AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
+     * смена аудио-устройства). Та же единая длительность FADE_DURATION_MS.
+     * Уровень — множитель поверх userVolume.
+     */
+    /**
+     * Плавно приглушить громкость (CAN_DUCK, смена аудио-устройства).
+     * Старт - живой уровень (середина чужого рампа тоже корректен); кубическая
+     * кривая мягче на концах. Шейпер переживает рамп (без автозакрытия).
+     * Гейт на _isPlaying: невидимые шейперы на софт-паузе отравляли бы
+     * последующие быстрые пути (стоп-из-тишины и др.).
+     */
+    fun duckTo(level: Float) {
+        val track = audioTrack
+        if (track == null || !_isPlaying.value) return
+
+        val target = level.coerceIn(0.05f, 1.0f)
+        if (installFade(
+                targetMultiplier = target,
+                cubic = true,
+                closeOnComplete = false,
+            )
+        ) {
+            isDucked = true
+            Log.d(TAG, "Ducked to x$target")
+        }
+    }
+
+    /**
+     * Снять duck симметричным рампом той же единой длительности.
+     */
+    /**
+     * Снять duck симметричным рампом к единице той же единой длительности.
+     * Старт читается из живого шейпера - даже если duck шёл мгновение назад.
+     */
+    fun unduck() {
+        if (!isDucked) return
+        isDucked = false
+        if (!_isPlaying.value) return
+
+        if (installFade(targetMultiplier = FADE_IDENTITY, closeOnComplete = true)) {
+            Log.d(TAG, "Unducked")
+        }
+    }
+
+    /**
      * Установить громкость в реальном времени.
-     * Использует прямую установку AudioTrack.setVolume() для мгновенного отклика.
-     * 
-     * ПРИМЕЧАНИЕ: VolumeShaper НЕ используется для слайдера громкости, потому что:
-     * - При быстрых движениях слайдера создаётся множество VolumeShaper
-     * - VolumeShaper работает асинхронно и не успевает завершиться
-     * - Это приводит к рассинхронизации реальной громкости с позицией слайдера
-     * 
-     * VolumeShaper используется только для плавных переходов при:
-     * - Старт воспроизведения (fade-in)
-     * - Остановка/пауза воспроизведения (fade-out)
+     *
+     * Плавный drag слайдера идёт ступеньками меньше VOLUME_JUMP_THRESHOLD —
+     * применяется напрямую (мгновенный отклик). РЕДКИЙ скачок (тап по треку,
+     * сброс) больше порога сглаживается микро-рампом той же единой
+     * длительности FADE_DURATION_MS, чтобы не щёлкать на произвольной фазе.
      */
     fun setVolume(volume: Float) {
         val clampedVolume = volume.coerceIn(0f, 1f)
-        userVolume = clampedVolume  // Сохраняем пользовательскую громкость
-        
+        val previous = userVolume
+        userVolume = clampedVolume // слайдер - единственный авторитет базы
+
         val track = audioTrack
-        if (track != null && isActive.get()) {
-            // Прямая установка громкости - мгновенный отклик
-            // Мастер-громкость управляется только через AudioTrack;
-            // в нативном движке volume всегда 1.0 для корректной работы fade
+        if (track == null || !isActive.get()) return
+
+        val jump = kotlin.math.abs(clampedVolume - previous)
+
+        if (jump <= VOLUME_JUMP_THRESHOLD || Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            // Обычный drag: мгновенный отклик. База меняется и под активным
+            // fade/duck - шейпер-множитель масштабирует её пропорционально.
             track.setVolume(clampedVolume)
-            currentVolume = clampedVolume
-            Log.d(TAG, "Volume set to $clampedVolume (userVolume)")
+            return
+        }
+
+        // Скачок (тап по треку): базу ставим сразу в ЦЕЛЬ, а шейпер ведёт
+        // ЭФФЕКТИВНЫЙ уровень previous*live -> clamped*live. Учёт живого
+        // множителя (duck/чужой рамп) обязателен: голый ratio давал x1/d
+        // мгновенный прыжок и молча уничтожал активный duck.
+        val liveMult = currentAudibleMultiplier()
+        val ratio = if (clampedVolume > 0.01f) {
+            ((previous * liveMult) / clampedVolume).coerceIn(0f, 1f)
+        } else 0f
+        track.setVolume(clampedVolume)
+        val closeAfter = liveMult >= FADE_IDENTITY - FADE_EQUALITY_EPSILON
+        if (!installFade(
+                targetMultiplier = liveMult,
+                fromMultiplier = ratio,
+                closeOnComplete = closeAfter,
+            )
+        ) {
+            // Инсталл сорвался - фиксируем конечное состояние принудительно
+            track.setVolume(clampedVolume)
         }
     }
     
@@ -1226,9 +1716,6 @@ class BinauralAudioEngine(private val context: Context) {
         val wasPlaying = _isPlaying.value
 
         if (wasPlaying) {
-            // Сохраняем текущую громкость для восстановления после перезапуска
-            currentVolume = getVolumeFromShaper()
-
             // Останавливаем генерацию
             isActive.set(false)
             _isPlaying.value = false
@@ -1236,6 +1723,10 @@ class BinauralAudioEngine(private val context: Context) {
 
             // Отменяем все запланированные операции restart с другим токеном
             audioHandler?.removeCallbacksAndMessages(RESTART_PLAYBACK_TOKEN)
+
+            // Анти-щелчок: гасим до нуля перед жёстким stop() трека
+            // (симметрично fade-in'у после пересоздания).
+            runFadeOutInline()
 
             // Останавливаем AudioTrack
             try {
@@ -1367,13 +1858,22 @@ class BinauralAudioEngine(private val context: Context) {
     }
 
     fun release() {
+        val thread = audioThread
+        val handler = audioHandler
         stop()
-        nativeEngine?.release()
-        nativeEngine = null
-        audioThread?.quitSafely()
+        // Отложенный финал встаёт В ХВОСТ живому циклу: доставится сразу после
+        // его распрямления (стоп-флаг гарантирует выход) и переживёт quitSafely.
+        // Никогда не освобождаем натив под работающим циклом генерации.
+        val finish = Runnable {
+            nativeEngine?.release()
+            nativeEngine = null
+            thread?.quitSafely()
+            Log.d(TAG, "Audio engine released")
+        }
         audioThread = null
+        val h = audioHandler
         audioHandler = null
-        Log.d(TAG, "Audio engine released")
+        h?.post(finish) ?: finish.run()
     }
 
     // ============ Debug virtual time (только debug-сборка) ============

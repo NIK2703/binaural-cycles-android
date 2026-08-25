@@ -144,6 +144,7 @@ void AudioGenerator::resetState(GeneratorState& state) {
     state.swapPhase = SwapPhase::SOLID;
     state.phaseRemainingMs = 0;
     state.cyclePositionMs = 0;
+    state.fadeElapsedSamples = 0;
 }
 
 FrequencyTableResult AudioGenerator::getChannelFrequenciesAt(
@@ -228,8 +229,8 @@ void AudioGenerator::generateSolidBuffer(
 ) {
     constexpr float baseVolumeFactor = 0.5f;
 
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
 
     float leftNormAmp = startLeftAmp;
     float rightNormAmp = startRightAmp;
@@ -319,8 +320,8 @@ bool AudioGenerator::generateFadeBuffer(
     constexpr float baseVolumeFactor = 0.5f;
     const float invFadeDuration = 1.0f / fadeDuration;
 
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
 
     float leftAmplitude = startLeftAmp;
     float rightAmplitude = startRightAmp;
@@ -443,8 +444,8 @@ void AudioGenerator::generateSolidBufferNeon(
     // при i = samples - 1 получить точно endOmega: omega(samples-1) = start + step*(samples-1) = end
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
     
     float leftOmega = startLeftOmega;
     float rightOmega = startRightOmega;
@@ -650,8 +651,8 @@ bool AudioGenerator::generateFadeBufferNeon(
     // при i = samples - 1 получить точно endOmega
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
     
     float leftOmega = startLeftOmega;
     float rightOmega = startRightOmega;
@@ -852,8 +853,8 @@ void AudioGenerator::generateSolidBufferSse(
     // при i = samples - 1 получить точно endOmega: omega(samples-1) = start + step*(samples-1) = end
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
     
     float leftOmega = startLeftOmega;
     float rightOmega = startRightOmega;
@@ -1061,8 +1062,8 @@ bool AudioGenerator::generateFadeBufferSse(
     // при i = samples - 1 получить точно endOmega
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
-    const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
-    const float ampStepRight = (endRightAmp - startRightAmp) / samples;
+    const float ampStepLeft = (samples > 1) ? (endLeftAmp - startLeftAmp) / (samples - 1) : 0.0f;
+    const float ampStepRight = (samples > 1) ? (endRightAmp - startRightAmp) / (samples - 1) : 0.0f;
     
     float leftOmega = startLeftOmega;
     float rightOmega = startRightOmega;
@@ -1311,6 +1312,16 @@ GenerateResult AudioGenerator::generatePackage(
         const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
         const float endRightOmega = twoPiOverSampleRate * endRightFreq;
         
+        // Позиция фейда по оси сэмплов. Сброс - на СТАРТЕ новой фейд-фазы,
+        // который планировщик маркирует fadeOffsetMs==0 (>0 = продолжение
+        // разрезанного границей пакета фейда). Сброс по типу "не-фейд" был
+        // НЕВЕРЕН: при паузе=0 планировщик пропускает PAUSE-сегмент, и
+        // накопленный счётчик FADE_OUT утекал в FADE_IN, прибивая его
+        // огибающую к 1.0 с первого сэмпла (щелчок ~0.46 на каждом свапе).
+        if ((segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) &&
+            segment.fadeOffsetMs == 0) {
+            state.fadeElapsedSamples = 0;
+        }
         switch (segment.type) {
             case BufferType::SOLID:
                 // STEP: ступенька должна быть мгновенной — режем сегмент по границам
@@ -1379,8 +1390,10 @@ GenerateResult AudioGenerator::generatePackage(
             case BufferType::FADE_OUT: {
                 // Позиция внутри ПОЛНОГО фейда из плана: разрезанный границей
                 // пакета фейд продолжается с правильной амплитуды (без щелчка).
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBuffer(
@@ -1417,8 +1430,10 @@ GenerateResult AudioGenerator::generatePackage(
                 break;
                 
             case BufferType::FADE_IN: {
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBuffer(
@@ -1456,6 +1471,10 @@ GenerateResult AudioGenerator::generatePackage(
             
             LOGD("PackageGen: swap at elapsedMs=%lld, channelsSwapped=%d",
                  (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+        }
+        
+        if (segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) {
+            state.fadeElapsedSamples += samples;
         }
         
         currentSample += samples;
@@ -1562,6 +1581,16 @@ GenerateResult AudioGenerator::generatePackageNeon(
              startLeftAmp, startRightAmp,
              endLeftAmp, endRightAmp);
         
+        // Позиция фейда по оси сэмплов. Сброс - на СТАРТЕ новой фейд-фазы,
+        // который планировщик маркирует fadeOffsetMs==0 (>0 = продолжение
+        // разрезанного границей пакета фейда). Сброс по типу "не-фейд" был
+        // НЕВЕРЕН: при паузе=0 планировщик пропускает PAUSE-сегмент, и
+        // накопленный счётчик FADE_OUT утекал в FADE_IN, прибивая его
+        // огибающую к 1.0 с первого сэмпла (щелчок ~0.46 на каждом свапе).
+        if ((segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) &&
+            segment.fadeOffsetMs == 0) {
+            state.fadeElapsedSamples = 0;
+        }
         switch (segment.type) {
             case BufferType::SOLID:
                 // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
@@ -1627,8 +1656,10 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 
             case BufferType::FADE_OUT: {
                 // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBufferNeon(
@@ -1662,8 +1693,10 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 break;
 
             case BufferType::FADE_IN: {
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBufferNeon(
@@ -1718,6 +1751,10 @@ GenerateResult AudioGenerator::generatePackageNeon(
             
             LOGD("PackageGenNeon: swap at elapsedMs=%lld, channelsSwapped=%d",
                  (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+        }
+        
+        if (segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) {
+            state.fadeElapsedSamples += samples;
         }
         
         currentSample += samples;
@@ -1817,6 +1854,16 @@ GenerateResult AudioGenerator::generatePackageSse(
         const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
         const float endRightOmega = twoPiOverSampleRate * endRightFreq;
         
+        // Позиция фейда по оси сэмплов. Сброс - на СТАРТЕ новой фейд-фазы,
+        // который планировщик маркирует fadeOffsetMs==0 (>0 = продолжение
+        // разрезанного границей пакета фейда). Сброс по типу "не-фейд" был
+        // НЕВЕРЕН: при паузе=0 планировщик пропускает PAUSE-сегмент, и
+        // накопленный счётчик FADE_OUT утекал в FADE_IN, прибивая его
+        // огибающую к 1.0 с первого сэмпла (щелчок ~0.46 на каждом свапе).
+        if ((segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) &&
+            segment.fadeOffsetMs == 0) {
+            state.fadeElapsedSamples = 0;
+        }
         switch (segment.type) {
             case BufferType::SOLID:
                 // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
@@ -1882,8 +1929,10 @@ GenerateResult AudioGenerator::generatePackageSse(
                 
             case BufferType::FADE_OUT: {
                 // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBufferSse(
@@ -1917,8 +1966,10 @@ GenerateResult AudioGenerator::generatePackageSse(
                 break;
 
             case BufferType::FADE_IN: {
-                const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                // Позиция в фейде - по оси СЭМПЛОВ (state.fadeElapsedSamples):
+                // конверсия ms->сэмплы расходилась с полом длительностей сегментов
+                // на ±1 сэмпл и давала пропуск тика огибающей на стыке пакетов.
+                const int fadeOffsetSamples = static_cast<int>(state.fadeElapsedSamples);
                 const int fadeTotalSamples = static_cast<int>(
                     (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
                 if (generateFadeBufferSse(
@@ -1951,6 +2002,10 @@ GenerateResult AudioGenerator::generatePackageSse(
             
             LOGD("PackageGenSse: swap at elapsedMs=%lld, channelsSwapped=%d",
                  (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+        }
+        
+        if (segment.type == BufferType::FADE_OUT || segment.type == BufferType::FADE_IN) {
+            state.fadeElapsedSamples += samples;
         }
         
         currentSample += samples;

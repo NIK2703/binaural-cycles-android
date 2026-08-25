@@ -370,17 +370,37 @@ class BinauralViewModel @Inject constructor(
             // Guard от гонки с коллектором пресетов: пока идёт фейд, updateAudioConfig
             // не должен применять конфиг к ещё звучащему старому пресету
             isPresetSwitchInProgress = true
-            // Сначала останавливаем с fade-out на старом пресете
-            playbackService?.stopWithFade()
-            // Ждем завершения fade-out (250мс + запас), затем запускаем новый пресет
+            // Детерминированный рестарт: fade-out -> тишина -> новый конфиг ->
+            // fade-in. Без участия цикла генерации - фиксированные ~300 мс.
             playPresetJob = viewModelScope.launch {
-                kotlinx.coroutines.delay(300)
-                // Применяем новый конфиг
-                playbackService?.updateConfig(config, relaxationSettings)
-                // Запускаем воспроизведение с fade-in
-                playbackService?.play()
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    val seriesJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                    // J4: суперсед abort'ит teardown БЕЗ применения работы -
+                    // повторяем попытку, пока серия жива (последний тап выигрывает)
+                    var committed = false
+                    var attempts = 0
+                    while (!committed && attempts < 10 &&
+                        seriesJob?.isActive == true
+                    ) {
+                        attempts++
+                        committed = playbackService?.fadeOutStopBlocking {
+                            // Job.cancel не прерывает Thread.sleep внутри teardown:
+                            // без проверки устаревший конфиг перезаписал бы более новый
+                            seriesJob.let { if (!it.isActive) throw kotlinx.coroutines.CancellationException("preset series cancelled") }
+                            playbackService?.updateConfig(config, relaxationSettings)
+                        } ?: true
+                    }
+                    seriesJob?.let { if (!it.isActive) throw kotlinx.coroutines.CancellationException("preset series cancelled") }
+                    // RC6: хвостовой play() только если серия реально закоммитила
+                    // teardown; после abort'нутой/проигравшей серии звук не оживляем.
+                    if (committed) playbackService?.play()
+                }
             }
-            playPresetJob?.invokeOnCompletion { isPresetSwitchInProgress = false }
+            val launchedJob = playPresetJob
+            launchedJob?.invokeOnCompletion {
+                // Отменённая старая серия не должна ронять guard новой
+                if (playPresetJob === launchedJob) isPresetSwitchInProgress = false
+            }
         } else {
             // Не воспроизводится - просто обновляем конфиг и запускаем
             playbackService?.updateConfig(config, relaxationSettings)
@@ -1137,14 +1157,27 @@ class BinauralViewModel @Inject constructor(
             return
         }
 
-        // Fade-out запускаем один раз на серию событий
-        if (!hasPendingRestart) {
-            playbackService?.stopWithFade()
-        }
+        // Детерминированный рестарт: фейд-аут -> тишина мимо цикла генерации ->
+        // applyChanges в тишине -> fade-in. Фиксированные ~300 мс, без гонок.
         restartJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(300) // Ждём завершения fade-out
-            applyChanges()
-            playbackService?.play()
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                val seriesJob = kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]
+                // J4: повторяем после суперседа - последняя настройка выигрывает
+                var committed = false
+                var attempts = 0
+                while (!committed && attempts < 10 &&
+                    seriesJob?.isActive == true
+                ) {
+                    attempts++
+                    committed = playbackService?.fadeOutStopBlocking {
+                        seriesJob.let { if (!it.isActive) throw kotlinx.coroutines.CancellationException("restart series cancelled") }
+                        applyChanges()
+                    } ?: true
+                }
+                    seriesJob?.let { if (!it.isActive) throw kotlinx.coroutines.CancellationException("restart series cancelled") }
+                    // RC6: см. playPreset - не оживлять звук после abort'нутой серии
+                    if (committed) playbackService?.play()
+            }
         }
     }
     
@@ -1568,8 +1601,13 @@ class BinauralViewModel @Inject constructor(
     // ============= Debug virtual time (только debug) =============
 
     fun setDebugVirtualTimeEnabled(enabled: Boolean) {
-        playbackService?.debugSetVirtualTimeEnabled(enabled)
-        _uiState.update { it.copy(debugVirtualTimeEnabled = enabled) }
+        // Единообразно с остальными переключателями времени: применение в
+        // гарантированной тишине между фейдами исключает гонку двух
+        // relaxed-записей таймлайна (base/total) при смене режима на ходу.
+        restartWithFadeIfNeeded {
+            playbackService?.debugSetVirtualTimeEnabled(enabled)
+            _uiState.update { it.copy(debugVirtualTimeEnabled = enabled) }
+        }
     }
 
     fun debugScrubTime(timeSeconds: Int) {

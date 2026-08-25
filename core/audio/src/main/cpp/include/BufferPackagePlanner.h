@@ -15,16 +15,21 @@ namespace binaural {
 // частоты кривой:
 //   рост   (Δf > 0) → обычное расположение каналов (swapped = false)
 //   спад   (Δf < 0) → обратное расположение           (swapped = true)
-//   плато  (|Δf| ≤ ε) → состояние не меняется (гистерезис против дребезга)
-// Производная оценивается конечной разностью по lookup-таблице кривой.
+//   плато  (Δf == 0) → состояние не меняется
+// Мёртвой зоны нет: переход = точная смена знака Δf, т.е. локальный экстремум
+// несущей. Все экстремумы предвычисляются один раз при финализации кривой
+// (FrequencyCurve::updateCache → buildTrendCrossings) и здесь только
+// переиспользуются.
+//
+// ЦЕНТРОВКА ПРОЦЕДУЫ ПЕРЕСТАНОВКИ: SOLID длится до T* − leadMs, где T* —
+// момент смены тенденции, leadMs — длительность грядущего FADE_OUT. Поэтому
+// вся процедура [fade-out | прерывание | fade-in] ложится серединой на T*:
+// фейд-аут завершается ровно на T*, в T* происходит прерывание потока
+// (перестановка каналов), фейд-ин идёт после T*.
 // ============================================================================
 
-// Полуокно оценки производной: Δf = carrier(t+h) − carrier(t−h)
-constexpr float kTrendHalfWindowSec = 60.0f;
-// Мёртвая зона: |Δf| за окно 2*h ниже порога считается плато
-constexpr float kTrendDeadbandHz = 0.05f;
-// Шаг сканирования кривой вперёд при поиске смены тренда
-constexpr float kTrendScanStepSec = 15.0f;
+// Полуокно оценки производной: Δf = carrier(t+h) − carrier(t−h) (см. Config.h)
+constexpr float kTrendHalfWindowSec = TREND_HALF_WINDOW_SEC;
 // Если переходов нет — предельная длина SOLID до переоценки (30 минут)
 constexpr int64_t kTrendMaxSolidMs = 1800000LL;
 
@@ -39,20 +44,26 @@ inline float trendCarrierDeltaAt(const FrequencyCurve& curve, float tSec) {
 }
 
 /**
- * Желаемое состояние перестановки с гистерезисом в мёртвой зоне.
+ * Желаемое состояние перестановки по знаку производной.
+ * Точный ноль (плато) состояние сохраняет — защита от дребезга на пологих
+ * участках без сдвига момента переключения.
  */
 inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
-    if (carrierDeltaHz > kTrendDeadbandHz)  return false; // рост → прямое расположение
-    if (carrierDeltaHz < -kTrendDeadbandHz) return true;  // убывание → обратное
-    return currentlySwapped;                              // плато → без изменений
+    if (carrierDeltaHz > 0.0f) return false; // рост → прямое расположение
+    if (carrierDeltaHz < 0.0f) return true;  // убывание → обратное
+    return currentlySwapped;                 // плато → без изменений
 }
 
 /**
- * Длительность SOLID-фазы в TREND-режиме: время до ближайшей смены тренда.
- * Единственная защита от дребезга — мёртвая зона производной (kTrendDeadbandHz);
- * искусственных минимальных пауз между сменами нет по требованию продукта.
+ * Длительность SOLID-фазы в TREND-режиме: время до ближайшей смены тренда
+ * минус lead (центровка процедуры перестановки на момент смены).
  *
- * Оси времени: скан идёт по ОСИ КРИВОЙ (сек суток), а длительности фаз живут
+ * @param leadMs Длительность FADE_OUT из конфига: SOLID заканчивается на
+ *        T* − leadMs, чтобы прерывание потока (конец fade-out) пришлось
+ *        ровно на T*. Если T* ближе leadMs — SOLID клампится в 0 (процедура
+ *        целиком уходит вправо; длительности фейдов не адаптируются).
+ *
+ * Оси времени: нули живут на ОСИ КРИВОЙ (сек суток), а длительности фаз —
  * на АУДИО-ОСИ (мс). При timeScale>1 (debug virtual time) кривая обгоняет
  * аудио, поэтому найденное смещение делится на масштаб.
  */
@@ -60,21 +71,45 @@ inline int64_t trendSolidDurationMs(
     const FrequencyCurve& curve,
     float curvePosSec,
     bool currentlySwapped,
-    float timeScale = 1.0f
+    float timeScale = 1.0f,
+    int64_t leadMs = 0
 ) {
-    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
 
-    for (float offset = 0.0f; offset < dayF; offset += kTrendScanStepSec) {
-        const float t = std::fmod(curvePosSec + offset, dayF);
-        const float delta = trendCarrierDeltaAt(curve, t);
-        if (trendDesiredSwapped(currentlySwapped, delta) != currentlySwapped) {
-            // Смещение по кривой -> длительность аудио-фазы с учётом масштаба
-            const int64_t dtMs = static_cast<int64_t>(offset * 1000.0f / ts);
-            return std::min(dtMs, kTrendMaxSolidMs);
-        }
+    // Рассогласование уже сейчас → немедленный свап (SOLID=0, без выдержек)
+    if (trendDesiredSwapped(currentlySwapped,
+                            trendCarrierDeltaAt(curve, curvePosSec)) != currentlySwapped) {
+        return 0;
     }
-    return kTrendMaxSolidMs; // переходов за сутки нет — переоценка позже
+
+    // Кэш нулей; для кривых вне production-пути (тесты строят конфиг вручную
+    // и не звали updateCache) — локальный расчёт без мутации curve и без
+    // копирования lookup-таблиц.
+    std::vector<TrendCrossing> localCrossings;
+    const std::vector<TrendCrossing>* crossings = &curve.trendCrossings;
+    if (!curve.trendCrossingsValid) {
+        computeTrendCrossings(curve, localCrossings);
+        crossings = &localCrossings;
+    }
+
+    // Нужен ближайший переход, переводящий состояние в !currentlySwapped:
+    // пик (toSwapped=true) при swapped=false, впадина (false) при swapped=true.
+    const bool needToSwapped = !currentlySwapped;
+    const double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
+    double bestRel = -1.0;
+    for (const TrendCrossing& c : *crossings) {
+        if (c.toSwapped != needToSwapped) continue;
+        double rel = static_cast<double>(c.timeSec) - pos;
+        if (rel <= 0.0) rel += dayD; // wrap через полночь
+        if (bestRel < 0.0 || rel < bestRel) bestRel = rel;
+    }
+    if (bestRel < 0.0) {
+        return kTrendMaxSolidMs; // подходящих переходов за сутки нет — переоценка позже
+    }
+
+    const int64_t dtMs = static_cast<int64_t>(bestRel * 1000.0 / ts);
+    return std::clamp(dtMs - leadMs, int64_t{0}, kTrendMaxSolidMs);
 }
 
 /**
@@ -215,11 +250,16 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
     }
 
-    // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены тренда),
-    // для остальных и TIMER — константа из конфига.
+    // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены тренда
+    // минус lead фейда — центровка прерывания на момент смены), для остальных и
+    // TIMER — константа из конфига.
     auto startPhaseDuration = [&](SwapPhase phase) -> int64_t {
         if (trendMode && phase == SwapPhase::SOLID) {
-            return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped, timeScale);
+            // Lead = длительность грядущего FADE_OUT: SOLID завершается на T* − lead,
+            // fade-out укладывается ровно перед T*, прерывание потока — на T*.
+            const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
+            return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
+                                        timeScale, leadMs);
         }
         return phaseDuration(phase, config);
     };
@@ -368,6 +408,7 @@ inline void BufferPackagePlanner::resetState(GeneratorState& state) {
     state.swapPhase = SwapPhase::SOLID;
     state.phaseRemainingMs = 0;
     state.cyclePositionMs = 0;
+    state.fadeElapsedSamples = 0;
     state.channelsSwapped = false;
 }
 

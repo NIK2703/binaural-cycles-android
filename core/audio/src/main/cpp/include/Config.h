@@ -23,6 +23,24 @@ constexpr int FREQUENCY_TABLE_INTERVAL_MS = 100;
 constexpr int FREQUENCY_TABLE_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_INTERVAL_MS;
 
 /**
+ * Полуокно оценки трендовой производной: Δf = carrier(t+h) − carrier(t−h).
+ * Живёт здесь, т.к. используется и планировщиком (BufferPackagePlanner.h),
+ * и предвычислением нулей в FrequencyCurve (Interpolation.h).
+ */
+constexpr float TREND_HALF_WINDOW_SEC = 60.0f;
+
+/**
+ * Ноль трендовой производной (локальный экстремум несущей).
+ * Предвычисляется ОДИН РАЗ при построении кривой (FrequencyCurve::updateCache)
+ * и дальше только переиспользуется планировщиком.
+ */
+struct TrendCrossing {
+    float timeSec;    // Время суток [0, SECONDS_PER_DAY), уточнено бисекцией
+    bool toSwapped;   // true: после T тренд убывает (пик) → нужно swapped;
+                      // false: после T тренд растёт (впадина) → swapped=false
+};
+
+/**
  * Тип интерполяции между точками
  */
 enum class InterpolationType : int8_t {
@@ -79,6 +97,12 @@ struct FrequencyCurve {
     // Фиксированный размер: FREQUENCY_TABLE_SIZE (864000 значений при шаге 100 мс)
     std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
     std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
+
+    // Кэш нулей трендовой производной carrier(t+h) − carrier(t−h), h = TREND_HALF_WINDOW_SEC.
+    // Строится один раз в updateCache() вместе с lookup-таблицей (профиль сохранён →
+    // экстремумы известны); планировщик только ищет по нему. Отсортирован по времени суток.
+    std::vector<TrendCrossing> trendCrossings;
+    bool trendCrossingsValid = false;
     
     /**
      * Получить частоты каналов для заданного времени через lookup table
@@ -99,6 +123,12 @@ struct FrequencyCurve {
      */
     void buildLookupTable();
 
+    /**
+     * Предвычислить все нули трендовой производной за сутки.
+     * Вызывается из updateCache(); результат — trendCrossings.
+     */
+    void buildTrendCrossings();
+
 private:
     /**
      * Внутренняя реализация построения таблицы
@@ -112,8 +142,9 @@ private:
 enum class ChannelSwapMode : int8_t {
     TIMER = 0,   // По таймеру: swap каждые channelSwapIntervalSec секунд
     TREND = 1    // По тенденции графика: рост несущей — прямое расположение,
-                 // убывание — обратное; интервал не участвует, частота смен
-                 // ограничена только мёртвой зоной производной
+                 // убывание — обратное; интервал не участвует, смены происходят
+                 // в локальных экстремумах несущей (предвычисленные нули
+                 // трендовой производной), процедура центрирована на них
 };
 
 /**
@@ -207,6 +238,12 @@ struct GeneratorState {
     
     // Позиция внутри цикла для переноса между пакетами
     int64_t cyclePositionMs = 0;
+
+    // Точное число сэмплов ТЕКУЩЕЙ фейд-фазы, уже отрендеренное генератором.
+    // Источник истины для fadeStartOffset вместо конверсии fadeOffsetMs
+    // (округление ms->сэмплы расходится с полом длительностей сегментов
+    // на ±1 сэмпл — пропуск тика огибающей на стыке разрезанного фейда).
+    int64_t fadeElapsedSamples = 0;
     
     // ================================================================
     // LEGACY ПОЛЯ (для обратной совместимости)

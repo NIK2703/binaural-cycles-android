@@ -135,6 +135,21 @@ class BinauralPlaybackService : Service() {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var hasAudioFocus = false
 
+
+    // Анти-щелчок: отложенный unduck после смены аудио-маршрута
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
+    // Один переиспользуемый runnable: BT-бёрсты дают 2-4 события onAdded подряд -
+    // без снятия предыдущего поста получаем шторм unduck'ов (каждый - рамп+щелчок)
+    private val unduckRunnable = Runnable { audioEngine?.unduck() }
+
+    private fun scheduleUnduck(delayMs: Long = 600L) {
+        mainHandler.removeCallbacks(unduckRunnable)
+        mainHandler.postDelayed(unduckRunnable, delayMs)
+    }
+
+    private fun cancelUnduck() = mainHandler.removeCallbacks(unduckRunnable)
+
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
             AudioManager.AUDIOFOCUS_GAIN -> {
@@ -143,7 +158,11 @@ class BinauralPlaybackService : Service() {
                     wasPausedByTransientFocus = false
                     audioEngine?.resumeWithFade()
                 }
-                audioEngine?.setVolume(audioEngine?.currentConfig?.value?.volume ?: 0.7f)
+                // Анти-щелчок: громкость НЕ трогаем ступенькой. База userVolume
+                // не менялась (старый setVolume(config.volume) перезаписывал
+                // пользовательский выбор и щёлкал на закрытом шейпере);
+                // если был duck — снимаем его симметричным рампом.
+                audioEngine?.unduck()
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // Другой экземпляр (или другое приложение) забрало фокус.
@@ -173,10 +192,9 @@ class BinauralPlaybackService : Service() {
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // Приглушение: временно снижаем громкость,
-                // восстановление - в AUDIOFOCUS_GAIN
-                val volume = audioEngine?.currentConfig?.value?.volume ?: 0.7f
-                audioEngine?.setVolume(volume * 0.2f)
+                // Приглушение плавным рампом (единая длительность фейдов),
+                // восстановление - в AUDIOFOCUS_GAIN через unduck()
+                audioEngine?.duckTo(level = 0.2f)
             }
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {
                 // Восстановление после временной потери
@@ -482,21 +500,33 @@ class BinauralPlaybackService : Service() {
                             android.util.Log.d("BinauralPlaybackService", "Headset device added: type=${device.type}, name=${device.productName}")
                         }
                     }
-                    
+
                     val hadNoHeadset = !hasHeadset
                     checkHeadsetDevices()
-                    
+
                     android.util.Log.d("BinauralPlaybackService", "onAudioDevicesAdded: hadNoHeadset=$hadNoHeadset, hasHeadset=$hasHeadset, wasStoppedByHeadsetDisconnect=$wasStoppedByHeadsetDisconnect, resumeOnHeadsetConnect=$resumeOnHeadsetConnect")
-                    
+
+                    // Анти-щелчок: пока играем — маскируем HAL-переключение маршрута
+                    // (проведение через duck/unduck той же единой длительности)
+                    if (_isPlaying.value) {
+                        audioEngine?.duckTo(level = 0.15f)
+                        scheduleUnduck()
+                    }
+
                     // Если гарнитуры не было и она появилась, и воспроизведение было остановлено из-за отключения
                     if (hadNoHeadset && hasHeadset && wasStoppedByHeadsetDisconnect && resumeOnHeadsetConnect) {
                         android.util.Log.d("BinauralPlaybackService", "Headset connected - resuming playback (was stopped by headset disconnect)")
                         wasStoppedByHeadsetDisconnect = false
-                        requestAudioFocus()
-                        audioEngine?.resumeWithFade()
+                        // Возобновляем только при реально выданном фокусе:
+                        // при DELAYED фокус придёт позже через AUDIOFOCUS_GAIN
+                        if (requestAudioFocus()) {
+                            audioEngine?.resumeWithFade()
+                        } else {
+                            wasPausedByTransientFocus = true
+                        }
                     }
                 }
-                
+
                 override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
                     // Проверяем, были ли удалены устройства гарнитуры
                     removedDevices?.forEach { device ->
@@ -693,19 +723,27 @@ class BinauralPlaybackService : Service() {
                     if (_isPlaying.value) {
                         this@BinauralPlaybackService.pauseWithFade()
                     } else {
-                        requestAudioFocus()
-                        this@BinauralPlaybackService.resumeWithFade()
+                        // При DELAYED-фокусе не играем поверх звонка —
+                        // resume выполнит AUDIOFOCUS_GAIN
+                        if (requestAudioFocus()) {
+                            this@BinauralPlaybackService.resumeWithFade()
+                        } else {
+                            wasPausedByTransientFocus = true
+                        }
                     }
                 }
-                
+
                 override fun onPause() {
                     // Toggle: если играет - пауза, если нет - воспроизведение
                     android.util.Log.d("BinauralPlaybackService", "MediaSession: onPause, isPlaying=${_isPlaying.value}")
                     if (_isPlaying.value) {
                         this@BinauralPlaybackService.pauseWithFade()
                     } else {
-                        requestAudioFocus()
-                        this@BinauralPlaybackService.resumeWithFade()
+                        if (requestAudioFocus()) {
+                            this@BinauralPlaybackService.resumeWithFade()
+                        } else {
+                            wasPausedByTransientFocus = true
+                        }
                     }
                 }
                 
@@ -853,15 +891,26 @@ class BinauralPlaybackService : Service() {
     }
 
     fun stopPlayback() {
+        cancelUnduck()
         audioEngine?.stop()
         abandonAudioFocus()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
+    /**
+     * Быстрая клик-безопасная остановка для смены настроек: фейд-аут единой
+     * длительностью -> тишина НЕЗАВИСИМО от цикла генерации -> work()
+     * применяется в тишине. Старт выполняет вызывающая сторона через play().
+     * Выполняется в вызывающем потоке (~300 мс при слышимом звуке).
+     */
+    fun fadeOutStopBlocking(work: () -> Unit): Boolean =
+        audioEngine?.fadeOutStopBlocking(work) ?: true
+
     private fun exitApp() {
-        // Останавливаем аудио с затуханием
-        audioEngine?.stopWithFade()
+        // Затухание выполнит release()->stop() в onDestroy (единственный фейд,
+        // флаг цикла; дублирующий stopWithFade здесь давал двойной рамп).
+        cancelUnduck()
         abandonAudioFocus()
         
         // Отправляем Intent в MainActivity для закрытия
@@ -889,7 +938,12 @@ class BinauralPlaybackService : Service() {
                 .build()
             
             val result = audioManager?.requestAudioFocus(audioFocusRequest!!)
-            hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            // RC6: AUDIOFOCUS_REQUEST_DELAYED тоже считаем успехом — иначе на
+            // кастом-ромах resume-путь play откладывается на AUDIOFOCUS_GAIN,
+            // который может не прийти, и звук никогда не возобновляется.
+            val granted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED ||
+                result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+            hasAudioFocus = granted
         } else {
             @Suppress("DEPRECATION")
             val result = audioManager?.requestAudioFocus(
@@ -897,7 +951,9 @@ class BinauralPlaybackService : Service() {
                 AudioManager.STREAM_MUSIC,
                 AudioManager.AUDIOFOCUS_GAIN
             )
-            hasAudioFocus = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            val granted = result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED ||
+                result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED
+            hasAudioFocus = granted
         }
         
         return hasAudioFocus
@@ -1081,6 +1137,7 @@ class BinauralPlaybackService : Service() {
 
     override fun onDestroy() {
         android.util.Log.d("BinauralPlaybackService", "onDestroy()")
+        mainHandler.removeCallbacksAndMessages(null)
         
         serviceInstance = null
         uiFrequencyUpdateJob?.cancel()

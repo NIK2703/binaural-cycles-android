@@ -67,6 +67,48 @@ std::atomic<float> s_seamPrevLastR{0.0f};
 std::atomic<float> s_seamPrevEndLower{0.0f};
 std::atomic<float> s_seamPrevEndUpper{0.0f};
 std::atomic<bool>  s_seamHasPrev{false};
+
+// ===== Seam-mask: маскировка щелчка при смене конфига между пакетами =====
+// Частота/амплитуда на стыке пакетов N/N+1 скачком меняются, если между их
+// генерациями приехал новый конфиг (живое редактирование кривой, смена типа
+// интерполяции, вход/выход из экрана редактирования и т.п.). Фазовый шов
+// непрерывен, но ступенька частоты/амплитуды слышна как щелчок. Маска —
+// короткий косинусный подъём громкости 0→1 в начале первого пакета после
+// смены конфига: ступенька заменяется на ~40 мс «дыхание» вместо щелчка.
+constexpr int kSeamMaskDefaultMs = 40;
+
+// Умная seam-маска: слепой рамп 0→1 САМ создавал ступеньку, когда прошлый
+// пакет кончался на громком уровне L (типичный SOLID). Решение:
+//   1) порог |Δ|<0.02 по последним сэмплам прошлого пакета — микроскачки
+//      частотного шага (≤0.007/сэмпл на 100 Гц) маскировать не нужно;
+//   2) рамп стартует с ИЗМЕРЕННОГО уровня огибающей прошлого пакета
+//      L̂=max(|L|,|R|)/0.5, а не с нуля → стык амплитудно-непрерывен.
+inline void maybeApplySeamMask(float* buffer, int samplesPerChannel, int sampleRate,
+                               bool cfgChangedSinceLastPackage) {
+    if (!cfgChangedSinceLastPackage || samplesPerChannel <= 1) return;
+
+    const bool hasPrev = s_seamHasPrev.load(std::memory_order_relaxed);
+    const float prevL = s_seamPrevLastL.load(std::memory_order_relaxed);
+    const float prevR = s_seamPrevLastR.load(std::memory_order_relaxed);
+    if (!hasPrev) return; // самый первый пакет — до него тишина, шов отсутствует
+
+    const float dL = std::fabs(buffer[0] - prevL);
+    const float dR = std::fabs(buffer[1] - prevR);
+    if (std::max(dL, dR) < 0.02f) return; // скачка нет — маска только навредила бы
+
+    const float envLevel = std::max(std::fabs(prevL), std::fabs(prevR));
+    const float lHat = std::clamp(envLevel / 0.5f, 0.0f, 1.0f);
+
+    int n = kSeamMaskDefaultMs * sampleRate / 1000;
+    if (n > samplesPerChannel) n = samplesPerChannel;
+    for (int i = 0; i < n; ++i) {
+        const float ramp = 0.5f * (1.0f - std::cos(
+            static_cast<float>(M_PI) * static_cast<float>(i) / static_cast<float>(n)));
+        const float g = lHat + (1.0f - lHat) * ramp;
+        buffer[i * 2]     *= g;
+        buffer[i * 2 + 1] *= g;
+    }
+}
 } // namespace
 
 BinauralEngine::BinauralEngine() {
@@ -135,9 +177,13 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         static_cast<int64_t>(samplesToGenerate) * 1000 / std::max(1, sampleRate);
     
     BinauralConfig config;
+    uint32_t cfgVerAtCopy = 0;
     {
         std::shared_lock<std::shared_mutex> lock(m_configMutex);
         config = m_config;
+        // Пара (конфиг, версия) снимается атомарно: иначе пакет со СТАРЫМ
+        // конфигом записал бы НОВУЮ версию и маска промахнулась бы мимо целевого пакета.
+        cfgVerAtCopy = s_cfgVersion.load(std::memory_order_relaxed);
     }
     
     // Точное время для начала буфера (float для сохранения дробной части)
@@ -194,7 +240,16 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         timeScale
     );
 #endif
-    
+
+    // Seam-mask умная: маскируем ТОЛЬКО реально измеренный скачок на стыке.
+    if (result.samplesGenerated > 0) {
+        const uint32_t lastGen =
+            m_lastCfgVersionGenerated.exchange(cfgVerAtCopy, std::memory_order_relaxed);
+        maybeApplySeamMask(buffer, result.samplesGenerated, sampleRate, lastGen != cfgVerAtCopy);
+    }
+    // Пустой результат НЕ фиксирует версию: иначе следующий слышимый пакет
+    // пропустил бы маску на реальном шве конфига.
+
     // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
     // Только float — единая ось времени с генератором.
     const float batchDurationSeconds =
@@ -380,11 +435,15 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
 
 void BinauralEngine::resetState() {
     m_generator.resetState(m_state);
-    
+
     // Сброс состояния планировщика
     BufferPackagePlanner planner;
     planner.resetState(m_state);
-    
+
+    // Свежий старт не считается сменой конфига на стыке — без seam-маски
+    m_lastCfgVersionGenerated.store(s_cfgVersion.load(std::memory_order_relaxed),
+                                    std::memory_order_relaxed);
+
     m_elapsedSeconds.store(0, std::memory_order_relaxed);
     m_currentBeatFreq.store(0.0f, std::memory_order_relaxed);
     m_currentCarrierFreq.store(0.0f, std::memory_order_relaxed);
@@ -522,9 +581,11 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // ОПТИМИЗАЦИЯ: Используем shared_lock для чтения (множественное чтение)
     // Это позволяет нескольким потокам читать конфигурацию одновременно
     BinauralConfig config;
+    uint32_t cfgVerAtCopy = 0;
     {
         std::shared_lock<std::shared_mutex> lock(m_configMutex);
         config = m_config;
+        cfgVerAtCopy = s_cfgVersion.load(std::memory_order_relaxed);
     }
     
     // НОВАЯ АРХИТЕКТУРА: Используем планировщик пакетов
@@ -594,6 +655,20 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     );
 #endif
     
+    // Сырые первые сэмплы пакета ДО маски — PKG_SEAM ниже должен видеть
+    // реальную непрерывность данных, а не нашу же маску.
+    const float rawFirstL = (result.samplesGenerated > 0) ? buffer[0] : 0.0f;
+    const float rawFirstR = (result.samplesGenerated > 0) ? buffer[1] : 0.0f;
+
+    // Seam-mask умная (см. generateBatch)
+    if (result.samplesGenerated > 0) {
+        const uint32_t lastGen =
+            m_lastCfgVersionGenerated.exchange(cfgVerAtCopy, std::memory_order_relaxed);
+        maybeApplySeamMask(buffer, result.samplesGenerated, sampleRate, lastGen != cfgVerAtCopy);
+    }
+    // Пустой результат НЕ фиксирует версию: иначе следующий слышимый пакет
+    // пропустил бы маску на реальном шве конфига.
+
     // Обновляем атомарные значения для Java (relaxed для производительности)
     const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq, std::memory_order_relaxed);
     m_currentCarrierFreq.store(result.currentCarrierFreq, std::memory_order_relaxed);
@@ -630,8 +705,8 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // |dL|,|dR| < 0.02 → данные непрерывны (щелчок вносит AudioTrack/HAL);
     // > 0.05 → разрыв В ДАННЫХ: смотрим dF/dt/cfgVer.
     if (result.samplesGenerated > 1) {
-        const float firstL = buffer[0];
-        const float firstR = buffer[1];
+        const float firstL = rawFirstL;
+        const float firstR = rawFirstR;
         const float lastL  = buffer[(result.samplesGenerated - 1) * 2];
         const float lastR  = buffer[(result.samplesGenerated - 1) * 2 + 1];
 
