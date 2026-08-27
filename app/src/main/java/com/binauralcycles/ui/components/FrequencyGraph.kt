@@ -455,12 +455,12 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     
     if (sortedPoints.size >= 2) {
         drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
-        drawCarrierLine(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
     }
     
     // В режимах STEP и SMOOTH рисуем пунктирную линию базовой кривой (через основные точки)
     if (relaxationModeSettings.enabled && 
         (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+        relaxationModeSettings.carrierReductionPercent > 0 &&
         realPoints.size >= 2) {
         drawDashedBaseCurve(realPoints, graphParams, primaryColor, interpolationType, splineTension)
     }
@@ -468,12 +468,14 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
     // Рисуем указатель текущей частоты только если воспроизводится этот график
     if (isPlaying) {
         val currentX = graphParams.timeToX(currentLocalTime)
-        val currentCarrierY = graphParams.carrierToY(currentCarrierFrequency)
-        val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency)
-        val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency)
+        val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+        val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
         
-        drawLine(color = indicatorColor.copy(alpha = 0.7f), start = Offset(currentX, 0f), end = Offset(currentX, height), strokeWidth = 2f)
-        drawCircle(color = indicatorColor, radius = 8f, center = Offset(currentX, currentCarrierY))
+        // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
+        // внутри области биений — ярче. Точку пересечения с несущей убираем.
+        val indicatorAlpha = 0.3f
+        drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, 0f), end = Offset(currentX, currentUpperY), strokeWidth = 2f)
+        drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, currentLowerY), end = Offset(currentX, height), strokeWidth = 2f)
         // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
         drawLine(color = indicatorColor.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
     }
@@ -586,72 +588,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     // Границы области (кривые частот каналов)
     drawPath(path = upperPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
     drawPath(path = lowerPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
-}
-
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCarrierLine(
-    sortedPoints: List<FrequencyPoint>,
-    params: GraphParams,
-    primaryColor: Color,
-    interpolationType: InterpolationType,
-    splineTension: Float = 0.0f
-) {
-    val width = size.width
-    val carrierPath = Path()
-
-    // Начинаем с левой границы (время 0)
-    val startTime = LocalTime.fromSecondOfDay(0)
-    // Линия несущей отображается как (l+u)/2 от канальных кривых — как в движке
-    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension
-    )
-    val startY = params.carrierToY((startLowerFreq + startUpperFreq) / 2.0f)
-    carrierPath.moveTo(0f, startY)
-    
-    // Для ступенчатой интерполяции рисуем ступеньки напрямую по точкам
-    if (interpolationType == InterpolationType.STEP) {
-        // Находим значение на левой границе (до первой точки) - это значение последней точки (переход через полночь)
-        val firstPointX = params.timeToX(sortedPoints.first().time)
-        val lastCarrierY = params.carrierToY(sortedPoints.last().carrierFrequency)
-        
-        // От левой границы до первой точки - значение последней точки
-        carrierPath.lineTo(firstPointX, lastCarrierY)
-        
-        // Рисуем ступеньки между точками
-        for (i in 0 until sortedPoints.size) {
-            val currentPoint = sortedPoints[i]
-            val nextPoint = sortedPoints.getOrNull(i + 1) ?: sortedPoints.first()
-            
-            val currentX = params.timeToX(currentPoint.time)
-            val nextX = if (i == sortedPoints.size - 1) {
-                width // до правой границы
-            } else {
-                params.timeToX(nextPoint.time)
-            }
-            
-            val currentCarrierY = params.carrierToY(currentPoint.carrierFrequency)
-            
-            // Вертикальный переход в точке
-            carrierPath.lineTo(currentX, currentCarrierY)
-            // Горизонтальная линия до следующей точки
-            carrierPath.lineTo(nextX, currentCarrierY)
-        }
-    } else {
-        // Обычная интерполяция для других типов
-        // Динамическое количество сэмплов: минимум 500, для плавных кривых - больше
-        val numSamples = (sortedPoints.size * 4).coerceAtLeast(500)
-        for (i in 1..numSamples) {
-            val t = i.toDouble() / numSamples
-            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension
-            )
-            val y = params.carrierToY((lowerFreq + upperFreq) / 2.0f)
-            val x = (t * width).toFloat()
-            carrierPath.lineTo(x, y)
-        }
-    }
-    
-    drawPath(path = carrierPath, color = primaryColor.copy(alpha = 0.6f), style = Stroke(width = 3f))
 }
 
 private enum class RangeType { MIN, MAX }

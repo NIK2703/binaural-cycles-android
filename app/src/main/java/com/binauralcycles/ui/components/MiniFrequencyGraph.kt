@@ -222,6 +222,7 @@ private fun computeGraphGeometry(
     // Вычисляем путь базовой кривой (по основным точкам) для режимов STEP и SMOOTH
     val baseCarrierPath = if (relaxationModeSettings.enabled && 
         (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+        relaxationModeSettings.carrierReductionPercent > 0 &&
         sortedPoints.size >= 2) {
         computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension)
     } else {
@@ -327,13 +328,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         style = Stroke(width = 0.5f)
     )
     
-    // Несущая частота
-    drawPath(
-        path = geometry.carrierPath,
-        color = graphColor.copy(alpha = 0.6f),
-        style = Stroke(width = 1.5f)
-    )
-    
     // Пунктирная линия базовой кривой (для режимов ADVANCED и SMOOTH)
     geometry.baseCarrierPath?.let { basePath ->
         val dashPattern = floatArrayOf(6f, 6f)
@@ -354,24 +348,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     for (i in sortedPoints.indices) {
         val x = pointPositions[i * 2]
         val y = pointPositions[i * 2 + 1]
-        val point = sortedPoints[i]
-        
+
+        // Точки — полупрозрачная цветная заливка (без белой сердцевины-обводки).
         drawCircle(
-            color = primaryColor,
+            color = primaryColor.copy(alpha = 0.5f),
             radius = 5f,
             center = Offset(x, y),
             style = Fill
         )
-        
-        val beatRatio = (point.beatFrequency / geometry.maxBeat).coerceIn(0.0f, 1.0f)
-        val innerRadius = 2f + beatRatio * 2f
-        drawCircle(
-            color = Color.White,
-            radius = innerRadius,
-            center = Offset(x, y),
-            style = Fill
-        )
-        
+
         val label = labelTexts[i]
         labelPaint.color = android.graphics.Color.argb(
             (0.8f * 255).toInt(),
@@ -428,23 +413,24 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         fun beatLowerY(carrier: Float, beat: Float): Float = carrierToY(carrier - beat / 2.0f)
         
         val currentX = timeToX(currentTime)
-        val currentCarrierY = carrierToY(currentCarrierFrequency)
-        val currentUpperY = beatUpperY(currentCarrierFrequency, currentBeatFrequency)
-        val currentLowerY = beatLowerY(currentCarrierFrequency, currentBeatFrequency)
+        val currentUpperY = beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+        val currentLowerY = beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
         
+        // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
+        // внутри области биений — ярче. Точку пересечения с несущей убираем.
+        val indicatorAlpha = 0.3f
         drawLine(
-            color = indicatorColor.copy(alpha = 0.7f),
+            color = indicatorColor.copy(alpha = indicatorAlpha),
             start = Offset(currentX, 0f),
+            end = Offset(currentX, currentUpperY),
+            strokeWidth = 2f
+        )
+        drawLine(
+            color = indicatorColor.copy(alpha = indicatorAlpha),
+            start = Offset(currentX, currentLowerY),
             end = Offset(currentX, height),
             strokeWidth = 2f
         )
-        
-        drawCircle(
-            color = indicatorColor,
-            radius = 6f,
-            center = Offset(currentX, currentCarrierY)
-        )
-        
         drawLine(
             color = indicatorColor.copy(alpha = 0.5f),
             start = Offset(currentX, currentUpperY),
