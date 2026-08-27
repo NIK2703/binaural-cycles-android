@@ -32,10 +32,20 @@
 #define LOGD(...) ((void)0)
 #endif
 
-// Всегда включённый лог стыков пакетов (release тоже): снимается через
-// adb logcat -s PKG_BOUNDARY — показывает, ЧТО прыгает на границе.
+// Лог стыков пакетов (PKG_BOUNDARY). ОТКЛЮЧЕН по умолчанию — включается
+// только при debug.binaural.segment_log=1 (как SEGMENT_DEBUG), иначе в
+// release/debug сборке засоряет logcat. Для включения:
+//   adb shell setprop debug.binaural.segment_log 1  (и перезапуск движка).
 #if defined(ANDROID) && !defined(AUDIO_TEST_BUILD)
-#define PKG_LOG(...) __android_log_print(ANDROID_LOG_INFO, "PKG_BOUNDARY", __VA_ARGS__)
+#include <sys/system_properties.h>
+inline bool pkgBoundaryLogEnabled() {
+    static const bool enabled = []() {
+        char v[PROP_VALUE_MAX] = {0};
+        return __system_property_get("debug.binaural.segment_log", v) > 0 && v[0] == '1';
+    }();
+    return enabled;
+}
+#define PKG_LOG(...) do { if (pkgBoundaryLogEnabled()) __android_log_print(ANDROID_LOG_INFO, "PKG_BOUNDARY", __VA_ARGS__); } while (0)
 #else
 #define PKG_LOG(...) ((void)0)
 #endif
@@ -285,10 +295,11 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
             //    (идемпотентно; TIMER не трогаем — его состоянием владеет фазовая машина).
             {
                 BinauralConfig resumeCfg;
-                {
-                    std::shared_lock<std::shared_mutex> lock(m_configMutex);
-                    resumeCfg = m_config;
-                }
+                // unique_lock: защищаем и чтение m_config, и запись
+                // m_state.channelsSwapped (синхронно с isChannelsSwapped(),
+                // читающим поле под shared_lock из UI-потока).
+                std::unique_lock<std::shared_mutex> lock(m_configMutex);
+                resumeCfg = m_config;
                 if (!resumeCfg.channelSwapEnabled) {
                     if (m_state.channelsSwapped) {
                         LOGD("setPlaying(resume): swap disabled while paused -> force normal");
@@ -311,6 +322,10 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
             anchorUiTimeline(resumeTime, resumeTime);
             return;
         }
+        // ЖЁСТКАЯ гарантия первого сэмпла = 0: свежий старт всегда обнуляет фазы
+        // генератора, независимо от порядка вызовов на стороне Kotlin.
+        // (resetState() в Kotlin делает то же самое — операция идемпотентна.)
+        m_generator.resetState(m_state);
         BufferPackagePlanner planner;
         planner.resetState(m_state);
         m_state.lastSwapElapsedMs = 0;
@@ -357,10 +372,10 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // бесщёлочно; не ждём первого fade-цикла.
         {
             BinauralConfig startCfg;
-            {
-                std::shared_lock<std::shared_mutex> lock(m_configMutex);
-                startCfg = m_config;
-            }
+            // unique_lock: чтение m_config + запись m_state.channelsSwapped
+            // (синхронно с isChannelsSwapped() из UI-потока под shared_lock).
+            std::unique_lock<std::shared_mutex> lock(m_configMutex);
+            startCfg = m_config;
             if (startCfg.channelSwapEnabled &&
                 startCfg.channelSwapMode == ChannelSwapMode::TREND &&
                 !startCfg.curve.lowerFreqTable.empty() &&
@@ -378,6 +393,16 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
     }
 }
 
+void BinauralEngine::setCurveTimeSeconds(float timeSeconds) {
+    const float t = normalizeTimeOfDay(timeSeconds);
+    // Единый носитель времени кривой + совместимость с legacy-диагностикой
+    m_curveTimeSeconds.store(t, std::memory_order_relaxed);
+    m_baseTimeSeconds.store(static_cast<int32_t>(t), std::memory_order_relaxed);
+    m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+    // UI-указатель на позицию продолжения (иначе экстраполяция от старого якоря)
+    anchorUiTimeline(t, t);
+}
+
 void BinauralEngine::resetState() {
     m_generator.resetState(m_state);
     
@@ -392,6 +417,14 @@ void BinauralEngine::resetState() {
     // UI-таймлайн больше не валиден: после stop показываем реальное время суток
     m_uiAnchorWallMs.store(0, std::memory_order_relaxed);
     m_uiLastUiTimeSec.store(0.0f, std::memory_order_relaxed);
+}
+
+bool BinauralEngine::isChannelsSwapped() const {
+    // Безвредный, но формальный data race: поле пишется аудио-потоком,
+    // читается UI-потоком. Берём под общий мьютекс конфига — дёшево и
+    // исключает предупреждения TSan / тиринг флага.
+    std::shared_lock<std::shared_mutex> lock(m_configMutex);
+    return m_state.channelsSwapped;
 }
 
 bool BinauralEngine::isCurveConfigured() const {

@@ -125,14 +125,24 @@ inline int64_t trendSolidDurationMs(
  * Пакет 2: [solid 4s] [fade-out 1s] [fade-in 1s] [solid 30s] ...
  */
 
-// Логирование только в DEBUG сборках
+// Логирование планировщика пакетов. ОТКЛЮЧЕНО по умолчанию — включается
+// только при debug.binaural.segment_log=1 (как SEGMENT_DEBUG/PKG_BOUNDARY),
+// чтобы не засорять logcat в обычной сборке.
 #ifdef AUDIO_TEST_BUILD
 // При тестировании отключаем логирование
 #define LOGD_PLANNER(...) ((void)0)
 #elif defined(ANDROID)
 #include <android/log.h>
+#include <sys/system_properties.h>
+inline bool plannerDebugLogEnabled() {
+    static const bool enabled = []() {
+        char v[PROP_VALUE_MAX] = {0};
+        return __system_property_get("debug.binaural.segment_log", v) > 0 && v[0] == '1';
+    }();
+    return enabled;
+}
 #define LOG_TAG "BufferPackagePlanner"
-#define LOGD_PLANNER(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGD_PLANNER(...) do { if (plannerDebugLogEnabled()) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); } while (0)
 #else
 #define LOGD_PLANNER(...) ((void)0)
 #endif

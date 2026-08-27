@@ -27,7 +27,7 @@ import android.support.v4.media.session.PlaybackStateCompat
 import com.binauralcycles.BuildConfig
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
-import com.binaural.core.audio.engine.BinauralAudioEngine
+import com.binaural.core.audio.stream.BinauralStreamManager
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
@@ -101,7 +101,7 @@ class BinauralPlaybackService : Service() {
     }
 
     // Аудио-движок создаётся только в сервисе
-    private var audioEngine: BinauralAudioEngine? = null
+    private var audioEngine: BinauralStreamManager? = null
     
     // MediaSession для обработки кнопок гарнитуры
     private var mediaSession: MediaSessionCompat? = null
@@ -198,7 +198,7 @@ class BinauralPlaybackService : Service() {
         createNotificationChannel()
         
         // Создаём аудио-движок в сервисе
-        audioEngine = BinauralAudioEngine(applicationContext).apply {
+        audioEngine = BinauralStreamManager(applicationContext).apply {
             initialize()
         }
         

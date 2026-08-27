@@ -23,12 +23,24 @@
 #define LOGD(...) ((void)0)
 #endif
 
-// Логирование для отладки стыков буферов
+// Логирование для отладки стыков буферов.
+// ВАЖНО: отключено по умолчанию и включается ТОЛЬКО при
+//   adb shell setprop debug.binaural.segment_log 1
+// иначе в обычной/debug сборке эти строки (по одной на КАЖДЫЙ сегмент!)
+// засоряют logcat сотнями тысяч строк в секунду (файл в сотни МБ).
 #ifdef AUDIO_TEST_BUILD
 #define LOG_SEG(...) ((void)0)
 #elif defined(ANDROID)
 #include <android/log.h>
-#define LOG_SEG(...) __android_log_print(ANDROID_LOG_DEBUG, "SEGMENT_DEBUG", __VA_ARGS__)
+#include <sys/system_properties.h>
+inline bool segmentDebugLogEnabled() {
+    static const bool enabled = []() {
+        char v[PROP_VALUE_MAX] = {0};
+        return __system_property_get("debug.binaural.segment_log", v) > 0 && v[0] == '1';
+    }();
+    return enabled;
+}
+#define LOG_SEG(...) do { if (segmentDebugLogEnabled()) __android_log_print(ANDROID_LOG_DEBUG, "SEGMENT_DEBUG", __VA_ARGS__); } while (0)
 #else
 #include "../tests/android_stub.h"
 #define LOG_SEG(...) __android_log_print(ANDROID_LOG_DEBUG, "SEGMENT_DEBUG", __VA_ARGS__)

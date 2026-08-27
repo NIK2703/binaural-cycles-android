@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <atomic>
+#include <new>
 
 #define LOG_TAG "NativeAudioEngine"
 
@@ -17,57 +18,64 @@
 #endif
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-namespace {
-    std::unique_ptr<binaural::BinauralEngine> g_engine;
-    
-    // PULL MODEL: Атомарные переменные для polling из Kotlin
-    // Kotlin читает эти значения напрямую через JNI getters без callbacks
-    // Это устраняет overhead JNI callbacks и context switching
-    std::atomic<float> g_currentBeatFreq{0.0f};
-    std::atomic<float> g_currentCarrierFreq{0.0f};
-    std::atomic<int> g_elapsedSeconds{0};
-    std::atomic<bool> g_channelsSwapped{false};
+// ============================================================================
+// PER-INSTANCE ENGINES (фикс краша "destroyed mutex" / SIGABRT).
+//
+// Раньше здесь жил глобальный std::unique_ptr<BinauralEngine> g_engine:
+// повторный тап по пресету переиспользовал/пересоздавал его, и старый
+// поток-писатель оставался внутри generateAudioBuffer с общим m_configMutex'ом,
+// который разрушал чужой вызов нативного релиза.
+//
+// Теперь каждый Kotlin-объект NativeAudioEngine владеет СОБСТВЕННЫМ
+// C++-движком через непрозрачный jlong-дескриптор:
+//   nativeInitialize() -> new BinauralEngine, возвращается как handle;
+//   все методы принимают handle первым аргументом;
+//   нативный релиз — delete; идемпотентность (ровно одна деструкция)
+//   обеспечивается атомарным getAndSet(0) на стороне Kotlin.
+// ============================================================================
+
+static inline binaural::BinauralEngine* engineFromHandle(jlong h) {
+    return reinterpret_cast<binaural::BinauralEngine*>(h);
 }
 
 extern "C" {
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-    LOGD("JNI_OnLoad: Native library loaded (pull-model)");
+    LOGD("JNI_OnLoad: Native library loaded (per-instance, pull-model)");
     return JNI_VERSION_1_6;
 }
 
 JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved) {
-    g_engine.reset();
-    LOGD("JNI_OnUnload: Native library unloaded");
+    LOGD("JNI_OnUnload: Native library unloaded (per-instance ownership)");
 }
 
 /**
- * Инициализация движка (упрощённая - без callback объекта)
+ * Инициализация движка (per-instance).
+ * Возвращает непрозрачный jlong-хэндл, который Kotlin хранит у себя.
  */
-JNIEXPORT void JNICALL
+JNIEXPORT jlong JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInitialize(
     JNIEnv* env,
     jobject thiz
 ) {
-    LOGD("nativeInitialize (pull-model)");
-    
-    if (!g_engine) {
-        g_engine = std::make_unique<binaural::BinauralEngine>();
-    }
-    
-    // Callbacks больше не нужны - Kotlin polling читает данные напрямую
+    auto* engine = new (std::nothrow) binaural::BinauralEngine();
+    LOGD("nativeInitialize (per-instance) engine=%p", (void*)engine);
+    return reinterpret_cast<jlong>(engine);
 }
 
 /**
- * Освобождение ресурсов
+ * Освобождение ресурсов (потокобезопасно: идемпотентно при параллельном вызове).
  */
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeRelease(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    LOGD("nativeRelease");
-    g_engine.reset();
+    if (!handle) return;
+    auto* engine = engineFromHandle(handle);
+    LOGD("nativeRelease engine=%p", (void*)engine);
+    delete engine;
 }
 
 /**
@@ -77,6 +85,7 @@ JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jintArray timePoints,
     jfloatArray carrierFreqs,
     jfloatArray beatFreqs,
@@ -92,10 +101,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jint normalizationType,
     jfloat volumeNormalizationStrength
 ) {
-    if (!g_engine) return;
-    
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return;
+
     binaural::BinauralConfig config;
-    
+
     // Получаем массивы точек
     jint numPoints = env->GetArrayLength(timePoints);
     const jint numCarriers = env->GetArrayLength(carrierFreqs);
@@ -114,7 +124,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
         if (beats) env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
         return;
     }
-    
+
     config.curve.points.reserve(numPoints);
     for (int i = 0; i < numPoints; ++i) {
         config.curve.points.push_back({
@@ -123,11 +133,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
             beats[i]
         });
     }
-    
+
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
     env->ReleaseFloatArrayElements(carrierFreqs, carriers, JNI_ABORT);
     env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
-    
+
     // Устанавливаем параметры
     config.curve.interpolationType = static_cast<binaural::InterpolationType>(interpolationType);
     config.curve.splineTension = splineTension;
@@ -142,9 +152,9 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     config.channelSwapPauseDurationMs = channelSwapPauseDurationMs;
     config.normalizationType = static_cast<binaural::NormalizationType>(normalizationType);
     config.volumeNormalizationStrength = volumeNormalizationStrength;
-    
+
     // Lookup-таблица строится внутри BinauralEngine::setConfig (единственная сборка)
-    g_engine->setConfig(config);
+    engine->setConfig(config);
 }
 
 /**
@@ -154,10 +164,12 @@ JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetSampleRate(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jint sampleRate
 ) {
-    if (g_engine) {
-        g_engine->setSampleRate(sampleRate);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setSampleRate(sampleRate);
     }
 }
 
@@ -167,15 +179,12 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetSampleRate(
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeResetState(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    if (g_engine) {
-        g_engine->resetState();
-        // Сбрасываем атомарные переменные
-        g_currentBeatFreq.store(0.0f, std::memory_order_relaxed);
-        g_currentCarrierFreq.store(0.0f, std::memory_order_relaxed);
-        g_elapsedSeconds.store(0, std::memory_order_relaxed);
-        g_channelsSwapped.store(false, std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->resetState();
     }
 }
 
@@ -187,14 +196,13 @@ JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaying(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jboolean playing,
     jboolean preserveTimeline
 ) {
-    if (g_engine) {
-        g_engine->setPlaying(playing, preserveTimeline == JNI_TRUE);
-        // Свежий старт в TREND-режиме может выставить swapped до первого буфера —
-        // обновляем зеркало сразу, чтобы UI-индикатор не показывал устаревшее значение
-        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setPlaying(playing, preserveTimeline == JNI_TRUE);
     }
 }
 
@@ -205,10 +213,29 @@ JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaybackStartTime(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jlong startTimeMs
 ) {
-    if (g_engine) {
-        g_engine->setPlaybackStartTime(startTimeMs);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setPlaybackStartTime(startTimeMs);
+    }
+}
+
+/**
+ * Явная установка позиции кривой (секунды суток) для продолжения таймлайна
+ * в свежем движке (resume/handoff).
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetCurveTime(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jint timeSeconds
+) {
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setCurveTimeSeconds(static_cast<float>(timeSeconds));
     }
 }
 
@@ -220,26 +247,20 @@ JNIEXPORT jboolean JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBuffer(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jfloatArray buffer,
     jint samplesPerChannel
 ) {
-    if (!g_engine) return JNI_FALSE;
-    
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return JNI_FALSE;
+
     jfloat* bufferPtr = env->GetFloatArrayElements(buffer, nullptr);
     if (!bufferPtr) return JNI_FALSE;
-    
-    int generated = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
-    
-    // PULL MODEL: Обновляем атомарные переменные после генерации
-    if (generated > 0) {
-        g_currentBeatFreq.store(g_engine->getCurrentBeatFrequency(), std::memory_order_relaxed);
-        g_currentCarrierFreq.store(g_engine->getCurrentCarrierFrequency(), std::memory_order_relaxed);
-        g_elapsedSeconds.store(g_engine->getElapsedSeconds(), std::memory_order_relaxed);
-        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
-    }
-    
+
+    int generated = engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
+
     env->ReleaseFloatArrayElements(buffer, bufferPtr, 0);
-    
+
     return generated > 0 ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -252,17 +273,19 @@ JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jobject directBuffer,
     jint samplesPerChannel
 ) {
-    if (!g_engine) return 0;
-    
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0;
+
     float* bufferPtr = static_cast<float*>(env->GetDirectBufferAddress(directBuffer));
     if (!bufferPtr) {
         LOGE("nativeGenerateBufferDirect: Failed to get direct buffer address");
         return 0;
     }
-    
+
     jlong bufferCapacity = env->GetDirectBufferCapacity(directBuffer);
     jlong requiredSize = static_cast<jlong>(samplesPerChannel) * 2 * sizeof(float);
     if (bufferCapacity < requiredSize) {
@@ -270,29 +293,23 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect
              (long)requiredSize, (long)bufferCapacity);
         return 0;
     }
-    
-    int generated = g_engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
-    
-    // PULL MODEL: Обновляем атомарные переменные после генерации
-    if (generated > 0) {
-        g_currentBeatFreq.store(g_engine->getCurrentBeatFrequency(), std::memory_order_relaxed);
-        g_currentCarrierFreq.store(g_engine->getCurrentCarrierFrequency(), std::memory_order_relaxed);
-        g_elapsedSeconds.store(g_engine->getElapsedSeconds(), std::memory_order_relaxed);
-        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
-    }
-    
+
+    int generated = engine->generateAudioBuffer(bufferPtr, samplesPerChannel);
+
     return generated;
 }
 
 /**
- * Получение текущей частоты биений (из атомарной переменной)
+ * Получение текущей частоты биений (из атомарного поля движка)
  */
 JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentBeatFrequency(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    return g_currentBeatFreq.load(std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    return engine ? engine->getCurrentBeatFrequency() : 0.0f;
 }
 
 /**
@@ -303,17 +320,19 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentBeatFreque
 JNIEXPORT jfloatArray JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetFrequenciesAtCurrentTime(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    if (!g_engine) return nullptr;
-    
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return nullptr;
+
     // null ТОЛЬКО когда кривая не сконфигурирована; 0/0 — легитимная точка графика
-    if (!g_engine->isCurveConfigured()) {
+    if (!engine->isCurveConfigured()) {
         return nullptr;
     }
-    
-    auto result = g_engine->getFrequenciesAtCurrentTime();
-    
+
+    auto result = engine->getFrequenciesAtCurrentTime();
+
     jfloatArray resultArray = env->NewFloatArray(2);
     if (resultArray) {
         const jfloat data[2] = { result.first, result.second };
@@ -323,36 +342,42 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetFrequenciesAtCurr
 }
 
 /**
- * Получение текущей несущей частоты (из атомарной переменной)
+ * Получение текущей несущей частоты (из атомарного поля движка)
  */
 JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentCarrierFrequency(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    return g_currentCarrierFreq.load(std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    return engine ? engine->getCurrentCarrierFrequency() : 0.0f;
 }
 
 /**
- * Получение прошедшего времени (из атомарной переменной)
+ * Получение прошедшего времени (из атомарного поля движка)
  */
 JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetElapsedSeconds(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    return g_elapsedSeconds.load(std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    return engine ? engine->getElapsedSeconds() : 0;
 }
 
 /**
- * Получение состояния перестановки каналов (из атомарной переменной)
+ * Получение состояния перестановки каналов (из движка)
  */
 JNIEXPORT jboolean JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeIsChannelsSwapped(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    return g_channelsSwapped.load(std::memory_order_relaxed) ? JNI_TRUE : JNI_FALSE;
+    auto* engine = engineFromHandle(handle);
+    return (engine && engine->isChannelsSwapped()) ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -361,11 +386,12 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeIsChannelsSwapped(
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeUpdateElapsedTime(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    if (g_engine) {
-        g_engine->updateElapsedTime();
-        g_elapsedSeconds.store(g_engine->getElapsedSeconds(), std::memory_order_relaxed);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->updateElapsedTime();
     }
 }
 
@@ -376,10 +402,12 @@ JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetBatchDurationMinutes(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jint durationMinutes
 ) {
-    if (g_engine) {
-        g_engine->setBatchDurationMinutes(durationMinutes);
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setBatchDurationMinutes(durationMinutes);
         LOGD("Batch duration set to %d minutes", durationMinutes);
     }
 }
@@ -390,9 +418,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetBatchDurationMinu
 JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetBatchDurationMinutes(
     JNIEnv* env,
-    jobject thiz
+    jobject thiz,
+    jlong handle
 ) {
-    return g_engine ? g_engine->getBatchDurationMinutes() : 0;
+    auto* engine = engineFromHandle(handle);
+    return engine ? engine->getBatchDurationMinutes() : 0;
 }
 
 /**
@@ -403,27 +433,21 @@ JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBatch(
     JNIEnv* env,
     jobject thiz,
+    jlong handle,
     jobject directBuffer,
     jint maxSamplesPerChannel
 ) {
-    if (!g_engine) return 0;
-    
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0;
+
     float* bufferPtr = static_cast<float*>(env->GetDirectBufferAddress(directBuffer));
     if (!bufferPtr) {
         LOGE("nativeGenerateBatch: Failed to get direct buffer address");
         return 0;
     }
-    
-    int samplesGenerated = g_engine->generateBatch(bufferPtr, maxSamplesPerChannel);
-    
-    // Обновляем атомарные переменные
-    if (samplesGenerated > 0) {
-        g_currentBeatFreq.store(g_engine->getCurrentBeatFrequency(), std::memory_order_relaxed);
-        g_currentCarrierFreq.store(g_engine->getCurrentCarrierFrequency(), std::memory_order_relaxed);
-        g_elapsedSeconds.store(g_engine->getElapsedSeconds(), std::memory_order_relaxed);
-        g_channelsSwapped.store(g_engine->isChannelsSwapped(), std::memory_order_relaxed);
-    }
-    
+
+    int samplesGenerated = engine->generateBatch(bufferPtr, maxSamplesPerChannel);
+
     return samplesGenerated;
 }
 
@@ -462,13 +486,13 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
     }
-    
+
     const jint numInputPoints = env->GetArrayLength(timePoints);
     const jint numValues = env->GetArrayLength(values);
     if (numInputPoints < 2 || numValues != numInputPoints) {
         return nullptr;
     }
-    
+
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
     jfloat* vals = env->GetFloatArrayElements(values, nullptr);
     if (!times || !vals) {
@@ -476,21 +500,21 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
         if (vals) env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
-    
+
     jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
         env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
         env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
-    
+
     std::vector<jfloat> outputValues(numOutputPoints);
     constexpr int SECONDS_PER_DAY = 86400;
-    
+
     for (int i = 0; i < numOutputPoints; ++i) {
         const float t = static_cast<float>(i) / (numOutputPoints - 1);
         const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
-        
+
         int leftIndex = -1;
         for (int j = 0; j < numInputPoints - 1; ++j) {
             if (times[j] <= targetSeconds && targetSeconds < times[j + 1]) {
@@ -498,7 +522,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                 break;
             }
         }
-        
+
         if (leftIndex < 0) {
             if (targetSeconds >= times[numInputPoints - 1] || targetSeconds < times[0]) {
                 leftIndex = numInputPoints - 1;
@@ -507,11 +531,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                 continue;
             }
         }
-        
+
         const int rightIndex = (leftIndex + 1) % numInputPoints;
         int t1 = times[leftIndex];
         int t2 = times[rightIndex];
-        
+
         bool isWrapping = (leftIndex == numInputPoints - 1);
         if (isWrapping) {
             t2 += SECONDS_PER_DAY;
@@ -519,10 +543,10 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                 if (t2 <= t1) { outputValues[i] = vals[leftIndex]; continue; }
                 const float ratio = static_cast<float>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
                 const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
-                
+
                 const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
                 const int nextNextIndex = (rightIndex + 1) % numInputPoints;
-                
+
                 outputValues[i] = binaural::Interpolation::interpolate(
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
@@ -531,25 +555,25 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                 continue;
             }
         }
-        
+
         if (t2 <= t1) { outputValues[i] = vals[leftIndex]; continue; }
         const float ratio = static_cast<float>(targetSeconds - t1) / (t2 - t1);
         const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
-        
+
         const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
         const int nextNextIndex = (rightIndex + 1) % numInputPoints;
-        
+
         outputValues[i] = binaural::Interpolation::interpolate(
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
             clampedRatio, tension
         );
     }
-    
+
     env->SetFloatArrayRegion(result, 0, numOutputPoints, outputValues.data());
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
     env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
-    
+
     return result;
 }
 
@@ -567,14 +591,14 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
     if (!timePoints || !carrierFreqs || !beatFreqs) {
         return nullptr;
     }
-    
+
     const jint numPoints = env->GetArrayLength(timePoints);
     const jint numCarriers = env->GetArrayLength(carrierFreqs);
     const jint numBeats = env->GetArrayLength(beatFreqs);
     if (numPoints < 2 || numCarriers != numPoints || numBeats != numPoints) {
         return nullptr;
     }
-    
+
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
     jfloat* carriers = env->GetFloatArrayElements(carrierFreqs, nullptr);
     jfloat* beats = env->GetFloatArrayElements(beatFreqs, nullptr);
@@ -584,25 +608,25 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
         if (beats) env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
         return nullptr;
     }
-    
+
     std::vector<float> lowerFreqs(numPoints);
     std::vector<float> upperFreqs(numPoints);
-    
+
     for (int i = 0; i < numPoints; ++i) {
         lowerFreqs[i] = static_cast<float>(carriers[i] - beats[i] / 2.0);
         upperFreqs[i] = static_cast<float>(carriers[i] + beats[i] / 2.0);
     }
-    
+
     constexpr int SECONDS_PER_DAY = 86400;
     int leftIndex = -1;
-    
+
     for (int j = 0; j < numPoints - 1; ++j) {
         if (times[j] <= targetTimeSeconds && targetTimeSeconds < times[j + 1]) {
             leftIndex = j;
             break;
         }
     }
-    
+
     if (leftIndex < 0) {
         if (targetTimeSeconds >= times[numPoints - 1] || targetTimeSeconds < times[0]) {
             leftIndex = numPoints - 1;
@@ -610,14 +634,14 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
             leftIndex = 0;
         }
     }
-    
+
     const int rightIndex = (leftIndex + 1) % numPoints;
     int t1 = times[leftIndex];
     int t2 = times[rightIndex];
-    
+
     float ratio = 0.0f;
     bool isWrapping = (leftIndex == numPoints - 1);
-    
+
     if (isWrapping) {
         t2 += SECONDS_PER_DAY;
     }
@@ -628,37 +652,37 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
             ratio = static_cast<float>(targetTimeSeconds - t1) / (t2 - t1);
         }
     }
-    
+
     ratio = std::clamp(ratio, 0.0f, 1.0f);
-    
+
     const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
     const int nextNextIndex = (rightIndex + 1) % numPoints;
-    
+
     float lowerFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         lowerFreqs[prevIndex], lowerFreqs[leftIndex], lowerFreqs[rightIndex], lowerFreqs[nextNextIndex],
         ratio, tension
     );
-    
+
     float upperFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         upperFreqs[prevIndex], upperFreqs[leftIndex], upperFreqs[rightIndex], upperFreqs[nextNextIndex],
         ratio, tension
     );
-    
+
     lowerFreq = std::max(0.0f, lowerFreq);
     upperFreq = std::max(0.0f, upperFreq);
-    
+
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
     env->ReleaseFloatArrayElements(carrierFreqs, carriers, JNI_ABORT);
     env->ReleaseFloatArrayElements(beatFreqs, beats, JNI_ABORT);
-    
+
     jfloatArray result = env->NewFloatArray(2);
     if (result) {
         const jfloat resultData[2] = { lowerFreq, upperFreq };
         env->SetFloatArrayRegion(result, 0, 2, resultData);
     }
-    
+
     return result;
 }
 
@@ -697,13 +721,13 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
     }
-    
+
     const jint numInputPoints = env->GetArrayLength(timePoints);
     const jint numValues = env->GetArrayLength(values);
     if (numInputPoints < 2 || numValues != numInputPoints) {
         return nullptr;
     }
-    
+
     jint* times = env->GetIntArrayElements(timePoints, nullptr);
     jfloat* vals = env->GetFloatArrayElements(values, nullptr);
     if (!times || !vals) {
@@ -711,21 +735,21 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
         if (vals) env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
-    
+
     jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
         env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
         env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
-    
+
     std::vector<jfloat> outputValues(numOutputPoints);
     constexpr int SECONDS_PER_DAY = 86400;
-    
+
     for (int i = 0; i < numOutputPoints; ++i) {
         const float t = static_cast<float>(i) / (numOutputPoints - 1);
         const int targetSeconds = static_cast<int>(t * SECONDS_PER_DAY);
-        
+
         int leftIndex = -1;
         for (int j = 0; j < numInputPoints - 1; ++j) {
             if (times[j] <= targetSeconds && targetSeconds < times[j + 1]) {
@@ -733,7 +757,7 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                 break;
             }
         }
-        
+
         if (leftIndex < 0) {
             if (targetSeconds >= times[numInputPoints - 1] || targetSeconds < times[0]) {
                 leftIndex = numInputPoints - 1;
@@ -742,11 +766,11 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                 continue;
             }
         }
-        
+
         const int rightIndex = (leftIndex + 1) % numInputPoints;
         int t1 = times[leftIndex];
         int t2 = times[rightIndex];
-        
+
         bool isWrapping = (leftIndex == numInputPoints - 1);
         if (isWrapping) {
             t2 += SECONDS_PER_DAY;
@@ -754,10 +778,10 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                 if (t2 <= t1) { outputValues[i] = vals[leftIndex]; continue; }
                 const float ratio = static_cast<float>(targetSeconds + SECONDS_PER_DAY - t1) / (t2 - t1);
                 const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
-                
+
                 const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
                 const int nextNextIndex = (rightIndex + 1) % numInputPoints;
-                
+
                 outputValues[i] = binaural::Interpolation::interpolate(
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
@@ -766,25 +790,25 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                 continue;
             }
         }
-        
+
         if (t2 <= t1) { outputValues[i] = vals[leftIndex]; continue; }
         const float ratio = static_cast<float>(targetSeconds - t1) / (t2 - t1);
         const float clampedRatio = std::clamp(ratio, 0.0f, 1.0f);
-        
+
         const int prevIndex = (leftIndex - 1 + numInputPoints) % numInputPoints;
         const int nextNextIndex = (rightIndex + 1) % numInputPoints;
-        
+
         outputValues[i] = binaural::Interpolation::interpolate(
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
             clampedRatio, tension
         );
     }
-    
+
     env->SetFloatArrayRegion(result, 0, numOutputPoints, outputValues.data());
     env->ReleaseIntArrayElements(timePoints, times, JNI_ABORT);
     env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
-    
+
     return result;
 }
 
@@ -794,80 +818,93 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
 
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetVirtualTimeEnabled(
-    JNIEnv* env, jobject thiz, jboolean enabled) {
+    JNIEnv* env, jobject thiz, jlong handle, jboolean enabled) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (g_engine) g_engine->setVirtualTimeEnabled(enabled == JNI_TRUE);
+    auto* engine = engineFromHandle(handle);
+    if (engine) engine->setVirtualTimeEnabled(enabled == JNI_TRUE);
 #else
-    (void)enabled;
+    (void)handle; (void)enabled;
 #endif
 }
 
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugScrub(
-    JNIEnv* env, jobject thiz, jint timeSeconds) {
+    JNIEnv* env, jobject thiz, jlong handle, jint timeSeconds) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (g_engine) g_engine->scrubVirtualTime(static_cast<float>(timeSeconds));
+    auto* engine = engineFromHandle(handle);
+    if (engine) engine->scrubVirtualTime(static_cast<float>(timeSeconds));
 #else
-    (void)timeSeconds;
+    (void)handle; (void)timeSeconds;
 #endif
 }
 
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetTimeScale(
-    JNIEnv* env, jobject thiz, jfloat scale) {
+    JNIEnv* env, jobject thiz, jlong handle, jfloat scale) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (g_engine) g_engine->setVirtualTimeScale(scale);
+    auto* engine = engineFromHandle(handle);
+    if (engine) engine->setVirtualTimeScale(scale);
 #else
-    (void)scale;
+    (void)handle; (void)scale;
 #endif
 }
 
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetRunning(
-    JNIEnv* env, jobject thiz, jboolean running) {
+    JNIEnv* env, jobject thiz, jlong handle, jboolean running) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (g_engine) g_engine->setVirtualTimeRunning(running == JNI_TRUE);
+    auto* engine = engineFromHandle(handle);
+    if (engine) engine->setVirtualTimeRunning(running == JNI_TRUE);
 #else
-    (void)running;
+    (void)handle; (void)running;
 #endif
 }
 
 JNIEXPORT void JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugReset(
-    JNIEnv* env, jobject thiz) {
+    JNIEnv* env, jobject thiz, jlong handle) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (g_engine) g_engine->resetVirtualTimeToReal();
+    auto* engine = engineFromHandle(handle);
+    if (engine) engine->resetVirtualTimeToReal();
+#else
+    (void)handle;
 #endif
 }
 
 JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetVirtualTime(
-    JNIEnv* env, jobject thiz) {
+    JNIEnv* env, jobject thiz, jlong handle) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (!g_engine) return 0;
-    return static_cast<jint>(g_engine->getVirtualTimeOfDaySeconds());
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0;
+    return static_cast<jint>(engine->getVirtualTimeOfDaySeconds());
 #else
+    (void)handle;
     return 0;
 #endif
 }
 
 JNIEXPORT jboolean JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugIsEnabled(
-    JNIEnv* env, jobject thiz) {
+    JNIEnv* env, jobject thiz, jlong handle) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    return (g_engine && g_engine->isVirtualTimeEnabled()) ? JNI_TRUE : JNI_FALSE;
+    auto* engine = engineFromHandle(handle);
+    return (engine && engine->isVirtualTimeEnabled()) ? JNI_TRUE : JNI_FALSE;
 #else
+    (void)handle;
     return JNI_FALSE;
 #endif
 }
 
 JNIEXPORT jfloat JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetTimeScale(
-    JNIEnv* env, jobject thiz) {
+    JNIEnv* env, jobject thiz, jlong handle) {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
-    if (!g_engine) return 1.0f;
-    return g_engine->getVirtualTimeScale();
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 1.0f;
+    return engine->getVirtualTimeScale();
 #else
+    (void)handle;
     return 1.0f;
 #endif
 }
@@ -876,9 +913,10 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetTimeScale(
 // В release это просто реальные часы.
 JNIEXPORT jint JNICALL
 Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentTimeOfDay(
-    JNIEnv* env, jobject thiz) {
-    if (!g_engine) return 0;
-    return static_cast<jint>(g_engine->getCurrentTimeOfDaySeconds());
+    JNIEnv* env, jobject thiz, jlong handle) {
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0;
+    return static_cast<jint>(engine->getCurrentTimeOfDaySeconds());
 }
 
 } // extern "C"

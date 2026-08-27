@@ -137,6 +137,12 @@ public:
      * Установить время начала воспроизведения (для расчёта elapsed)
      */
     void setPlaybackStartTime(int64_t startTimeMs) { m_playbackStartTimeMs = startTimeMs; }
+
+    /**
+     * Явно задать позицию кривой (секунды суток) для продолжения таймлайна
+     * в свежем движке (resume/handoff). Вызывать до setPlaying(true, true).
+     */
+    void setCurveTimeSeconds(float timeSeconds);
     
     /**
      * Обновить прошедшее время
@@ -146,7 +152,7 @@ public:
     /**
      * Получить состояние перестановки каналов
      */
-    bool isChannelsSwapped() const { return m_state.channelsSwapped; }
+    bool isChannelsSwapped() const;
     
     /**
      * Получить частоты каналов для текущего времени из lookup table.
@@ -184,6 +190,22 @@ public:
     float getVirtualTimeScale() const;
 
 private:
+    // ========================================================================
+    // ИНВАРИАНТ ПОТОКОВ (важно не сломать!):
+    //  - ТОЛЬКО АУДИО-ПОТОК (писатель) вызывает методы, читающие/мутирующие
+    //    m_generator и m_state: generateAudioBuffer / generateBatch.
+    //  - resetState / setPlaying / setCurveTimeSeconds / setConfig вызываются
+    //    нитью-владельцем СТРОГО до запуска писателя либо после его
+    //    гарантированного выхода (см. BinauralStreamImpl.releaseInternal).
+    //  - m_configMutex защищает ТОЛЬКО m_config (чтение копии под
+    //    shared_lock в аудио-потоке и подмена под unique_lock в setConfig).
+    //    Если когда-либо понадобится «живая» переконфигурация во время
+    //    воспроизведения — потребуется расширить синхронизацию на весь
+    //    цикл генерации (или перезапускать стрим), иначе гонка на
+    //    векторах кривой / состоянии генератора.
+    //  - m_state.channelsSwapped пишется под unique_lock(m_configMutex)
+    //    (setPlaying) и читается под shared_lock (isChannelsSwapped).
+    // ========================================================================
     BinauralConfig m_config;
     AudioGenerator m_generator;
     GeneratorState m_state;

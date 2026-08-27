@@ -11,22 +11,22 @@ import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * JNI обёртка для C++ аудиодвижка.
- * 
- * PULL MODEL ARCHITECTURE:
- * - C++ обновляет атомарные переменные после каждой генерации буфера
- * - Kotlin polling читает значения через JNI getters без callbacks
- * - Это устраняет overhead JNI callbacks и context switching
- * 
- * ОПТИМИЗАЦИЯ ЭНЕРГОПОТРЕБЛЕНИЯ:
- * - Убраны JNI callbacks из C++ в Java (push model)
- * - Kotlin polling читает данные только когда нужно (pull model)
- * - Нет лишних JNI calls и context switching
+ *
+ * PER-INSTANCE ARCHITECTURE (фикс краша "destroyed mutex" / SIGABRT):
+ * - Каждый Kotlin-объект владеет СОБСТВЕННЫМ C++-движком через непрозрачный
+ *   jlong-хэндл (nativeHandle).
+ * - release() делает атомарный getAndSet(0): движок удаляется ровно один раз,
+ *   даже если релиз одновременно зовут писатель (выход из лупа) и менеджер.
+ * - Все нативные вызовы читают snapshot хэндла и тихо возвращают дефолт, если
+ *   движок уже освобождён — поэтому повторный тап по пресету больше не делит
+ *   один разрушаемый движок между старым (ещё пишущим) и новым стримом.
  */
 class NativeAudioEngine {
-    
+
     companion object {
         private const val TAG = "NativeAudioEngine"
 
@@ -39,7 +39,7 @@ class NativeAudioEngine {
         init {
             try {
                 System.loadLibrary("binaural-engine")
-                Log.d(TAG, "Native library loaded successfully (pull-model)")
+                Log.d(TAG, "Native library loaded successfully (per-instance)")
             } catch (e: UnsatisfiedLinkError) {
                 libraryLoadFailed = true
                 Log.e(TAG, "Failed to load native library", e)
@@ -56,23 +56,29 @@ class NativeAudioEngine {
             return true
         }
     }
-    
+
     // Текущая конфигурация
     private var currentConfig: BinauralConfig? = null
 
     @Volatile
     private var isInitialized = false
 
+    // Непрозрачный хэндл per-instance C++-движка. getAndSet(0) в release()
+    // гарантирует ровно одну нативную деструкцию.
+    private val nativeHandle = AtomicLong(0L)
+
     // C11: сериализация play/stop/resetState
     private val playbackLock = Any()
-    
+
     // Настройки режима расслабления
     private var relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
-    
-    // Нативные методы (PULL MODEL - без callback параметра)
-    private external fun nativeInitialize()
-    private external fun nativeRelease()
+
+    // Нативные методы: ВСЕ принимают хэндл движка первым аргументом.
+    // nativeInitialize возвращает хэндл свежего per-instance движка.
+    private external fun nativeInitialize(): Long
+    private external fun nativeRelease(handle: Long)
     private external fun nativeSetConfig(
+        handle: Long,
         timePoints: IntArray,
         carrierFreqs: FloatArray,
         beatFreqs: FloatArray,
@@ -88,37 +94,36 @@ class NativeAudioEngine {
         normalizationType: Int,
         volumeNormalizationStrength: Float
     )
-    private external fun nativeSetSampleRate(sampleRate: Int)
-    private external fun nativeResetState()
-    private external fun nativeSetPlaying(playing: Boolean, preserveTimeline: Boolean)
-    private external fun nativeSetPlaybackStartTime(startTimeMs: Long)
-    
+    private external fun nativeSetSampleRate(handle: Long, sampleRate: Int)
+    private external fun nativeResetState(handle: Long)
+    private external fun nativeSetPlaying(handle: Long, playing: Boolean, preserveTimeline: Boolean)
+    private external fun nativeSetPlaybackStartTime(handle: Long, startTimeMs: Long)
+    private external fun nativeSetCurveTime(handle: Long, timeSeconds: Int)
+
     // FloatArray версия (с копированием) - для обратной совместимости
-    private external fun nativeGenerateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean
-    
+    private external fun nativeGenerateBuffer(handle: Long, buffer: FloatArray, samplesPerChannel: Int): Boolean
+
     // Zero-copy версия через DirectByteBuffer - ОПТИМИЗИРОВАНО
-    private external fun nativeGenerateBufferDirect(buffer: java.nio.ByteBuffer, samplesPerChannel: Int): Int
-    
-    // PULL MODEL: Геттеры читают из атомарных переменных в C++
-    private external fun nativeGetCurrentBeatFrequency(): Float
-    private external fun nativeGetCurrentCarrierFrequency(): Float
-    private external fun nativeGetElapsedSeconds(): Int
-    private external fun nativeIsChannelsSwapped(): Boolean
-    // reserved
-    private external fun nativeUpdateElapsedTime()
-    
-    // O(1) получение частот из lookup table по текущему времени
-    private external fun nativeGetFrequenciesAtCurrentTime(): FloatArray?
-    
+    private external fun nativeGenerateBufferDirect(handle: Long, buffer: java.nio.ByteBuffer, samplesPerChannel: Int): Int
+
+    // Геттеры читают атомарные поля СВОЕГО движка (устраняет рассинхрон
+    // частот между параллельными стримами при кроссфейде).
+    private external fun nativeGetCurrentBeatFrequency(handle: Long): Float
+    private external fun nativeGetCurrentCarrierFrequency(handle: Long): Float
+    private external fun nativeGetElapsedSeconds(handle: Long): Int
+    private external fun nativeIsChannelsSwapped(handle: Long): Boolean
+    private external fun nativeUpdateElapsedTime(handle: Long)
+    private external fun nativeGetFrequenciesAtCurrentTime(handle: Long): FloatArray?
+
     // === Нативные методы для интерполяции (используются в UI для графика) ===
-    
+
     private external fun nativeInterpolate(
         p0: Float, p1: Float, p2: Float, p3: Float,
         t: Float,
         interpolationType: Int,
         tension: Float
     ): Float
-    
+
     private external fun nativeGenerateInterpolatedCurve(
         timePoints: IntArray,
         values: FloatArray,
@@ -126,7 +131,7 @@ class NativeAudioEngine {
         interpolationType: Int,
         tension: Float
     ): FloatArray?
-    
+
     private external fun nativeGetChannelFrequencies(
         timePoints: IntArray,
         carrierFreqs: FloatArray,
@@ -135,40 +140,57 @@ class NativeAudioEngine {
         interpolationType: Int,
         tension: Float
     ): FloatArray?
-    
+
+    /** Снимок хэндла для нативного вызова. 0 => движок освобождён. */
+    private inline fun h(): Long = nativeHandle.get()
+
     /**
-     * Инициализация движка
+     * Инициализация движка (идемпотентна, потокобезопасна).
      */
     fun initialize() {
         if (nativeUnavailable()) return
-        if (!isInitialized) {
-            nativeInitialize()
+        synchronized(playbackLock) {
+            if (nativeHandle.get() != 0L) return
+            val handle = nativeInitialize()
+            if (handle == 0L) {
+                Log.e(TAG, "nativeInitialize returned null handle")
+                return
+            }
+            nativeHandle.set(handle)
             isInitialized = true
-            Log.d(TAG, "Native engine initialized (pull-model)")
+            Log.d(TAG, "Native engine initialized (per-instance, handle=$handle)")
         }
     }
-    
+
     /**
-     * Освобождение ресурсов
+     * Освобождение ресурсов. Идемпотентно и потокобезопасно: атомарный
+     * getAndSet(0) гарантирует, что движок будет удалён ровно один раз,
+     * даже если релиз зовут одновременно писатель (выход из лупа) и менеджер.
      */
     fun release() {
         if (nativeUnavailable()) return
-        if (isInitialized) {
-            nativeRelease()
+        val handle = nativeHandle.getAndSet(0L)
+        if (handle != 0L) {
+            try { nativeRelease(handle) } catch (e: Exception) {
+                Log.e(TAG, "nativeRelease failed: ${e.message}")
+            }
             isInitialized = false
-            Log.d(TAG, "Native engine released")
+            Log.d(TAG, "Native engine released (handle=$handle)")
         }
     }
-    
+
     /**
      * Установить конфигурацию с настройками режима расслабления
      */
     fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
         currentConfig = config
         relaxationModeSettings = relaxationSettings
-        
+
+        val hh = h()
+        if (hh == 0L || nativeUnavailable()) return
+
         val curve = config.frequencyCurve
-        
+
         // Генерируем точки для воспроизведения в зависимости от режима расслабления
         // C1: оценка базовых кривых тем же сплайном, что и график
         val playbackPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
@@ -185,27 +207,28 @@ class NativeAudioEngine {
         } else {
             curve.points
         }
-        
+
         val numPoints = playbackPoints.size
-        
+
         val timePoints = IntArray(numPoints) { playbackPoints[it].time.toSecondOfDay() }
         val carrierFreqs = FloatArray(numPoints) { playbackPoints[it].carrierFrequency }
         val beatFreqs = FloatArray(numPoints) { playbackPoints[it].beatFrequency }
-        
+
         val interpolationType = when (curve.interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
             InterpolationType.MONOTONE -> 2
             InterpolationType.STEP -> 3
         }
-        
+
         val normalizationType = when (config.normalizationType) {
             NormalizationType.NONE -> 0
             NormalizationType.CHANNEL -> 1
             NormalizationType.TEMPORAL -> 2
         }
-        
+
         nativeSetConfig(
+            handle = hh,
             timePoints = timePoints,
             carrierFreqs = carrierFreqs,
             beatFreqs = beatFreqs,
@@ -221,11 +244,11 @@ class NativeAudioEngine {
             normalizationType = normalizationType,
             volumeNormalizationStrength = config.volumeNormalizationStrength
         )
-        
+
         Log.d(TAG, "Config updated with ${curve.points.size} real points, " +
             "${if (relaxationSettings.enabled) "relaxation mode enabled" else "relaxation mode disabled"}")
     }
-    
+
     /**
      * Генерирует виртуальные точки для SMOOTH режима расслабления.
      * Чередует точки на графике и снижающие точки с заданным интервалом.
@@ -238,9 +261,9 @@ class NativeAudioEngine {
         splineTension: Float
     ): List<FrequencyPoint> {
         if (!settings.enabled || points.size < 2) return emptyList()
-        
+
         val virtualPoints = mutableListOf<FrequencyPoint>()
-        
+
         val carrierReduction = settings.carrierReductionPercent / 100.0f
         val beatReduction = settings.beatReductionPercent / 100.0f
         // C1: guard от бесконечного цикла при нецелом интервале
@@ -260,7 +283,7 @@ class NativeAudioEngine {
             val time = LocalTime.fromSecondOfDay((currentTimeSeconds % daySeconds).toInt())
             val baseCarrier = interpolateCarrierAtTime(sortedPoints, time, interpType, splineTension)
             val baseBeat = interpolateBeatAtTime(sortedPoints, time, interpType, splineTension)
-            
+
             if (isRelaxationPoint) {
                 // Снижающая точка
                 virtualPoints.add(FrequencyPoint(
@@ -272,15 +295,15 @@ class NativeAudioEngine {
                 // Точка на графике (базовая)
                 virtualPoints.add(FrequencyPoint(time, baseCarrier, baseBeat))
             }
-            
+
             isRelaxationPoint = !isRelaxationPoint
             currentTimeSeconds += intervalSeconds
         }
-        
+
         // Сортируем по времени
         return virtualPoints.sortedBy { it.time.toSecondOfDay() }
     }
-    
+
     /**
      * Генерирует виртуальные точки для STEP режима расслабления.
      * Создаёт группы из 4 точек для каждого периода расслабления, образующие трапецию.
@@ -293,16 +316,16 @@ class NativeAudioEngine {
         splineTension: Float
     ): List<FrequencyPoint> {
         if (!settings.enabled || points.size < 2) return emptyList()
-        
+
         val virtualPoints = mutableListOf<FrequencyPoint>()
-        
+
         val carrierReduction = settings.carrierReductionPercent / 100.0f
         val beatReduction = settings.beatReductionPercent / 100.0f
-        
+
         val gapSeconds = settings.gapBetweenRelaxationMinutes * 60L
         val transitionSeconds = settings.transitionPeriodMinutes * 60L
         val durationSeconds = settings.relaxationDurationMinutes * 60L
-        
+
         // Полный период расслабления = 2 * переход + длительность
         val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
 
@@ -364,11 +387,11 @@ class NativeAudioEngine {
             // Переходим к следующему периоду: полный период + пауза между периодами
             periodStartSeconds += stepSeconds
         }
-        
+
         // Сортируем по времени
         return virtualPoints.sortedBy { it.time.toSecondOfDay() }
     }
-    
+
     /**
      * Интерполирует несущую частоту для заданного времени.
      */
@@ -380,7 +403,7 @@ class NativeAudioEngine {
     ): Float {
         return interpolateValueAtTime(points, time, interpType, splineTension) { it.carrierFrequency }
     }
-    
+
     /**
      * Интерполирует частоту биения для заданного времени.
      */
@@ -408,26 +431,26 @@ class NativeAudioEngine {
         val sortedPoints = points
         val size = sortedPoints.size
         val targetSeconds = time.toSecondOfDay()
-        
+
         // Находим интервал
         for (i in 0 until size) {
             val current = sortedPoints[i]
             val next = sortedPoints[(i + 1) % size]
-            
+
             val currentSeconds = current.time.toSecondOfDay()
             var nextSeconds = next.time.toSecondOfDay()
-            
+
             // Обработка перехода через полночь
             if (nextSeconds <= currentSeconds) {
                 nextSeconds += 24 * 3600
             }
-            
+
             val adjustedTarget = if (targetSeconds < currentSeconds && i == size - 1) {
                 targetSeconds + 24 * 3600
             } else {
                 targetSeconds
             }
-            
+
             if (adjustedTarget in currentSeconds..nextSeconds) {
                 if (nextSeconds == currentSeconds) return valueOf(current)
                 val t = (adjustedTarget - currentSeconds).toFloat() / (nextSeconds - currentSeconds)
@@ -441,42 +464,46 @@ class NativeAudioEngine {
                 )
             }
         }
-        
+
         return valueOf(sortedPoints.first())
     }
-    
+
     /**
      * Обновить настройки режима расслабления
      */
     fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
         relaxationModeSettings = settings
-        
+
         // Если есть текущая конфигурация, обновляем с новыми настройками расслабления
         currentConfig?.let { config ->
             updateConfig(config, settings)
         }
-        
+
         Log.d(TAG, "Relaxation mode settings updated: enabled=${settings.enabled}")
     }
-    
+
     /**
      * Установить частоту дискретизации
      */
     fun setSampleRate(sampleRate: Int) {
         if (nativeUnavailable()) return
-        nativeSetSampleRate(sampleRate)
+        val hh = h()
+        if (hh == 0L) return
+        nativeSetSampleRate(hh, sampleRate)
     }
-    
+
     /**
      * Сбросить состояние
      */
     fun resetState() {
         if (nativeUnavailable()) return
         synchronized(playbackLock) {
-            nativeResetState()
+            val hh = h()
+            if (hh == 0L) return
+            nativeResetState(hh)
         }
     }
-    
+
     /**
      * Начать воспроизведение
      * @param preserveTimeline true = RESUME: продолжить с того же места кривой
@@ -486,20 +513,24 @@ class NativeAudioEngine {
         if (nativeUnavailable()) return
         // C11: атомарность пары setPlaybackStartTime + setPlaying
         synchronized(playbackLock) {
+            val hh = h()
+            if (hh == 0L) return
             if (!preserveTimeline) {
-                nativeSetPlaybackStartTime(System.currentTimeMillis())
+                nativeSetPlaybackStartTime(hh, System.currentTimeMillis())
             }
-            nativeSetPlaying(true, preserveTimeline)
+            nativeSetPlaying(hh, true, preserveTimeline)
         }
     }
-    
+
     /**
      * Остановить воспроизведение
      */
     fun stop() {
         if (nativeUnavailable()) return
         synchronized(playbackLock) {
-            nativeSetPlaying(false, false)
+            val hh = h()
+            if (hh == 0L) return
+            nativeSetPlaying(hh, false, false)
         }
     }
 
@@ -510,7 +541,23 @@ class NativeAudioEngine {
     fun setPlaybackStartTime(startTimeMs: Long) {
         if (nativeUnavailable()) return
         synchronized(playbackLock) {
-            nativeSetPlaybackStartTime(startTimeMs)
+            val hh = h()
+            if (hh == 0L) return
+            nativeSetPlaybackStartTime(hh, startTimeMs)
+        }
+    }
+
+    /**
+     * Явно задать позицию кривой (секунды суток) для продолжения воспроизведения
+     * в НОВОМ нативном движке (resume из паузы / handoff). Вызывать ДО
+     * play(preserveTimeline = true), иначе свежий движок сгенерирует с 00:00.
+     */
+    fun setCurveTime(timeSeconds: Int) {
+        if (nativeUnavailable()) return
+        synchronized(playbackLock) {
+            val hh = h()
+            if (hh == 0L) return
+            nativeSetCurveTime(hh, timeSeconds)
         }
     }
 
@@ -519,9 +566,11 @@ class NativeAudioEngine {
      */
     fun generateBuffer(buffer: FloatArray, samplesPerChannel: Int): Boolean {
         if (nativeUnavailable()) return false
-        return nativeGenerateBuffer(buffer, samplesPerChannel)
+        val hh = h()
+        if (hh == 0L) return false
+        return nativeGenerateBuffer(hh, buffer, samplesPerChannel)
     }
-    
+
     /**
      * Сгенерировать буфер аудио (Zero-copy через DirectByteBuffer)
      * ОПТИМИЗАЦИЯ: Избегает копирования данных между Java и C++
@@ -533,18 +582,34 @@ class NativeAudioEngine {
         samplesPerChannel: Int
     ): Int {
         if (nativeUnavailable()) return 0
-        return nativeGenerateBufferDirect(directBuffer, samplesPerChannel)
+        val hh = h()
+        if (hh == 0L) return 0
+        return nativeGenerateBufferDirect(hh, directBuffer, samplesPerChannel)
     }
-    
-    // === PULL MODEL: Геттеры читают из атомарных переменных в C++ ===
-    // Эти методы вызываются из Kotlin после каждой генерации буфера
-    // вместо callbacks из C++
-    
-    fun getCurrentBeatFrequency(): Float = if (nativeUnavailable()) 0f else nativeGetCurrentBeatFrequency()
-    fun getCurrentCarrierFrequency(): Float = if (nativeUnavailable()) 0f else nativeGetCurrentCarrierFrequency()
-    fun getElapsedSeconds(): Int = if (nativeUnavailable()) 0 else nativeGetElapsedSeconds()
-    fun isChannelsSwapped(): Boolean = !nativeUnavailable() && nativeIsChannelsSwapped()
-    
+
+    // === Геттеры читают атомарные поля СВОЕГО движка (per-instance) ===
+
+    fun getCurrentBeatFrequency(): Float {
+        if (nativeUnavailable()) return 0f
+        val hh = h()
+        return if (hh == 0L) 0f else nativeGetCurrentBeatFrequency(hh)
+    }
+    fun getCurrentCarrierFrequency(): Float {
+        if (nativeUnavailable()) return 0f
+        val hh = h()
+        return if (hh == 0L) 0f else nativeGetCurrentCarrierFrequency(hh)
+    }
+    fun getElapsedSeconds(): Int {
+        if (nativeUnavailable()) return 0
+        val hh = h()
+        return if (hh == 0L) 0 else nativeGetElapsedSeconds(hh)
+    }
+    fun isChannelsSwapped(): Boolean {
+        if (nativeUnavailable()) return false
+        val hh = h()
+        return hh != 0L && nativeIsChannelsSwapped(hh)
+    }
+
     /**
      * Получить частоты для текущего времени из lookup table.
      * O(1) операция - использует предвычисленную таблицу в C++.
@@ -552,46 +617,52 @@ class NativeAudioEngine {
      */
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? {
         if (nativeUnavailable()) return null
-        val result = nativeGetFrequenciesAtCurrentTime()
+        val hh = h()
+        if (hh == 0L) return null
+        val result = nativeGetFrequenciesAtCurrentTime(hh)
         return result?.let { Pair(it[0], it[1]) }
     }
-    
+
     // === Нативные методы для батчевой генерации (оптимизация энергопотребления) ===
-    
-    private external fun nativeSetBatchDurationMinutes(durationMinutes: Int)
-    private external fun nativeGetBatchDurationMinutes(): Int
-    private external fun nativeGenerateBatch(buffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int
-    
+
+    private external fun nativeSetBatchDurationMinutes(handle: Long, durationMinutes: Int)
+    private external fun nativeGetBatchDurationMinutes(handle: Long): Int
+    private external fun nativeGenerateBatch(handle: Long, buffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int
+
     // === НОВОЕ: текущее время суток (учитывает virtual-режим) ===
-    private external fun nativeGetCurrentTimeOfDay(): Int
-    
+    private external fun nativeGetCurrentTimeOfDay(handle: Long): Int
+
     // === НОВОЕ: Debug virtual time (только debug-сборка) ===
-    private external fun nativeDebugSetVirtualTimeEnabled(enabled: Boolean)
-    private external fun nativeDebugScrub(timeSeconds: Int)
-    private external fun nativeDebugSetTimeScale(scale: Float)
-    private external fun nativeDebugSetRunning(running: Boolean)
-    private external fun nativeDebugReset()
-    private external fun nativeDebugGetVirtualTime(): Int
-    // reserved
-    private external fun nativeDebugIsEnabled(): Boolean
-    // reserved
-    private external fun nativeDebugGetTimeScale(): Float
-    
+    private external fun nativeDebugSetVirtualTimeEnabled(handle: Long, enabled: Boolean)
+    private external fun nativeDebugScrub(handle: Long, timeSeconds: Int)
+    private external fun nativeDebugSetTimeScale(handle: Long, scale: Float)
+    private external fun nativeDebugSetRunning(handle: Long, running: Boolean)
+    private external fun nativeDebugReset(handle: Long)
+    private external fun nativeDebugGetVirtualTime(handle: Long): Int
+    private external fun nativeDebugIsEnabled(handle: Long): Boolean
+    private external fun nativeDebugGetTimeScale(handle: Long): Float
+
     /**
      * Установить длительность батча для оптимизации энергопотребления
      * @param durationMinutes длительность в минутах (0 = отключено)
      */
     fun setBatchDurationMinutes(durationMinutes: Int) {
         if (nativeUnavailable()) return
-        nativeSetBatchDurationMinutes(durationMinutes.coerceIn(0, 60))
+        val hh = h()
+        if (hh == 0L) return
+        nativeSetBatchDurationMinutes(hh, durationMinutes.coerceIn(0, 60))
         Log.d(TAG, "Batch duration set to $durationMinutes minutes")
     }
-    
+
     /**
      * Получить длительность батча в минутах
      */
-    fun getBatchDurationMinutes(): Int = if (nativeUnavailable()) 0 else nativeGetBatchDurationMinutes()
-    
+    fun getBatchDurationMinutes(): Int {
+        if (nativeUnavailable()) return 0
+        val hh = h()
+        return if (hh == 0L) 0 else nativeGetBatchDurationMinutes(hh)
+    }
+
     /**
      * Сгенерировать батч аудио (оптимизация энергопотребления)
      * Генерирует один большой буфер на заданное время за один вызов
@@ -601,41 +672,65 @@ class NativeAudioEngine {
      */
     fun generateBatch(directBuffer: java.nio.ByteBuffer, maxSamplesPerChannel: Int): Int {
         if (nativeUnavailable()) return 0
-        return nativeGenerateBatch(directBuffer, maxSamplesPerChannel)
+        val hh = h()
+        if (hh == 0L) return 0
+        return nativeGenerateBatch(hh, directBuffer, maxSamplesPerChannel)
     }
 
     /**
      * Текущее время суток в секундах (реальное или виртуальное).
      */
-    fun getCurrentTimeOfDay(): Int = if (nativeUnavailable()) 0 else nativeGetCurrentTimeOfDay()
+    fun getCurrentTimeOfDay(): Int {
+        if (nativeUnavailable()) return 0
+        val hh = h()
+        return if (hh == 0L) 0 else nativeGetCurrentTimeOfDay(hh)
+    }
 
     // === Публичные обёртки для Debug virtual time (no-op в release) ===
 
     fun debugSetVirtualTimeEnabled(enabled: Boolean) {
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugSetVirtualTimeEnabled(enabled)
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugSetVirtualTimeEnabled(hh, enabled)
+        }
     }
 
     fun debugScrub(timeSeconds: Int) {
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugScrub(timeSeconds)
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugScrub(hh, timeSeconds)
+        }
     }
 
     fun debugSetTimeScale(scale: Float) {
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugSetTimeScale(scale)
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugSetTimeScale(hh, scale)
+        }
     }
 
     fun debugSetRunning(running: Boolean) {
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugSetRunning(running)
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugSetRunning(hh, running)
+        }
     }
 
     fun debugResetToRealTime() {
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugReset()
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugReset(hh)
+        }
     }
 
     fun debugGetVirtualTime(): Int =
-        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugGetVirtualTime() else 0
-    
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            val hh = h()
+            if (hh != 0L) nativeDebugGetVirtualTime(hh) else 0
+        } else 0
+
     // === Публичные методы для интерполяции (используются в UI для графика) ===
-    
+
     /**
      * Выполнить интерполяцию одного значения через C++
      */
@@ -654,7 +749,7 @@ class NativeAudioEngine {
         if (nativeUnavailable()) return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, t, tension)
         return nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension)
     }
-    
+
     /**
      * Генерация массива интерполированных значений для графика
      * @param timePoints массив временных точек (секунды с начала суток)
@@ -680,7 +775,7 @@ class NativeAudioEngine {
         if (nativeUnavailable()) return null
         return nativeGenerateInterpolatedCurve(timePoints, values, numOutputPoints, typeInt, tension)
     }
-    
+
     /**
      * Получение частот каналов для заданного времени (для UI)
      * @return Pair(нижняя частота, верхняя частота) или null при ошибке
@@ -701,7 +796,7 @@ class NativeAudioEngine {
         }
         if (nativeUnavailable()) return null
         val result = nativeGetChannelFrequencies(
-            timePoints, carrierFreqs, beatFreqs, 
+            timePoints, carrierFreqs, beatFreqs,
             targetTimeSeconds, typeInt, tension
         )
         return result?.let { Pair(it[0], it[1]) }
