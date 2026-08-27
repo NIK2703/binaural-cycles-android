@@ -382,7 +382,11 @@ class BinauralStreamImpl(
                 // Новый шейпер сидит на редуцированной базе (base = from*userVolume),
                 // поэтому его ординаты = огибающая / from — гасит в запрошенной форме
                 // (для EQUAL_POWER и to=0 это from*cos(p*π/2), согласованно с sin у NEXT).
-                val fromC = from.coerceIn(0f, 1f)
+                // Уплотнение: живой множитель читаем максимально близко к close() —
+                // пока старый шейпер ещё растёт (стоп посреди fade-in), переданный
+                // [from] устаревает, а база = userVolume*from дала бы микропровал ε.
+                val live = try { old.volume } catch (_: Exception) { from }
+                val fromC = live.coerceIn(0f, 1f)
                 val base = userVolume * fromC
                 audioTrack?.setVolume(base)
                 try { old.close() } catch (_: Exception) {}

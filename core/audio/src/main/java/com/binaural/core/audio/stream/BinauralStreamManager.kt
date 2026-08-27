@@ -531,11 +531,18 @@ class BinauralStreamManager(private val context: Context) {
                 val playSpec = pendingPlaySpec
                 pendingPlaySpec = null
                 resetSession()
-                if (playSpec != null) {
+                // ФИКС Б4: если во время фейд-аута прилетели настройки новее снапшота,
+                // снятого в момент play(), берём их (последняя команда побеждает).
+                val finalSpec = when {
+                    playSpec == null -> null
+                    queued != null && !queued.audioEquals(playSpec) -> queued.copy(reason = SpecReason.PLAY)
+                    else -> playSpec
+                }
+                if (finalSpec != null) {
                     // play(), пришедший во время фейд-аута: старт строго после него
-                    StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> play пришёл во время фейда, старт spec#${playSpec.serial}")
-                    sessionSpec = playSpec
-                    launchSpec(playSpec)
+                    StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> play пришёл во время фейда, старт spec#${finalSpec.serial}")
+                    sessionSpec = finalSpec
+                    launchSpec(finalSpec)
                 } else {
                     if (queued != null) sessionSpec = queued // запомнить для следующего play
                     StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> IDLE (queued=${queued?.serial})")
@@ -613,6 +620,7 @@ class BinauralStreamManager(private val context: Context) {
                 // Фейд CURRENT уже идёт — только ретаргет; NEXT гасим сами.
                 queue.clear()
                 pendingPlaySpec = null
+                pendingHandoff = false
                 resetContinuity()
                 discardNext()
                 retargetFade(FadeTarget.STOP)
@@ -620,14 +628,24 @@ class BinauralStreamManager(private val context: Context) {
             ManagerState.FADE_OUT_PAUSE -> {
                 queue.clear()
                 pendingResume = false
+                pendingPlaySpec = null
                 retargetFade(FadeTarget.STOP)
+            }
+            ManagerState.FADE_OUT_STOP -> {
+                // ФИКС Б1: повторный stop во время идущего fade-out в ноль.
+                // Без сброса pendingPlaySpec от более раннего play доживёт до
+                // onStreamFullyStopped и запустит воспроизведение вопреки stop.
+                queue.clear()
+                pendingPlaySpec = null
+                pendingResume = false
+                retargetFade(FadeTarget.STOP) // идемпотентно: цель уже STOP
             }
             ManagerState.PAUSED -> {
                 resetSession()
                 setState(ManagerState.IDLE)
                 updateWakeLock()
             }
-            else -> { /* IDLE/FADE_OUT_STOP: идемпотентно */ }
+            else -> { /* IDLE: идемпотентно */ }
         }
     }
 
@@ -640,6 +658,7 @@ class BinauralStreamManager(private val context: Context) {
             }
             ManagerState.HANDOFF -> {
                 capturePauseMetrics()
+                pendingHandoff = false
                 resetContinuity()
                 discardNext()
                 // Новейший спека из очереди станет sessionSpec по завершении фейда
@@ -648,9 +667,18 @@ class BinauralStreamManager(private val context: Context) {
             ManagerState.FADE_OUT_STOP -> {
                 capturePauseMetrics()
                 pendingPlaySpec = null
+                pendingResume = false
                 retargetFade(FadeTarget.PAUSE)
             }
-            else -> { /* IDLE/PAUSED/FADE_OUT_PAUSE: no-op */ }
+            ManagerState.FADE_OUT_PAUSE -> {
+                // ФИКС Б2: повторная пауза во время идущего fade-out обязана снять
+                // намерение возобновления, иначе по завершении фейда сработает
+                // «призрачный» resumeFromPaused вопреки финальному pause.
+                pendingResume = false
+                capturePauseMetrics()
+                retargetFade(FadeTarget.PAUSE) // идемпотентно
+            }
+            else -> { /* IDLE/PAUSED: no-op */ }
         }
     }
 
@@ -893,6 +921,7 @@ class BinauralStreamManager(private val context: Context) {
         pausedTimeOfDay = 0
         pendingResume = false
         pendingPlaySpec = null
+        pendingHandoff = false
         resetContinuity()
     }
 }
