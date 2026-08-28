@@ -1389,26 +1389,57 @@ GenerateResult AudioGenerator::generatePackage(
                 break;
                 
             case BufferType::FADE_OUT: {
-                // Позиция внутри ПОЛНОГО фейда из плана: разрезанный границей
-                // пакета фейд продолжается с правильной амплитуды (без щелчка).
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBuffer(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    true,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBuffer(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        true,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
@@ -1429,24 +1460,57 @@ GenerateResult AudioGenerator::generatePackage(
                 break;
                 
             case BufferType::FADE_IN: {
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBuffer(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    false,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBuffer(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        false,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
@@ -1638,25 +1702,57 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 break;
                 
             case BufferType::FADE_OUT: {
-                // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBufferNeon(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    true,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBufferNeon(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        true,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
@@ -1674,24 +1770,57 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 break;
 
             case BufferType::FADE_IN: {
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBufferNeon(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    false,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBufferNeon(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        false,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
@@ -1893,25 +2022,57 @@ GenerateResult AudioGenerator::generatePackageSse(
                 break;
                 
             case BufferType::FADE_OUT: {
-                // Позиция внутри ПОЛНОГО фейда из плана (продолжение разрезанного)
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBufferSse(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    true,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBufferSse(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        true,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
@@ -1929,24 +2090,57 @@ GenerateResult AudioGenerator::generatePackageSse(
                 break;
 
             case BufferType::FADE_IN: {
+                // Ручные планы могут не задавать fadeTotalMs/fadeOffsetMs (==0) —
+                // тогда огибающая вырождается и фейд нем (тишина). Считаем
+                // весь сегмент полным фейдом.
+                int fadeOffsetMs = segment.fadeOffsetMs;
+                int fadeTotalMs = segment.fadeTotalMs;
+                if (fadeTotalMs == 0) {
+                    fadeTotalMs = segment.durationMs;
+                    fadeOffsetMs = 0;
+                }
                 const int fadeOffsetSamples = static_cast<int>(
-                    (segment.fadeOffsetMs * m_sampleRate + 500) / 1000);
+                    (fadeOffsetMs * m_sampleRate + 500) / 1000);
                 const int fadeTotalSamples = static_cast<int>(
-                    (segment.fadeTotalMs * m_sampleRate + 500) / 1000);
-                if (generateFadeBufferSse(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    fadeOffsetSamples,
-                    fadeTotalSamples,
-                    false,
-                    state.channelsSwapped,
-                    state
-                )) {
-                    result.fadePhaseCompleted = true;
+                    (fadeTotalMs * m_sampleRate + 500) / 1000);
+
+                // Режем фейд на подсегменты <=100 мс и рампим частоту между
+                // значениями кривой на границах каждого (точность = SOLID).
+                // fadeProgress = fadeOffsetSamples + gen + i — поточечно тот же,
+                // что у одного длинного фейда, поэтому щелчков нет.
+                const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                int gen = 0;
+                while (gen < samples) {
+                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+                    const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+                    if (constantFreq) {
+                        f0.lowerFreq = f1.lowerFreq = 200.0f;
+                        f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    const float l0 = twoPiOverSampleRate * f0.lowerFreq;
+                    const float r0 = twoPiOverSampleRate * f0.upperFreq;
+                    const float l1 = twoPiOverSampleRate * f1.lowerFreq;
+                    const float r1 = twoPiOverSampleRate * f1.upperFreq;
+                    auto [a0l, a0r] = calculateNormalizedAmplitudes(f0.lowerFreq, f0.upperFreq, config, config.curve);
+                    auto [a1l, a1r] = calculateNormalizedAmplitudes(f1.lowerFreq, f1.upperFreq, config, config.curve);
+                    if (generateFadeBufferSse(
+                        buffer + (currentSample + gen) * 2,
+                        ps,
+                        l0, r0, l1, r1,
+                        a0l, a0r, a1l, a1r,
+                        fadeOffsetSamples + gen,
+                        fadeTotalSamples,
+                        false,
+                        state.channelsSwapped,
+                        state
+                    )) {
+                        result.fadePhaseCompleted = true;
+                    }
+                    gen += ps;
                 }
                 break;
             }
