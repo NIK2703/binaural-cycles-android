@@ -3,8 +3,10 @@
 #include "Config.h"
 #include "Interpolation.h"
 #include <vector>
+
 #include <algorithm>
 #include <cmath>
+
 
 namespace binaural {
 
@@ -176,12 +178,10 @@ inline int64_t trendSolidDurationMs(
     constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
 
-    // Ниже (после подготовки crossings) — немедленный свап только при явном
-    // рассогласовании канала с АВТОРИТЕТНЫМ расписанием channelSwapStateAt
-    // (счётчик пересечений), а НЕ с правилом знака (trendDesiredSwapped).
-    // Кэш нулей; для кривых вне production-пути (тесты строят конфиг вручную
-    // и не звали updateCache) — локальный расчёт без мутации curve и без
-    // копирования lookup-таблиц.
+    // Паритет каналов выставляется единожды на входе planPackage (см. одноразовую
+    // коррекцию рассогласованного свежего/сброшенного состояния) и поддерживается
+    // плановыми свапами (по одному на выбранное пересечение). Здесь parity-логики
+    // нет: функция только считает длительность SOLID до ближайшего пересечения.
     std::vector<TrendCrossing> localCrossings;
     const std::vector<TrendCrossing>* crossings = &curve.trendCrossings;
     if (!curve.trendCrossingsValid) {
@@ -194,30 +194,12 @@ inline int64_t trendSolidDurationMs(
     // TROUGHS — только впадина (toSwapped==false).
     const bool wantPeaks = (points == ChannelSwapTrendPoints::PEAKS);
     const double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
+    // Паритет не перепроверяется: его сверка на каждом реарме SOLID гоняется с
+    // собственной процедурой свапа (счётчик пересечений переворачивается в T*, а
+    // фактический свап — в конце FADE_OUT, T*−P/2) и каскадом порождает двойные
+    // смены каналов. Сверка вынесена в planPackage (одноразово, на входе).
     double bestRel = -1.0;
-    // Немедленный свап при рассогласовании со счётчиком пересечений channelSwapStateAt.
-    // Сравниваем с ТЕМ ЖЕ правилом, что и плановые свапы (channelSwapStateAt), иначе
-    // правило знака ложно срабатывает на редких BOTH-кривых и форсирует лишний
-    // свап вне фазы с пересечением (двойная смена каналов).
-    if (points == ChannelSwapTrendPoints::BOTH) {
-        const double posCs = std::fmod(static_cast<double>(curvePosSec), dayD);
-        const double pp = (posCs < 0.0) ? posCs + dayD : posCs;
-        int64_t xcount = 0;
-        for (const TrendCrossing& c : *crossings) {
-            if (static_cast<double>(c.timeSec) < pp) ++xcount;
-        }
-        bool desiredSwapped = (xcount & 1) != 0;
-        {
-            const float dayF = static_cast<float>(SECONDS_PER_DAY);
-            const FrequencyTableResult fp = curve.getChannelFrequenciesAt(kTrendHalfWindowSec);
-            const FrequencyTableResult fm = curve.getChannelFrequenciesAt(dayF - kTrendHalfWindowSec);
-            const float delta0 = ((fp.upperFreq + fp.lowerFreq) - (fm.upperFreq + fm.lowerFreq)) * 0.5f;
-            if (delta0 < 0.0f) desiredSwapped = !desiredSwapped;
-        }
-        if (desiredSwapped != currentlySwapped) {
-            return 0;
-        }
-    }
+    (void)currentlySwapped;
 
     for (const TrendCrossing& c : *crossings) {
 
@@ -352,6 +334,11 @@ inline void BufferPackagePlanner::initStateForStart(
     float timeScale) {
     state.channelsSwapped = channelSwapStateAt(config, curveStartSeconds);
     state.swapPhase = SwapPhase::SOLID;
+    // Anchor the internal drift-free curve position to the requested start.
+    const double dayD0 = static_cast<double>(SECONDS_PER_DAY);
+    double p = std::fmod(static_cast<double>(curveStartSeconds), dayD0);
+    if (p < 0.0) p += dayD0;
+    state.lastNormInput = p;   // avoids spurious seek-detect on first planPackage
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
     if (config.channelSwapMode == ChannelSwapMode::TREND && curveStartSeconds >= 0.0f) {
         const int64_t leadMs = config.channelSwapFadeDurationMs;
@@ -420,14 +407,49 @@ inline PackagePlan BufferPackagePlanner::planPackage(
     // k*channelSwapIntervalSec от начала суток, а не от момента Play.
     const bool timerGridMode = config.channelSwapMode == ChannelSwapMode::TIMER &&
                                curveStartSeconds >= 0.0f;
-    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
-    float trendCurvePosSec = 0.0f;   // позиция кривой внутри плана (сек суток)
+
+    const double dayD = static_cast<double>(SECONDS_PER_DAY);
+    // Internal drift-free curve position. The caller passes a float curveStartSeconds
+    // (engine m_curveTimeSeconds / test accumulator) that accumulates float rounding
+    // drift over long playbacks; maintaining our own double position prevents that
+    // drift from making us re-target an already-served crossing (spurious 2nd swap).
+    double trendCurvePosSec = state.trendCurvePosSec;
     bool projectedSwapped = state.channelsSwapped; // проекция состояния после запланированных swap
     if (trendMode || timerGridMode) {
-        // Стартовая позиция кривой от движка (иначе скан пойдёт от полуночи)
-        trendCurvePosSec = std::fmod(curveStartSeconds, dayF);
-        if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
+        // Normalize caller position. We keep an internal drift-free position and only
+        // resync to the caller on a genuine discontinuity (seek): a real seek makes the
+        // caller jump by far more than the audio advanced this package, whereas the
+        // caller's own float accumulator drifts only gradually (≈ audio length/call).
+        // The 2s tolerance absorbs normal per-package timing jitter.
+        const double inputPos = std::fmod(static_cast<double>(curveStartSeconds), dayD);
+        const double normInput = inputPos < 0.0 ? inputPos + dayD : inputPos;
+        const double audioAdvance = static_cast<double>(packageDurationMs) / 1000.0 * timeScale;
+        double callerAdvance = normInput - state.lastNormInput;
+        if (callerAdvance > dayD * 0.5) callerAdvance -= dayD;
+        else if (callerAdvance < -dayD * 0.5) callerAdvance += dayD;
+        const bool seek = std::abs(callerAdvance - audioAdvance) > 2.0;
+        if (state.justStarted || seek) {
+            trendCurvePosSec = normInput;
+        }
+        state.lastNormInput = normInput;
     }
+
+    // ОДНОРАЗОВАЯ коррекция рассогласованного входа (TREND/BOTH): свежий/сброшенный
+    // вход (фаза SOLID ещё не начата, phaseRemainingMs == 0) может нести channelsSwapped,
+    // не совпадающий с авторитетным расписанием channelSwapStateAt (легаси-состояние,
+    // смена конфига без рестарта, тестовый вход без initStateForStart). Форсируем
+    // нулевой SOLID → процедура начнётся с FADE_OUT. Середина потока паритет НЕ
+    // перепроверяется — перепроверка каскадно порождает двойные смены каналов.
+    bool forceImmediateTrendSwap = false;
+    if (trendMode &&
+        state.justStarted && state.swapPhase == SwapPhase::SOLID &&
+        config.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH &&
+        channelSwapStateAt(config, trendCurvePosSec) != projectedSwapped) {
+        forceImmediateTrendSwap = true;
+    }
+    // one-shot: only the first planPackage after reset/init may force a swap
+    state.justStarted = false;
+
 
     // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены
     // тренда минус lead фейда и половина паузы — центровка прерывания/паузы на
@@ -435,16 +457,16 @@ inline PackagePlan BufferPackagePlanner::planPackage(
     auto startPhaseDuration = [&](SwapPhase phase) -> int64_t {
         if (phase == SwapPhase::SOLID) {
             if (trendMode) {
-                // Lead = длительность грядущего FADE_OUT + половина паузы. SOLID
-                // завершается на T* − leadMs − P/2, фейд-аут укладывается перед
-                // T*−P/2, прерывание потока — на T*−P/2, а ПАУЗА [T*−P/2, T*+P/2]
-                // оказывается центрированной на T* (середина паузы = центр экстремума).
-                // При P = 0 поведение вырождается в базовое: прерывание ровно на T*.
+                if (forceImmediateTrendSwap) {   // одноразово: только на входе planPackage
+                    forceImmediateTrendSwap = false;
+                    return 0;
+                }
                 const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
                 const int64_t pauseHalfMs = config.channelSwapPauseDurationMs / 2;
-                return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
+                int64_t solidDur = trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
                                             timeScale, leadMs, config.channelSwapTrendPoints,
                                             pauseHalfMs);
+                return solidDur;
             }
             if (timerGridMode) {
                 // Следующая смена = ближайший узел суточной сетки. Каждый новый
@@ -466,8 +488,8 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         if (trendMode || timerGridMode) {
             trendCurvePosSec = std::fmod(
                 trendCurvePosSec +
-                static_cast<float>(segment.durationMs) * 0.001f * timeScale, dayF);
-            if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
+                static_cast<double>(segment.durationMs) * 0.001 * static_cast<double>(timeScale), dayD);
+            if (trendCurvePosSec < 0.0) trendCurvePosSec += dayD;
         }
     };
 
@@ -547,10 +569,6 @@ inline PackagePlan BufferPackagePlanner::planPackage(
             // Если паузы нет, swap происходит в конце FADE_OUT перед FADE_IN
             segment.swapAfterSegment = (currentPhase == SwapPhase::FADE_OUT &&
                                         segmentDuration == phaseTimeRemaining);
-
-            // Позиция внутри ПОЛНОГО фейда: если фейд разрезан границей пакета,
-            // генератор продолжит кривую затухания/нарастания с правильного места
-            // вместо рестарта с offset=0 (щелчок + скачок частот).
             if (currentPhase == SwapPhase::FADE_OUT || currentPhase == SwapPhase::FADE_IN) {
                 const int64_t fullPhaseDur = phaseDuration(currentPhase, config);
                 segment.fadeTotalMs  = fullPhaseDur;
@@ -579,11 +597,9 @@ inline PackagePlan BufferPackagePlanner::planPackage(
     // Сохраняем состояние для следующего пакета
     state.swapPhase = currentPhase;
     state.phaseRemainingMs = phaseTimeRemaining;
+    state.trendCurvePosSec = trendCurvePosSec;   // persist drift-free position
     plan.endsMidCycle = (phaseTimeRemaining > 0);
     
-    LOGD_PLANNER("  final state: phase=%d, phaseRemaining=%lldms, segments=%zu",
-                 static_cast<int>(currentPhase), (long long)phaseTimeRemaining,
-                 plan.segments.size());
     
     return plan;
 }
@@ -603,6 +619,7 @@ inline void BufferPackagePlanner::resetState(GeneratorState& state) {
     state.phaseRemainingMs = 0;
     state.cyclePositionMs = 0;
     state.channelsSwapped = false;
+    state.justStarted = true;
 }
 
 inline SwapPhase BufferPackagePlanner::nextPhase(SwapPhase current) const {

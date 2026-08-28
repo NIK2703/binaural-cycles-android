@@ -250,6 +250,19 @@ struct GeneratorState {
     // Оставшееся время в текущей фазе (в мс)
     // Когда достигает 0, переходим к следующей фазе
     int64_t phaseRemainingMs = 0;
+    // True only for the first planPackage after reset/init: one-shot parity fix.
+    bool justStarted = true;
+    // Drift-free TREND curve position (seconds within the day), maintained across
+    // planPackage calls. The caller passes a float curveStartSeconds each call
+    // (engine m_curveTimeSeconds / test accumulator) that accumulates float
+    // rounding drift over long playbacks; that drift makes the planner re-target
+    // an already-served crossing and emit a spurious second swap. We keep an
+    // internal double here so SOLID targets stay anchored to the true crossings.
+    double trendCurvePosSec = 0.0;
+    // Last caller-supplied normalized curve position, used to distinguish a real
+    // seek (caller jumps far beyond the audio advanced this package) from the
+    // gradual float drift of the caller's own accumulator (which we must ignore).
+    double lastNormInput = 0.0;
     
     // Позиция внутри цикла для переноса между пакетами
     int64_t cyclePositionMs = 0;
