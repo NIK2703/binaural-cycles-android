@@ -60,6 +60,7 @@ class BinauralStreamImpl(
     private var preparedPacketBytes = 0
     private val writerExitLatch = CountDownLatch(1)
     @Volatile private var writerStarted = false
+    @Volatile private var preparedPrefilled = false
     /**
      * Писатель забрал владение нативным движком (вызвал его release() в своём
      * finally). Устанавливается ДО writerExitLatch.countDown() — память
@@ -103,6 +104,14 @@ class BinauralStreamImpl(
             // ФИКС 1.4: движок ВСЕГДА свежий — состояние обязано быть детерминированным.
             // resetState ДО любого play: фазы синусоид = 0 => первый сэмпл = 0.
             engine.resetState()
+            // ФИКС RC-2: продолжение (кроссфейд смены SR/настроек) — восстанавливаем
+            // фазу несущих, иначе NEXT стартует с фазой 0 и интерферирует со старым
+            // (провал/всплеск огибающей в EQUAL_POWER). СТРОГО после resetState().
+            val rl = spec.resumeLeftPhase
+            val rr = spec.resumeRightPhase
+            if (rl != null && rr != null) {
+                engine.setPhases(rl, rr)
+            }
 
             if (spec.resumeCurveTimeSeconds >= 0) {
                 // Продолжение (пауза/handoff): позиция кривой задаётся явно,
@@ -206,12 +215,35 @@ class BinauralStreamImpl(
         fadeMode = FadeMode.IN
         StreamLogger.d(TAG, "start spec#${spec.serial}: shaper($shape) -> play -> writer (именно в этом порядке)")
         return try {
-            // ФИКС 1.1. ПОРЯДОК КРИТИЧЕН:
-            // 1) шейпер активен ДО первого рендера — до play() и до первой записи;
-            // 2) только затем стартуем трек — первый цикл микшера уже под множителем ~0;
-            // 3) писатель последним — в буфере нет данных до применения рампы.
+            // ФИКС RC-1. Новый порядок (устраняет стартовый щелчок на 44.1/48 кГц):
+            // 1) праймим трек УЖЕ СГЕНЕРИРОВАННЫМ пакетом ДО старта — микшеру
+            //    сразу есть данные, окна underrun/пустоты нет;
+            // 2) активируем шейпер (множитель ~0) ДО первого рендера;
+            // 3) стартуем трек — первый цикл микшера читает УЖЕ ЗАПИСАННЫЕ данные
+            //    под нулевой рампой;
+            // 4) писатель последним — продолжает со смещения preparedPacketBytes.
+            val tApply = System.nanoTime()
+            val underrunBefore = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N)
+                track.underrunCount else -1
+            directBuffer?.let { buf ->
+                buf.position(0)
+                buf.limit(preparedPacketBytes)
+                val written = track.write(buf, preparedPacketBytes, AudioTrack.WRITE_BLOCKING)
+                if (written < preparedPacketBytes) {
+                    StreamLogger.w(TAG, "start spec#${spec.serial}: prefill $written/$preparedPacketBytes")
+                }
+            }
+            preparedPrefilled = true
+
             val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = shape)
             track.play()
+            // §E: верификация RC-1 без осциллографа (underrun-окно + позиция).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val du = track.underrunCount - underrunBefore
+                val head = track.playbackHeadPosition
+                StreamLogger.d(TAG, "start spec#${spec.serial}: RC1 underrunDelta=$du headPos=$head " +
+                    "applyToPlayUs=${(System.nanoTime() - tApply) / 1000}")
+            }
             writerStarted = true
             writerHandler?.post(::writerLoop)
 
@@ -544,7 +576,9 @@ class BinauralStreamImpl(
                 val track = audioTrack ?: return
                 val engine = nativeEngine ?: return
                 var packetBytes = preparedPacketBytes
-                var offset = 0
+                // ФИКС RC-1: если пакет уже записан в start() (прайминг), стартуем
+                // со смещения, чтобы не дублировать и не оставлять трек без данных.
+                var offset = if (preparedPrefilled) preparedPacketBytes else 0
                 while (lifecycleRef.get() == StreamLifecycle.PLAYING) {
                     if (offset >= packetBytes) {
                         val buf = directBuffer ?: break
@@ -604,6 +638,11 @@ class BinauralStreamImpl(
     // координаты старого потока, чтобы новый стартовал ровно с того же места.
     fun getElapsedMs(): Long = (nativeEngine?.getElapsedSeconds() ?: 0) * 1000L
     fun getCurrentCurveTimeSeconds(): Float = nativeEngine?.getCurrentTimeOfDay()?.toFloat() ?: 0f
+    // ФИКС RC-2: живые фазы несущих для бесшовного кроссфейда.
+    fun getPhases(): Pair<Float, Float>? {
+        val p = nativeEngine?.getCurrentPhases() ?: return null
+        return if (p.size == 2) Pair(p[0], p[1]) else null
+    }
 
     override fun isChannelsSwapped(): Boolean = nativeEngine?.isChannelsSwapped() ?: false
     override fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? =

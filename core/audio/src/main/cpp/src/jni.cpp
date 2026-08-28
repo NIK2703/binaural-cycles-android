@@ -302,6 +302,41 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateBufferDirect
 
     return generated;
 }
+/**
+ * Получение текущей фазы несущих каналов (для бесшовного кроссфейда).
+ * Возвращает FloatArray[2] = { leftPhase, rightPhase }.
+ */
+JNIEXPORT jfloatArray JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurrentPhases(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle
+) {
+    auto* engine = engineFromHandle(handle);
+    jfloatArray out = env->NewFloatArray(2);
+    if (!engine) return out;
+    const auto p = engine->getCurrentPhases();
+    const float arr[2] = { p.first, p.second };
+    env->SetFloatArrayRegion(out, 0, 2, arr);
+    return out;
+}
+
+/**
+ * Установка фазы несущих каналов (продолжение кроссфейда).
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPhases(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jfloat leftPhase,
+    jfloat rightPhase
+) {
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setPhases(leftPhase, rightPhase);
+    }
+}
 
 /**
  * Получение текущей частоты биений (из атомарного поля движка)

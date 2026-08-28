@@ -316,7 +316,7 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
                     if (resumeCfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
                         const bool aligned = trendDesiredSwapped(
                             m_state.channelsSwapped,
-                            trendCarrierDeltaAt(resumeCfg.curve, resumeTime));
+                            trendBeatDeltaAt(resumeCfg.curve, resumeTime));
                         if (aligned != m_state.channelsSwapped) {
                             LOGD("setPlaying(resume): TREND realign swapped %d -> %d",
                                  m_state.channelsSwapped ? 1 : 0, aligned ? 1 : 0);
@@ -334,9 +334,14 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // (resetState() в Kotlin делает то же самое — операция идемпотентна.)
         m_generator.resetState(m_state);
         BufferPackagePlanner planner;
-        planner.resetState(m_state);
         m_state.lastSwapElapsedMs = 0;
         m_elapsedSeconds.store(0, std::memory_order_relaxed);
+
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+        const float timeScale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
+#else
+        const float timeScale = 1.0f;
+#endif
 
 #ifdef ENABLE_DEBUG_TIME_CONTROL
         if (m_virtualClock.isEnabled()) {
@@ -374,31 +379,21 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // сгенерируется немедленно и расширит диапазон.
         const float freshStart = computePlaybackTimeSeconds();
 
-        // TREND-режим перестановки: начальное расположение каналов по знаку
-        // тренда в точке старта (спад → сразу обратное). До первого сэмпла —
-        // бесщёлочно; не ждём первого fade-цикла.
+        // Старт воспроизведения: положение каналов и фаза цикла инициализируются
+        // по расписанию для текущего момента суток (initStateForStart): играем
+        // сразу в правильном расположении, свап — только в расписанное время.
         {
             BinauralConfig startCfg;
-            // unique_lock: чтение m_config + запись m_state.channelsSwapped
-            // (синхронно с isChannelsSwapped() из UI-потока под shared_lock).
+            // unique_lock: чтение m_config + запись m_state (синхронно с
+            // isChannelsSwapped() из UI-потока под shared_lock).
             std::unique_lock<std::shared_mutex> lock(m_configMutex);
             startCfg = m_config;
-            if (startCfg.channelSwapEnabled &&
-                !startCfg.curve.lowerFreqTable.empty() &&
-                !startCfg.curve.upperFreqTable.empty()) {
-                // Начальное расположение каналов определяется расписанием смен,
-                // привязанным к моменту суток (позиция 0 = начало суток), а не к
-                // моменту нажатия Play: состояние = чётность уже прошедших за
-                // сутки точек смены (выбранные экстремумы для TREND, узлы сетки
-                // k*interval для TIMER). Для TREND/BOTH эквивалентно прежнему
-                // знаковому правилу.
-                m_state.channelsSwapped = channelSwapStateAt(startCfg, freshStart);
-                LOGD("setPlaying(true): schedule init swap=%d (mode=%d, points=%d, pos=%.3f)",
-                     m_state.channelsSwapped ? 1 : 0,
-                     static_cast<int>(startCfg.channelSwapMode),
-                     static_cast<int>(startCfg.channelSwapTrendPoints),
-                     freshStart);
-            }
+            planner.initStateForStart(startCfg, m_state, freshStart, timeScale);
+            LOGD("setPlaying(true): schedule init swap=%d (mode=%d, points=%d, pos=%.3f, solidMs=%lld)",
+                 m_state.channelsSwapped ? 1 : 0,
+                 static_cast<int>(startCfg.channelSwapMode),
+                 static_cast<int>(startCfg.channelSwapTrendPoints),
+                 freshStart, (long long)m_state.phaseRemainingMs);
         }
 
         anchorUiTimeline(freshStart, freshStart);
@@ -437,6 +432,17 @@ bool BinauralEngine::isChannelsSwapped() const {
     // исключает предупреждения TSan / тиринг флага.
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
     return m_state.channelsSwapped;
+}
+std::pair<float, float> BinauralEngine::getCurrentPhases() const {
+    // best-effort чтение живой фазы OLD (см. комментарий в заголовке):
+    // на ARM выровненное 32-битное чтение атомарно, отклонение — доли мкс.
+    return { m_state.leftPhase, m_state.rightPhase };
+}
+
+void BinauralEngine::setPhases(float leftPhase, float rightPhase) {
+    // Зовётся до старта писателя (prepare) — гонки с аудио-потоком нет.
+    m_state.leftPhase = leftPhase;
+    m_state.rightPhase = rightPhase;
 }
 
 bool BinauralEngine::isCurveConfigured() const {

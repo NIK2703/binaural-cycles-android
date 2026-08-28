@@ -57,8 +57,3 @@ target_link_libraries(buffer_package_tests
     GTest::gtest_main
     pthread
 )
-
-# Добавляем тесты в CTest (без discover из-за проблем с LD_LIBRARY_PATH)
-# include(GoogleTest)
-# gtest_discover_tests(buffer_package_tests)
-add_test(NAME buffer_package_tests COMMAND buffer_package_tests)

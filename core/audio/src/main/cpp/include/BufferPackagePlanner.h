@@ -176,18 +176,9 @@ inline int64_t trendSolidDurationMs(
     constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
 
-    // Немедленный свап — только при явном рассогласовании со ЗНАКОМ тренда (BOTH).
-    // Для PEAKS/TROUGHS абсолютного «правильного» состояния нет (фаза зависит от
-    // числа пройденных суток, теряемого при wrap позиции в [0, DAY)): фаза задаётся
-    // начальным состоянием и тогглами на выбранных экстремумах, поэтому немедленный
-    // свап не форсируем — иначе фаза ломается. Здесь points влияет только на фильтр
-    // ближайшего выбранного перехода ниже.
-    if (points == ChannelSwapTrendPoints::BOTH &&
-            trendDesiredSwapped(currentlySwapped, trendCarrierDeltaAt(curve, curvePosSec))
-                != currentlySwapped) {
-        return 0;
-    }
-
+    // Ниже (после подготовки crossings) — немедленный свап только при явном
+    // рассогласовании канала с АВТОРИТЕТНЫМ расписанием channelSwapStateAt
+    // (счётчик пересечений), а НЕ с правилом знака (trendDesiredSwapped).
     // Кэш нулей; для кривых вне production-пути (тесты строят конфиг вручную
     // и не звали updateCache) — локальный расчёт без мутации curve и без
     // копирования lookup-таблиц.
@@ -204,7 +195,32 @@ inline int64_t trendSolidDurationMs(
     const bool wantPeaks = (points == ChannelSwapTrendPoints::PEAKS);
     const double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
     double bestRel = -1.0;
+    // Немедленный свап при рассогласовании со счётчиком пересечений channelSwapStateAt.
+    // Сравниваем с ТЕМ ЖЕ правилом, что и плановые свапы (channelSwapStateAt), иначе
+    // правило знака ложно срабатывает на редких BOTH-кривых и форсирует лишний
+    // свап вне фазы с пересечением (двойная смена каналов).
+    if (points == ChannelSwapTrendPoints::BOTH) {
+        const double posCs = std::fmod(static_cast<double>(curvePosSec), dayD);
+        const double pp = (posCs < 0.0) ? posCs + dayD : posCs;
+        int64_t xcount = 0;
+        for (const TrendCrossing& c : *crossings) {
+            if (static_cast<double>(c.timeSec) < pp) ++xcount;
+        }
+        bool desiredSwapped = (xcount & 1) != 0;
+        {
+            const float dayF = static_cast<float>(SECONDS_PER_DAY);
+            const FrequencyTableResult fp = curve.getChannelFrequenciesAt(kTrendHalfWindowSec);
+            const FrequencyTableResult fm = curve.getChannelFrequenciesAt(dayF - kTrendHalfWindowSec);
+            const float delta0 = ((fp.upperFreq + fp.lowerFreq) - (fm.upperFreq + fm.lowerFreq)) * 0.5f;
+            if (delta0 < 0.0f) desiredSwapped = !desiredSwapped;
+        }
+        if (desiredSwapped != currentlySwapped) {
+            return 0;
+        }
+    }
+
     for (const TrendCrossing& c : *crossings) {
+
         const bool isSelected = (points == ChannelSwapTrendPoints::BOTH)
             ? true
             : (c.toSwapped == wantPeaks);
@@ -221,13 +237,17 @@ inline int64_t trendSolidDurationMs(
     // SOLID заканчивается на T* − leadMs − swapOffsetMs: прерывание потока
     // (конец fade-out) приходится на T* − swapOffsetMs, а при swapOffsetMs = P/2
     // середина последующей паузы ложится ровно на T* (центр экстремума).
-    return std::clamp(dtMs - leadMs - swapOffsetMs, int64_t{0}, kTrendMaxSolidMs);
+    const int64_t raw = dtMs - leadMs - swapOffsetMs;
+    if (points == ChannelSwapTrendPoints::BOTH) {
+        // Без верхнего клампа: редкий BOTH-тренд (пилообразный и т.п.) не должен
+        // принудительно разрывать SOLID каждые kTrendMaxSolidMs и форсировать
+        // периодические свапы там, где реальных пересечений нет.
+        return std::max(int64_t{0}, raw);
+    }
+    return std::clamp(raw, int64_t{0}, kTrendMaxSolidMs);
 }
 
 /**
- * Планировщик пакетов буферов
- *
- * Разбивает время пакета на последовательность целых буферов согласно циклу:
  * [SOLID N сек] → [FADE_OUT M сек] → [FADE_IN M сек] → [SOLID N сек] → ...
  *
  * Ключевой принцип: неполный буфер в конце пакета переносится в начало следующего.
@@ -296,6 +316,18 @@ public:
      * @param state Состояние для сброса
      */
     void resetState(GeneratorState& state);
+    /**
+     * Инициализировать состояние по расписанию для момента свежего старта.
+     * Каналы выставляются ровно по channelSwapStateAt(pos) — без немедленного
+     * свапа. Фаза = SOLID, phaseRemainingMs = длительность SOLID для позиции.
+     */
+    void initStateForStart(
+        const BinauralConfig& config,
+        GeneratorState& state,
+        float curveStartSeconds,
+        float timeScale = 1.0f
+    );
+
     
 private:
     /**
@@ -313,6 +345,26 @@ private:
      */
     BufferType toBufferType(SwapPhase phase) const;
 };
+inline void BufferPackagePlanner::initStateForStart(
+    const BinauralConfig& config,
+    GeneratorState& state,
+    float curveStartSeconds,
+    float timeScale) {
+    state.channelsSwapped = channelSwapStateAt(config, curveStartSeconds);
+    state.swapPhase = SwapPhase::SOLID;
+    const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
+    if (config.channelSwapMode == ChannelSwapMode::TREND && curveStartSeconds >= 0.0f) {
+        const int64_t leadMs = config.channelSwapFadeDurationMs;
+        const int64_t swapOffsetMs = config.channelSwapPauseDurationMs / 2;
+        state.phaseRemainingMs = trendSolidDurationMs(
+            config.curve, curveStartSeconds, state.channelsSwapped,
+            ts, leadMs, config.channelSwapTrendPoints, swapOffsetMs);
+    } else {
+        state.phaseRemainingMs = timerSolidDurationMs(
+            curveStartSeconds, config.channelSwapIntervalSec, ts);
+    }
+}
+
 
 // ============================================================================
 // INLINE РЕАЛИЗАЦИЯ ДЛЯ ПРОИЗВОДИТЕЛЬНОСТИ

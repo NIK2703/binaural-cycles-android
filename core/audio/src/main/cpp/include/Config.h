@@ -23,20 +23,21 @@ constexpr int FREQUENCY_TABLE_INTERVAL_MS = 100;
 constexpr int FREQUENCY_TABLE_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_INTERVAL_MS;
 
 /**
- * Полуокно оценки трендовой производной: Δf = carrier(t+h) − carrier(t−h).
- * Живёт здесь, т.к. используется и планировщиком (BufferPackagePlanner.h),
- * и предвычислением нулей в FrequencyCurve (Interpolation.h).
+ * Полуокно оценки трендовой производной: Δbeat = beat(t+h) − beat(t−h),
+ * beat = upper − lower (частота биений). Живёт здесь, т.к. используется и
+ * планировщиком (BufferPackagePlanner.h), и предвычислением нулей в
+ * FrequencyCurve (Interpolation.h).
  */
 constexpr float TREND_HALF_WINDOW_SEC = 60.0f;
 
 /**
- * Ноль трендовой производной (локальный экстремум несущей).
+ * Ноль трендовой производной (локальный экстремум ЧАСТОТЫ БИЕНИЙ).
  * Предвычисляется ОДИН РАЗ при построении кривой (FrequencyCurve::updateCache)
  * и дальше только переиспользуется планировщиком.
  */
 struct TrendCrossing {
     float timeSec;    // Время суток [0, SECONDS_PER_DAY), уточнено бисекцией
-    bool toSwapped;   // true: после T тренд убывает (пик) → нужно swapped;
+    bool toSwapped;   // true: после T тренд частоты биений убывает (пик) → swapped;
                       // false: после T тренд растёт (впадина) → swapped=false
 };
 
@@ -97,10 +98,10 @@ struct FrequencyCurve {
     // Фиксированный размер: FREQUENCY_TABLE_SIZE (864000 значений при шаге 100 мс)
     std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
     std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
-
-    // Кэш нулей трендовой производной carrier(t+h) − carrier(t−h), h = TREND_HALF_WINDOW_SEC.
-    // Строится один раз в updateCache() вместе с lookup-таблицей (профиль сохранён →
-    // экстремумы известны); планировщик только ищет по нему. Отсортирован по времени суток.
+    // Кэш нулей трендовой производной beat(t+h) − beat(t−h), beat = upper − lower,
+    // h = TREND_HALF_WINDOW_SEC. Строится один раз в updateCache() вместе с
+    // lookup-таблицей (профиль сохранён → экстремумы частоты биений известны);
+    // планировщик только ищет по нему. Отсортирован по времени суток.
     std::vector<TrendCrossing> trendCrossings;
     bool trendCrossingsValid = false;
     
@@ -142,8 +143,8 @@ private:
 /**
  * Точки графика, в которых происходит перестановка каналов в TREND-режиме.
  * TREND-режим переключает (toggle) channelsSwapped при прохождении выбранного
- * типа локального экстремума несущей (предвычисленные нули трендовой
- * производной). BOTH — текущее поведение (на каждом экстремуме); PEAKS — только
+ * типа локального экстремума ЧАСТОТЫ БИЕНИЙ (предвычисленные нули трендовой
+ * производной beat). BOTH — текущее поведение (на каждом экстремуме); PEAKS — только
  * на пиках; TROUGHS — только на впадинах.
  */
 enum class ChannelSwapTrendPoints : int8_t {
@@ -154,10 +155,10 @@ enum class ChannelSwapTrendPoints : int8_t {
 
 enum class ChannelSwapMode : int8_t {
     TIMER = 0,   // По таймеру: swap каждые channelSwapIntervalSec секунд
-    TREND = 1    // По тенденции графика: рост несущей — прямое расположение,
+    TREND = 1    // По тенденции графика: рост частоты биений — прямое расположение,
                  // убывание — обратное; интервал не участвует, смены происходят
-                 // в локальных экстремумах несущей (предвычисленные нули
-                 // трендовой производной), процедура центрирована на них
+                 // в локальных экстремумах частоты биений (предвычисленные нули
+                 // трендовой производной beat), процедура центрирована на них
 };
 
 /**

@@ -115,6 +115,8 @@ class NativeAudioEngine {
     private external fun nativeIsChannelsSwapped(handle: Long): Boolean
     private external fun nativeUpdateElapsedTime(handle: Long)
     private external fun nativeGetFrequenciesAtCurrentTime(handle: Long): FloatArray?
+    private external fun nativeGetCurrentPhases(handle: Long): FloatArray
+    private external fun nativeSetPhases(handle: Long, leftPhase: Float, rightPhase: Float)
 
     // === Нативные методы для интерполяции (используются в UI для графика) ===
 
@@ -623,6 +625,28 @@ class NativeAudioEngine {
         if (hh == 0L) return null
         val result = nativeGetFrequenciesAtCurrentTime(hh)
         return result?.let { Pair(it[0], it[1]) }
+    }
+    /**
+     * Получить текущую фазу несущих каналов (для бесшовного кроссфейда).
+     * Чтение живого движка; возвращает FloatArray[2] = { leftPhase, rightPhase },
+     * либо [0f, 0f], если движок недоступен.
+     */
+    fun getCurrentPhases(): FloatArray {
+        if (nativeUnavailable()) return floatArrayOf(0f, 0f)
+        val hh = h()
+        if (hh == 0L) return floatArrayOf(0f, 0f)
+        return nativeGetCurrentPhases(hh)
+    }
+
+    /**
+     * Установить фазу несущих каналов (продолжение кроссфейда).
+     * Вызывать до старта воспроизведения (в prepare()).
+     */
+    fun setPhases(leftPhase: Float, rightPhase: Float) {
+        if (nativeUnavailable()) return
+        val hh = h()
+        if (hh == 0L) return
+        nativeSetPhases(hh, leftPhase, rightPhase)
     }
 
     // === Нативные методы для батчевой генерации (оптимизация энергопотребления) ===

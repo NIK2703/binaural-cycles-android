@@ -23,7 +23,10 @@ data class PlaybackSpec(
     /** RESUME: накопленное чистое время воспроизведения до паузы. */
     val resumeElapsedMs: Long = 0L,
     /** Позиция кривой (секунды суток) для продолжения; -1 = свежий старт от настенных часов. */
-    val resumeCurveTimeSeconds: Int = -1
+    val resumeCurveTimeSeconds: Int = -1,
+    /** ФИКС RC-2: фаза несущих для бесшовного кроссфейда (null = свежий старт, фаза 0). */
+    val resumeLeftPhase: Float? = null,
+    val resumeRightPhase: Float? = null
 ) {
     /** Звучат ли два спека одинаково (нужен ли вообще handoff). */
     fun audioEquals(other: PlaybackSpec): Boolean =

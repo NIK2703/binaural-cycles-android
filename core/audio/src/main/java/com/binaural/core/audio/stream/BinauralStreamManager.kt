@@ -83,6 +83,8 @@ class BinauralStreamManager(private val context: Context) {
     // beginHandoff/rearmNextIfStale и передаются в NEXT через обогащённую спеку.
     private var switchCurveTod: Float? = null
     private var switchElapsedMs: Long = 0L
+    private var switchLeftPhase: Float? = null
+    private var switchRightPhase: Float? = null
     // Маркер: ближайший launchStream — это продолжение handoff'а (не сбрасывать якорь).
     private var pendingHandoff = false
     // Wall-якорь начала хэндоффа: точный учёт сессионного времени при повышении NEXT.
@@ -314,7 +316,7 @@ class BinauralStreamManager(private val context: Context) {
         pendingHandoff = true
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
-        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: кроссфейд — NEXT стартует одновременно с fade-out CURRENT (curveTod=$switchCurveTod, elapsed=${switchElapsedMs}ms)")
+        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: кроссфейд — NEXT стартует одновременно с fade-out CURRENT (curveTod=$switchCurveTod, elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
         val candidate = createStream(enriched)
         if (!candidate.prepare()) {
             StreamLogger.e(TAG, "beginHandoff: prepare NEXT spec#${spec.serial} не удался — старый продолжает играть")
@@ -728,6 +730,11 @@ class BinauralStreamManager(private val context: Context) {
         current?.let {
             switchCurveTod = it.getCurrentCurveTimeSeconds()
             switchElapsedMs = it.getElapsedMs()
+            // ФИКС RC-2: живые фазы несущих для бесшовного кроссфейда.
+            it.getPhases()?.let { (l, r) ->
+                switchLeftPhase = l
+                switchRightPhase = r
+            }
         }
     }
 
@@ -735,13 +742,17 @@ class BinauralStreamManager(private val context: Context) {
         val tod = switchCurveTod ?: return spec
         return spec.copy(
             resumeCurveTimeSeconds = tod.toInt(),
-            resumeElapsedMs = switchElapsedMs
+            resumeElapsedMs = switchElapsedMs,
+            resumeLeftPhase = switchLeftPhase,
+            resumeRightPhase = switchRightPhase
         )
     }
 
     private fun resetContinuity() {
         switchCurveTod = null
         switchElapsedMs = 0L
+        switchLeftPhase = null
+        switchRightPhase = null
     }
 
     // ================================================================== Запуск потоков
