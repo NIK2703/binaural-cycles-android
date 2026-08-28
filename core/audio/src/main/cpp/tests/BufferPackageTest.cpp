@@ -4032,6 +4032,110 @@ TEST(TrendSwapTest, SwapCenteredAtTStar_PlanTiming) {
     EXPECT_NEAR(timing.fadeOutStartMs, 59000, 2);
 }
 
+// Пауза центрируется на экстремуме T*: середина паузы = T* (в аудио-мс).
+// Треугольник: минимум ровно 43200c (T*). now=11:00 (39600c), swapped=true
+// (согласование, без немедленного свапа). timeScale=60, P=2000 мс.
+//   SOLID = (43200-39600)*1000/60 - 1000(lead) - 1000(P/2) = 58000 мс
+//   FADE_OUT [58000..59000], прерывание (swap) на 59000 = T* - P/2
+//   PAUSE   [59000..61000], середина 60000 = T* (в аудио-мс = (43200-39600)*1000/60)
+//   FADE_IN [61000..62000]
+TEST(TrendSwapTest, SwapCenteredAtTStar_WithPause_PlanTiming) {
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    config.channelSwapPauseDurationMs = 2000;
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        70000, config, state, /*curveStartSeconds=*/39600.0f, /*timeScale=*/60.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    const SwapTiming timing = measureSwapTiming(plan);
+    ASSERT_GE(timing.swapEndMs, 0);
+    EXPECT_NEAR(timing.fadeOutStartMs, 58000, 2);  // FADE_OUT начинается на T* - P/2 - lead
+    EXPECT_NEAR(timing.swapEndMs, 59000, 2);       // прерывание = T* - P/2 (аудио-мс)
+
+    // Пауза должна быть, и её середина = T* в аудио-мс (60000).
+    int64_t acc = 0;
+    bool pauseFound = false;
+    for (const auto& s : plan.segments) {
+        if (s.type == BufferType::PAUSE) {
+            const int64_t pauseMid = acc + s.durationMs / 2;
+            EXPECT_NEAR(pauseMid, 60000, 2);  // середина паузы = центр экстремума
+            pauseFound = true;
+        }
+        acc += s.durationMs;
+    }
+    EXPECT_TRUE(pauseFound);
+
+    // SOLID перед первым swap = 58000 мс.
+    EXPECT_NEAR(solidMsBeforeFirstSwap(plan), 58000, 5);
+}
+
+// Большая пауза + близкий T*: SOLID клампится в 0 (как и без паузы), свап
+// не теряется. Треугольник, T*=43200, now=43199.5, swapped=true (согласование
+// — НЕ немедленный свап, чтобы проверить именно кламп dtMs-lead-pauseHalf).
+// timeScale=1: dtMs=500. lead=1000, P=4000 -> pauseHalf=2000.
+// SOLID = clamp(500 - 1000 - 2000, 0) = 0.
+// Большая/близкая пауза + близкий T*: SOLID клампится в 0 (как и без паузы),
+// свап не теряется, первым сегментом идёт FADE_OUT. Треугольник, T*=43200,
+// now=43199.5, swapped=true (согласование — НЕ немедленный свап, чтобы
+// проверить именно кламп dtMs-lead-pauseHalf). timeScale=1: dtMs=500.
+// lead=1000, P=4000 -> pauseHalf=2000. SOLID = clamp(500-1000-2000,0)=0.
+TEST(TrendSwapTest, SwapCenteredAtTStar_WithLargePause_ClampsSolidToZero) {
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    config.channelSwapPauseDurationMs = 4000;
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        60000, config, state, /*curveStartSeconds=*/43199.5f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);          // кламп, не немедленный реалайн
+    ASSERT_FALSE(plan.segments.empty());
+    EXPECT_EQ(plan.segments[0].type, BufferType::FADE_OUT); // SOLID вытеснен полностью
+}
+
+// Немедленный свап по рассогласованию (BOTH) НЕ зависит от паузы: ранний
+// return 0 срабатывает до вычисления dtMs, offset не применяется. Пила,
+// 18:00 (спад), swapped=false -> рассогласование -> SOLID=0, первый FADE_OUT.
+TEST(TrendSwapTest, ImmediateMismatchSwap_IgnoresPauseOffset) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    config.channelSwapPauseDurationMs = 5000;
+    GeneratorState state;  // swapped=false, спад на 18:00
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        40000, config, state, /*curveStartSeconds=*/18.0f * 3600.0f);
+
+    EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);
+    ASSERT_FALSE(plan.segments.empty());
+    EXPECT_EQ(plan.segments[0].type, BufferType::FADE_OUT);
+}
+
+// Нечётная пауза: середина паузы в пределах 1 мс от T* (floor(P/2)).
+// Треугольник, now=11:00, swapped=true, timeScale=60, P=2001.
+// SOLID = 60000-1000-1000 = 58000; пауза [59000, 61001], середина ~60000.5.
+TEST(TrendSwapTest, OddPause_MidpointWithin1Ms) {
+    BinauralConfig config = makeTrendConfig(makeTrendTriangleCurve());
+    config.channelSwapPauseDurationMs = 2001;
+    GeneratorState state;
+    state.channelsSwapped = true;
+
+    PackagePlan plan = BufferPackagePlanner().planPackage(
+        70000, config, state, /*curveStartSeconds=*/39600.0f, /*timeScale=*/60.0f);
+
+    ASSERT_TRUE(planHasSwapAfter(plan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(plan), 58000, 2);
+    int64_t acc = 0;
+    for (const auto& s : plan.segments) {
+        if (s.type == BufferType::PAUSE) {
+            const int64_t pauseMid = acc + s.durationMs / 2;
+            EXPECT_NEAR(pauseMid, 60000, 1);  // середина паузы ~ T* (в аудио-мс)
+        }
+        acc += s.durationMs;
+    }
+}
+
 // Переход ближе lead (фейд не укорачиваем): SOLID клампится в 0, вся процедура
 // уходит вправо, свап не теряется.
 TEST(TrendSwapTest, ImminentTransition_ClampsSolidToZero_ShiftsRight) {

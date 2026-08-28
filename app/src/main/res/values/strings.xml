@@ -58,7 +58,7 @@
     <string name="swap_mode_timer">Таймер</string>
     <string name="swap_mode_trend">Тенденция</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
-    <string name="swap_mode_trend_description">Рост частоты — обычное расположение каналов, спад — обратное; смена происходит в экстремумах графика выбранных типов</string>
+    <string name="swap_mode_trend_description">Смена происходит в экстремумах графика выбранных типов</string>
     <string name="swap_points">Типы экстремумов</string>
     <string name="swap_points_both">Все</string>
     <string name="swap_points_peaks">Пики</string>

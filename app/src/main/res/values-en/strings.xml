@@ -58,7 +58,7 @@
     <string name="swap_mode_timer">Timer</string>
     <string name="swap_mode_trend">Trend-based</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
-    <string name="swap_mode_trend_description">Rising frequency — normal channels, falling — swapped; switches occur at the extrema of the curve of the selected types</string>
+    <string name="swap_mode_trend_description">Switches occur at the extrema of the curve of the selected types</string>
     <string name="swap_points">Extremum types</string>
     <string name="swap_points_both">Peaks and troughs</string>
     <string name="swap_points_peaks">Peaks</string>

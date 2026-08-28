@@ -21,11 +21,15 @@ namespace binaural {
 // (FrequencyCurve::updateCache → buildTrendCrossings) и здесь только
 // переиспользуются.
 //
-// ЦЕНТРОВКА ПРОЦЕДУЫ ПЕРЕСТАНОВКИ: SOLID длится до T* − leadMs, где T* —
-// момент смены тенденции, leadMs — длительность грядущего FADE_OUT. Поэтому
-// вся процедура [fade-out | прерывание | fade-in] ложится серединой на T*:
-// фейд-аут завершается ровно на T*, в T* происходит прерывание потока
-// (перестановка каналов), фейд-ин идёт после T*.
+// ЦЕНТРОВКА ПРОЦЕДУРЫ ПЕРЕСТАНОВКИ НА ЭКСТРЕМУМ T* (момент смены тенденции):
+// SOLID длится до T* − leadMs − P/2, где leadMs — длительность грядущего
+// FADE_OUT, P — длительность паузы (channelSwapPauseDurationMs). Фейд-аут
+// занимает [T*−P/2−lead, T*−P/2] и завершается ровно на T*−P/2, там же
+// происходит прерывание потока (перестановка каналов). Пауза идёт сразу
+// после: [T*−P/2, T*+P/2], то есть её СЕРЕДИНА приходится ровно на T*
+// (центр экстремума). Фейд-ин идёт после паузы: [T*+P/2, T*+P/2+lead].
+// При P = 0 пауза вырождается, и прерывание потока ложится ровно на T*
+// (базовое поведение «момент смены = экстремум»).
 // ============================================================================
 
 // Полуокно оценки производной: Δf = carrier(t+h) − carrier(t−h) (см. Config.h)
@@ -56,23 +60,33 @@ inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
 
 /**
  * Длительность SOLID-фазы в TREND-режиме: время до ближайшей смены тренда
- * минус lead (центровка процедуры перестановки на момент смены).
+ * минус lead и минус swapOffset (центровка процедуры перестановки на T*).
  *
  * @param leadMs Длительность FADE_OUT из конфига: SOLID заканчивается на
- *        T* − leadMs, чтобы прерывание потока (конец fade-out) пришлось
- *        ровно на T*. Если T* ближе leadMs — SOLID клампится в 0 (процедура
- *        целиком уходит вправо; длительности фейдов не адаптируются).
+ *        T* − leadMs − swapOffset, чтобы прерывание потока (конец fade-out)
+ *        пришлось на T* − swapOffset.
+ * @param swapOffsetMs Доп. смещение до прерывания относительно T* (АУДИО-мс).
+ *        Для центровки ПАУЗЫ на экстремуме передаётся P/2 (половина
+ *        channelSwapPauseDurationMs): тогда пауза [T*−P/2, T*+P/2] имеет
+ *        середину ровно T*. При P = 0 (swapOffset = 0) прерывание потока
+ *        ложится ровно на T* (базовое поведение). Если T* ближе
+ *        (leadMs + swapOffsetMs) — SOLID клампится в 0 (процедура целиком
+ *        уходит вправо; длительности фейдов не адаптируются).
  *
  * Оси времени: нули живут на ОСИ КРИВОЙ (сек суток), а длительности фаз —
  * на АУДИО-ОСИ (мс). При timeScale>1 (debug virtual time) кривая обгоняет
- * аудио, поэтому найденное смещение делится на масштаб.
+ * аудио, поэтому найденное смещение dtMs делится на масштаб. swapOffsetMs —
+ * это уже аудио-длительность (реальная пауза воспроизведения), делить на
+ * timeScale его НЕ нужно.
  */
 inline int64_t trendSolidDurationMs(
     const FrequencyCurve& curve,
     float curvePosSec,
     bool currentlySwapped,
     float timeScale = 1.0f,
-    int64_t leadMs = 0, ChannelSwapTrendPoints points = ChannelSwapTrendPoints::BOTH
+    int64_t leadMs = 0,
+    ChannelSwapTrendPoints points = ChannelSwapTrendPoints::BOTH,
+    int64_t swapOffsetMs = 0
 ) {
     constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
@@ -119,7 +133,10 @@ inline int64_t trendSolidDurationMs(
     }
 
     const int64_t dtMs = static_cast<int64_t>(bestRel * 1000.0 / ts);
-    return std::clamp(dtMs - leadMs, int64_t{0}, kTrendMaxSolidMs);
+    // SOLID заканчивается на T* − leadMs − swapOffsetMs: прерывание потока
+    // (конец fade-out) приходится на T* − swapOffsetMs, а при swapOffsetMs = P/2
+    // середина последующей паузы ложится ровно на T* (центр экстремума).
+    return std::clamp(dtMs - leadMs - swapOffsetMs, int64_t{0}, kTrendMaxSolidMs);
 }
 
 /**
@@ -270,16 +287,21 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
     }
 
-    // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены тренда
-    // минус lead фейда — центровка прерывания на момент смены), для остальных и
-    // TIMER — константа из конфига.
+    // Длительность СТАРТУЮЩЕЙ фазы: для SOLID в TREND — динамическая (до смены
+    // тренда минус lead фейда и половина паузы — центровка прерывания/паузы на
+    // момент смены), для остальных и TIMER — константа из конфига.
     auto startPhaseDuration = [&](SwapPhase phase) -> int64_t {
         if (trendMode && phase == SwapPhase::SOLID) {
-            // Lead = длительность грядущего FADE_OUT: SOLID завершается на T* − lead,
-            // fade-out укладывается ровно перед T*, прерывание потока — на T*.
+            // Lead = длительность грядущего FADE_OUT + половина паузы. SOLID
+            // завершается на T* − leadMs − P/2, фейд-аут укладывается перед
+            // T*−P/2, прерывание потока — на T*−P/2, а ПАУЗА [T*−P/2, T*+P/2]
+            // оказывается центрированной на T* (середина паузы = центр экстремума).
+            // При P = 0 поведение вырождается в базовое: прерывание ровно на T*.
             const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
+            const int64_t pauseHalfMs = config.channelSwapPauseDurationMs / 2;
             return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
-                                        timeScale, leadMs, config.channelSwapTrendPoints);
+                                        timeScale, leadMs, config.channelSwapTrendPoints,
+                                        pauseHalfMs);
         }
         return phaseDuration(phase, config);
     };
