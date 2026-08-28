@@ -91,6 +91,7 @@ class NativeAudioEngine {
         channelSwapFadeEnabled: Boolean,
         channelSwapFadeDurationMs: Long,
         channelSwapPauseDurationMs: Long,
+        channelSwapTrendPoints: Int,
         normalizationType: Int,
         volumeNormalizationStrength: Float
     )
@@ -241,6 +242,7 @@ class NativeAudioEngine {
             channelSwapFadeEnabled = config.channelSwapFadeEnabled,
             channelSwapFadeDurationMs = config.channelSwapFadeDurationMs,
             channelSwapPauseDurationMs = config.channelSwapPauseDurationMs,
+            channelSwapTrendPoints = config.channelSwapTrendPoints.ordinal,
             normalizationType = normalizationType,
             volumeNormalizationStrength = config.volumeNormalizationStrength
         )

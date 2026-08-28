@@ -66,7 +66,8 @@ fun SettingsScreen(
                 onChannelSwapSelect = { viewModel.setChannelSwapSelection(it) },
                 onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
                 onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
-                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) }
+                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) },
+                onChannelSwapTrendPointsChange = { viewModel.setChannelSwapTrendPoints(it) }
             )
             
             HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))

@@ -4110,5 +4110,116 @@ TEST(TrendSwapTest, MismatchImmediateSwap_IgnoresLeadAndCap) {
     EXPECT_EQ(solidMsBeforeFirstSwap(plan), 0);
 }
 
+// Выбор точек графика для TREND-перестановки: BOTH — на каждом экстремуме
+// (прежнее поведение), PEAKS — только на пиках, TROUGHS — только на впадинах.
+// Поведение проверяем через реальный план пакета (planPackage): момент первого
+// свапа определяется ближайшим ВЫБРАННЫМ экстремумом.
+
+// Старт 11:55 (рост, пик Z1=43199.8 через ~3.3 мин). PEAKS и BOTH свапают на
+// пике (внутри окна пакета), TROUGHS ждёт впадину Z2 (~12 ч) — свапа нет.
+TEST(TrendSwapTest, TrendPoints_PeaksAtPeak_TroughsWaits) {
+    constexpr float startSec = 11.0f * 3600.0f + 55.0f * 60.0f; // 42900
+    constexpr int kPkg = 400000; // > 3.3 мин: пакет достигает пика
+
+    BinauralConfig both = makeTrendConfig(makeTrendSawCurve());
+    both.channelSwapTrendPoints = ChannelSwapTrendPoints::BOTH;
+    GeneratorState bothState;
+    PackagePlan bothPlan = BufferPackagePlanner().planPackage(kPkg, both, bothState, startSec);
+    ASSERT_TRUE(planHasSwapAfter(bothPlan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(bothPlan), 298809, 100);
+
+    BinauralConfig peaks = makeTrendConfig(makeTrendSawCurve());
+    peaks.channelSwapTrendPoints = ChannelSwapTrendPoints::PEAKS;
+    GeneratorState peaksState;
+    PackagePlan peaksPlan = BufferPackagePlanner().planPackage(kPkg, peaks, peaksState, startSec);
+    ASSERT_TRUE(planHasSwapAfter(peaksPlan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(peaksPlan), 298809, 100);
+
+    BinauralConfig troughs = makeTrendConfig(makeTrendSawCurve());
+    troughs.channelSwapTrendPoints = ChannelSwapTrendPoints::TROUGHS;
+    GeneratorState troughsState;
+    PackagePlan troughsPlan = BufferPackagePlanner().planPackage(kPkg, troughs, troughsState, startSec);
+    // Впадина далеко (~12 ч) -> в окне пакета свапа нет
+    EXPECT_FALSE(planHasSwapAfter(troughsPlan));
+}
+
+// Старт 13:00 (спад). BOTH немедленно выравнивается по знаку тренда (свап сразу),
+// PEAKS/TROUGHS не форсируют немедленный свап — ближайший выбранный экстремум
+// далеко, поэтому в окне пакета свапа нет.
+TEST(TrendSwapTest, TrendPoints_BothImmediateOnFalling_PeaksTroughsWait) {
+    constexpr float startSec = 13.0f * 3600.0f; // 46800
+    constexpr int kPkg = 400000;
+
+    BinauralConfig both = makeTrendConfig(makeTrendSawCurve());
+    both.channelSwapTrendPoints = ChannelSwapTrendPoints::BOTH;
+    GeneratorState bothState;
+    PackagePlan bothPlan = BufferPackagePlanner().planPackage(kPkg, both, bothState, startSec);
+    ASSERT_TRUE(planHasSwapAfter(bothPlan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(bothPlan), 0); // немедленный реалайн
+
+    BinauralConfig peaks = makeTrendConfig(makeTrendSawCurve());
+    peaks.channelSwapTrendPoints = ChannelSwapTrendPoints::PEAKS;
+    GeneratorState peaksState;
+    PackagePlan peaksPlan = BufferPackagePlanner().planPackage(kPkg, peaks, peaksState, startSec);
+    EXPECT_FALSE(planHasSwapAfter(peaksPlan));
+
+    BinauralConfig troughs = makeTrendConfig(makeTrendSawCurve());
+    troughs.channelSwapTrendPoints = ChannelSwapTrendPoints::TROUGHS;
+    GeneratorState troughsState;
+    PackagePlan troughsPlan = BufferPackagePlanner().planPackage(kPkg, troughs, troughsState, startSec);
+    EXPECT_FALSE(planHasSwapAfter(troughsPlan));
+}
+
+// Старт 23:30 (спад, впадина Z2=86306.2 через ~28.4 мин). TROUGHS свапает на
+// впадине (внутри окна), PEAKS ждёт пик (~12 ч) — свапа нет, BOTH немедленно.
+TEST(TrendSwapTest, TrendPoints_TroughsAtTrough_PeaksWait) {
+    constexpr float startSec = 23.0f * 3600.0f + 30.0f * 60.0f; // 84600
+    constexpr int kPkg = 1800000; // 30 мин: достигает впадины (28.4 мин)
+
+    BinauralConfig troughs = makeTrendConfig(makeTrendSawCurve());
+    troughs.channelSwapTrendPoints = ChannelSwapTrendPoints::TROUGHS;
+    GeneratorState troughsState;
+    PackagePlan troughsPlan = BufferPackagePlanner().planPackage(kPkg, troughs, troughsState, startSec);
+    ASSERT_TRUE(planHasSwapAfter(troughsPlan));
+    EXPECT_NEAR(solidMsBeforeFirstSwap(troughsPlan), 1705000, 500); // ~28.4 мин (не кап 30 мин)
+
+    BinauralConfig peaks = makeTrendConfig(makeTrendSawCurve());
+    peaks.channelSwapTrendPoints = ChannelSwapTrendPoints::PEAKS;
+    GeneratorState peaksState;
+    PackagePlan peaksPlan = BufferPackagePlanner().planPackage(kPkg, peaks, peaksState, startSec);
+    EXPECT_FALSE(planHasSwapAfter(peaksPlan));
+
+    BinauralConfig both = makeTrendConfig(makeTrendSawCurve());
+    both.channelSwapTrendPoints = ChannelSwapTrendPoints::BOTH;
+    GeneratorState bothState;
+    PackagePlan bothPlan = BufferPackagePlanner().planPackage(kPkg, both, bothState, startSec);
+    ASSERT_TRUE(planHasSwapAfter(bothPlan));
+    EXPECT_EQ(solidMsBeforeFirstSwap(bothPlan), 0); // немедленный реалайн (спад)
+}
+
+// Ближайший ВЫБРАННЫЙ экстремум определяет момент свапа:
+// старт 11:55 (подъём, ~3.3 мин до пика Z1) -> PEAKS/BOTH свапают на пике,
+// TROUGHS ждёт впадину Z2 (~12 ч) и упирается в кап 30 мин.
+TEST(TrendSwapTest, TrendPoints_PeaksVsTroughs_NextSelectedCrossing) {
+    BinauralConfig config = makeTrendConfig(makeTrendSawCurve());
+    const FrequencyCurve& curve = config.curve;
+    constexpr float startSec = 11.0f * 3600.0f + 55.0f * 60.0f; // 42900
+    constexpr int64_t leadMs = 1000; // FADE_OUT = channelSwapFadeDurationMs
+
+    const int64_t bothMs = trendSolidDurationMs(
+        curve, startSec, /*currentlySwapped=*/false, 1.0f, leadMs,
+        ChannelSwapTrendPoints::BOTH);
+    const int64_t peaksMs = trendSolidDurationMs(
+        curve, startSec, /*currentlySwapped=*/false, 1.0f, leadMs,
+        ChannelSwapTrendPoints::PEAKS);
+    const int64_t troughsMs = trendSolidDurationMs(
+        curve, startSec, /*currentlySwapped=*/false, 1.0f, leadMs,
+        ChannelSwapTrendPoints::TROUGHS);
+
+    // Пик Z1=43199.809: до него ~299.8 с, минус lead 1 с -> ~298809 мс
+    EXPECT_NEAR(peaksMs, 298809, 50);
+    EXPECT_NEAR(bothMs, 298809, 50);          // BOTH на ближайшем экстремуме == пик
+    EXPECT_EQ(troughsMs, kTrendMaxSolidMs);   // впадина далеко -> кап переоценки
+}
 } // namespace test
 } // namespace binaural

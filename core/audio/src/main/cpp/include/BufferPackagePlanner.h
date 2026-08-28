@@ -72,14 +72,20 @@ inline int64_t trendSolidDurationMs(
     float curvePosSec,
     bool currentlySwapped,
     float timeScale = 1.0f,
-    int64_t leadMs = 0
+    int64_t leadMs = 0, ChannelSwapTrendPoints points = ChannelSwapTrendPoints::BOTH
 ) {
     constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
 
-    // Рассогласование уже сейчас → немедленный свап (SOLID=0, без выдержек)
-    if (trendDesiredSwapped(currentlySwapped,
-                            trendCarrierDeltaAt(curve, curvePosSec)) != currentlySwapped) {
+    // Немедленный свап — только при явном рассогласовании со ЗНАКОМ тренда (BOTH).
+    // Для PEAKS/TROUGHS абсолютного «правильного» состояния нет (фаза зависит от
+    // числа пройденных суток, теряемого при wrap позиции в [0, DAY)): фаза задаётся
+    // начальным состоянием и тогглами на выбранных экстремумах, поэтому немедленный
+    // свап не форсируем — иначе фаза ломается. Здесь points влияет только на фильтр
+    // ближайшего выбранного перехода ниже.
+    if (points == ChannelSwapTrendPoints::BOTH &&
+            trendDesiredSwapped(currentlySwapped, trendCarrierDeltaAt(curve, curvePosSec))
+                != currentlySwapped) {
         return 0;
     }
 
@@ -93,13 +99,17 @@ inline int64_t trendSolidDurationMs(
         crossings = &localCrossings;
     }
 
-    // Нужен ближайший переход, переводящий состояние в !currentlySwapped:
-    // пик (toSwapped=true) при swapped=false, впадина (false) при swapped=true.
-    const bool needToSwapped = !currentlySwapped;
+    // Ближайший ВЫБРАННЫЙ переход: BOTH — любой экстремум (прежнее поведение,
+    // смена на каждом пике и впадине), PEAKS — только пик (toSwapped==true),
+    // TROUGHS — только впадина (toSwapped==false).
+    const bool wantPeaks = (points == ChannelSwapTrendPoints::PEAKS);
     const double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
     double bestRel = -1.0;
     for (const TrendCrossing& c : *crossings) {
-        if (c.toSwapped != needToSwapped) continue;
+        const bool isSelected = (points == ChannelSwapTrendPoints::BOTH)
+            ? true
+            : (c.toSwapped == wantPeaks);
+        if (!isSelected) continue;
         double rel = static_cast<double>(c.timeSec) - pos;
         if (rel <= 0.0) rel += dayD; // wrap через полночь
         if (bestRel < 0.0 || rel < bestRel) bestRel = rel;
@@ -269,7 +279,7 @@ inline PackagePlan BufferPackagePlanner::planPackage(
             // fade-out укладывается ровно перед T*, прерывание потока — на T*.
             const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
             return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
-                                        timeScale, leadMs);
+                                        timeScale, leadMs, config.channelSwapTrendPoints);
         }
         return phaseDuration(phase, config);
     };

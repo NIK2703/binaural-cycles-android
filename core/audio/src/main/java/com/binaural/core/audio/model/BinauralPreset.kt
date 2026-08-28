@@ -318,6 +318,7 @@ data class BinauralConfig(
     val channelSwapEnabled: Boolean = false,
     val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию (только TIMER)
     val channelSwapMode: ChannelSwapMode = ChannelSwapMode.TIMER,
+    val channelSwapTrendPoints: ChannelSwapTrendPoints = ChannelSwapTrendPoints.BOTH,
     val channelSwapFadeEnabled: Boolean = true, // затухание при смене каналов
     val channelSwapFadeDurationMs: Long = 1000L, // длительность затухания/нарастания в миллисекундах
     val channelSwapPauseDurationMs: Long = 0L, // длительность паузы между fade-out и fade-in (0 = без паузы)
@@ -374,6 +375,17 @@ enum class ChannelSwapMode {
             // убывает - обратное; интервал не участвует, защита от дребезга -
             // только мёртвая зона производной
 }
+/**
+ * Точки графика, в которых происходит перестановка каналов в TREND-режиме.
+ * BOTH — на каждом локальном экстремуме (пиках и впадинах);
+ * PEAKS — только на пиках; TROUGHS — только на впадинах.
+ */
+@Serializable
+enum class ChannelSwapTrendPoints {
+    BOTH,    // На пиках и впадинах (текущее поведение)
+    PEAKS,   // Только на пиках
+    TROUGHS  // Только на впадинах
+}
 
 /**
  * Настройки перестановки каналов для пресета
@@ -382,6 +394,7 @@ enum class ChannelSwapMode {
 data class ChannelSwapSettings(
     val enabled: Boolean = false,
     val mode: ChannelSwapMode = ChannelSwapMode.TIMER,
+    val trendPoints: ChannelSwapTrendPoints = ChannelSwapTrendPoints.BOTH,
     val intervalSeconds: Int = 300,        // 5 минут по умолчанию (только TIMER)
     val fadeEnabled: Boolean = true,       // затухание при смене каналов
     val fadeDurationMs: Long = 1000L,      // длительность затухания/нарастания в мс

@@ -48,7 +48,7 @@
     <string name="spline_tension_description">0 = smooth Catmull-Rom, 1 = almost linear</string>
 
     <!-- Channel Swap -->
-    <string name="auto_channel_swap">Auto channel swap</string>
+    <string name="auto_channel_swap">Channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
     <string name="channel_swap_now_normal">Now: normal arrangement</string>
     <string name="channel_swap_now_swapped">Now: channels swapped</string>
@@ -58,7 +58,11 @@
     <string name="swap_mode_timer">Timer</string>
     <string name="swap_mode_trend">Trend-based</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
-    <string name="swap_mode_trend_description">Rising frequency — normal channels, falling — swapped; flips occur at curve peaks and troughs</string>
+    <string name="swap_mode_trend_description">Rising frequency — normal channels, falling — swapped; switches occur at the extrema of the curve of the selected types</string>
+    <string name="swap_points">Extremum types</string>
+    <string name="swap_points_both">Peaks and troughs</string>
+    <string name="swap_points_peaks">Peaks</string>
+    <string name="swap_points_troughs">Troughs</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>

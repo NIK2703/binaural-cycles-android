@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
+import com.binaural.core.audio.model.ChannelSwapTrendPoints
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.RelaxationMode
@@ -247,7 +248,8 @@ fun ChannelSwapSettingsCard(
     onChannelSwapSelect: (ChannelSwapMode?) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
-    onChannelSwapPauseDurationChange: (Long) -> Unit
+    onChannelSwapPauseDurationChange: (Long) -> Unit,
+    onChannelSwapTrendPointsChange: (ChannelSwapTrendPoints) -> Unit,
 ) {
     // null = выключено; иначе включено с выбранным режимом
     val selection = when {
@@ -260,7 +262,7 @@ fun ChannelSwapSettingsCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Авто-перестановка каналов: один ряд из трёх чипов (как у нормализации)
+        // Смена каналов: один ряд из трёх чипов (как у нормализации)
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = stringResource(R.string.auto_channel_swap),
@@ -351,15 +353,91 @@ fun ChannelSwapSettingsCard(
                 )
             }
             
+            // Точки графика для перестановки: только в TREND-режиме
+            // (в TIMER интервал не участвует — смены привязаны к экстремумам кривой)
+            if (channelSwapSettings.mode == ChannelSwapMode.TREND) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = stringResource(R.string.swap_points),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 8.dp)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                    ) {
+                        FilterChip(
+                            selected = channelSwapSettings.trendPoints == ChannelSwapTrendPoints.BOTH,
+                            onClick = { onChannelSwapTrendPointsChange(ChannelSwapTrendPoints.BOTH) },
+                            label = {
+                                Text(
+                                    text = stringResource(R.string.swap_points_both),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = channelSwapSettings.trendPoints == ChannelSwapTrendPoints.PEAKS,
+                            onClick = { onChannelSwapTrendPointsChange(ChannelSwapTrendPoints.PEAKS) },
+                            label = {
+                                Text(
+                                    text = stringResource(R.string.swap_points_peaks),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                        FilterChip(
+                            selected = channelSwapSettings.trendPoints == ChannelSwapTrendPoints.TROUGHS,
+                            onClick = { onChannelSwapTrendPointsChange(ChannelSwapTrendPoints.TROUGHS) },
+                            label = {
+                                Text(
+                                    text = stringResource(R.string.swap_points_troughs),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+            
             // Слайдер длительности затухания (всегда показываем, т.к. fadeEnabled всегда true)
-            DiscreteSliderLong(
-                label = stringResource(R.string.fade_duration),
-                value = channelSwapSettings.fadeDurationMs,
-                values = listOf(1000L, 2000L, 3000L, 4000L, 5000L, 6000L, 7000L, 8000L, 9000L, 10000L, 11000L, 12000L, 13000L, 14000L, 15000L),
-                formatValue = { ms -> formatFadeDurationLabel(ms) },
-                onValueChange = onChannelSwapFadeDurationChange,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                var localSeconds by remember(channelSwapSettings.fadeDurationMs) {
+                    mutableStateOf(channelSwapSettings.fadeDurationMs / 1000f)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = stringResource(R.string.fade_duration),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = formatFadeDurationLabel(localSeconds.toLong() * 1000L),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = localSeconds,
+                    onValueChange = { localSeconds = (it + 0.5f).toInt().toFloat() },
+                    onValueChangeFinished = {
+                        onChannelSwapFadeDurationChange(localSeconds.toInt().toLong() * 1000L)
+                    },
+                    valueRange = 1f..15f,
+                    steps = 0,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             
             // Слайдер длительности паузы при переключении (расширенный диапазон до 1 минуты)
             DiscreteSliderLong(

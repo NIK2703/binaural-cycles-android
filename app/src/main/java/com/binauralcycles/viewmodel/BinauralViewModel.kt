@@ -14,6 +14,7 @@ import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
+import com.binaural.core.audio.model.ChannelSwapTrendPoints
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -355,6 +356,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapEnabled = state.channelSwapSettings.enabled,
             channelSwapIntervalSeconds = state.channelSwapSettings.intervalSeconds,
             channelSwapMode = state.channelSwapSettings.mode,
+            channelSwapTrendPoints = state.channelSwapSettings.trendPoints,
             channelSwapFadeEnabled = state.channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = state.channelSwapSettings.fadeDurationMs,
             channelSwapPauseDurationMs = state.channelSwapSettings.pauseDurationMs,
@@ -1310,6 +1312,22 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
+     * Выбрать точки графика для перестановки каналов в TREND-режиме:
+     * BOTH — на пиках и впадинах, PEAKS — только на пиках, TROUGHS — только на впадинах.
+     */
+    fun setChannelSwapTrendPoints(points: ChannelSwapTrendPoints) {
+        restartWithFadeIfNeeded {
+            val state = _uiState.value
+            val newSettings = state.channelSwapSettings.copy(trendPoints = points)
+            _uiState.update { it.copy(channelSwapSettings = newSettings) }
+            updateAudioConfig()
+            viewModelScope.launch {
+                preferencesRepository.saveChannelSwapSettings(newSettings)
+            }
+        }
+    }
+    
+    /**
      * Включить/выключить возобновление воспроизведения при подключении гарнитуры
      */
     fun setResumeOnHeadsetConnect(enabled: Boolean) {
@@ -1362,6 +1380,7 @@ class BinauralViewModel @Inject constructor(
             channelSwapEnabled = channelSwapSettings.enabled,
             channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
             channelSwapMode = channelSwapSettings.mode,
+            channelSwapTrendPoints = channelSwapSettings.trendPoints,
             channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
             channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
             channelSwapPauseDurationMs = channelSwapSettings.pauseDurationMs,

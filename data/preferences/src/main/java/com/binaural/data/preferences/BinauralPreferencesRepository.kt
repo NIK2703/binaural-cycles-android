@@ -12,6 +12,7 @@ import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.data.preferences.R
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
+import com.binaural.core.audio.model.ChannelSwapTrendPoints
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -129,6 +130,7 @@ class BinauralPreferencesRepository @Inject constructor(
         private val CHANNEL_SWAP_FADE_ENABLED_KEY = booleanPreferencesKey("channel_swap_fade_enabled")
         private val CHANNEL_SWAP_FADE_DURATION_KEY = intPreferencesKey("channel_swap_fade_duration")
         private val CHANNEL_SWAP_PAUSE_DURATION_KEY = intPreferencesKey("channel_swap_pause_duration")
+        private val CHANNEL_SWAP_TREND_POINTS_KEY = stringPreferencesKey("channel_swap_trend_points")
         // Настройки нормализации громкости
         private val VOLUME_NORMALIZATION_TYPE_KEY = stringPreferencesKey("volume_normalization_type")
         private val VOLUME_NORMALIZATION_STRENGTH_KEY = floatPreferencesKey("volume_normalization_strength")
@@ -278,6 +280,9 @@ class BinauralPreferencesRepository @Inject constructor(
                 mode = preferences[CHANNEL_SWAP_MODE_KEY]?.let {
                     try { ChannelSwapMode.valueOf(it) } catch (e: Exception) { ChannelSwapMode.TIMER }
                 } ?: ChannelSwapMode.TIMER,
+                trendPoints = preferences[CHANNEL_SWAP_TREND_POINTS_KEY]?.let {
+                    try { ChannelSwapTrendPoints.valueOf(it) } catch (e: Exception) { ChannelSwapTrendPoints.BOTH }
+                } ?: ChannelSwapTrendPoints.BOTH,
                 intervalSeconds = preferences[CHANNEL_SWAP_INTERVAL_KEY] ?: 60,
                 fadeEnabled = preferences[CHANNEL_SWAP_FADE_ENABLED_KEY] ?: true,
                 fadeDurationMs = preferences[CHANNEL_SWAP_FADE_DURATION_KEY]?.toLong() ?: 2000L,
@@ -294,6 +299,7 @@ class BinauralPreferencesRepository @Inject constructor(
             preferences[CHANNEL_SWAP_ENABLED_KEY] = settings.enabled
             preferences[CHANNEL_SWAP_INTERVAL_KEY] = settings.intervalSeconds
             preferences[CHANNEL_SWAP_MODE_KEY] = settings.mode.name
+            preferences[CHANNEL_SWAP_TREND_POINTS_KEY] = settings.trendPoints.name
             // fadeEnabled всегда true, не сохраняем
             preferences[CHANNEL_SWAP_FADE_DURATION_KEY] = settings.fadeDurationMs.toInt()
             preferences[CHANNEL_SWAP_PAUSE_DURATION_KEY] = settings.pauseDurationMs.toInt()

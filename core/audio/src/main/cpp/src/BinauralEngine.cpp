@@ -308,13 +308,20 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
                 } else if (resumeCfg.channelSwapMode == ChannelSwapMode::TREND &&
                            !resumeCfg.curve.lowerFreqTable.empty() &&
                            !resumeCfg.curve.upperFreqTable.empty()) {
-                    const bool aligned = trendDesiredSwapped(
-                        m_state.channelsSwapped,
-                        trendCarrierDeltaAt(resumeCfg.curve, resumeTime));
-                    if (aligned != m_state.channelsSwapped) {
-                        LOGD("setPlaying(resume): TREND realign swapped %d -> %d",
-                             m_state.channelsSwapped ? 1 : 0, aligned ? 1 : 0);
-                        m_state.channelsSwapped = aligned;
+                    // BOTH: реалайн по знаку тренда (прежнее поведение). Для
+                    // PEAKS/TROUGHS абсолютного эталона нет — фаза зависит от числа
+                    // пройденных суток (теряется при wrap позиции), поэтому держим
+                    // сохранённое состояние: тогглы на выбранных экстремумах иначе
+                    // сломаются.
+                    if (resumeCfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
+                        const bool aligned = trendDesiredSwapped(
+                            m_state.channelsSwapped,
+                            trendCarrierDeltaAt(resumeCfg.curve, resumeTime));
+                        if (aligned != m_state.channelsSwapped) {
+                            LOGD("setPlaying(resume): TREND realign swapped %d -> %d",
+                                 m_state.channelsSwapped ? 1 : 0, aligned ? 1 : 0);
+                            m_state.channelsSwapped = aligned;
+                        }
                     }
                 }
             }
@@ -381,8 +388,7 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
                 !startCfg.curve.lowerFreqTable.empty() &&
                 !startCfg.curve.upperFreqTable.empty()) {
                 m_state.channelsSwapped = trendDesiredSwapped(
-                    /*currentlySwapped=*/false,
-                    trendCarrierDeltaAt(startCfg.curve, freshStart));
+                    false, trendCarrierDeltaAt(startCfg.curve, freshStart));
                 LOGD("setPlaying(true): trend initial swap=%d (delta=%.3f Hz)",
                      m_state.channelsSwapped ? 1 : 0,
                      trendCarrierDeltaAt(startCfg.curve, freshStart));

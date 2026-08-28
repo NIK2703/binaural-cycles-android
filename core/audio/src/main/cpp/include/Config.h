@@ -139,6 +139,19 @@ private:
 /**
  * Режим автоматической перестановки каналов
  */
+/**
+ * Точки графика, в которых происходит перестановка каналов в TREND-режиме.
+ * TREND-режим переключает (toggle) channelsSwapped при прохождении выбранного
+ * типа локального экстремума несущей (предвычисленные нули трендовой
+ * производной). BOTH — текущее поведение (на каждом экстремуме); PEAKS — только
+ * на пиках; TROUGHS — только на впадинах.
+ */
+enum class ChannelSwapTrendPoints : int8_t {
+    BOTH = 0,     // На пиках и впадинах (текущее поведение)
+    PEAKS = 1,    // Только на пиках
+    TROUGHS = 2   // Только на впадинах
+};
+
 enum class ChannelSwapMode : int8_t {
     TIMER = 0,   // По таймеру: swap каждые channelSwapIntervalSec секунд
     TREND = 1    // По тенденции графика: рост несущей — прямое расположение,
@@ -158,6 +171,7 @@ struct BinauralConfig {
     bool channelSwapEnabled = false;
     int32_t channelSwapIntervalSec = 300;  // 5 минут (только TIMER; в TREND не участвует)
     ChannelSwapMode channelSwapMode = ChannelSwapMode::TIMER;
+    ChannelSwapTrendPoints channelSwapTrendPoints = ChannelSwapTrendPoints::BOTH;
     bool channelSwapFadeEnabled = true;
     int64_t channelSwapFadeDurationMs = 1000;
     int64_t channelSwapPauseDurationMs = 0;  // Пауза между fade-out и fade-in (0 = без паузы)
