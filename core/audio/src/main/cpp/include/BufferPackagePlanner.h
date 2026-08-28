@@ -57,6 +57,91 @@ inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
     if (carrierDeltaHz < 0.0f) return true;  // убывание → обратное
     return currentlySwapped;                 // плато → без изменений
 }
+/**
+ * Состояние перестановки каналов (true = swapped) для позиции времени суток
+ * curvePosSec согласно расписанию смен, привязанному к оси суток
+ * (позиция 0 = начало суток), а не к моменту нажатия Play.
+ *
+ * Результат = чётность событий смены, уже прошедших в полуинтервале
+ * [0, curvePosSec):
+ *   TREND — выбранные экстремумы (фильтр channelSwapTrendPoints) из
+ *           curve.trendCrossings с timeSec < curvePosSec;
+ *   TIMER — узлы сетки k*channelSwapIntervalSec: floor(pos / interval).
+ * База в начале суток — normal (false), с поправкой на знак тренда в начале
+ * суток для BOTH (см. обоснование ниже).
+ *
+ * Для TREND/BOTH наивная чётность равна знаковому правилу
+ * (swapped ⇔ производная < 0) только при восходящем тренде в начале суток.
+ * Если в начале суток тренд нисходящий (Δ(0) < 0), наивная чётность ошибается
+ * на 1, и планировщик при старте немедленно форсировал бы свап (щелчок сразу
+ * после Play). Поправка midnightPhase = (Δ(0) < 0) ровно восстанавливает
+ * эквивалентность знаковому правилу и гарантирует нулевую регрессию для BOTH.
+ */
+inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
+    constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
+    double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
+    if (pos < 0.0) pos += dayD;
+
+    if (cfg.channelSwapMode == ChannelSwapMode::TREND) {
+        std::vector<TrendCrossing> localCrossings;
+        const std::vector<TrendCrossing>* crossings = &cfg.curve.trendCrossings;
+        if (!cfg.curve.trendCrossingsValid) {
+            computeTrendCrossings(cfg.curve, localCrossings);
+            crossings = &localCrossings;
+        }
+        const bool wantPeaks = (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::PEAKS);
+        int64_t count = 0;
+        for (const TrendCrossing& c : *crossings) {
+            const bool selected =
+                (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH)
+                    ? true
+                    : (c.toSwapped == wantPeaks);
+            if (selected && static_cast<double>(c.timeSec) < pos) ++count;
+        }
+        bool swapped = (count & 1) != 0;
+
+        // Поправка фазы в начале суток (только BOTH).
+        if (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
+            constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+            const FrequencyTableResult fp =
+                cfg.curve.getChannelFrequenciesAt(kTrendHalfWindowSec);        // 0 + h
+            const FrequencyTableResult fm =
+                cfg.curve.getChannelFrequenciesAt(dayF - kTrendHalfWindowSec); // 0 − h (wrap)
+            const float delta0 = ((fp.upperFreq + fp.lowerFreq) -
+                                  (fm.upperFreq + fm.lowerFreq)) * 0.5f;
+            if (delta0 < 0.0f) swapped = !swapped;
+        }
+        return swapped;
+    }
+
+    // TIMER: узлы сетки k*channelSwapIntervalSec от начала суток.
+    if (cfg.channelSwapIntervalSec <= 0) return false;
+    const int64_t n = static_cast<int64_t>(
+        pos / static_cast<double>(cfg.channelSwapIntervalSec));  // floor, pos ≥ 0
+    return (n & 1) != 0;
+}
+
+/**
+ * Длительность SOLID в TIMER-режиме с привязкой к суточной сетке:
+ * время (аудио-мс) до ближайшего узла k*channelSwapIntervalSec от curvePosSec.
+ * Позиция делится на timeScale (кривая обгоняет аудио при virtual time).
+ * При старте ровно на узле (fmod == 0) — следующий узел через полный интервал.
+ * Каждый последующий SOLID пересчитывается от продвинутой позиции кривой,
+ * поэтому сетка остаётся привязанной к началу суток на всём горизонте
+ * воспроизведения (поглощается длительность fade/pause между узлами).
+ */
+inline int64_t timerSolidDurationMs(float curvePosSec,
+                                    int32_t intervalSec,
+                                    float timeScale = 1.0f) {
+    if (intervalSec <= 0) return 0;
+    const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
+    const double interval = static_cast<double>(intervalSec);
+    const double pos = std::fmod(static_cast<double>(curvePosSec),
+                                 static_cast<double>(SECONDS_PER_DAY));
+    const double distSec = interval - std::fmod(pos, interval); // ∈ (0, I]
+    const int64_t dtMs = static_cast<int64_t>(distSec * 1000.0 / ts);
+    return std::max<int64_t>(dtMs, 0);
+}
 
 /**
  * Длительность SOLID-фазы в TREND-режиме: время до ближайшей смены тренда
@@ -274,14 +359,19 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         return plan;
     }
 
-    // Контекст TREND-режима. curveStartSeconds < 0 (не передан вызывающим)
-    // → откат к TIMER-поведению через флаг trendMode.
+    // Контекст режимов, привязанных к оси кривой (позиция 0 = начало суток).
+    // curveStartSeconds < 0 (не передан вызывающим) → откат к базовому
+    // поведению (TIMER от старта воспроизведения) для совместимости.
     const bool trendMode = config.channelSwapMode == ChannelSwapMode::TREND &&
                            curveStartSeconds >= 0.0f;
+    // TIMER с привязкой к суточной сетке: расписание смен — узлы
+    // k*channelSwapIntervalSec от начала суток, а не от момента Play.
+    const bool timerGridMode = config.channelSwapMode == ChannelSwapMode::TIMER &&
+                               curveStartSeconds >= 0.0f;
     constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
     float trendCurvePosSec = 0.0f;   // позиция кривой внутри плана (сек суток)
     bool projectedSwapped = state.channelsSwapped; // проекция состояния после запланированных swap
-    if (trendMode) {
+    if (trendMode || timerGridMode) {
         // Стартовая позиция кривой от движка (иначе скан пойдёт от полуночи)
         trendCurvePosSec = std::fmod(curveStartSeconds, dayF);
         if (trendCurvePosSec < 0.0f) trendCurvePosSec += dayF;
@@ -291,17 +381,27 @@ inline PackagePlan BufferPackagePlanner::planPackage(
     // тренда минус lead фейда и половина паузы — центровка прерывания/паузы на
     // момент смены), для остальных и TIMER — константа из конфига.
     auto startPhaseDuration = [&](SwapPhase phase) -> int64_t {
-        if (trendMode && phase == SwapPhase::SOLID) {
-            // Lead = длительность грядущего FADE_OUT + половина паузы. SOLID
-            // завершается на T* − leadMs − P/2, фейд-аут укладывается перед
-            // T*−P/2, прерывание потока — на T*−P/2, а ПАУЗА [T*−P/2, T*+P/2]
-            // оказывается центрированной на T* (середина паузы = центр экстремума).
-            // При P = 0 поведение вырождается в базовое: прерывание ровно на T*.
-            const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
-            const int64_t pauseHalfMs = config.channelSwapPauseDurationMs / 2;
-            return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
-                                        timeScale, leadMs, config.channelSwapTrendPoints,
-                                        pauseHalfMs);
+        if (phase == SwapPhase::SOLID) {
+            if (trendMode) {
+                // Lead = длительность грядущего FADE_OUT + половина паузы. SOLID
+                // завершается на T* − leadMs − P/2, фейд-аут укладывается перед
+                // T*−P/2, прерывание потока — на T*−P/2, а ПАУЗА [T*−P/2, T*+P/2]
+                // оказывается центрированной на T* (середина паузы = центр экстремума).
+                // При P = 0 поведение вырождается в базовое: прерывание ровно на T*.
+                const int64_t leadMs = phaseDuration(SwapPhase::FADE_OUT, config);
+                const int64_t pauseHalfMs = config.channelSwapPauseDurationMs / 2;
+                return trendSolidDurationMs(config.curve, trendCurvePosSec, projectedSwapped,
+                                            timeScale, leadMs, config.channelSwapTrendPoints,
+                                            pauseHalfMs);
+            }
+            if (timerGridMode) {
+                // Следующая смена = ближайший узел суточной сетки. Каждый новый
+                // SOLID пересчитывается от продвинутой позиции, поэтому сетка
+                // остаётся привязанной к началу суток на всём горизонте.
+                return timerSolidDurationMs(trendCurvePosSec,
+                                            config.channelSwapIntervalSec,
+                                            timeScale);
+            }
         }
         return phaseDuration(phase, config);
     };
@@ -311,7 +411,7 @@ inline PackagePlan BufferPackagePlanner::planPackage(
         if (segment.swapAfterSegment) {
             projectedSwapped = !projectedSwapped;
         }
-        if (trendMode) {
+        if (trendMode || timerGridMode) {
             trendCurvePosSec = std::fmod(
                 trendCurvePosSec +
                 static_cast<float>(segment.durationMs) * 0.001f * timeScale, dayF);

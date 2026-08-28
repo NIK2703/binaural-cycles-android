@@ -384,14 +384,20 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
             std::unique_lock<std::shared_mutex> lock(m_configMutex);
             startCfg = m_config;
             if (startCfg.channelSwapEnabled &&
-                startCfg.channelSwapMode == ChannelSwapMode::TREND &&
                 !startCfg.curve.lowerFreqTable.empty() &&
                 !startCfg.curve.upperFreqTable.empty()) {
-                m_state.channelsSwapped = trendDesiredSwapped(
-                    false, trendCarrierDeltaAt(startCfg.curve, freshStart));
-                LOGD("setPlaying(true): trend initial swap=%d (delta=%.3f Hz)",
+                // Начальное расположение каналов определяется расписанием смен,
+                // привязанным к моменту суток (позиция 0 = начало суток), а не к
+                // моменту нажатия Play: состояние = чётность уже прошедших за
+                // сутки точек смены (выбранные экстремумы для TREND, узлы сетки
+                // k*interval для TIMER). Для TREND/BOTH эквивалентно прежнему
+                // знаковому правилу.
+                m_state.channelsSwapped = channelSwapStateAt(startCfg, freshStart);
+                LOGD("setPlaying(true): schedule init swap=%d (mode=%d, points=%d, pos=%.3f)",
                      m_state.channelsSwapped ? 1 : 0,
-                     trendCarrierDeltaAt(startCfg.curve, freshStart));
+                     static_cast<int>(startCfg.channelSwapMode),
+                     static_cast<int>(startCfg.channelSwapTrendPoints),
+                     freshStart);
             }
         }
 
