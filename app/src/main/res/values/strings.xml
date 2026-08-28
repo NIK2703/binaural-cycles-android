@@ -50,8 +50,6 @@
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Смена каналов</string>
     <string name="channel_swap_description">Каналы меняются местами для равномерной нагрузки</string>
-    <string name="channel_swap_now_normal">Сейчас: обычное расположение</string>
-    <string name="channel_swap_now_swapped">Сейчас: каналы переставлены</string>
     <string name="channel_swap_disabled">Выключено</string>
     <string name="swap_interval">Интервал перестановки</string>
     <string name="swap_mode_off_description">Каналы всегда в обычном расположении</string>

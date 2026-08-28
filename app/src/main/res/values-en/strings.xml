@@ -50,8 +50,6 @@
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
-    <string name="channel_swap_now_normal">Now: normal arrangement</string>
-    <string name="channel_swap_now_swapped">Now: channels swapped</string>
     <string name="channel_swap_disabled">Disabled</string>
     <string name="swap_interval">Swap interval</string>
     <string name="swap_mode_off_description">Channels always in normal arrangement</string>

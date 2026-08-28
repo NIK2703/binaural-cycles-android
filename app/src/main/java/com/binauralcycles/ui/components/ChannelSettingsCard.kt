@@ -244,7 +244,6 @@ fun VolumeNormalizationSettingsCard(
 @Composable
 fun ChannelSwapSettingsCard(
     channelSwapSettings: ChannelSwapSettings,
-    isChannelsSwapped: Boolean,
     onChannelSwapSelect: (ChannelSwapMode?) -> Unit,
     onChannelSwapIntervalChange: (Int) -> Unit,
     onChannelSwapFadeDurationChange: (Long) -> Unit,
@@ -269,26 +268,15 @@ fun ChannelSwapSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
-            // Подсказка в зависимости от выбора + живой индикатор расположения
+            // Подсказка в зависимости от выбора
             Text(
-                text = buildString {
-                    append(
-                        when (selection) {
-                            null -> stringResource(R.string.swap_mode_off_description)
-                            ChannelSwapMode.TIMER -> stringResource(R.string.swap_mode_timer_description)
-                            ChannelSwapMode.TREND -> stringResource(R.string.swap_mode_trend_description)
-                        }
-                    )
-                    if (selection != null) {
-                        append("\n")
-                        append(
-                            stringResource(
-                                if (isChannelsSwapped) R.string.channel_swap_now_swapped
-                                else R.string.channel_swap_now_normal
-                            )
-                        )
+                text = stringResource(
+                    when (selection) {
+                        null -> R.string.swap_mode_off_description
+                        ChannelSwapMode.TIMER -> R.string.swap_mode_timer_description
+                        ChannelSwapMode.TREND -> R.string.swap_mode_trend_description
                     }
-                },
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
