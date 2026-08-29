@@ -512,13 +512,24 @@ std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
     // Индекс: время в мс / шаг таблицы (100 мс)
     const float timeMs = currentSeconds * 1000.0f;
     const float indexFloat = timeMs / FREQUENCY_TABLE_INTERVAL_MS;
-    const int index = static_cast<int>(indexFloat);
-    
-    // Безопасное получение значений с проверкой границ
-    const int clampedIndex = std::clamp(index, 0, static_cast<int>(curve.lowerFreqTable.size()) - 1);
-    
-    const float lowerFreq = curve.lowerFreqTable[clampedIndex];
-    const float upperFreq = curve.upperFreqTable[clampedIndex];
+    const int tableSize = static_cast<int>(curve.lowerFreqTable.size());
+
+    // Линейная интерполяция между соседними ячейками — та же модель, что в
+    // аудио-пути (FrequencyCurve::getChannelFrequenciesAt). Раньше брался целый
+    // индекс: показания UI квантовались по 100 мс и могли отличаться от того,
+    // что реально звучит, на величину дрейфа внутри ячейки.
+    const int baseIndex = static_cast<int>(std::floor(indexFloat));
+    const float frac = indexFloat - static_cast<float>(baseIndex);
+
+    // Индексы с циклическим переходом через полночь и защитой от отрицательного
+    // времени (модуль в C++ для отрицательных даёт отрицательный результат).
+    const int i0 = ((baseIndex % tableSize) + tableSize) % tableSize;
+    const int i1 = (i0 + 1) % tableSize;
+
+    const float lowerFreq = curve.lowerFreqTable[i0] +
+        (curve.lowerFreqTable[i1] - curve.lowerFreqTable[i0]) * frac;
+    const float upperFreq = curve.upperFreqTable[i0] +
+        (curve.upperFreqTable[i1] - curve.upperFreqTable[i0]) * frac;
     
     // Вычисляем beat и carrier частоты
     const float beatFreq = upperFreq - lowerFreq;

@@ -137,6 +137,40 @@ static std::vector<int> collectStepBoundaries(
     return bounds;
 }
 
+// Смещение (в сэмплах от начала окна) БЛИЖАЙШЕЙ границы ступени STEP-кривой
+// внутри окна [startTimeSeconds, startTimeSeconds + secPerSample*maxSamples).
+// 0 — границ внутри окна нет. Без выделений (вызывается на аудио-потоке).
+static int stepBoundaryOffset(
+    const FrequencyCurve& curve,
+    double startTimeSeconds,
+    double secPerSample,
+    int maxSamples
+) {
+    if (maxSamples <= 1 || !(secPerSample > 0.0)) {
+        return 0;
+    }
+    const double endTime = startTimeSeconds + secPerSample * maxSamples;
+    const double day = static_cast<double>(SECONDS_PER_DAY);
+    int best = 0;
+    for (const auto& p : curve.points) {
+        const double pt = static_cast<double>(p.timeSeconds);
+        const int64_t kFirst = static_cast<int64_t>(std::floor((startTimeSeconds - pt) / day)) - 1;
+        const int64_t kLast  = static_cast<int64_t>(std::ceil((endTime - pt) / day)) + 1;
+        for (int64_t k = kFirst; k <= kLast; ++k) {
+            const double occurrence = pt + static_cast<double>(k) * day;
+            if (occurrence <= startTimeSeconds || occurrence >= endTime) {
+                continue;
+            }
+            const int n = static_cast<int>(
+                std::ceil((occurrence - startTimeSeconds) / secPerSample));
+            if (n > 0 && n < maxSamples && (best == 0 || n < best)) {
+                best = n;
+            }
+        }
+    }
+    return best;
+}
+
 AudioGenerator::AudioGenerator() {
     Wavetable::initialize();
 }
@@ -426,6 +460,67 @@ void AudioGenerator::updatePhasesOnly(
 
         leftOmega += leftOmegaStep;
         rightOmega += rightOmegaStep;
+    }
+}
+
+void AudioGenerator::updatePhasesOverCurve(
+    const BinauralConfig& config,
+    int samples,
+    double currentTime,
+    float timeScale,
+    bool constantFreq,
+    GeneratorState& state
+) {
+    if (samples <= 0) {
+        return;
+    }
+    // Пауза: звука нет, но фазы должны идти по кривой. Режем на кусочки
+    // <=100 мс — та же модель, что в FADE_OUT/FADE_IN и в подсегментах SOLID.
+    const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
+    const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+    const float twoPiOverSampleRate = TWO_PI / static_cast<float>(m_sampleRate);
+    const bool stepMode = !constantFreq &&
+        config.curve.interpolationType == InterpolationType::STEP &&
+        config.curve.points.size() > 1;
+
+    int gen = 0;
+    while (gen < samples) {
+        int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+        // STEP: кусочек не должен перешагивать границу ступени, иначе частота
+        // внутри паузы рампилась бы вместо мгновенного скачка.
+        if (stepMode) {
+            const int cut = stepBoundaryOffset(
+                config.curve,
+                currentTime + static_cast<double>(gen) * secPerSample,
+                secPerSample,
+                ps);
+            if (cut > 0 && cut < ps) {
+                ps = cut;
+            }
+        }
+        const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
+        const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
+        auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
+        auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
+        if (constantFreq) {
+            // Бисекция: игнорируем кривую, частота постоянна.
+            f0.lowerFreq = f1.lowerFreq = 200.0f;
+            f0.upperFreq = f1.upperFreq = 206.0f;
+        }
+        if (stepMode) {
+            // STEP: hold the step value inside the piece (see the fade loops).
+            f1.lowerFreq = f0.lowerFreq;
+            f1.upperFreq = f0.upperFreq;
+        }
+        updatePhasesOnly(
+            ps,
+            twoPiOverSampleRate * f0.lowerFreq,
+            twoPiOverSampleRate * f0.upperFreq,
+            twoPiOverSampleRate * f1.lowerFreq,
+            twoPiOverSampleRate * f1.upperFreq,
+            state
+        );
+        gen += ps;
     }
 }
 
@@ -1409,9 +1504,24 @@ GenerateResult AudioGenerator::generatePackage(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -1419,6 +1529,16 @@ GenerateResult AudioGenerator::generatePackage(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;
@@ -1447,12 +1567,12 @@ GenerateResult AudioGenerator::generatePackage(
             case BufferType::PAUSE:
                 // Пауза: тишина, но фазы продолжают обновляться
                 // Это обеспечивает бесшовное продолжение после паузы
-                updatePhasesOnly(
+                updatePhasesOverCurve(
+                    config,
                     samples,
-                    startLeftOmega,
-                    startRightOmega,
-                    endLeftOmega,
-                    endRightOmega,
+                    currentTime,
+                    timeScale,
+                    constantFreq,
                     state
                 );
                 // Заполняем буфер тишиной
@@ -1480,9 +1600,24 @@ GenerateResult AudioGenerator::generatePackage(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -1490,6 +1625,16 @@ GenerateResult AudioGenerator::generatePackage(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;
@@ -1722,9 +1867,24 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -1732,6 +1892,16 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;
@@ -1758,12 +1928,12 @@ GenerateResult AudioGenerator::generatePackageNeon(
             }
                 
             case BufferType::PAUSE:
-                updatePhasesOnly(
+                updatePhasesOverCurve(
+                    config,
                     samples,
-                    startLeftOmega,
-                    startRightOmega,
-                    endLeftOmega,
-                    endRightOmega,
+                    currentTime,
+                    timeScale,
+                    constantFreq,
                     state
                 );
                 std::memset(buffer + currentSample * 2, 0, samples * 2 * sizeof(float));
@@ -1790,9 +1960,24 @@ GenerateResult AudioGenerator::generatePackageNeon(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -1800,6 +1985,16 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;
@@ -2042,9 +2237,24 @@ GenerateResult AudioGenerator::generatePackageSse(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -2052,6 +2262,16 @@ GenerateResult AudioGenerator::generatePackageSse(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;
@@ -2078,12 +2298,12 @@ GenerateResult AudioGenerator::generatePackageSse(
             }
                 
             case BufferType::PAUSE:
-                updatePhasesOnly(
+                updatePhasesOverCurve(
+                    config,
                     samples,
-                    startLeftOmega,
-                    startRightOmega,
-                    endLeftOmega,
-                    endRightOmega,
+                    currentTime,
+                    timeScale,
+                    constantFreq,
                     state
                 );
                 std::memset(buffer + currentSample * 2, 0, samples * 2 * sizeof(float));
@@ -2110,9 +2330,24 @@ GenerateResult AudioGenerator::generatePackageSse(
                 // что у одного длинного фейда, поэтому щелчков нет.
                 const int pieceSamples = (100 * m_sampleRate + 500) / 1000;
                 const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                // STEP: ступенька должна быть мгновенной — кусочек не перешагивает
+                // границу контрольной точки, иначе частота внутри фейда рампилась
+                // бы вместо скачка (SOLID это умеет через collectStepBoundaries,
+                // из-за чего фейд расходился с SOLID в 4 раза на ступеньке).
+                const bool stepMode = !constantFreq &&
+                    config.curve.interpolationType == InterpolationType::STEP &&
+                    config.curve.points.size() > 1;
                 int gen = 0;
                 while (gen < samples) {
-                    const int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    int ps = (pieceSamples < samples - gen) ? pieceSamples : (samples - gen);
+                    if (stepMode) {
+                        const int cut = stepBoundaryOffset(config.curve,
+                            currentTime + static_cast<double>(gen) * secPerSample,
+                            secPerSample, ps);
+                        if (cut > 0 && cut < ps) {
+                            ps = cut;
+                        }
+                    }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
                     auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
@@ -2120,6 +2355,16 @@ GenerateResult AudioGenerator::generatePackageSse(
                     if (constantFreq) {
                         f0.lowerFreq = f1.lowerFreq = 200.0f;
                         f0.upperFreq = f1.upperFreq = 206.0f;
+                    }
+                    if (stepMode) {
+                        // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
+                        // exactly as in SOLID. A chord f0->f1 would smear the
+                        // instantaneous jump into a ramp across the whole piece:
+                        // when a step boundary lands on the piece END (stepBoundaryOffset
+                        // does not cut there, it is not strictly inside), the pre-step
+                        // value would already ramp toward the post-step one.
+                        f1.lowerFreq = f0.lowerFreq;
+                        f1.upperFreq = f0.upperFreq;
                     }
                     const float l0 = twoPiOverSampleRate * f0.lowerFreq;
                     const float r0 = twoPiOverSampleRate * f0.upperFreq;

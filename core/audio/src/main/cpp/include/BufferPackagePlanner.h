@@ -40,14 +40,16 @@ constexpr float kTrendHalfWindowSec = TREND_HALF_WINDOW_SEC;
 constexpr int64_t kTrendMaxSolidMs = 1800000LL;
 
 /**
- * Знакопеременный прирост несущей частоты в точке t (Гц за окно 2*h).
+ * ЕДИНАЯ ТОЧКА ИСТИНЫ ТРЕНДА — прирост ЧАСТОТЫ БИЕНИЙ (см. trendBeatDeltaAt
+ * в Interpolation.h). Все решения о смене каналов (список экстремумов,
+ * поправка чётности в channelSwapStateAt, рестарт в BinauralEngine::setPlaying)
+ * обязаны приниматься по этой величине.
+ *
+ * Раньше здесь жила trendCarrierDeltaAt() — прирост НЕСУЩЕЙ
+ * (((up+lo) − (up+lo))/2). Она удалена: знаки трендов carrier и beat могут
+ * расходиться, и любое решение по несущей рано или поздно инвертирует чётность
+ * каналов относительно списка экстремумов, построенного по биениям.
  */
-inline float trendCarrierDeltaAt(const FrequencyCurve& curve, float tSec) {
-    const FrequencyTableResult plus = curve.getChannelFrequenciesAt(tSec + kTrendHalfWindowSec);
-    const FrequencyTableResult minus = curve.getChannelFrequenciesAt(tSec - kTrendHalfWindowSec);
-    // carrier = (upper + lower)/2 → разность носителей = половина разности сумм
-    return ((plus.upperFreq + plus.lowerFreq) - (minus.upperFreq + minus.lowerFreq)) * 0.5f;
-}
 
 /**
  * Желаемое состояние перестановки по знаку производной.
@@ -103,14 +105,17 @@ inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
         bool swapped = (count & 1) != 0;
 
         // Поправка фазы в начале суток (только BOTH).
+        //
+        // ВАЖНО: дельта берётся по частоте БИЕНИЙ — той же величине, по которой
+        // построен список экстремумов (computeTrendCrossings -> trendBeatDeltaAt)
+        // и по которой работает BinauralEngine::setPlaying. Раньше здесь
+        // считалась дельта НЕСУЩЕЙ (бывшая trendCarrierDeltaAt, удалена): пока
+        // знаки трендов carrier и beat в начале суток совпадают, разницы нет,
+        // но как только они расходятся — чётность инвертирована на все сутки:
+        // планировщик стартует в переставленном состоянии и форсирует лишний
+        // свап сразу после Play.
         if (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
-            constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
-            const FrequencyTableResult fp =
-                cfg.curve.getChannelFrequenciesAt(kTrendHalfWindowSec);        // 0 + h
-            const FrequencyTableResult fm =
-                cfg.curve.getChannelFrequenciesAt(dayF - kTrendHalfWindowSec); // 0 − h (wrap)
-            const float delta0 = ((fp.upperFreq + fp.lowerFreq) -
-                                  (fm.upperFreq + fm.lowerFreq)) * 0.5f;
+            const float delta0 = trendBeatDeltaAt(cfg.curve, 0.0f);
             if (delta0 < 0.0f) swapped = !swapped;
         }
         return swapped;

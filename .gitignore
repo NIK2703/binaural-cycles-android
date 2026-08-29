@@ -98,4 +98,6 @@ Thumbs.db
 # Logs
 logs/
 .qwen/
+.workbuddy-ai/
+__pycache__/
 gha-creds-*.json

@@ -449,13 +449,27 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
     if (firstSignedIdx >= 0 && lastSignedIdx >= 0 &&
         firstSignedIdx != lastSignedIdx &&
         ((firstSign > 0.0f) != (lastSign > 0.0f))) {
-        TrendCrossing crossing;
-        crossing.timeSec = std::fmod(TrendScanDetail::refineZero(
-            curve, timeAt(lastSignedIdx),
-            static_cast<float>(SECONDS_PER_DAY) + timeAt(firstSignedIdx)), dayF);
-        if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
-        crossing.toSwapped = (firstSign < 0.0f); // знак начала суток после перехода
-        out.push_back(crossing);
+        const float loT = timeAt(lastSignedIdx);
+        const float hiT = dayF + timeAt(firstSignedIdx);
+
+        // Длинный горизонтальный участок, пересекающий полночь, — НЕ экстремум.
+        // На нём Δbeat == 0 (частота биений не меняется на окне ±60 с), и если
+        // по обе стороны от него знаки Δbeat противоположны — например, это
+        // спад и подъём одного и того же бампа, — смычка видит «смену знака
+        // − -> +» и объявляет минимум там, где кривая просто плоская. Это
+        // лишняя перестановка каналов посреди неизменного звука.
+        //
+        // Настоящий экстремум у полуночи локален: ненулевые узлы стоят по
+        // обе стороны от неё в нескольких шагах сетки, и бракет короток.
+        // Поэтому бракет длиннее полусуток — признак плато, а не экстремума.
+        if (hiT - loT <= dayF * 0.5f) {
+            TrendCrossing crossing;
+            crossing.timeSec = std::fmod(
+                TrendScanDetail::refineZero(curve, loT, hiT), dayF);
+            if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
+            crossing.toSwapped = (firstSign < 0.0f); // знак начала суток после перехода
+            out.push_back(crossing);
+        }
     }
 }
 
@@ -555,6 +569,46 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
         timeSeconds += static_cast<float>(SECONDS_PER_DAY);
     }
     
+    // STEP: таблица линейно интерполирует между ячейками 100 мс, из-за чего
+    // ступенька размазывается в глиссандо на 100 мс — и в SOLID, и в фейдах
+    // (SOLID это частично компенсирует collectStepBoundaries, фейд — нет,
+    // отсюда расхождение SOLID/фейд в 4 раза на ступеньке). Сама ступенчатая
+    // функция задана ТОЧНО контрольными точками, поэтому для STEP таблица не
+    // нужна: берём значение напрямую (удержание левой точки интервала, как в
+    // Interpolation::step). Скачок становится мгновенным и одинаковым во всех
+    // фазах, а место скачка — ровно timeSeconds контрольной точки.
+    if (interpolationType == InterpolationType::STEP && points.size() >= 2) {
+        const FrequencyPoint* held = &points[0];
+        bool found = false;
+        float bestTime = 0.0f;
+        // Точки могут прийти неотсортированными — ищем последнюю по времени,
+        // не наступающую на timeSeconds (STEP = удержание ЛЕВОЙ точки).
+        for (const auto& p : points) {
+            const float pt = static_cast<float>(p.timeSeconds);
+            if (pt <= timeSeconds && (!found || pt > bestTime)) {
+                bestTime = pt;
+                found = true;
+                held = &p;
+            }
+        }
+        if (!found) {
+            // Wrap: время раньше первой точки суток — держим последнюю точку
+            // (то же соглашение, что при построении таблицы).
+            float maxTime = static_cast<float>(points[0].timeSeconds);
+            held = &points[0];
+            for (const auto& p : points) {
+                const float pt = static_cast<float>(p.timeSeconds);
+                if (pt > maxTime) {
+                    maxTime = pt;
+                    held = &p;
+                }
+            }
+        }
+        result.lowerFreq = std::max(0.0f, held->carrierFrequency - held->beatFrequency * 0.5f);
+        result.upperFreq = std::max(0.0f, held->carrierFrequency + held->beatFrequency * 0.5f);
+        return result;
+    }
+
     // Фиксированный шаг таблицы 0.1 сек (100 мс)
     constexpr float intervalSeconds = static_cast<float>(FREQUENCY_TABLE_INTERVAL_MS) / 1000.0f;
     const int tableSize = static_cast<int>(lowerFreqTable.size());

@@ -1966,8 +1966,11 @@ TEST_F(FrequencyJumpDiagnosticTest, MultiPackageFrequencyConsistency) {
     float currentTime = 0.0f;
     int64_t elapsedMs = 0;
     
-    std::vector<float> allFrequencies;
-    
+    // Пары частот, инвариантные к перестановке каналов (см. комментарий ниже).
+    std::vector<float> stableFrequencies;   // нижняя из пары
+    std::vector<float> upperFrequencies;    // верхняя из пары
+    int swapsSeen = 0;
+
     for (int p = 0; p < numPackages; ++p) {
         PackagePlan plan = planner.planPackage(packageDurationMs, config, state);
         std::vector<float> buffer(packageSamples * 2);
@@ -1983,8 +1986,6 @@ TEST_F(FrequencyJumpDiagnosticTest, MultiPackageFrequencyConsistency) {
         float rightFreq = measureInstantFrequency(buffer.data(), midSample - windowSamples/2,
                                                    windowSamples, 1);
         
-        allFrequencies.push_back(leftFreq);
-        
         printf("Package %d: L=%.2f Hz, R=%.2f Hz, segments=%zu\n",
                p, leftFreq, rightFreq, plan.segments.size());
         
@@ -1995,28 +1996,62 @@ TEST_F(FrequencyJumpDiagnosticTest, MultiPackageFrequencyConsistency) {
                    (long long)plan.segments[i].durationMs);
         }
         
+        bool packageHasSwap = false;
+        bool packageHasFade = false;
+        for (const auto& s : plan.segments) {
+            if (s.swapAfterSegment) packageHasSwap = true;
+            if (s.type == BufferType::FADE_OUT || s.type == BufferType::FADE_IN) {
+                packageHasFade = true;
+            }
+        }
+        if (packageHasSwap) swapsSeen++;
+
+        // «Левый канал» — понятие, зависящее от перестановки: после свапа
+        // левый несёт ВЕРХНЮЮ частоту (205 Гц), правый — нижнюю (195 Гц).
+        // Поэтому проверять надо не «левый всегда 195», а инвариантную к
+        // перестановке пару {min; max} = {195; 205}: она и не должна дрейфовать.
+        //
+        // Пакеты с FADE_OUT/FADE_IN в статистику не берём: окно измерения
+        // попадает на сам переход, где частота меняется 195 -> 205 по
+        // определению, и усреднение даёт промежуточное значение (около 200 Гц),
+        // никак не свидетельствующее об ошибке.
+        if (!packageHasFade) {
+            stableFrequencies.push_back(std::min(leftFreq, rightFreq));
+            upperFrequencies.push_back(std::max(leftFreq, rightFreq));
+        }
+
         currentTime += static_cast<float>(packageDurationMs) / 1000.0f;
         elapsedMs += packageDurationMs;
     }
-    
-    // Проверяем, что все частоты одинаковы (для постоянной конфигурации)
+
+    ASSERT_FALSE(stableFrequencies.empty()) << "не осталось пакетов без фейда";
+    EXPECT_GT(swapsSeen, 0) << "перестановка каналов за 10 пакетов не произошла";
+
+    // Проверяем, что пара частот не дрейфует от пакета к пакету
+    // (для постоянной конфигурации)
     float avgFreq = 0.0f;
-    for (float f : allFrequencies) avgFreq += f;
-    avgFreq /= allFrequencies.size();
-    
+    for (float f : stableFrequencies) avgFreq += f;
+    avgFreq /= stableFrequencies.size();
+
     float maxDeviation = 0.0f;
-    for (float f : allFrequencies) {
-        float dev = std::abs(f - avgFreq);
-        maxDeviation = std::max(maxDeviation, dev);
+    for (float f : stableFrequencies) {
+        maxDeviation = std::max(maxDeviation, std::abs(f - avgFreq));
     }
-    
-    printf("\nFrequency statistics:\n");
-    printf("  Average: %.2f Hz\n", avgFreq);
+
+    float avgUpper = 0.0f;
+    for (float f : upperFrequencies) avgUpper += f;
+    avgUpper /= upperFrequencies.size();
+
+    printf("\nFrequency statistics (swap-invariant pair, %zu/%d packages):\n",
+           stableFrequencies.size(), numPackages);
+    printf("  Average lower: %.2f Hz (expected 195.0)\n", avgFreq);
+    printf("  Average upper: %.2f Hz (expected 205.0)\n", avgUpper);
     printf("  Max deviation: %.2f Hz\n", maxDeviation);
-    printf("  Expected: 195.0 Hz (left channel)\n");
-    
+    printf("  Swaps observed: %d\n", swapsSeen);
+
     EXPECT_LT(maxDeviation, 0.5f) << "Frequency deviation across packages too high";
-    EXPECT_NEAR(avgFreq, 195.0f, 0.5f) << "Average frequency mismatch";
+    EXPECT_NEAR(avgFreq, 195.0f, 0.5f) << "Lower channel frequency mismatch";
+    EXPECT_NEAR(avgUpper, 205.0f, 0.5f) << "Upper channel frequency mismatch";
 }
 
 // ТЕСТ 5: Анализ непрерывности фазы на границе
@@ -3654,6 +3689,11 @@ protected:
         return config;
     }
 
+    // measureLeftFreqAt считает центр окна ОТ НАЧАЛА БУФЕРА, а буфер
+    // начинается в абсолютном startTimeSec суток. Эти две шкалы легко
+    // перепутать: окно, задуманное как «до ступени», на поверку оказывается
+    // уже после неё (и наоборот). Все новые проверки задают время в
+    // АБСОЛЮТНОЙ шкале — той самой, в которой задана кривая.
     float measureLeftFreqAt(const std::vector<float>& buffer,
                             float centerSec, float windowSec) {
         const int windowSize = static_cast<int>(windowSec * SAMPLE_RATE);
@@ -3663,6 +3703,12 @@ protected:
                                         static_cast<int>(buffer.size() / 2),
                                         startSample, windowSize, 0, SAMPLE_RATE);
     }
+
+    float measureLeftFreqAtAbs(const std::vector<float>& buffer,
+                               float startTimeSec,
+                               float absCenterSec, float windowSec) {
+        return measureLeftFreqAt(buffer, absCenterSec - startTimeSec, windowSec);
+    }
 };
 
 TEST_F(StepInterpolationTest, StepInterpolationAcrossSegmentBoundary) {
@@ -3671,6 +3717,13 @@ TEST_F(StepInterpolationTest, StepInterpolationAcrossSegmentBoundary) {
     // целых секунд): подсегмент до ступени целиком держит старое значение
     // (G1-hold), следующий сразу даёт новое, БЕЗ линейного рампа между ними.
     // A: carrier=200, beat=10 -> L=195; B: carrier=260, beat=20 -> L=250
+    //
+    // ВАЖНО: буфер начинается в абсолютной t=0.5с, а measureLeftFreqAt
+    // принимает время ОТ НАЧАЛА БУФЕРА. Поэтому окна заданы в абсолютной
+    // шкале через measureLeftFreqAtAbs: прежние центры 0.75/0.90 означали
+    // абсолютные 1.125..1.375с и 1.325..1.475с — то есть уже ПОСЛЕ ступени,
+    // и тест требовал там 195 Гц, хотя 250 Гц был верным ответом.
+    constexpr float kStartSec = 0.5f;   // абсолютное время первого сэмпла
     BinauralConfig config = createStepConfig(1, 200.0f, 10.0f, 260.0f, 20.0f);
 
     GeneratorState state;
@@ -3678,24 +3731,136 @@ TEST_F(StepInterpolationTest, StepInterpolationAcrossSegmentBoundary) {
 
     std::vector<float> signal(3 * SAMPLE_RATE * 2);
     GenerateResult result =
-        generator.generatePackage(signal.data(), plan, config, state, 0.5f, 0);
+        generator.generatePackage(signal.data(), plan, config, state, kStartSec, 0);
     ASSERT_EQ(result.samplesGenerated, 3 * SAMPLE_RATE);
 
-    printf("\nSTEP inside segment [0.5s..1.5s], step at t=1s:\n");
-    printf("  t=0.75s: L=%.2f Hz (exp 195)\n", measureLeftFreqAt(signal, 0.75f, 0.25f));
-    printf("  t=1.25s: L=%.2f Hz (exp 250)\n", measureLeftFreqAt(signal, 1.25f, 0.25f));
-    printf("  t=2.00s: L=%.2f Hz (exp 250)\n", measureLeftFreqAt(signal, 2.00f, 0.25f));
+    auto at = [&](float absCenterSec, float windowSec) {
+        return measureLeftFreqAtAbs(signal, kStartSec, absCenterSec, windowSec);
+    };
+
+    printf("\nSTEP at absolute t=1.0s, buffer starts at absolute t=%.1fs:\n",
+           kStartSec);
+    printf("  t=0.75s: L=%.2f Hz (exp 195)\n", at(0.75f, 0.25f));
+    printf("  t=0.90s: L=%.2f Hz (exp 195)\n", at(0.90f, 0.16f));
+    printf("  t=1.10s: L=%.2f Hz (exp 250)\n", at(1.10f, 0.16f));
+    printf("  t=1.25s: L=%.2f Hz (exp 250)\n", at(1.25f, 0.25f));
+    printf("  t=2.00s: L=%.2f Hz (exp 250)\n", at(2.00f, 0.25f));
 
     // До и после ступени — плато константной частоты
-    EXPECT_NEAR(measureLeftFreqAt(signal, 0.75f, 0.25f), 195.0f, FREQ_TOLERANCE);
-    EXPECT_NEAR(measureLeftFreqAt(signal, 1.25f, 0.25f), 250.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(0.75f, 0.25f), 195.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(1.25f, 0.25f), 250.0f, FREQ_TOLERANCE);
 
     // Узкие окна у самого среза: скачок мгновенный, промежуточных значений нет
-    EXPECT_NEAR(measureLeftFreqAt(signal, 0.90f, 0.15f), 195.0f, FREQ_TOLERANCE);
-    EXPECT_NEAR(measureLeftFreqAt(signal, 1.10f, 0.15f), 250.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(0.90f, 0.16f), 195.0f, FREQ_TOLERANCE);   // абс. 0.82..0.98
+    EXPECT_NEAR(at(1.10f, 0.16f), 250.0f, FREQ_TOLERANCE);   // абс. 1.02..1.18
 
     // Следующий сегмент продолжает новое значение без дрейфа
-    EXPECT_NEAR(measureLeftFreqAt(signal, 2.00f, 0.25f), 250.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(2.00f, 0.25f), 250.0f, FREQ_TOLERANCE);
+}
+
+TEST_F(StepInterpolationTest, FadeStraddlingStep_HoldsPlateauNoGlissando) {
+    // РЕГРЕССИЯ: фейд смены каналов обязан следовать графику STEP так же
+    // точно, как обычное время (SOLID).
+    //
+    // Кусочек фейда, на который приходится граница ступени, должен
+    // УДЕРЖИВАТЬ значение ступени (Δω=0) — ровно как это делает SOLID
+    // (generateSolidBuffer для STEP получает pieceLeftOmega == pieceRightOmega).
+    // Хорда «значение на начале кусочка -> значение на конце» размазывает
+    // мгновенный скачок в глиссандо на весь кусочек (до 100 мс): на крутой
+    // ступени это до 150 Гц расхождения с графиком, причём только в фейдах —
+    // отсюда наблюдавшееся 4-кратное расхождение фейд/SOLID.
+    //
+    // A: carrier=200, beat=10 -> L=195; B: carrier=260, beat=20 -> L=250
+    // План собираем ВРУЧНУЮ: нам нужно проверить генератор (следует ли фейд
+    // графику), а не расписание планировщика, поэтому расположение фейда
+    // фиксируем детерминированно.
+    constexpr float kStartSec = 0.5f;   // абсолютное время первого сэмпла
+    constexpr float kStepSec = 1.0f;    // абсолютное время ступени
+    constexpr int64_t kFadeMs = 1500;   // FADE_OUT = [0.5с .. 2.0с]
+    BinauralConfig config = createStepConfig(1, 200.0f, 10.0f, 260.0f, 20.0f);
+
+    PackagePlan plan;
+    BufferSegment fade{};
+    fade.type = BufferType::FADE_OUT;
+    fade.durationMs = kFadeMs;
+    fade.swapAfterSegment = true;
+    fade.fadeOffsetMs = 0;
+    fade.fadeTotalMs = kFadeMs;
+    plan.segments.push_back(fade);
+    plan.totalDurationMs = kFadeMs;
+
+    std::vector<float> signal(
+        static_cast<size_t>(kFadeMs) * SAMPLE_RATE / 1000 * 2);
+    GeneratorState state;
+    GenerateResult result = generator.generatePackage(
+        signal.data(), plan, config, state, kStartSec, 0);
+    ASSERT_EQ(result.samplesGenerated,
+              static_cast<int>(kFadeMs) * SAMPLE_RATE / 1000);
+
+    auto at = [&](float absCenterSec, float windowSec) {
+        return measureLeftFreqAtAbs(signal, kStartSec, absCenterSec, windowSec);
+    };
+
+    printf("\nSTEP at absolute t=%.1fs inside FADE_OUT [%.2fs..%.2fs]:\n",
+           kStepSec, kStartSec, kStartSec + kFadeMs / 1000.0f);
+    printf("  t=0.75s: L=%.2f Hz (exp 195, до ступени)\n", at(0.75f, 0.15f));
+    printf("  t=0.95s: L=%.2f Hz (exp 195, последний кусочек перед ступенью)\n",
+           at(0.95f, 0.08f));
+    printf("  t=1.05s: L=%.2f Hz (exp 250, сразу после ступени)\n",
+           at(1.05f, 0.08f));
+    printf("  t=1.50s: L=%.2f Hz (exp 250)\n", at(1.50f, 0.15f));
+
+    // Ключевая проверка: в кусочке 0.9..1.0с (последний перед ступенью)
+    // частота УДЕРЖИВАЕТ 195 Гц, а не тянется хордой к 250 Гц.
+    EXPECT_NEAR(at(0.95f, 0.08f), 195.0f, FREQ_TOLERANCE);
+    // Плато до ступени
+    EXPECT_NEAR(at(0.75f, 0.15f), 195.0f, FREQ_TOLERANCE);
+    // Сразу после ступени — новое значение, без «доехавшего» глиссандо
+    EXPECT_NEAR(at(1.05f, 0.08f), 250.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(1.50f, 0.15f), 250.0f, FREQ_TOLERANCE);
+}
+
+TEST_F(StepInterpolationTest, FadeStepInsidePiece_CutsAtStepBoundary) {
+    // Тот же инвариант, но граница ступени попадает ВНУТРЬ кусочка фейда
+    // (старт фейда 0.55с не на сетке 100 мс, поэтому кусочки идут
+    // 0.95..1.05 и перешагивают ступень на 1.0с). Такой кусочек обязан быть
+    // разрезан по границе ступени, иначе частота внутри него рампилась бы
+    // 195 -> 250 вместо мгновенного скачка.
+    constexpr float kStartSec = 0.55f;
+    constexpr float kStepSec = 1.0f;
+    constexpr int64_t kFadeMs = 1500;
+    BinauralConfig config = createStepConfig(1, 200.0f, 10.0f, 260.0f, 20.0f);
+
+    PackagePlan plan;
+    BufferSegment fade{};
+    fade.type = BufferType::FADE_OUT;
+    fade.durationMs = kFadeMs;
+    fade.swapAfterSegment = true;
+    fade.fadeOffsetMs = 0;
+    fade.fadeTotalMs = kFadeMs;
+    plan.segments.push_back(fade);
+    plan.totalDurationMs = kFadeMs;
+
+    std::vector<float> signal(
+        static_cast<size_t>(kFadeMs) * SAMPLE_RATE / 1000 * 2);
+    GeneratorState state;
+    GenerateResult result = generator.generatePackage(
+        signal.data(), plan, config, state, kStartSec, 0);
+    ASSERT_EQ(result.samplesGenerated,
+              static_cast<int>(kFadeMs) * SAMPLE_RATE / 1000);
+
+    auto at = [&](float absCenterSec, float windowSec) {
+        return measureLeftFreqAtAbs(signal, kStartSec, absCenterSec, windowSec);
+    };
+
+    printf("\nSTEP at absolute t=%.1fs strictly inside fade piece "
+           "[0.95s..1.05s]:\n", kStepSec);
+    printf("  t=0.975s: L=%.2f Hz (exp 195, до ступени)\n", at(0.975f, 0.04f));
+    printf("  t=1.025s: L=%.2f Hz (exp 250, после ступени)\n", at(1.025f, 0.04f));
+
+    // Окна по 40 мс целиком лежат внутри половинок разрезанного кусочка.
+    EXPECT_NEAR(at(0.975f, 0.04f), 195.0f, FREQ_TOLERANCE);
+    EXPECT_NEAR(at(1.025f, 0.04f), 250.0f, FREQ_TOLERANCE);
 }
 
 TEST_F(StepInterpolationTest, StepPointAtSegmentEnd_HoldsOldValueUntilBoundary) {
@@ -3790,12 +3955,18 @@ FrequencyCurve makeTrendTriangleCurve() {
  * нули со сменой знака у вершины).
  */
 FrequencyCurve makeTrendWideBumpCurve(int32_t centerSec, int32_t halfWidthSec, float heightHz) {
+    // Бамп задаётся по ЧАСТОТЕ БИЕНИЙ (beat), а не по несущей: тренд и его
+    // экстремумы считаются по beat (см. trendBeatDeltaAt). Раньше высота
+    // добавлялась к carrier — наследие перехода на beat-тренд. При плоском
+    // beat Δbeat тождественно равен нулю, и знак определялся ТОЛЬКО шумом
+    // округления float32 при вычитании близких upper−lower: сканер видел
+    // десятки «экстремумов» на ровном месте.
     FrequencyCurve curve;
     curve.points = {
-        {0,                              1000.0f,      10.0f},
-        {centerSec - halfWidthSec,       1000.0f,      10.0f},
-        {centerSec,                      1000.0f + heightHz, 10.0f},
-        {centerSec + halfWidthSec,       1000.0f,      10.0f},
+        {0,                              1000.0f, 10.0f},
+        {centerSec - halfWidthSec,       1000.0f, 10.0f},
+        {centerSec,                      1000.0f, 10.0f + heightHz},
+        {centerSec + halfWidthSec,       1000.0f, 10.0f},
     };
     curve.interpolationType = InterpolationType::LINEAR;
     return curve;
@@ -4311,6 +4482,12 @@ TEST(TrendSwapTest, WideBump_DetectedExactlyAtPeak) {
 
     PackagePlan plan = BufferPackagePlanner().planPackage(
         800000, config, state, /*curveStartSeconds=*/3600.0f, /*timeScale=*/10.0f);
+
+    printf("\nwide bump crossings: %zu\n", config.curve.trendCrossings.size());
+    for (const auto& c : config.curve.trendCrossings) {
+        printf("  T*=%.3f s toSwapped=%d\n", c.timeSec,
+               static_cast<int>(c.toSwapped));
+    }
 
     ASSERT_TRUE(planHasSwapAfter(plan));
     EXPECT_NEAR(solidMsBeforeFirstSwap(plan), 359000, 100);

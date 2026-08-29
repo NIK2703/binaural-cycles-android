@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.22.1)
 project("binaural-engine")
 
+# CMake 3.22 для Android подставляет в LTO-линковку "-fuse-ld=gold", если не может
+# определить версию NDK (см. Modules/Compiler/Clang.cmake: ANDROID AND NOT
+# CMAKE_ANDROID_NDK_VERSION VERSION_GREATER_EQUAL "22"). NDK 29 не объявляет
+# CMAKE_ANDROID_NDK_VERSION, поэтому CMake считает NDK младше 22 и требует gold —
+# а gold и LLVMgold.so удалены из NDK ещё в r23, и clang подхватывает системный
+# /usr/bin/ld.gold, который не умеет aarch64. Явно используем lld из NDK.
+if(ANDROID)
+    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
