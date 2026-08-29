@@ -17,6 +17,8 @@ import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import com.binauralcycles.ui.components.*
 import com.binauralcycles.viewmodel.BinauralViewModel
@@ -171,7 +173,29 @@ fun PresetEditScreen(
                     .pointerInput(Unit) {
                         detectTapGestures(onTap = {
                             focusManager.clearFocus()
+                            // Касание вне контекстного окна точки закрывает его
+                            if (uiState.selectedPointIndex != null) {
+                                viewModel.deselectPoint()
+                            }
                         })
+                    }
+                    // То же самое, но не только по «чистому» тапу: свайп и
+                    // прокрутка за пределами графика тоже закрывают окно.
+                    // Смотрим DOWN в проходе Final — если касание пришлось на
+                    // кнопку, слайдер, текстовое поле или само окно, они
+                    // успели съесть событие, и мы его не трогаем. Сами не
+                    // съедаем ничего, поэтому прокрутка и жесты работают.
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                                val down = event.changes.firstOrNull { it.changedToDown() }
+                                    ?: continue
+                                if (!down.isConsumed && uiState.selectedPointIndex != null) {
+                                    viewModel.deselectPoint()
+                                }
+                            }
+                        }
                     }
                     .padding(horizontal = 16.dp)
                     .verticalScroll(rememberScrollState()),
@@ -209,7 +233,17 @@ fun PresetEditScreen(
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         // НОВОЕ: единое время (реальное/виртуальное) для указателя на графике
                         externalCurrentTime = telemetry.currentTime,
-                        onPointSelected = { viewModel.selectPoint(it) },
+                        // Параметры точки редактируются во всплывающем окне прямо
+                        // на графике, отдельного раздела в списке опций больше нет.
+                        autoExpandGraphRange = uiState.autoExpandGraphRange,
+                        onPointSelected = { index ->
+                            // Повторное нажатие на уже выбранную точку закрывает окно
+                            if (uiState.selectedPointIndex == index) {
+                                viewModel.deselectPoint()
+                            } else {
+                                viewModel.selectPoint(index)
+                            }
+                        },
                         onPointTimeChanged = { index, newTime ->
                             viewModel.updateEditingPointTimeDirect(index, newTime)
                         },
@@ -222,6 +256,8 @@ fun PresetEditScreen(
                         onAddPoint = { time, carrier, beat ->
                             viewModel.addEditingPoint(time, carrier, beat)
                         },
+                        onRemovePoint = { index -> viewModel.removeEditingPoint(index) },
+                        onDismissPopup = { viewModel.deselectPoint() },
                         onCarrierRangeChange = { min, max -> 
                             viewModel.updateEditingCarrierRange(min, max) 
                         },
@@ -232,32 +268,6 @@ fun PresetEditScreen(
                 }
                 
                 Spacer(modifier = Modifier.height(8.dp))
-                
-                // Редактирование выбранной точки
-                if (uiState.selectedPointIndex != null && editingCurve != null) {
-                    val points = editingCurve.points
-                    val selectedIndex = uiState.selectedPointIndex
-                    
-                    if (selectedIndex != null && selectedIndex in points.indices) {
-                        val selectedPoint = points[selectedIndex]
-                        PointEditor(
-                            point = selectedPoint,
-                            carrierRange = editingCurve.carrierRange,
-                            autoExpandGraphRange = uiState.autoExpandGraphRange,
-                            onCarrierFrequencyChange = { viewModel.updateEditingPointCarrierFrequency(it) },
-                            onBeatFrequencyChange = { viewModel.updateEditingPointBeatFrequency(it) },
-                            onTimeChange = { time -> 
-                                selectedIndex?.let { viewModel.updateEditingPointTimeDirect(it, time) }
-                            },
-                            onRemove = { 
-                                selectedIndex?.let { viewModel.removeEditingPoint(it) }
-                            },
-                            onDeselect = { viewModel.deselectPoint() }
-                        )
-                    }
-                    
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
                 
                 // Настройки интерполяции пресета
                 PresetSettingsCard(

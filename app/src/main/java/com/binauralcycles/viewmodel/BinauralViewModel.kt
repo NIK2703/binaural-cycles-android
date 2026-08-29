@@ -89,9 +89,6 @@ data class BinauralUiState(
     val sampleRate: SampleRate = SampleRate.LOW,
     // Интервал генерации буфера в минутах (для оптимизации энергопотребления)
     val bufferGenerationMinutes: Int = 10,
-    // Реально достижимый максимум для текущей частоты дискретизации
-    // (кап direct-буфера). Считается в observePowerSettings/смене sampleRate.
-    val maxBufferGenerationMinutes: Int = SampleRate.maxBufferMinutes(SampleRate.LOW),
     // Автоматическое расширение границ графика при редактировании (по умолчанию выключено)
     val autoExpandGraphRange: Boolean = false,
     // Флаг подключения к сервису
@@ -252,31 +249,17 @@ class BinauralViewModel @Inject constructor(
                     48000 -> SampleRate.HIGH
                     else -> SampleRate.MEDIUM
                 }
-                _uiState.update { state ->
-                    // Предел буфера зависит от частоты дискретизации: на 48000 Гц
-                    // достижимо ~11 мин, а не 60. Переклампываем сохранённое
-                    // значение, чтобы настройка не врала пользователю.
-                    val maxMinutes = SampleRate.maxBufferMinutes(sampleRate)
-                    val clamped = state.bufferGenerationMinutes.coerceIn(1, maxMinutes)
-                    if (clamped != state.bufferGenerationMinutes) {
-                        playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
-                        viewModelScope.launch {
-                            preferencesRepository.saveBufferGenerationMinutes(clamped)
-                        }
-                    }
-                    state.copy(
-                        sampleRate = sampleRate,
-                        maxBufferGenerationMinutes = maxMinutes,
-                        bufferGenerationMinutes = clamped
-                    )
-                }
+                _uiState.update { it.copy(sampleRate = sampleRate) }
                 playbackService?.setSampleRate(sampleRate)
             }
         }
         // Интервал генерации буфера (в минутах)
         viewModelScope.launch {
             preferencesRepository.getBufferGenerationMinutes().collect { minutes ->
-                val clamped = clampBufferMinutes(minutes, _uiState.value.sampleRate)
+                // Шкала всегда полная (1..60 мин) на любой частоте. Если
+                // интервал больше ёмкости direct-буфера, движок сам урежет
+                // длину пакета по фактической ёмкости — звук при этом идёт.
+                val clamped = minutes.coerceIn(1, 60)
                 _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
                 // Преобразуем минуты в миллисекунды для частоты обновления
                 // Большой буфер = реже обновления = лучше энергопотребление
@@ -1228,21 +1211,11 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
-     * Приводит интервал генерации к реально достижимому для данной частоты
-     * дискретизации. Движок капает direct-буфер по байтам, поэтому 45 и 60 мин
-     * физически недостижимы на 44100/48000 Гц (предел ~12 и ~11 мин).
-     * Без клампа настройка молча урезалась в лог, а пользователь думал,
-     * что получил заявленный интервал.
-     */
-    private fun clampBufferMinutes(minutes: Int, sampleRate: SampleRate): Int =
-        minutes.coerceIn(1, SampleRate.maxBufferMinutes(sampleRate))
-
-    /**
      * Установить интервал генерации буфера в минутах
      * Большой интервал = меньше пробуждений CPU = лучше энергопотребление
      */
     fun setBufferGenerationMinutes(minutes: Int) {
-        val clampedMinutes = clampBufferMinutes(minutes, _uiState.value.sampleRate)
+        val clampedMinutes = minutes.coerceIn(1, 60)
         _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
         // Преобразуем минуты в миллисекунды
         playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)

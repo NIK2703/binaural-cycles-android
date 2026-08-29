@@ -131,7 +131,6 @@ fun SettingsScreen(
             PowerSettingsCard(
                 sampleRate = uiState.sampleRate,
                 bufferGenerationMinutes = uiState.bufferGenerationMinutes,
-                maxBufferGenerationMinutes = uiState.maxBufferGenerationMinutes,
                 onSampleRateChange = { viewModel.setSampleRate(it) },
                 onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
             )

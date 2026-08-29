@@ -48,7 +48,8 @@ class BinauralStreamImpl(
          */
         private const val WRITE_CHUNK_MS = 2000           // гранулярность записи/реакции
         private const val MAX_BUFFER_MINUTES = 60
-        private const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
+        // Синхронно с BinauralAudioEngine.MAX_BUFFER_BYTES
+        private const val MAX_BUFFER_BYTES = 1024 * 1024 * 1024
         /**
          * Сколько ждём выхода писателя перед уничтожением нативного движка.
          * ОБЯЗАН покрывать один полный чанк записи (WRITE_CHUNK_MS), иначе
@@ -159,6 +160,13 @@ class BinauralStreamImpl(
             ).toInt()
             directBuffer = allocateDirect(samplesPerChannel * 2 * 4, rate)
                 ?: throw OutOfMemoryError("direct buffer unavailable")
+            // Реальная ёмкость может оказаться меньше запрошенной: при OOM
+            // allocateDirect() делит размер пополам. Урезаем длину пакета по
+            // факту — иначе JNI вернёт 0 («buffer too small») и звук встанет.
+            val capacitySamples = directBuffer!!.capacity() / 8
+            if (capacitySamples in 1 until samplesPerChannel) {
+                samplesPerChannel = capacitySamples
+            }
 
             // 4. AudioTrack создан, но НЕ запущен — поток ещё беззвучен.
             createAudioTrack(rate)

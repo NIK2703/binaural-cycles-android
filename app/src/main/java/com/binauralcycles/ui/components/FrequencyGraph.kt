@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,19 +13,28 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -40,6 +50,7 @@ import kotlinx.datetime.toLocalDateTime
 import kotlin.math.abs
 import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.roundToInt
 
 // Порог для определения направления перетаскивания
 private const val DRAG_DIRECTION_THRESHOLD = 10f
@@ -178,6 +189,12 @@ fun FrequencyGraph(
     onPointBeatChanged: (Int, Float) -> Unit = { _, _ -> },
     onAddPoint: (LocalTime, Float, Float) -> Unit,
     onCarrierRangeChange: (Float, Float) -> Unit,
+    // Контекстное окно точки: показывается слоем поверх графика, поэтому
+    // графу нужны те же входы, что были у отдельного раздела редактора.
+    autoExpandGraphRange: Boolean = false,
+    onRemovePoint: (Int) -> Unit = {},
+    // Касание вне контекстного окна точки закрывает его.
+    onDismissPopup: () -> Unit = {},
     // НОВОЕ: внешнее время (например, виртуальное из uiState). null => свои часы.
     externalCurrentTime: LocalTime? = null,
     modifier: Modifier = Modifier
@@ -216,15 +233,42 @@ fun FrequencyGraph(
         )
     }
 
+    // Фон и рамку карточки рисуем сами в drawBehind, а не модификаторами
+    // background/border. Рамка от Modifier.border в этой версии Compose
+    // отрисовывается ПОСЛЕ содержимого, а контекстное окно точки выступает
+    // за нижний край карточки — и рамка оказывалась поверх окна.
+    // drawBehind гарантированно рисуется до всего содержимого.
+    val cardSurfaceColor = MaterialTheme.colorScheme.surface
+    val cardBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)
+
     Column(
+        // zIndex: окно точки может выступать за нижний край графика, и тогда
+        // его перекрыли бы следующие за графиком карточки, которые рисуются
+        // позже. Поднимаем весь граф выше соседей по экрану редактора.
         modifier = modifier
+            .zIndex(1f)
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
-            .border(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+            .drawBehind {
+                val corner = CornerRadius(8.dp.toPx(), 8.dp.toPx())
+                drawRoundRect(color = cardSurfaceColor, cornerRadius = corner)
+                // Как в Modifier.border: линия рисуется внутри контура,
+                // поэтому прямоугольник вдвинут на половину толщины.
+                val strokePx = 1.dp.toPx()
+                drawRoundRect(
+                    color = cardBorderColor,
+                    topLeft = Offset(strokePx / 2f, strokePx / 2f),
+                    size = Size(size.width - strokePx, size.height - strokePx),
+                    cornerRadius = corner,
+                    style = Stroke(width = strokePx)
+                )
+            }
             .padding(16.dp)
     ) {
         BoxWithConstraints(
-            modifier = Modifier.weight(1f).fillMaxWidth()
+            // zIndex: контекстное окно точки — последний ребёнок этого Box и
+            // может выступать за нижний край, поэтому весь Box рисуется выше
+            // оси X, объявленной следом в колонке.
+            modifier = Modifier.weight(1f).fillMaxWidth().zIndex(1f)
         ) {
             val widthPx = with(density) { maxWidth.roundToPx() }
             val heightPx = with(density) { maxHeight.roundToPx() }
@@ -234,6 +278,10 @@ fun FrequencyGraph(
 
             val primaryColor = MaterialTheme.colorScheme.primary
             val errorColor = MaterialTheme.colorScheme.error
+
+            // Границы контекстного окна точки в координатах области графика.
+            // Нужны, чтобы касание по самому окну его не закрывало.
+            var popupRect by remember { mutableStateOf<Rect?>(null) }
 
             // Объединяем реальные и виртуальные точки для отрисовки
             // В ADVANCED и SMOOTH режимах используем только виртуальные точки (кривая проходит только через них)
@@ -322,8 +370,40 @@ fun FrequencyGraph(
                                     } ?: 0.0f
                                 }
                                 onAddPoint(time, carrier, interpolatedBeat)
+                            },
+                            onTap = { offset ->
+                                // Касание по графику, но мимо контекстного
+                                // окна точки, закрывает это окно. По самому
+                                // окну касание съедает его собственный
+                                // clickable, сюда оно не доходит.
+                                val rect = popupRect
+                                if (rect != null && !rect.contains(offset)) {
+                                    onDismissPopup()
+                                }
                             }
                         )
+                    }
+                    // Закрываем окно по ЛЮБОМУ касанию мимо него, а не только
+                    // по «чистому» тапу: свайп и прокрутка тоже считаются.
+                    // Смотрим на DOWN в проходе Final — к этому моменту все
+                    // потомки (маркеры точек, само окно) уже успели съесть
+                    // событие, если касались их. Сами ничего не съедаем,
+                    // поэтому жест продолжает работать как раньше — в отличие
+                    // от detectDragGestures, который отобрал бы прокрутку
+                    // у внешнего verticalScroll.
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Final)
+                                val down = event.changes.firstOrNull { it.changedToDown() }
+                                    ?: continue
+                                if (down.isConsumed) continue
+                                val rect = popupRect
+                                if (rect != null && !rect.contains(down.position)) {
+                                    onDismissPopup()
+                                }
+                            }
+                        }
                     }
             ) {
                 displayPoints.forEachIndexed { sortedIndex, point ->
@@ -424,6 +504,7 @@ fun FrequencyGraph(
                         }
                     }
                 }
+
             }
 
             // Ось Y
@@ -439,6 +520,80 @@ fun FrequencyGraph(
                 ) {
                     Text(hzFormat.format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
+            }
+
+            // Контекстное окно редактирования точки — всплывающий слой
+            // поверх графика, а не отдельный раздел в списке опций. Окно
+            // ВСЕГДА ставится ПОД маркером точки: уголок на его верхней
+            // стороне смотрит вверх, то есть подходит к точке СНИЗУ.
+            // Индекс в points (как его хранит экран) -> индекс в
+            // отсортированном displayPoints, по которому считаны xPx/yPx.
+            val selectedDisplayIndex = if (selectedPointIndex != null) {
+                displayPoints.indexOfFirst { points.indexOf(it) == selectedPointIndex }
+            } else {
+                -1
+            }
+            if (selectedPointIndex != null && selectedDisplayIndex >= 0) {
+                val selectedPoint = displayPoints[selectedDisplayIndex]
+                val anchorXPx = graphParams.timeToX(selectedPoint.time)
+                val anchorYPx = graphParams.carrierToY(selectedPoint.carrierFrequency)
+
+                // Размер окна известен только после первой раскладки,
+                // поэтому до измерения оно ставится невидимым: иначе на
+                // один кадр мелькнуло бы в точке, а не под ней.
+                var popupSize by remember { mutableStateOf(IntSize.Zero) }
+                val gapPx = with(density) { POINT_POPUP_ANCHOR_GAP.roundToPx() }
+                // Вынос за боковые границы области графика: у крайних
+                // точек окно иначе упиралось бы в край, и до края экрана
+                // оставалось бы 32 dp (16 карточки + 16 экрана).
+                val overhangPx = with(density) {
+                    (POINT_POPUP_OUTER_PADDING - POINT_POPUP_SCREEN_MARGIN).roundToPx()
+                }
+
+                // Окно всегда ПОД точкой — без переворота вверх.
+                val minLeftPx = -overhangPx.toFloat()
+                val maxLeftPx = (widthPx - popupSize.width).toFloat() + overhangPx
+                val leftPx = (anchorXPx - popupSize.width / 2f)
+                    .coerceIn(minLeftPx, maxLeftPx.coerceAtLeast(minLeftPx))
+                val topPx = anchorYPx + gapPx
+
+                SideEffect {
+                    popupRect = if (popupSize == IntSize.Zero) null else Rect(
+                        left = leftPx,
+                        top = topPx,
+                        right = leftPx + popupSize.width,
+                        bottom = topPx + popupSize.height
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .offset { IntOffset(leftPx.roundToInt(), topPx.roundToInt()) }
+                        .onSizeChanged { popupSize = it }
+                        .then(if (popupSize == IntSize.Zero) Modifier.alpha(0f) else Modifier)
+                        // Касания по самому окну не должны уходить на график
+                        // и закрывать его: съедаем их, без ripple.
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { }
+                        )
+                ) {
+                    PointEditorPopup(
+                        point = selectedPoint,
+                        pointIndex = selectedPointIndex,
+                        carrierRange = carrierRange,
+                        autoExpandGraphRange = autoExpandGraphRange,
+                        arrowOffsetX = anchorXPx - leftPx,
+                        onCarrierFrequencyChange = { onPointCarrierChanged(selectedPointIndex, it) },
+                        onBeatFrequencyChange = { onPointBeatChanged(selectedPointIndex, it) },
+                        onTimeChange = { onPointTimeChanged(selectedPointIndex, it) },
+                        onRemove = { onRemovePoint(selectedPointIndex) }
+                    )
+                }
+            } else {
+                // Окна нет — нечего и защищать от касаний.
+                SideEffect { popupRect = null }
             }
         }
         

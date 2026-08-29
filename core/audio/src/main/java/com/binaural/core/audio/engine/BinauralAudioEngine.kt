@@ -30,23 +30,6 @@ enum class SampleRate(val value: Int) {
     HIGH(48000);
 
     companion object {
-        // Стерео float: 2 канала × 4 байта = 8 байт на сэмпл
-        private const val BYTES_PER_SAMPLE = 8
-
-        /**
-         * Реальный предел длительности одного генерируемого пакета (в минутах)
-         * для этой частоты дискретизации.
-         *
-         * Движок капает direct-буфер по [BinauralAudioEngine.MAX_BUFFER_BYTES],
-         * поэтому «60 минут» из настроек физически достижимы только на 8000 Гц.
-         * На 22050 Гц предел ~25 мин, на 44100 Гц ~12 мин, на 48000 Гц ~11 мин.
-         * Без этого UI предлагал недостижимые значения и молча урезал их в лог.
-         */
-        fun maxBufferMinutes(sampleRate: SampleRate): Int = minOf(
-            BinauralAudioEngine.MAX_BUFFER_MINUTES,
-            BinauralAudioEngine.MAX_BUFFER_BYTES / (sampleRate.value * BYTES_PER_SAMPLE) / 60
-        ).coerceAtLeast(1)
-
         fun fromValue(value: Int): SampleRate = entries.find { it.value == value } ?: MEDIUM
     }
 }
@@ -78,14 +61,17 @@ class BinauralAudioEngine(private val context: Context) {
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
 
-        // C2: максимальный размер буфера в минутах — верхняя граница настроек.
-        // public: SampleRate.maxBufferMinutes() считает по нему достижимый предел.
-        const val MAX_BUFFER_MINUTES = 60
+        // C2: максимальный размер буфера в минутах — разрешённый UI диапазон 1-60 мин
+        private const val MAX_BUFFER_MINUTES = 60
 
         // C2: жёсткий байтовый кап на direct-буфер (применяется и в старте, и при реаллокации).
-        // При 48000 Гц стерео float: 8 байт/с на сэмпл-канал => ~11.6 мин аудио
-        // public: SampleRate.maxBufferMinutes() использует его для честного UI-диапазона.
-        const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
+        // При 48000 Гц стерео float: 8 байт на сэмпл => ~46.6 мин аудио,
+        // при 44100 Гц => ~50.7 мин, при 22050 Гц => >60 мин (упирается уже
+        // в MAX_BUFFER_MINUTES).
+        // Это нативная (внекучная) память: если устройства её не дают,
+        // allocateDirectBuffer() ловит OutOfMemoryError и делит размер пополам,
+        // подбирая посильный объём — падения не будет, только лог.
+        private const val MAX_BUFFER_BYTES = 1024 * 1024 * 1024
 
         // Токен для отмены callbacks при переключении частоты дискретизации
         private val RESTART_PLAYBACK_TOKEN = Any()
@@ -431,24 +417,27 @@ class BinauralAudioEngine(private val context: Context) {
         try {
             // Максимальный размер буфера в сэмплах (из MAX_BUFFER_MINUTES)
             val maxSamplesPerChannelLimit = sampleRate * 60 * MAX_BUFFER_MINUTES
-            
+            // C2: байтовый кап в сэмплах — стерео float = 8 байт на сэмпл.
+            // ОБЯЗАТЕЛЕН здесь: буфер аллоцируется с minOf(..., MAX_BUFFER_BYTES),
+            // а генерировать мы просим samplesPerChannel. Без капа на интервалах
+            // больше ёмкости буфера JNI возвращал 0 («buffer too small»),
+            // и воспроизведение вставало.
+            val maxSamplesByBytesLimit = MAX_BUFFER_BYTES / 8
+
             // Учитываем отложенный интервал при создании буфера
             // pendingFrequencyUpdateIntervalMs может быть установлен до нажатия play
             val effectiveIntervalMs = pendingFrequencyUpdateIntervalMs.get() ?: frequencyUpdateIntervalMs
             
             // Вычисляем размер буфера на основе эффективного интервала с ограничением
             val requestedSamplesPerChannel = (sampleRate.toLong() * effectiveIntervalMs / 1000).toInt()
-            val samplesPerChannel = minOf(requestedSamplesPerChannel, maxSamplesPerChannelLimit)
-
-            // F7: честность капа — реальный интервал урезан лимитом буфера
-            val effectiveBufferIntervalMs = samplesPerChannel * 1000L / sampleRate
-            if (effectiveBufferIntervalMs < effectiveIntervalMs - 999) {
-                Log.w(TAG, "Buffer interval capped by buffer limit: requested=${effectiveIntervalMs}ms, effective=${effectiveBufferIntervalMs}ms")
-            }
+            var samplesPerChannel = minOf(
+                requestedSamplesPerChannel,
+                maxSamplesPerChannelLimit,
+                maxSamplesByBytesLimit
+            )
 
             // Создаём DirectByteBuffer для zero-copy генерации
             // Размер: samplesPerChannel * 2 канала * 4 байта на float
-            // Дополнительно ограничиваем MAX_BUFFER_BYTES для защиты от OOM
             val directBufferSize = minOf(
                 samplesPerChannel * 2 * 4,
                 MAX_BUFFER_BYTES
@@ -457,10 +446,25 @@ class BinauralAudioEngine(private val context: Context) {
             if (directAudioBuffer == null || directAudioBuffer!!.capacity() < directBufferSize) {
                 directAudioBuffer = allocateDirectBuffer(directBufferSize, sampleRate)
                 if (directAudioBuffer != null) {
-                    Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes (${directBufferSize / 1024 / 1024} MB) for interval ${effectiveBufferIntervalMs}ms")
+                    Log.d(TAG, "Created DirectByteBuffer: $directBufferSize bytes (${directBufferSize / 1024 / 1024} MB)")
                 } else {
                     Log.e(TAG, "Failed to allocate DirectByteBuffer ($directBufferSize bytes)")
                 }
+            }
+
+            // Реальная ёмкость может оказаться меньше запрошенной: при OOM
+            // allocateDirectBuffer() делит размер пополам. Урезаем длину
+            // пакета по факту — иначе JNI вернёт 0 и звук не пойдёт.
+            val capacitySamples = (directAudioBuffer?.capacity() ?: 0) / 8
+            if (capacitySamples in 1 until samplesPerChannel) {
+                Log.w(TAG, "Direct buffer smaller than requested: $capacitySamples samples instead of $samplesPerChannel")
+                samplesPerChannel = capacitySamples
+            }
+
+            // F7: честность капа — реальный интервал урезан лимитом буфера
+            val effectiveBufferIntervalMs = samplesPerChannel * 1000L / sampleRate
+            if (effectiveBufferIntervalMs < effectiveIntervalMs - 999) {
+                Log.w(TAG, "Buffer interval capped by buffer limit: requested=${effectiveIntervalMs}ms, effective=${effectiveBufferIntervalMs}ms")
             }
             
             createAudioTrack()
@@ -699,6 +703,14 @@ class BinauralAudioEngine(private val context: Context) {
                     } else {
                         Log.e(TAG, "Failed to resize DirectByteBuffer ($requiredSize bytes)")
                     }
+                }
+                // Реальная ёмкость может быть меньше запрошенной (OOM-цикл делит
+                // размер пополам) — урезаем длину пакета по факту, иначе JNI
+                // вернёт 0 («buffer too small») и звук встанет.
+                val capacitySamples = (directAudioBuffer?.capacity() ?: 0) / 8
+                if (capacitySamples in 1 until samplesPerChannel) {
+                    Log.w(TAG, "generateAudioLoop: direct buffer holds $capacitySamples samples, interval truncated from $samplesPerChannel")
+                    samplesPerChannel = capacitySamples
                 }
             }
 
