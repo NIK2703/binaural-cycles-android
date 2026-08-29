@@ -46,7 +46,14 @@ data class FrequencyRange(
     
     companion object {
         val DEFAULT_CARRIER = FrequencyRange(100.0f, 600.0f)
-        val DEFAULT_BEAT = FrequencyRange(0.0f, 1000.0f)
+        /**
+         * Частота биений — величина ЗНАКОВАЯ (см. [FrequencyPoint.beatFrequency]),
+         * поэтому диапазон симметричен относительно нуля.
+         */
+        val DEFAULT_BEAT = FrequencyRange(
+            -FrequencyMath.MAX_BEAT_MAGNITUDE,
+            FrequencyMath.MAX_BEAT_MAGNITUDE
+        )
     }
 }
 
@@ -74,14 +81,39 @@ enum class NormalizationType {
 /**
  * Точка на графике зависимости частот от времени суток
  * Содержит время, несущую частоту и частоту биений
+ *
+ * ЧАСТОТА БИЕНИЙ — ЗНАКОВАЯ: beat = частота_правого − частота_левого.
+ * - beat > 0 — правый канал выше левого (обычная раскладка);
+ * - beat < 0 — каналы поменяны местами, правый ниже левого;
+ * - слышимая пульсация — |beat|, знак задаёт только раскладку каналов.
+ *
+ * Канальные частоты: левый = carrier − beat/2, правый = carrier + beat/2
+ * (см. [FrequencyMath]). При смене знака beat они меняются местами, поэтому
+ * обе формулы корректны для любого знака, а ограничение накладывается только
+ * на модуль: |beat| <= 2 * (carrier - 20 Гц), чтобы ни один канал не ушёл
+ * ниже слышимого диапазона.
  */
 @Serializable
 data class FrequencyPoint(
     @Serializable(with = LocalTimeSerializer::class)
     val time: LocalTime,           // Время суток
     val carrierFrequency: Float,  // Несущая частота (Гц)
-    val beatFrequency: Float      // Частота биений (Гц)
+    val beatFrequency: Float      // Частота биений (Гц, может быть отрицательной)
 ) {
+    /**
+     * Частота ЛЕВОГО канала: carrier − beat/2.
+     * При beat < 0 это более высокий тон (каналы поменяны местами).
+     */
+    val leftChannelFrequency: Float
+        get() = FrequencyMath.leftChannelFrequency(carrierFrequency, beatFrequency)
+
+    /**
+     * Частота ПРАВОГО канала: carrier + beat/2.
+     * При beat < 0 это более низкий тон (каналы поменяны местами).
+     */
+    val rightChannelFrequency: Float
+        get() = FrequencyMath.rightChannelFrequency(carrierFrequency, beatFrequency)
+
     companion object {
         /**
          * Создаёт точку из часов и минут
@@ -115,44 +147,101 @@ data class FrequencyCurve(
     }
 
     /**
+     * Диапазон частот биений, симметричный относительно нуля.
+     *
+     * Пресеты, сохранённые до появления отрицательных частот биений, держат
+     * beatRange = (0; 1000). Зеркальное расширение делает знак доступным
+     * независимо от версии пресета и не меняет смысл старых значений:
+     * модуль по-прежнему ограничен тем же максимумом.
+     */
+    val effectiveBeatRange: FrequencyRange
+        get() = FrequencyMath.symmetricBeatRange(beatRange)
+
+    /**
      * Получить несущую частоту для заданного времени путём интерполяции
      * Не ограничиваем результат - кубический сплайн может давать значения за пределами точек
+     *
+     * Несущая — физическая частота тона, отрицательной быть не может.
      */
     fun getCarrierFrequencyAt(time: LocalTime): Float {
         return interpolate(time) { it.carrierFrequency }.coerceAtLeast(0.0f)
     }
 
     /**
-     * Получить частоту биений для заданного времени путём интерполяции
+     * Получить частоту биений для заданного времени путём интерполяции.
+     * Результат ЗНАКОВЫЙ: отрицательная частота биений означает, что каналы
+     * поменяны местами (правый тон ниже левого). Кламп к >= 0 здесь
+     * недопустим — он уничтожил бы знак и раскладку каналов.
+     *
      * Не ограничиваем результат - кубический сплайн может давать значения за пределами точек
      */
     fun getBeatFrequencyAt(time: LocalTime): Float {
-        return interpolate(time) { it.beatFrequency }.coerceAtLeast(0.0f)
+        return interpolate(time, allowNegative = true) { it.beatFrequency }
     }
-    
+
     /**
-     * Получить частоту ВЕРХНЕГО канала для заданного времени путём интерполяции
+     * Частоты каналов (левый, правый) для заданного времени.
+     * Каждая канальная кривая интерполируется отдельно, как в движке:
+     * левый = carrier − beat/2, правый = carrier + beat/2.
+     *
+     * При отрицательной частоте биений каналы меняются местами автоматически —
+     * отдельной обработки знака не требуется.
+     *
+     * @return Pair(левый канал, правый канал)
+     */
+    fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> =
+        Interpolation.interpolateChannels(
+            sortedPoints, time, interpolationType, splineTension, presorted = true
+        )
+
+    /**
+     * Получить частоту ПРАВОГО канала для заданного времени путём интерполяции
      * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier + beat/2)
      * Каждая точка кривой канала: carrier + beat/2
+     *
+     * ВАЖНО: при beat < 0 это БОЛЕЕ НИЗКИЙ тон — имя сохраняется за формулой,
+     * а не за взаимным расположением каналов.
      */
     fun getUpperChannelFrequencyAt(time: LocalTime): Float {
-        return interpolate(time) { point ->
-            point.carrierFrequency + point.beatFrequency / 2.0f
-        }.coerceAtLeast(0.0f)
+        return getChannelFrequenciesAt(time).second
     }
-    
+
     /**
-     * Получить частоту НИЖНЕГО канала для заданного времени путём интерполяции
+     * Получить частоту ЛЕВОГО канала для заданного времени путём интерполяции
      * Интерполяция применяется НАПРЯМУЮ к кривой канала (carrier - beat/2)
      * Каждая точка кривой канала: carrier - beat/2
+     *
+     * ВАЖНО: при beat < 0 это БОЛЕЕ ВЫСОКИЙ тон — имя сохраняется за формулой,
+     * а не за взаимным расположением каналов.
      */
     fun getLowerChannelFrequencyAt(time: LocalTime): Float {
-        return interpolate(time) { point ->
-            point.carrierFrequency - point.beatFrequency / 2.0f
-        }.coerceAtLeast(0.0f)
+        return getChannelFrequenciesAt(time).first
     }
-    
-    private fun interpolate(time: LocalTime, frequencySelector: (FrequencyPoint) -> Float): Float {
+
+    /**
+     * Допустимый интервал частоты биений для точки с заданной несущей
+     * (физика ∩ границы графика ∩ диапазон кривой). Симметричен по модулю.
+     */
+    fun beatBoundsForCarrier(carrierFrequency: Float): ClosedFloatingPointRange<Float> =
+        FrequencyMath.beatBounds(carrierFrequency, effectiveBeatRange, carrierRange)
+
+    /**
+     * Привести частоту биений к допустимому интервалу для заданной несущей.
+     * Знак сохраняется, клампится только модуль.
+     */
+    fun clampBeatForCarrier(carrierFrequency: Float, beatFrequency: Float): Float =
+        FrequencyMath.clampBeat(carrierFrequency, beatFrequency, effectiveBeatRange, carrierRange)
+
+    /**
+     * @param allowNegative false (по умолчанию) — результат клампится к >= 0
+     *        (физические частоты: несущая и каналы). true — знак сохраняется
+     *        (частота биений).
+     */
+    private fun interpolate(
+        time: LocalTime,
+        allowNegative: Boolean = false,
+        frequencySelector: (FrequencyPoint) -> Float
+    ): Float {
         val targetSeconds = time.toSecondOfDay()
         
         // Бинарный поиск для быстрого нахождения интервала
@@ -167,6 +256,7 @@ data class FrequencyCurve(
                 0, // первая точка (с переходом через полночь)
                 time,
                 frequencySelector,
+                allowNegative,
                 isWrapping = true
             )
         }
@@ -177,6 +267,7 @@ data class FrequencyCurve(
             intervalIndex + 1,
             time,
             frequencySelector,
+            allowNegative,
             isWrapping = false
         )
     }
@@ -216,6 +307,7 @@ data class FrequencyCurve(
         rightIndex: Int,
         time: LocalTime,
         frequencySelector: (FrequencyPoint) -> Float,
+        allowNegative: Boolean = false,
         isWrapping: Boolean
     ): Float {
         val leftPoint = sortedPoints[leftIndex]
@@ -245,8 +337,13 @@ data class FrequencyCurve(
         val p2 = frequencySelector(rightPoint)
         val p3 = getNeighborPoint(rightIndex, +1, frequencySelector, isWrapping)
         
-        // Используем общий объект интерполяции с параметром tension для CARDINAL
-        return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
+        // Используем общий объект интерполяции с параметром tension для CARDINAL.
+        // allowNegative=false клампит результат к >= 0 (несущая и каналы —
+        // физические частоты); для частоты биений знак сохраняется.
+        return Interpolation.interpolate(
+            interpolationType, p0, p1, p2, p3, ratio, splineTension,
+            allowNegative = allowNegative
+        )
     }
     
     /**
@@ -274,12 +371,13 @@ data class FrequencyCurve(
      */
     fun getInterpolatedValues(
         numSamples: Int = 100,
+        allowNegative: Boolean = false,
         frequencySelector: (FrequencyPoint) -> Float
     ): List<Pair<Int, Float>> {
         return (0..numSamples).map { i ->
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            time.toSecondOfDay() to interpolate(time, frequencySelector)
+            time.toSecondOfDay() to interpolate(time, allowNegative, frequencySelector)
         }
     }
 
@@ -344,14 +442,14 @@ data class BinauralConfig(
     /**
      * Получить частоты каналов для заданного времени
      * Интерполяция применяется НАПРЯМУЮ к кривым каналов
-     * Возвращает (нижняя_частота, верхняя_частота) = (carrier - beat/2, carrier + beat/2)
-     * 
+     * Возвращает (левый_канал, правый_канал) = (carrier - beat/2, carrier + beat/2)
+     *
      * ВАЖНО: Каждая кривая канала интерполируется отдельно через свои точки!
+     * При beat < 0 каналы меняются местами — это и есть отрицательная частота
+     * биений, поэтому знак здесь терять нельзя.
      */
     fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
-        val lowerFreq = frequencyCurve.getLowerChannelFrequencyAt(time)
-        val upperFreq = frequencyCurve.getUpperChannelFrequencyAt(time)
-        return Pair(lowerFreq, upperFreq)
+        return frequencyCurve.getChannelFrequenciesAt(time)
     }
 }
 
@@ -446,9 +544,37 @@ data class RelaxationModeSettings(
         generateVirtualPoints(curve.points, curve.interpolationType, curve.splineTension)
 
     /**
+     * Снижает частоты на период расслабления.
+     *
+     * Знак частоты биений СОХРАНЯЕТСЯ: снижается её модуль, а раскладка каналов
+     * (какое ухо слышит более высокий тон) не меняется — иначе режим расслабления
+     * молча переставлял бы каналы местами на отрицательных участках кривой.
+     *
+     * Несущая не уходит ниже слышимого минимума; если из-за этого клампа
+     * соотношение carrier/beat нарушается, модуль beat приводится к физически
+     * допустимому (боковая частота не должна уйти ниже 0 Гц).
+     */
+    private fun reduceFrequencies(
+        carrier: Float,
+        beat: Float,
+        carrierReduction: Float,
+        beatReduction: Float
+    ): Pair<Float, Float> {
+        val reducedCarrier = (carrier * (1.0f - carrierReduction))
+            .coerceAtLeast(FrequencyMath.MIN_TONE_FREQUENCY)
+        val reducedBeat = FrequencyMath.clampBeat(
+            reducedCarrier,
+            beat * (1.0f - beatReduction),
+            FrequencyRange.DEFAULT_BEAT
+        )
+        return reducedCarrier to reducedBeat
+    }
+
+    /**
      * Генерирует виртуальные точки режима расслабления (единая реализация для UI и движка).
      * Каноническое правило: базовые кривые carrier/beat оцениваются сплайном
-     * interpolationType+splineTension по исходным точкам.
+     * interpolationType+splineTension по исходным точкам. Обе кривые знаковые:
+     * beat интерполируется без клампа к >= 0.
      */
     fun generateVirtualPoints(
         points: List<FrequencyPoint>,
@@ -515,26 +641,26 @@ data class RelaxationModeSettings(
             val t2 = periodStartSeconds + transitionSeconds
             if (t2 < daySeconds) {
                 val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
-                val baseCarrier2 = curve.getCarrierFrequencyAt(time2)
-                val baseBeat2 = curve.getBeatFrequencyAt(time2)
-                virtualPoints.add(FrequencyPoint(
-                    time2,
-                    baseCarrier2 * (1.0f - carrierReduction),
-                    baseBeat2 * (1.0f - beatReduction)
-                ))
+                val (carrier2, beat2) = reduceFrequencies(
+                    curve.getCarrierFrequencyAt(time2),
+                    curve.getBeatFrequencyAt(time2),
+                    carrierReduction,
+                    beatReduction
+                )
+                virtualPoints.add(FrequencyPoint(time2, carrier2, beat2))
             }
             
             // Точка 3: конец расслабления (сниженные частоты)
             val t3 = periodStartSeconds + transitionSeconds + durationSeconds
             if (t3 < daySeconds) {
                 val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
-                val baseCarrier3 = curve.getCarrierFrequencyAt(time3)
-                val baseBeat3 = curve.getBeatFrequencyAt(time3)
-                virtualPoints.add(FrequencyPoint(
-                    time3,
-                    baseCarrier3 * (1.0f - carrierReduction),
-                    baseBeat3 * (1.0f - beatReduction)
-                ))
+                val (carrier3, beat3) = reduceFrequencies(
+                    curve.getCarrierFrequencyAt(time3),
+                    curve.getBeatFrequencyAt(time3),
+                    carrierReduction,
+                    beatReduction
+                )
+                virtualPoints.add(FrequencyPoint(time3, carrier3, beat3))
             }
             
             // Точка 4: после выхода (на базовой кривой)
@@ -585,14 +711,14 @@ data class RelaxationModeSettings(
                 val beat = curve.getBeatFrequencyAt(time)
                 virtualPoints.add(FrequencyPoint(time, carrier, beat))
             } else {
-                // Нечётный индекс - снижающая точка
-                val baseCarrier = curve.getCarrierFrequencyAt(time)
-                val baseBeat = curve.getBeatFrequencyAt(time)
-                virtualPoints.add(FrequencyPoint(
-                    time,
-                    baseCarrier * (1.0f - carrierReduction),
-                    baseBeat * (1.0f - beatReduction)
-                ))
+                // Нечётный индекс - снижающая точка (знак beat сохраняется)
+                val (carrier, beat) = reduceFrequencies(
+                    curve.getCarrierFrequencyAt(time),
+                    curve.getBeatFrequencyAt(time),
+                    carrierReduction,
+                    beatReduction
+                )
+                virtualPoints.add(FrequencyPoint(time, carrier, beat))
             }
 
             currentSeconds += safeIntervalSeconds
@@ -680,13 +806,14 @@ data class BinauralPreset(
     }
 
     /**
-     * Частоты каналов как в движке: каждая канальная кривая (carrier±beat/2)
+     * Частоты каналов как в движке: каждая канальная кривая (carrier∓beat/2)
      * интерполируется отдельно по точкам кривой с учётом расслабления.
-     * Отображаемые carrier=(l+u)/2, beat=u−l.
+     * Отображаемые carrier=(l+r)/2, beat=r−l (знак beat сохраняется).
+     *
+     * @return Pair(левый канал, правый канал)
      */
     fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> {
-        val curve = curveWithRelaxation
-        return curve.getLowerChannelFrequencyAt(time) to curve.getUpperChannelFrequencyAt(time)
+        return curveWithRelaxation.getChannelFrequenciesAt(time)
     }
 
     companion object {

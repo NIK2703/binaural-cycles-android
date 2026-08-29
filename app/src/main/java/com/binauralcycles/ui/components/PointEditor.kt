@@ -27,6 +27,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
+import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binauralcycles.R
@@ -46,12 +47,20 @@ private fun parseFrequency(value: String): Float? {
  * Ограничивает ввод частоты: максимум 4 знака в целой части и 2 в дробной
  * Разрешает только одну точку или запятую как разделитель
  * Убирает ведущие нули в целой части (кроме случая "0.xxx")
+ *
+ * @param allowNegative разрешить ведущий минус. Нужно для ЧАСТОТЫ БИЕНИЙ,
+ *        которая величина знаковая (beat = right − left; знак задаёт раскладку
+ *        каналов). Для несущей частоты минус бессмысленен и отбрасывается.
  */
-private fun limitFrequencyInput(value: String): String {
+private fun limitFrequencyInput(value: String, allowNegative: Boolean = false): String {
+    // Знак: минус учитывается, только если он ВЕДУЩИЙ и разрешён.
+    // "-" в середине строки — это не знак числа, а мусор: отбрасываем.
+    val sign = if (allowNegative && value.trimStart().startsWith('-')) "-" else ""
+
     // Находим позицию первого разделителя (точки или запятой)
     val firstDotIndex = value.indexOf('.')
     val firstCommaIndex = value.indexOf(',')
-    
+
     // Определяем позицию первого разделителя
     val separatorIndex = when {
         firstDotIndex == -1 && firstCommaIndex == -1 -> -1
@@ -59,26 +68,27 @@ private fun limitFrequencyInput(value: String): String {
         firstCommaIndex == -1 -> firstDotIndex
         else -> minOf(firstDotIndex, firstCommaIndex)
     }
-    
+
     return if (separatorIndex == -1) {
         // Нет разделителя - только целая часть, максимум 4 цифры
         val digits = value.filter { it.isDigit() }.take(4)
         // Убираем ведущие нули, но оставляем один ноль если всё число состоит из нулей
-        digits.trimLeadingZeros()
+        // "-0" не имеет смысла — знак теряется (минус пропадёт при вводе цифр после "-0")
+        if (digits.isEmpty() || digits.all { it == '0' }) sign else sign + digits.trimLeadingZeros()
     } else {
         // Есть разделитель - разбиваем на целую и дробную части
         val integerPart = value.substring(0, separatorIndex).filter { it.isDigit() }.take(4)
         val decimalPart = value.substring(separatorIndex + 1).filter { it.isDigit() }.take(2)
-        
+
         // Убираем ведущие нули в целой части, но оставляем один ноль для чисел вида "0.xxx"
         val normalizedInteger = integerPart.trimLeadingZeros()
-        
+
         // Собираем результат с точкой как разделителем
         // Всегда сохраняем точку, даже если дробная часть пуста (пользователь продолжает ввод)
         if (decimalPart.isEmpty()) {
-            "$normalizedInteger."
+            "$sign$normalizedInteger."
         } else {
-            "$normalizedInteger.$decimalPart"
+            "$sign$normalizedInteger.$decimalPart"
         }
     }
 }
@@ -127,64 +137,40 @@ fun PointEditor(
     
     val isCarrierValid = carrierValue != null && carrierValue >= MIN_AUDIBLE_FREQUENCY && carrierValue <= 2000.0f
     
-    // Максимальная частота биений для слайдера ограничена условиями:
-    // 1. Нижняя боковая частота >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
-    // 2. Верхняя боковая частота <= 2000 Гц: carrier + beat/2 <= 2000 → beat <= 2*(2000 - carrier)
-    // 3. Если autoExpandGraphRange = false, дополнительно ограничиваем границами графика:
-    //    - Нижняя боковая >= carrierRange.min: beat <= 2*(carrier - carrierRange.min)
-    //    - Верхняя боковая <= carrierRange.max: beat <= 2*(carrierRange.max - carrier)
-    
-    // Максимальная частота биений вычисляется от текущего значения в текстовом поле (для валидации)
-    // или от значения точки (для слайдера)
-    val maxBeatFrequencyForValidation = if (carrierValue != null && isCarrierValid) {
-        val globalMax = minOf(
-            (carrierValue - MIN_AUDIBLE_FREQUENCY) * 2,  // нижняя боковая >= 20 Гц
-            (2000.0f - carrierValue) * 2  // верхняя боковая <= 2000 Гц
-        )
-        if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0f)
-        } else {
-            // Дополнительно ограничиваем границами графика
-            val rangeMax = minOf(
-                (carrierValue - carrierRange.min) * 2,  // нижняя боковая >= carrierRange.min
-                (carrierRange.max - carrierValue) * 2   // верхняя боковая <= carrierRange.max
-            )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
-        }
-    } else {
-        val globalMax = minOf(
-            (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0f - point.carrierFrequency) * 2
-        )
-        if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0f)
-        } else {
-            val rangeMax = minOf(
-                (point.carrierFrequency - carrierRange.min) * 2,
-                (carrierRange.max - point.carrierFrequency) * 2
-            )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
-        }
+    // Границы частоты биений СИММЕТРИЧНЫ по модулю (beat — знаковая величина,
+    // beat = right − left; знак задаёт раскладку каналов, |beat| — пульсация):
+    //   1. |beat| <= 2*(carrier − 20 Гц):    обе боковые остаются >= 20 Гц;
+    //   2. |beat| <= 2*(2000 Гц − carrier):  обе боковые остаются <= 2000 Гц;
+    //   3. если autoExpandGraphRange = false, дополнительно границами графика:
+    //      |beat| <= 2*(carrier − carrierRange.min) и 2*(carrierRange.max − carrier).
+    // Диапазон самой кривой (beatRange) тоже учитывается — см. FrequencyMath.beatBounds.
+    val effectiveBeatRange = FrequencyMath.symmetricBeatRange(beatRange)
+
+    // Максимальный МОДУЛЬ частоты биений вычисляется от текущего значения
+    // в текстовом поле (для валидации) или от значения точки (для слайдера)
+    val maxBeatMagnitudeForValidation = run {
+        val carrierForLimit = if (carrierValue != null && isCarrierValid) carrierValue
+                              else point.carrierFrequency
+        val range = if (autoExpandGraphRange) null else carrierRange
+        minOf(
+            FrequencyMath.maxBeatMagnitude(carrierForLimit, range),
+            maxOf(effectiveBeatRange.max, -effectiveBeatRange.min)
+        ).coerceAtLeast(0.0f)
     }
-    
-    val maxBeatFrequencyForSlider = run {
-        val globalMax = minOf(
-            (point.carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2,
-            (2000.0f - point.carrierFrequency) * 2
-        )
-        if (autoExpandGraphRange) {
-            globalMax.coerceAtLeast(1.0f)
-        } else {
-            val rangeMax = minOf(
-                (point.carrierFrequency - carrierRange.min) * 2,
-                (carrierRange.max - point.carrierFrequency) * 2
-            )
-            minOf(globalMax, rangeMax).coerceAtLeast(1.0f)
-        }
+
+    val maxBeatMagnitudeForSlider = run {
+        val range = if (autoExpandGraphRange) null else carrierRange
+        minOf(
+            FrequencyMath.maxBeatMagnitude(point.carrierFrequency, range),
+            maxOf(effectiveBeatRange.max, -effectiveBeatRange.min)
+        ).coerceAtLeast(0.0f)
     }
-    
-    // Валидация частоты биений - проверяем относительно текущего значения несущей в поле ввода
-    val isBeatValid = beatValue != null && beatValue >= beatRange.min && beatValue <= maxBeatFrequencyForValidation
+
+    // Валидация частоты биений: проверяем МОДУЛЬ (знак разрешён всегда),
+    // относительно текущего значения несущей в поле ввода
+    val isBeatValid = beatValue != null &&
+        beatValue >= -maxBeatMagnitudeForValidation &&
+        beatValue <= maxBeatMagnitudeForValidation
     
     var sliderCarrier by remember(point.carrierFrequency) { mutableStateOf(point.carrierFrequency.toFloat()) }
     var sliderBeat by remember(point.beatFrequency) { mutableStateOf(point.beatFrequency.toFloat()) }
@@ -517,7 +503,8 @@ fun PointEditor(
                 BasicTextField(
                     value = tempBeatFrequency,
                     onValueChange = { newValue ->
-                        val limited = limitFrequencyInput(newValue.text)
+                        // allowNegative=true: частота биений знаковая
+                        val limited = limitFrequencyInput(newValue.text, allowNegative = true)
                         // Если при удалении появился "0", выделяем его полностью
                         if (limited == "0" && tempBeatFrequency.text.length > 1) {
                             tempBeatFrequency = TextFieldValue(limited, selection = TextRange(0, 1))
@@ -537,7 +524,10 @@ fun PointEditor(
                         onDone = {
                             // Сохраняем значение при нажатии Done
                             val value = parseFrequency(tempBeatFrequency.text)
-                            if (value != null && value >= beatRange.min && value <= maxBeatFrequencyForValidation) {
+                            if (value != null &&
+                                value >= -maxBeatMagnitudeForValidation &&
+                                value <= maxBeatMagnitudeForValidation
+                            ) {
                                 onBeatFrequencyChange(value)
                             } else {
                                 // Восстанавливаем предыдущее значение при ошибке
@@ -558,7 +548,10 @@ fun PointEditor(
                                 // Фокус был потерян после того как был получен - сохраняем
                                 beatWasFocused = false
                                 val value = parseFrequency(tempBeatFrequency.text)
-                                if (value != null && value >= beatRange.min && value <= maxBeatFrequencyForValidation) {
+                                if (value != null &&
+                                    value >= -maxBeatMagnitudeForValidation &&
+                                    value <= maxBeatMagnitudeForValidation
+                                ) {
                                     sliderBeat = value.toFloat()
                                     onBeatFrequencyChange(value)
                                 } else {
@@ -595,8 +588,10 @@ fun PointEditor(
                     modifier = Modifier.padding(start = 4.dp)
                 )
                 
-                val minBeatForSlider = beatRange.min.toFloat().coerceAtLeast(0.0f)
-                val maxBeatForSlider = maxBeatFrequencyForSlider.toFloat().coerceAtLeast(minBeatForSlider)
+                // Слайдер симметричен: влево от нуля — отрицательные частоты
+                // биений (каналы поменяны), вправо — положительные.
+                val maxBeatForSlider = maxBeatMagnitudeForSlider
+                val minBeatForSlider = -maxBeatForSlider
                 Slider(
                     value = sliderBeat.coerceIn(minBeatForSlider, maxBeatForSlider),
                     onValueChange = {

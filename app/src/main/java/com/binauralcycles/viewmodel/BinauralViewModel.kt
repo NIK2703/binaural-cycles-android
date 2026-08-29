@@ -16,6 +16,7 @@ import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.ChannelSwapTrendPoints
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
@@ -29,6 +30,8 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -37,17 +40,34 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
 
+/**
+ * Высокочастотная телеметрия воспроизведения (обновляется 1–2 раза в секунду).
+ *
+ * Вынесена из [BinauralUiState] сознательно: `uiState` коллектится в корне
+ * навигации и во всех экранах, поэтому каждое изменение частот перекомпоновало
+ * ВСЁ дерево целиком — включая списки пресетов и экраны настроек, которым эти
+ * частоты вообще не нужны. Разделение потоков сужает recomposition до тех
+ * нескольких компонентов, которые реально рисуют телеметрию.
+ *
+ * Частоты и время — это «живые» значения для индикаторов; низкочастотные поля
+ * (presets, настройки, редактируемая кривая) остаются в [BinauralUiState].
+ */
+data class PlaybackTelemetry(
+    val isPlaying: Boolean = false,
+    val currentBeatFrequency: Float = 0.0f,
+    val currentCarrierFrequency: Float = 0.0f,
+    val isChannelsSwapped: Boolean = false,
+    val currentTime: LocalTime = LocalTime(12, 0)
+)
+
 data class BinauralUiState(
     // Список пресетов
     val presets: List<BinauralPreset> = emptyList(),
     val activePreset: BinauralPreset? = null,
-    // Состояние воспроизведения
-    val isPlaying: Boolean = false,
-    val currentBeatFrequency: Float = 0.0f,
-    val currentCarrierFrequency: Float = 0.0f,
+    // Флаг воспроизведения дублируется в PlaybackTelemetry — здесь он НЕ хранится,
+    // иначе любое его изменение снова перекомпонует всё дерево (см. Navigation).
     val volume: Float = 0.7f,
     val selectedPointIndex: Int? = null,
-    val currentTime: LocalTime = LocalTime(12, 0),
     // НОВОЕ: debug virtual time
     val debugVirtualTimeEnabled: Boolean = false,
     val debugTimeScale: Float = 1.0f,
@@ -65,12 +85,13 @@ data class BinauralUiState(
     val volumeNormalizationSettings: VolumeNormalizationSettings = VolumeNormalizationSettings(),
     // Глобальные настройки перестановки каналов (не зависят от пресета)
     val channelSwapSettings: ChannelSwapSettings = ChannelSwapSettings(),
-    // Состояние перестановки каналов (из сервиса)
-    val isChannelsSwapped: Boolean = false,
     // Общие настройки приложения
     val sampleRate: SampleRate = SampleRate.LOW,
     // Интервал генерации буфера в минутах (для оптимизации энергопотребления)
     val bufferGenerationMinutes: Int = 10,
+    // Реально достижимый максимум для текущей частоты дискретизации
+    // (кап direct-буфера). Считается в observePowerSettings/смене sampleRate.
+    val maxBufferGenerationMinutes: Int = SampleRate.maxBufferMinutes(SampleRate.LOW),
     // Автоматическое расширение границ графика при редактировании (по умолчанию выключено)
     val autoExpandGraphRange: Boolean = false,
     // Флаг подключения к сервису
@@ -91,6 +112,14 @@ class BinauralViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
+
+    /**
+     * Отдельный поток телеметрии: его читают только те компоненты, которые
+     * реально рисуют частоты/время. Изменения здесь НЕ перекомпонуют корень
+     * навигации и экраны, подписанные на `uiState`.
+     */
+    private val _telemetry = MutableStateFlow(PlaybackTelemetry())
+    val telemetry: StateFlow<PlaybackTelemetry> = _telemetry.asStateFlow()
     
     // Ссылка на сервис (может быть null если сервис не привязан)
     private var playbackService: BinauralPlaybackService? = null
@@ -223,17 +252,35 @@ class BinauralViewModel @Inject constructor(
                     48000 -> SampleRate.HIGH
                     else -> SampleRate.MEDIUM
                 }
-                _uiState.update { it.copy(sampleRate = sampleRate) }
+                _uiState.update { state ->
+                    // Предел буфера зависит от частоты дискретизации: на 48000 Гц
+                    // достижимо ~11 мин, а не 60. Переклампываем сохранённое
+                    // значение, чтобы настройка не врала пользователю.
+                    val maxMinutes = SampleRate.maxBufferMinutes(sampleRate)
+                    val clamped = state.bufferGenerationMinutes.coerceIn(1, maxMinutes)
+                    if (clamped != state.bufferGenerationMinutes) {
+                        playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
+                        viewModelScope.launch {
+                            preferencesRepository.saveBufferGenerationMinutes(clamped)
+                        }
+                    }
+                    state.copy(
+                        sampleRate = sampleRate,
+                        maxBufferGenerationMinutes = maxMinutes,
+                        bufferGenerationMinutes = clamped
+                    )
+                }
                 playbackService?.setSampleRate(sampleRate)
             }
         }
         // Интервал генерации буфера (в минутах)
         viewModelScope.launch {
             preferencesRepository.getBufferGenerationMinutes().collect { minutes ->
-                _uiState.update { it.copy(bufferGenerationMinutes = minutes) }
+                val clamped = clampBufferMinutes(minutes, _uiState.value.sampleRate)
+                _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
                 // Преобразуем минуты в миллисекунды для частоты обновления
                 // Большой буфер = реже обновления = лучше энергопотребление
-                playbackService?.setFrequencyUpdateInterval(minutes * 60 * 1000)
+                playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
             }
         }
         // Громкость - загружаем только для UI
@@ -282,35 +329,36 @@ class BinauralViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Наблюдение за телеметрией сервиса.
+     *
+     * Раньше пять отдельных коллекторов писали каждый в свой `MutableStateFlow`
+     * через `_uiState.update`, то есть за секунду могло быть до пяти эмиссий
+     * монолитного состояния — и пять полных перекомпозиций всего дерева.
+     * Теперь они сливаются в один [combine] и отсекаются [distinctUntilChanged],
+     * а результат уходит в отдельный поток [telemetry].
+     */
     private fun observePlaybackState() {
-        // Наблюдаем за статическими StateFlows сервиса
         viewModelScope.launch {
-            BinauralPlaybackService.isPlaying.collect { isPlaying ->
-                _uiState.update { it.copy(isPlaying = isPlaying) }
+            combine(
+                BinauralPlaybackService.isPlaying,
+                BinauralPlaybackService.currentBeatFrequency,
+                BinauralPlaybackService.currentCarrierFrequency,
+                BinauralPlaybackService.isChannelsSwapped,
+                BinauralPlaybackService.currentTimeOfDaySeconds
+            ) { playing, beat, carrier, swapped, timeSeconds ->
+                PlaybackTelemetry(
+                    isPlaying = playing,
+                    currentBeatFrequency = beat,
+                    currentCarrierFrequency = carrier,
+                    isChannelsSwapped = swapped,
+                    currentTime = LocalTime.fromSecondOfDay(timeSeconds.coerceIn(0, 86399))
+                )
             }
-        }
-        viewModelScope.launch {
-            BinauralPlaybackService.currentBeatFrequency.collect { freq ->
-                _uiState.update { it.copy(currentBeatFrequency = freq) }
-            }
-        }
-        viewModelScope.launch {
-            BinauralPlaybackService.currentCarrierFrequency.collect { freq ->
-                _uiState.update { it.copy(currentCarrierFrequency = freq) }
-            }
-        }
-        viewModelScope.launch {
-            BinauralPlaybackService.isChannelsSwapped.collect { swapped ->
-                _uiState.update { it.copy(isChannelsSwapped = swapped) }
-            }
-        }
-        
-        // НОВОЕ: единое время (реальное в release, виртуальное в debug)
-        viewModelScope.launch {
-            BinauralPlaybackService.currentTimeOfDaySeconds.collect { secs ->
-                val clamped = secs.coerceIn(0, 86399)
-                _uiState.update { it.copy(currentTime = LocalTime.fromSecondOfDay(clamped)) }
-            }
+                // Схлопываем повторы: на паузе сервис шлёт те же значения,
+                // и без этого StateFlow будил бы подписчиков впустую.
+                .distinctUntilChanged()
+                .collect { telemetry -> _telemetry.value = telemetry }
         }
     }
 
@@ -324,7 +372,7 @@ class BinauralViewModel @Inject constructor(
         val state = _uiState.value
         
         // Если уже воспроизводится этот пресет - останавливаем с затуханием
-        if (state.activePreset?.id == presetId && state.isPlaying) {
+        if (state.activePreset?.id == presetId && _telemetry.value.isPlaying) {
             playbackService?.stopWithFade()
             return
         }
@@ -368,7 +416,7 @@ class BinauralViewModel @Inject constructor(
         
         // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
         // Сначала fade-out на старом пресете, затем fade-in на новом
-        if (state.isPlaying) {
+        if (_telemetry.value.isPlaying) {
             // Guard от гонки с коллектором пресетов: пока идёт фейд, updateAudioConfig
             // не должен применять конфиг к ещё звучащему старому пресету
             isPresetSwitchInProgress = true
@@ -592,13 +640,14 @@ class BinauralViewModel @Inject constructor(
         if (restartJob?.isActive == true) {
             restartJob?.cancel()
             playbackService?.pauseWithFade()
-            _uiState.update { it.copy(isPlaying = false) }
+            // Оптимистично гасим индикатор: сервис подтвердит через свой StateFlow
+            _telemetry.update { it.copy(isPlaying = false) }
             return
         }
 
         val state = _uiState.value
         
-        if (state.isPlaying) {
+        if (_telemetry.value.isPlaying) {
             // Плавная остановка с затуханием
             playbackService?.stopWithFade()
         } else {
@@ -653,38 +702,28 @@ class BinauralViewModel @Inject constructor(
     // ============= Методы для редактирования точек (редактируемая кривая) =============
     
     companion object {
-        private const val MIN_AUDIBLE_FREQUENCY = 20.0f
-        private const val MAX_FREQUENCY = 2000.0f
-        
         /**
          * Вычисляет скорректированную частоту биения для заданной несущей частоты.
-         * Учитывает обе границы: нижнюю (20 Гц) и верхнюю (2000 Гц).
-         * Нижняя граница: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
-         * Верхняя граница: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
+         *
+         * ЗНАК СОХРАНЯЕТСЯ: клампится только МОДУЛЬ частоты биений, т.к. beat —
+         * величина знаковая (beat = right − left; знак задаёт раскладку каналов,
+         * |beat| — слышимую пульсацию). Ограничение симметрично:
+         *   |beat| <= 2 * (carrier − 20 Гц)   — нижняя боковая не ниже 20 Гц;
+         *   |beat| <= 2 * (2000 Гц − carrier) — верхняя боковая не выше 2000 Гц.
          */
         private fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
-            val maxBeatForLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
-            val maxBeatForUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0f)
-            val maxBeat = minOf(maxBeatForLower, maxBeatForUpper)
-            return currentBeat.coerceAtMost(maxBeat)
+            val maxBeat = FrequencyMath.maxBeatMagnitude(carrier)
+            return currentBeat.coerceIn(-maxBeat, maxBeat)
         }
-        
+
         /**
          * Вычисляет скорректированную частоту биения с учётом границ графика.
-         * Дополнительно учитывает, что боковые частоты не должны выходить за границы графика.
+         * Дополнительно учитывает, что боковые частоты не должны выходить
+         * за вертикальные границы графика. Знак также сохраняется.
          */
         private fun adjustBeatForCarrierWithRange(carrier: Float, currentBeat: Float, carrierRange: FrequencyRange): Float {
-            // Глобальные ограничения (20-2000 Гц)
-            val maxBeatForGlobalLower = ((carrier - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
-            val maxBeatForGlobalUpper = ((MAX_FREQUENCY - carrier) * 2).coerceAtLeast(0.0f)
-            
-            // Ограничения границ графика
-            val maxBeatForRangeLower = ((carrier - carrierRange.min) * 2).coerceAtLeast(0.0f)
-            val maxBeatForRangeUpper = ((carrierRange.max - carrier) * 2).coerceAtLeast(0.0f)
-            
-            // Берём минимум из всех ограничений
-            val maxBeat = minOf(maxBeatForGlobalLower, maxBeatForGlobalUpper, maxBeatForRangeLower, maxBeatForRangeUpper)
-            return currentBeat.coerceAtMost(maxBeat)
+            val maxBeat = FrequencyMath.maxBeatMagnitude(carrier, carrierRange)
+            return currentBeat.coerceIn(-maxBeat, maxBeat)
         }
     }
     
@@ -699,11 +738,14 @@ class BinauralViewModel @Inject constructor(
             
             val (newCarrier, adjustedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val carrier = frequency.coerceIn(20.0f, 2000.0f)
+                val carrier = frequency.coerceIn(
+                    FrequencyMath.MIN_TONE_FREQUENCY, FrequencyMath.MAX_TONE_FREQUENCY)
                 val beat = adjustBeatForCarrier(carrier, oldPoint.beatFrequency)
-                
-                val upperFrequency = carrier + beat / 2.0f
-                val lowerFrequency = carrier - beat / 2.0f
+
+                // Границы расширяем по РЕАЛЬНО более высокой/низкой боковой:
+                // при beat < 0 формулы каналов меняются местами, поэтому берём модуль.
+                val upperFrequency = carrier + FrequencyMath.beatMagnitude(beat) / 2.0f
+                val lowerFrequency = carrier - FrequencyMath.beatMagnitude(beat) / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
                     (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
@@ -745,14 +787,12 @@ class BinauralViewModel @Inject constructor(
             
             val (newBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val maxBeat = minOf(
-                    (oldPoint.carrierFrequency - 20.0f) * 2.0f,
-                    (2000.0f - oldPoint.carrierFrequency) * 2.0f
-                ).coerceAtLeast(1.0f)
-                val beat = frequency.coerceIn(curve.beatRange.min, maxBeat)
-                
-                val upperFrequency = oldPoint.carrierFrequency + beat / 2.0f
-                val lowerFrequency = oldPoint.carrierFrequency - beat / 2.0f
+                val beat = FrequencyMath.clampBeat(
+                    oldPoint.carrierFrequency, frequency, curve.effectiveBeatRange)
+
+                // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
+                val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
+                val lowerFrequency = oldPoint.carrierFrequency - FrequencyMath.beatMagnitude(beat) / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
                     (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
@@ -767,8 +807,8 @@ class BinauralViewModel @Inject constructor(
                 Pair(beat, FrequencyRange(newMin, newMax))
             } else {
                 // Ограничение частот заданными границами графика (новое поведение по умолчанию)
-                val beat = adjustBeatForCarrierWithRange(oldPoint.carrierFrequency, frequency, curve.carrierRange)
-                    .coerceIn(curve.beatRange.min, frequency)
+                val beat = FrequencyMath.clampBeat(
+                    oldPoint.carrierFrequency, frequency, curve.effectiveBeatRange, curve.carrierRange)
                 Pair(beat, curve.carrierRange)
             }
             
@@ -806,11 +846,14 @@ class BinauralViewModel @Inject constructor(
             
             val (carrier, adjustedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val clampedCarrier = newCarrier.coerceIn(20.0f, 2000.0f)
+                val clampedCarrier = newCarrier.coerceIn(
+                    FrequencyMath.MIN_TONE_FREQUENCY, FrequencyMath.MAX_TONE_FREQUENCY)
                 val beat = adjustBeatForCarrier(clampedCarrier, oldPoint.beatFrequency)
-                
-                val upperFrequency = clampedCarrier + beat / 2.0f
-                val lowerFrequency = clampedCarrier - beat / 2.0f
+
+                // Модуль beat: при beat < 0 каналы меняются местами, а границы
+                // графика должны расширяться по реально низкой/высокой боковой.
+                val upperFrequency = clampedCarrier + FrequencyMath.beatMagnitude(beat) / 2.0f
+                val lowerFrequency = clampedCarrier - FrequencyMath.beatMagnitude(beat) / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
                     (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
@@ -848,14 +891,12 @@ class BinauralViewModel @Inject constructor(
             
             val (clampedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
-                val maxBeat = minOf(
-                    (oldPoint.carrierFrequency - 20.0f) * 2.0f,
-                    (2000.0f - oldPoint.carrierFrequency) * 2.0f
-                ).coerceAtLeast(1.0f)
-                val beat = newBeat.coerceIn(curve.beatRange.min, maxBeat)
-                
-                val upperFrequency = oldPoint.carrierFrequency + beat / 2.0f
-                val lowerFrequency = oldPoint.carrierFrequency - beat / 2.0f
+                val beat = FrequencyMath.clampBeat(
+                    oldPoint.carrierFrequency, newBeat, curve.effectiveBeatRange)
+
+                // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
+                val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
+                val lowerFrequency = oldPoint.carrierFrequency - FrequencyMath.beatMagnitude(beat) / 2.0f
                 
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
                     (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
@@ -870,8 +911,8 @@ class BinauralViewModel @Inject constructor(
                 Pair(beat, FrequencyRange(newMin, newMax))
             } else {
                 // Ограничение частот заданными границами графика (новое поведение по умолчанию)
-                val beat = adjustBeatForCarrierWithRange(oldPoint.carrierFrequency, newBeat, curve.carrierRange)
-                    .coerceIn(curve.beatRange.min, newBeat)
+                val beat = FrequencyMath.clampBeat(
+                    oldPoint.carrierFrequency, newBeat, curve.effectiveBeatRange, curve.carrierRange)
                 Pair(beat, curve.carrierRange)
             }
             
@@ -889,14 +930,11 @@ class BinauralViewModel @Inject constructor(
         val curve = state.editingFrequencyCurve ?: return
         
         val clampedCarrier = curve.carrierRange.clamp(carrierFrequency)
-        // Ограничение частоты биений:
-        // 1. Нижняя боковая >= 20 Гц: carrier - beat/2 >= 20 → beat <= 2*(carrier - 20)
-        // 2. Верхняя боковая <= 2000 Гц: carrier + beat/2 <= 2000 → beat <= 2*(2000 - carrier)
-        val maxBeat = minOf(
-            (clampedCarrier - 20.0f) * 2.0f,
-            (2000.0f - clampedCarrier) * 2.0f
-        ).coerceAtLeast(1.0f)
-        val clampedBeat = beatFrequency.coerceIn(curve.beatRange.min, maxBeat)
+        // Ограничение частоты биений по МОДУЛЮ (знак сохраняется — см. FrequencyMath):
+        // 1. Нижняя боковая >= 20 Гц:   |beat| <= 2*(carrier - 20)
+        // 2. Верхняя боковая <= 2000 Гц: |beat| <= 2*(2000 - carrier)
+        val clampedBeat = FrequencyMath.clampBeat(
+            clampedCarrier, beatFrequency, curve.effectiveBeatRange)
         
         val points = curve.points.toMutableList()
         points.add(FrequencyPoint(
@@ -1129,7 +1167,7 @@ class BinauralViewModel @Inject constructor(
         // воспроизведение было активным до её начала (во время fade-out isPlaying уже false)
         val hasPendingRestart = restartJob?.isActive == true
         val wasPlaying = hasPendingRestart ||
-            (_uiState.value.isPlaying && _uiState.value.isServiceConnected)
+            (_telemetry.value.isPlaying && _uiState.value.isServiceConnected)
 
         restartJob?.cancel()
 
@@ -1161,11 +1199,21 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
+     * Приводит интервал генерации к реально достижимому для данной частоты
+     * дискретизации. Движок капает direct-буфер по байтам, поэтому 45 и 60 мин
+     * физически недостижимы на 44100/48000 Гц (предел ~12 и ~11 мин).
+     * Без клампа настройка молча урезалась в лог, а пользователь думал,
+     * что получил заявленный интервал.
+     */
+    private fun clampBufferMinutes(minutes: Int, sampleRate: SampleRate): Int =
+        minutes.coerceIn(1, SampleRate.maxBufferMinutes(sampleRate))
+
+    /**
      * Установить интервал генерации буфера в минутах
      * Большой интервал = меньше пробуждений CPU = лучше энергопотребление
      */
     fun setBufferGenerationMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(1, 60)
+        val clampedMinutes = clampBufferMinutes(minutes, _uiState.value.sampleRate)
         _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
         // Преобразуем минуты в миллисекунды
         playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)
@@ -1562,7 +1610,7 @@ class BinauralViewModel @Inject constructor(
         if (state.autoResumeOnAppStart &&
             state.activePreset != null &&
             state.isServiceConnected &&
-            !state.isPlaying &&
+            !_telemetry.value.isPlaying &&
             !autoResumeHandled) {
             
             autoResumeHandled = true
@@ -1598,7 +1646,7 @@ class BinauralViewModel @Inject constructor(
         restartWithFadeIfNeeded {
             playbackService?.debugScrub(clamped)
             // Мгновенное отражение в UI, не дожидаясь 1-секундного поллинга
-            _uiState.update { it.copy(currentTime = LocalTime.fromSecondOfDay(clamped)) }
+            _telemetry.update { it.copy(currentTime = LocalTime.fromSecondOfDay(clamped)) }
         }
     }
 

@@ -28,8 +28,25 @@ enum class SampleRate(val value: Int) {
     LOW(22050),
     MEDIUM(44100),
     HIGH(48000);
-    
+
     companion object {
+        // Стерео float: 2 канала × 4 байта = 8 байт на сэмпл
+        private const val BYTES_PER_SAMPLE = 8
+
+        /**
+         * Реальный предел длительности одного генерируемого пакета (в минутах)
+         * для этой частоты дискретизации.
+         *
+         * Движок капает direct-буфер по [BinauralAudioEngine.MAX_BUFFER_BYTES],
+         * поэтому «60 минут» из настроек физически достижимы только на 8000 Гц.
+         * На 22050 Гц предел ~25 мин, на 44100 Гц ~12 мин, на 48000 Гц ~11 мин.
+         * Без этого UI предлагал недостижимые значения и молча урезал их в лог.
+         */
+        fun maxBufferMinutes(sampleRate: SampleRate): Int = minOf(
+            BinauralAudioEngine.MAX_BUFFER_MINUTES,
+            BinauralAudioEngine.MAX_BUFFER_BYTES / (sampleRate.value * BYTES_PER_SAMPLE) / 60
+        ).coerceAtLeast(1)
+
         fun fromValue(value: Int): SampleRate = entries.find { it.value == value } ?: MEDIUM
     }
 }
@@ -61,12 +78,14 @@ class BinauralAudioEngine(private val context: Context) {
         // Множитель интервала при Battery Saver (3x = 30 сек вместо 10 сек)
         private const val POWER_SAVE_INTERVAL_MULTIPLIER = 3
 
-        // C2: максимальный размер буфера в минутах — разрешённый UI диапазон 1-60 мин
-        private const val MAX_BUFFER_MINUTES = 60
+        // C2: максимальный размер буфера в минутах — верхняя граница настроек.
+        // public: SampleRate.maxBufferMinutes() считает по нему достижимый предел.
+        const val MAX_BUFFER_MINUTES = 60
 
         // C2: жёсткий байтовый кап на direct-буфер (применяется и в старте, и при реаллокации).
         // При 48000 Гц стерео float: 8 байт/с на сэмпл-канал => ~11.6 мин аудио
-        private const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
+        // public: SampleRate.maxBufferMinutes() использует его для честного UI-диапазона.
+        const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
 
         // Токен для отмены callbacks при переключении частоты дискретизации
         private val RESTART_PLAYBACK_TOKEN = Any()
@@ -102,8 +121,11 @@ class BinauralAudioEngine(private val context: Context) {
     // Токен для debounce операций переключения частоты дискретизации
     private val SAMPLE_RATE_CHANGE_TOKEN = Any()
 
-    // Текущие настройки
-    private var sampleRate: Int = SampleRate.MEDIUM.value
+    // Текущие настройки.
+    // Дефолт 22 050 Гц согласован с PreferencesRepository и BinauralUiState:
+    // сигнал < 2 кГц, Найквист 11 кГц — вдвое меньше памяти и DSP, чем 44 100,
+    // без слышимой разницы (см. docs/battery_hotpaths_analysis.md §4.1).
+    private var sampleRate: Int = SampleRate.LOW.value
     private var frequencyUpdateIntervalMs: Int = 600_000
 
     // C4: последний пользовательский интервал (для восстановления после debug-времени)

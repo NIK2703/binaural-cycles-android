@@ -46,6 +46,9 @@ fun PresetListScreen(
     onOpenSettings: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    // Отдельный поток телеметрии: текущее время и флаг воспроизведения меняются
+    // каждую секунду и не должны перекомпоновывать весь список пресетов.
+    val telemetry by viewModel.telemetry.collectAsState()
     
     // Время последней навигации для защиты от быстрых повторных нажатий
     var lastNavigationTime by remember { mutableStateOf(0L) }
@@ -126,7 +129,7 @@ fun PresetListScreen(
                         // Используем методы BinauralPreset для учёта виртуальных точек расслабления
                         // Время: единое из uiState (реальное в release, виртуальное в debug)
                         // Канальная оценка как в движке: carrier=(l+u)/2, beat=u−l
-                        val (lowerFreq, upperFreq) = preset.getChannelFrequenciesAt(uiState.currentTime)
+                        val (lowerFreq, upperFreq) = preset.getChannelFrequenciesAt(telemetry.currentTime)
                         val carrierFreq = (lowerFreq + upperFreq) / 2.0f
                         val beatFreq = upperFreq - lowerFreq
                         
@@ -136,10 +139,10 @@ fun PresetListScreen(
                             frequencyCurve = preset.frequencyCurve,
                             relaxationModeSettings = preset.relaxationModeSettings,
                             isActive = isActivePreset,
-                            isPlaying = isActivePreset && uiState.isPlaying,
+                            isPlaying = isActivePreset && telemetry.isPlaying,
                             currentCarrierFrequency = carrierFreq,
                             currentBeatFrequency = beatFreq,
-                            currentTime = uiState.currentTime, // Передаём время из родителя
+                            currentTime = telemetry.currentTime, // Передаём время из родителя
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },

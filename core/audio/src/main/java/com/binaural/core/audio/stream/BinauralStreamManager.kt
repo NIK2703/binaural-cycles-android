@@ -171,12 +171,30 @@ class BinauralStreamManager(private val context: Context) {
     }
     fun getFrequencyUpdateInterval(): Int = bufferIntervalMs
 
+    /**
+     * Реакция на системный режим энергосбережения.
+     *
+     * ВАЖНО (фикс инвертированной логики): ранее здесь стояло
+     * `(lastUserIntervalMs * POWER_SAVE_MULTIPLIER).coerceAtMost(60_000)`.
+     * `coerceAtMost` — это min, поэтому при дефолте 600_000 мс (10 мин)
+     * результат оказывался 60_000 мс (1 мин): в режиме энергосбережения
+     * генерация запускалась в 10 раз ЧАЩЕ. Имелся в виду верхний предел
+     * 60 минут = 3_600_000 мс.
+     *
+     * Правильная семантика: в энергосбережении буфер НЕ короче заданного
+     * пользователем (иначе смысл настройки теряется), но и не больше часа —
+     * это одновременно предел `setFrequencyUpdateInterval` и предел
+     * разумного расхода памяти.
+     */
     fun applyPowerSaveMode() {
         actor.post {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-            bufferIntervalMs = if (pm.isPowerSaveMode)
-                (lastUserIntervalMs * POWER_SAVE_MULTIPLIER).coerceAtMost(60_000)
-            else lastUserIntervalMs
+            bufferIntervalMs = if (pm.isPowerSaveMode) {
+                (lastUserIntervalMs * POWER_SAVE_MULTIPLIER)
+                    .coerceIn(lastUserIntervalMs, 60 * 60 * 1000)
+            } else {
+                lastUserIntervalMs
+            }
         }
     }
 

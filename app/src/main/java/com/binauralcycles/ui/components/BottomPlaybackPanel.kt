@@ -12,6 +12,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.binaural.core.audio.model.FrequencyMath
 import com.binauralcycles.R
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0f
@@ -33,8 +34,12 @@ fun BottomPlaybackPanel(
     onVolumeSave: () -> Unit,  // Вызывается при отпускании для сохранения
     modifier: Modifier = Modifier
 ) {
-    val leftChannelFreq = carrierFrequency - beatFrequency / 2.0f
-    val isLeftChannelTooLow = leftChannelFreq < MIN_AUDIBLE_FREQUENCY
+    // Каналы по общей формуле (как в движке): left = carrier − beat/2,
+    // right = carrier + beat/2. При ОТРИЦАТЕЛЬНОЙ частоте биений ниже порога
+    // слышимости может уйти ПРАВЫЙ канал — проверяем оба.
+    val leftChannelFreq = FrequencyMath.leftChannelFrequency(carrierFrequency, beatFrequency)
+    val rightChannelFreq = FrequencyMath.rightChannelFrequency(carrierFrequency, beatFrequency)
+    val isChannelTooLow = minOf(leftChannelFreq, rightChannelFreq) < MIN_AUDIBLE_FREQUENCY
     
     // Локальное состояние для мгновенного отклика слайдера
     var localVolume by remember(volume) { mutableFloatStateOf(volume) }
@@ -113,7 +118,7 @@ fun BottomPlaybackPanel(
                     )
                     
                     // Предупреждение о низкой частоте
-                    if (isLeftChannelTooLow) {
+                    if (isChannelTooLow) {
                         Text(
                             text = "⚠",
                             style = MaterialTheme.typography.bodySmall,

@@ -43,7 +43,8 @@ object NativeInterpolation {
         p0: Float, p1: Float, p2: Float, p3: Float,
         t: Float,
         interpolationType: Int,
-        tension: Float
+        tension: Float,
+        allowNegative: Boolean
     ): Float
     
     private external fun nativeGenerateInterpolatedCurve(
@@ -51,7 +52,8 @@ object NativeInterpolation {
         values: FloatArray,
         numOutputPoints: Int,
         interpolationType: Int,
-        tension: Float
+        tension: Float,
+        allowNegative: Boolean
     ): FloatArray?
     
     /**
@@ -64,13 +66,17 @@ object NativeInterpolation {
      * @param t нормализованная позиция [0, 1]
      * @param interpolationType тип интерполяции
      * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom)
+     * @param allowNegative разрешить отрицательный результат. true — для
+     *        знаковых величин (частота биений, beat = right − left);
+     *        false — для физических частот каналов.
      * @return интерполированное значение
      */
     fun interpolate(
         p0: Float, p1: Float, p2: Float, p3: Float,
         t: Float,
         interpolationType: InterpolationType,
-        tension: Float = 0.0f
+        tension: Float = 0.0f,
+        allowNegative: Boolean = false
     ): Float {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -79,11 +85,11 @@ object NativeInterpolation {
             InterpolationType.STEP -> 3
         }
         return try {
-            nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension)
+            nativeInterpolate(p0, p1, p2, p3, t, typeInt, tension, allowNegative)
         } catch (e: UnsatisfiedLinkError) {
             logFallback()
             com.binaural.core.audio.model.Interpolation.interpolate(
-                interpolationType, p0, p1, p2, p3, t, tension
+                interpolationType, p0, p1, p2, p3, t, tension, allowNegative
             )
         }
     }
@@ -98,6 +104,8 @@ object NativeInterpolation {
      * @param numOutputPoints количество выходных точек (обычно 200 для графика)
      * @param interpolationType тип интерполяции
      * @param tension параметр натяжения
+     * @param allowNegative разрешить отрицательные значения (true для частоты
+     *        биений — величина знаковая)
      * @return массив интерполированных значений или null при ошибке
      */
     fun generateInterpolatedCurve(
@@ -105,7 +113,8 @@ object NativeInterpolation {
         values: FloatArray,
         numOutputPoints: Int,
         interpolationType: InterpolationType,
-        tension: Float = 0.0f
+        tension: Float = 0.0f,
+        allowNegative: Boolean = false
     ): FloatArray? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -114,7 +123,9 @@ object NativeInterpolation {
             InterpolationType.STEP -> 3
         }
         return try {
-            nativeGenerateInterpolatedCurve(timePoints, values, numOutputPoints, typeInt, tension)
+            nativeGenerateInterpolatedCurve(
+                timePoints, values, numOutputPoints, typeInt, tension, allowNegative
+            )
         } catch (e: UnsatisfiedLinkError) {
             logFallback()
             null

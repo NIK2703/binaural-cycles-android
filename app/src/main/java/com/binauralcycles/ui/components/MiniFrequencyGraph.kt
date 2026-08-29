@@ -17,6 +17,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.Interpolation
@@ -46,13 +47,20 @@ private data class MiniGraphParams(
         return heightPx - ((carrier - carrierRange.min) / carrierRangeSize * heightPx)
     }
     
+    /**
+     * Y «верхней» границы полосы биений = ПРАВЫЙ канал: carrier + beat/2.
+     * При ОТРИЦАТЕЛЬНОЙ частоте биений правый канал звучит ниже левого, и эта
+     * координата оказывается ниже [beatLowerY]. Полоса между ними от этого
+     * не меняется — обе границы считаются по одной формуле каналов.
+     */
     fun beatUpperY(carrier: Float, beat: Float): Float {
-        val upperFrequency = carrier + beat / 2.0f
+        val upperFrequency = FrequencyMath.rightChannelFrequency(carrier, beat)
         return carrierToY(upperFrequency)
     }
-    
+
+    /** Y «нижней» границы полосы биений = ЛЕВЫЙ канал: carrier − beat/2. */
     fun beatLowerY(carrier: Float, beat: Float): Float {
-        val lowerFrequency = carrier - beat / 2.0f
+        val lowerFrequency = FrequencyMath.leftChannelFrequency(carrier, beat)
         return carrierToY(lowerFrequency)
     }
 }
@@ -188,11 +196,12 @@ private fun computeGraphGeometry(
         splineTension
     )
     
-    // Вычисляем maxBeat
+    // Вычисляем maxBeat — по МОДУЛЮ частоты биений: знак задаёт только
+    // раскладку каналов, а масштаб («толщина» полосы) определяется |beat|.
     val maxBeat = run {
-        val maxFromPoints = sortedPoints.maxOfOrNull { it.beatFrequency } ?: 20.0f
+        val maxFromPoints = sortedPoints.maxOfOrNull { FrequencyMath.beatMagnitude(it.beatFrequency) } ?: 20.0f
         val maxFromVirtual = if (relaxationModeSettings.enabled && virtualPoints.isNotEmpty()) {
-            virtualPoints.maxOfOrNull { it.beatFrequency } ?: 0.0f
+            virtualPoints.maxOfOrNull { FrequencyMath.beatMagnitude(it.beatFrequency) } ?: 0.0f
         } else {
             0.0f
         }
@@ -409,12 +418,18 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         val carrierRangeSize = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
         fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (24.0f * 3600f) * width)
         fun carrierToY(carrier: Float): Float = height - ((carrier - carrierRange.min) / carrierRangeSize * height)
-        fun beatUpperY(carrier: Float, beat: Float): Float = carrierToY(carrier + beat / 2.0f)
-        fun beatLowerY(carrier: Float, beat: Float): Float = carrierToY(carrier - beat / 2.0f)
-        
+        // Формулы каналов: при beat < 0 «верхний» и «нижний» меняются местами,
+        // поэтому границы полосы ниже берём по координатам, а не по именам.
+        fun beatUpperY(carrier: Float, beat: Float): Float =
+            carrierToY(FrequencyMath.rightChannelFrequency(carrier, beat))
+        fun beatLowerY(carrier: Float, beat: Float): Float =
+            carrierToY(FrequencyMath.leftChannelFrequency(carrier, beat))
+
         val currentX = timeToX(currentTime)
-        val currentUpperY = beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val currentLowerY = beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+        val rightChannelY = beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+        val leftChannelY = beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+        val currentUpperY = minOf(rightChannelY, leftChannelY)
+        val currentLowerY = maxOf(rightChannelY, leftChannelY)
         
         // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
         // внутри области биений — ярче. Точку пересечения с несущей убираем.
@@ -465,8 +480,9 @@ private fun computeCarrierPath(
 
     val startTime = LocalTime.fromSecondOfDay(0)
     // Линия несущей отображается как (l+u)/2 от канальных кривых — как в движке
+    // presorted = true: вызывающие стороны передают уже отсортированный список
     val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension
+        sortedPoints, startTime, interpolationType, splineTension, presorted = true
     )
     val startY = params.carrierToY((startLowerFreq + startUpperFreq) / 2.0f)
     carrierPath.moveTo(0f, startY)
@@ -495,7 +511,7 @@ private fun computeCarrierPath(
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension
+                sortedPoints, time, interpolationType, splineTension, presorted = true
             )
             val y = params.carrierToY((lowerFreq + upperFreq) / 2.0f)
             val x = t * width
@@ -520,9 +536,15 @@ private fun computeBeatPaths(
 
     val startTime = LocalTime.fromSecondOfDay(0)
     // Канальные кривые интерполируются напрямую — как в движке
+    // presorted = true: вызывающие стороны передают уже отсортированный список
     val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension
+        sortedPoints, startTime, interpolationType, splineTension, presorted = true
     )
+
+    // Кэш Y нижней кривой: раньше обратный проход для combinedPath
+    // пересчитывал interpolateChannels по всем сэмплам второй раз (2x работа).
+    val lowerY = FloatArray(numSamples + 1)
+    lowerY[0] = params.carrierToY(startLowerFreq)
 
     upperPath.moveTo(0f, params.carrierToY(startUpperFreq))
     lowerPath.moveTo(0f, params.carrierToY(startLowerFreq))
@@ -542,23 +564,34 @@ private fun computeBeatPaths(
             val nextX = if (i == sortedPoints.size - 1) width else params.timeToX(nextPoint.time)
 
             val upperY = params.beatUpperY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
-            val lowerY = params.beatLowerY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
+            val lowerLineY = params.beatLowerY(currentPoint.carrierFrequency, currentPoint.beatFrequency)
 
             upperPath.lineTo(currentX, upperY)
             upperPath.lineTo(nextX, upperY)
-            lowerPath.lineTo(currentX, lowerY)
-            lowerPath.lineTo(nextX, lowerY)
+            lowerPath.lineTo(currentX, lowerLineY)
+            lowerPath.lineTo(nextX, lowerLineY)
+        }
+
+        // Значения нижней кривой для combinedPath (STEP держит последнее значение)
+        for (i in 1..numSamples) {
+            val t = i.toFloat() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            val (lowerFreq, _) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension, presorted = true
+            )
+            lowerY[i] = params.carrierToY(lowerFreq)
         }
     } else {
         for (i in 1..numSamples) {
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension
+                sortedPoints, time, interpolationType, splineTension, presorted = true
             )
             val x = t * width
+            lowerY[i] = params.carrierToY(lowerFreq)
             upperPath.lineTo(x, params.carrierToY(upperFreq))
-            lowerPath.lineTo(x, params.carrierToY(lowerFreq))
+            lowerPath.lineTo(x, lowerY[i])
         }
     }
 
@@ -567,12 +600,8 @@ private fun computeBeatPaths(
 
     for (i in numSamples downTo 0) {
         val t = i.toFloat() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val (lowerFreq, _) = Interpolation.interpolateChannels(
-            sortedPoints, time, interpolationType, splineTension
-        )
         val x = t * width
-        combinedPath.lineTo(x, params.carrierToY(lowerFreq))
+        combinedPath.lineTo(x, lowerY[i])
     }
     combinedPath.close()
 

@@ -33,6 +33,9 @@ fun PresetEditScreen(
     onImportPreset: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    // Телеметрия отдельным потоком: частоты/время тикают каждую секунду и
+    // не должны перекомпоновывать весь экран редактирования.
+    val telemetry by viewModel.telemetry.collectAsState()
     val newPresetName = stringResource(R.string.new_preset)
     
     // Находим пресет для редактирования
@@ -195,17 +198,17 @@ fun PresetEditScreen(
                     FrequencyGraph(
                         points = editingCurve.points,
                         selectedPointIndex = uiState.selectedPointIndex,
-                        currentCarrierFrequency = uiState.currentCarrierFrequency,
-                        currentBeatFrequency = uiState.currentBeatFrequency,
+                        currentCarrierFrequency = telemetry.currentCarrierFrequency,
+                        currentBeatFrequency = telemetry.currentBeatFrequency,
                         carrierRange = editingCurve.carrierRange,
                         beatRange = editingCurve.beatRange,
                         interpolationType = editingCurve.interpolationType,
                         splineTension = editingCurve.splineTension,
                         // Показываем указатель только если редактируется активный пресет
-                        isPlaying = isEditingActivePreset && uiState.isPlaying,
+                        isPlaying = isEditingActivePreset && telemetry.isPlaying,
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         // НОВОЕ: единое время (реальное/виртуальное) для указателя на графике
-                        externalCurrentTime = uiState.currentTime,
+                        externalCurrentTime = telemetry.currentTime,
                         onPointSelected = { viewModel.selectPoint(it) },
                         onPointTimeChanged = { index, newTime ->
                             viewModel.updateEditingPointTimeDirect(index, newTime)

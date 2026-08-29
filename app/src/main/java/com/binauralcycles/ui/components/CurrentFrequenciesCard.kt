@@ -8,11 +8,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.binaural.core.audio.model.FrequencyMath
 import com.binauralcycles.R
 
 // Движок клампит частоту канала к >= 0 Гц; ниже 0 Гц канал замолкает,
 // и отображаемое значение перестаёт соответствовать звуку
-private const val MIN_CHANNEL_FREQUENCY = 0.0
+private const val MIN_CHANNEL_FREQUENCY = 0.0f
 
 @Composable
 fun CurrentFrequenciesCard(
@@ -20,8 +21,12 @@ fun CurrentFrequenciesCard(
     carrierFrequency: Float,
     isPlaying: Boolean
 ) {
-    val leftChannelFreq = carrierFrequency - beatFrequency / 2.0
-    val isLeftChannelTooLow = leftChannelFreq < MIN_CHANNEL_FREQUENCY
+    // Каналы по общей формуле (как в движке): left = carrier − beat/2,
+    // right = carrier + beat/2. При ОТРИЦАТЕЛЬНОЙ частоте биений ниже нуля
+    // может уйти ПРАВЫЙ канал — поэтому проверяем оба, а не только левый.
+    val leftChannelFreq = FrequencyMath.leftChannelFrequency(carrierFrequency, beatFrequency)
+    val rightChannelFreq = FrequencyMath.rightChannelFrequency(carrierFrequency, beatFrequency)
+    val isChannelTooLow = minOf(leftChannelFreq, rightChannelFreq) < MIN_CHANNEL_FREQUENCY
     
     // Локализованные строки
     val beatLabel = stringResource(R.string.beat_frequency)
@@ -61,7 +66,7 @@ fun CurrentFrequenciesCard(
                 color = MaterialTheme.colorScheme.onSurface
             )
             
-            if (isLeftChannelTooLow) {
+            if (isChannelTooLow) {
                 VerticalDivider(
                     modifier = Modifier.height(32.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.3f)

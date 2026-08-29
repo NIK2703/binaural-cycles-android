@@ -441,6 +441,12 @@ fun ChannelSwapSettingsCard(
 }
 
 /**
+ * Шкала интервала генерации буфера: от 1 минуты до 1 часа.
+ * Конкретный срез выбирается по реальному пределу direct-буфера.
+ */
+private val BUFFER_MINUTE_STOPS = listOf(1, 2, 5, 10, 15, 20, 30, 45, 60)
+
+/**
  * Блок настроек энергопотребления (интервал генерации буфера, частота дискретизации)
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -448,6 +454,7 @@ fun ChannelSwapSettingsCard(
 fun PowerSettingsCard(
     sampleRate: SampleRate,
     bufferGenerationMinutes: Int,
+    maxBufferGenerationMinutes: Int = SampleRate.maxBufferMinutes(sampleRate),
     onSampleRateChange: (SampleRate) -> Unit,
     onBufferGenerationMinutesChange: (Int) -> Unit
 ) {
@@ -455,7 +462,9 @@ fun PowerSettingsCard(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Интервал генерации буфера в минутах - слайдер (от 1 минуты до 1 часа)
+        // Интервал генерации буфера в минутах - слайдер.
+        // Шкала обрезается по реально достижимому пределу: direct-буфер капается
+        // по байтам, поэтому на 44100/48000 Гц 30/45/60 мин физически недостижимы.
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
             Text(
                 text = stringResource(R.string.buffer_generation_minutes),
@@ -470,7 +479,8 @@ fun PowerSettingsCard(
             DiscreteSlider(
                 label = "",
                 value = bufferGenerationMinutes,
-                values = listOf(1, 2, 5, 10, 15, 20, 30, 45, 60),  // От 1 минуты до 1 часа
+                values = BUFFER_MINUTE_STOPS.filter { it <= maxBufferGenerationMinutes }
+                    .ifEmpty { listOf(BUFFER_MINUTE_STOPS.first()) },
                 formatValue = { mins -> formatBufferInterval(mins) },
                 onValueChange = onBufferGenerationMinutesChange,
                 modifier = Modifier.fillMaxWidth()

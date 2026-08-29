@@ -35,6 +35,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.viewmodel.BinauralViewModel
+import kotlinx.coroutines.flow.map
+import kotlinx.datetime.LocalTime
 import kotlin.math.roundToInt
 
 /**
@@ -45,14 +47,17 @@ import kotlin.math.roundToInt
 @Composable
 fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
     val uiState by viewModel.uiState.collectAsState()
+    // Текущее время живёт в телеметрии (тикает раз в секунду), а не в uiState.
+    val currentTime by remember { viewModel.telemetry.map { it.currentTime } }
+        .collectAsState(initial = LocalTime(12, 0))
 
     // Локальное состояние слайдера времени, чтобы не "воевать"
     // с обновляющимся во время перетаскивания значением.
-    var timeSliderSeconds by remember { mutableIntStateOf(uiState.currentTime.toSecondOfDay()) }
+    var timeSliderSeconds by remember { mutableIntStateOf(currentTime.toSecondOfDay()) }
     var isDraggingTime by remember { mutableStateOf(false) }
-    LaunchedEffect(uiState.currentTime) {
+    LaunchedEffect(currentTime) {
         if (!isDraggingTime) {
-            timeSliderSeconds = uiState.currentTime.toSecondOfDay()
+            timeSliderSeconds = currentTime.toSecondOfDay()
         }
     }
 
@@ -92,7 +97,7 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
             if (uiState.debugVirtualTimeEnabled) {
                 // Текущее виртуальное время
                 Text(
-                    text = "Текущее время: ${formatTime(uiState.currentTime.toSecondOfDay())}",
+                    text = "Текущее время: ${formatTime(currentTime.toSecondOfDay())}",
                     style = MaterialTheme.typography.bodyLarge
                 )
 

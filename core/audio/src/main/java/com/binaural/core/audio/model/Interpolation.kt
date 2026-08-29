@@ -122,13 +122,19 @@ object Interpolation {
      * @param p3 точка после правой границы
      * @param t нормализованная позиция в интервале [0, 1]
      * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom, 1.0=почти линейный)
+     * @param allowNegative false (по умолчанию) — результат клампится к >= 0: так
+     *        интерполируются ФИЗИЧЕСКИЕ частоты (несущая, каналы), которые
+     *        отрицательными быть не могут. true — знак результата сохраняется:
+     *        так интерполируется ЧАСТОТА БИЕНИЙ, у которой знак кодирует
+     *        раскладку каналов (см. [FrequencyPoint.beatFrequency]).
      * @return интерполированное значение
      */
     fun interpolate(
         type: InterpolationType,
         p0: Float, p1: Float, p2: Float, p3: Float,
         t: Float,
-        tension: Float = 0.0f
+        tension: Float = 0.0f,
+        allowNegative: Boolean = false
     ): Float {
         val result = when (type) {
             InterpolationType.LINEAR -> linear(p1, p2, t)
@@ -136,7 +142,7 @@ object Interpolation {
             InterpolationType.MONOTONE -> monotone(p0, p1, p2, p3, t)
             InterpolationType.STEP -> step(p1)
         }
-        return result.coerceAtLeast(0.0f)
+        return if (allowNegative) result else result.coerceAtLeast(0.0f)
     }
 
     /**
@@ -146,23 +152,32 @@ object Interpolation {
      * Wrap через полночь [последняя → первая + 24ч], hold-last для STEP,
      * ratio клампится [0,1], результат каждого канала >= 0 Гц.
      *
-     * @param points контрольные точки (сортируются внутри)
+     * Отрицательная частота биений обрабатывается автоматически: канальные
+     * кривые строятся по формулам left = carrier − beat/2, right = carrier + beat/2,
+     * поэтому при beat < 0 они просто меняются местами, а beat = right − left
+     * на выходе остаётся отрицательной. Кламп результата >= 0 Гц для КАЖДОГО
+     * канала сохраняется: это физическая частота тона.
+     *
+     * @param points контрольные точки (сортируются внутри, если presorted = false)
      * @param time время суток
      * @param type тип интерполяции
      * @param tension натяжение для CARDINAL
-     * @return Pair(нижний канал, верхний канал); отображаемые carrier=(l+u)/2, beat=u−l
+     * @param presorted true, если points уже отсортированы по времени суток
+     * @return Pair(левый канал, правый канал) = (carrier − beat/2, carrier + beat/2);
+     *         отображаемые carrier=(l+r)/2, beat=r−l
      */
     fun interpolateChannels(
         points: List<FrequencyPoint>,
         time: LocalTime,
         type: InterpolationType,
-        tension: Float = 0.0f
+        tension: Float = 0.0f,
+        presorted: Boolean = false
     ): Pair<Float, Float> {
-        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val sortedPoints = if (presorted) points else points.sortedBy { it.time.toSecondOfDay() }
         if (sortedPoints.isEmpty()) return 0.0f to 0.0f
 
-        val lowerSelector: (FrequencyPoint) -> Float = { it.carrierFrequency - it.beatFrequency / 2.0f }
-        val upperSelector: (FrequencyPoint) -> Float = { it.carrierFrequency + it.beatFrequency / 2.0f }
+        val lowerSelector: (FrequencyPoint) -> Float = { it.leftChannelFrequency }
+        val upperSelector: (FrequencyPoint) -> Float = { it.rightChannelFrequency }
 
         if (sortedPoints.size == 1) {
             val p = sortedPoints[0]

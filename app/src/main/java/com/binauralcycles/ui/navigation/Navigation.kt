@@ -43,6 +43,9 @@ fun BinauralNavigation(
     viewModel: BinauralViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    // Телеметрия намеренно отдельным потоком: частоты меняются 1-2 раза в секунду,
+    // и подмешивать их в uiState значило бы перекомпоновывать весь NavHost.
+    val telemetry by viewModel.telemetry.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     
@@ -182,9 +185,9 @@ fun BinauralNavigation(
         if (showBottomPanel) {
             BottomPlaybackPanel(
                 presetName = uiState.activePreset?.name,
-                beatFrequency = uiState.currentBeatFrequency,
-                carrierFrequency = uiState.currentCarrierFrequency,
-                isPlaying = uiState.isPlaying,
+                beatFrequency = telemetry.currentBeatFrequency,
+                carrierFrequency = telemetry.currentCarrierFrequency,
+                isPlaying = telemetry.isPlaying,
                 volume = uiState.volume,
                 onPlayClick = { viewModel.togglePlayback() },
                 onVolumeChange = { viewModel.setVolumeImmediate(it) },

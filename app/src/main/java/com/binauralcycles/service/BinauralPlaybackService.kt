@@ -47,6 +47,14 @@ class BinauralPlaybackService : Service() {
     companion object {
         const val CHANNEL_ID = "binaural_playback_channel"
         const val NOTIFICATION_ID = 1001
+
+        /**
+         * Интервал обновления уведомления в фоне (мс).
+         * Текст уведомления имеет гранулярность "%.1f Гц | %.0f Гц", поэтому
+         * 30 с вместо 10 с не ухудшают восприятие, но сокращают число
+         * пробуждений CPU втрое.
+         */
+        private const val NOTIFICATION_UPDATE_INTERVAL_MS = 30_000L
         
         const val ACTION_START = "com.binauralcycles.action.START"
         const val ACTION_STOP = "com.binauralcycles.action.STOP"
@@ -127,9 +135,6 @@ class BinauralPlaybackService : Service() {
     
     // Интервал обновления частот (из настроек)
     private val _frequencyUpdateIntervalMs = MutableStateFlow(600_000) // По умолчанию 10 минут
-    
-    // Следим за изменением интервала для перезапуска notificationUpdateJob
-    private var notificationIntervalObserver: Job? = null
     
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
@@ -223,6 +228,13 @@ class BinauralPlaybackService : Service() {
                 updateMediaMetadata()
                 // Обновляем notification при изменении состояния воспроизведения
                 updateNotificationImmediately()
+                // Фоновый джоб уведомления нужен только во время воспроизведения:
+                // на паузе текст статичен ("Пауза") и обновлять его нечего.
+                if (playing) {
+                    startNotificationUpdateJob()
+                } else {
+                    stopNotificationUpdateJob()
+                }
             }
         }
         
@@ -230,7 +242,8 @@ class BinauralPlaybackService : Service() {
         // Это вызывало мерцание некорректных значений при старте/смене пресета.
         // Частоты обновляются только через updateCurrentFrequencies() в:
         // - startUiFrequencyUpdateJob() - каждую секунду (когда приложение на экране)
-        // - startNotificationUpdateJob() - каждые 10 секунд (всегда)
+        // - startNotificationUpdateJob() - каждые 30 секунд, только при воспроизведении
+        //   и только при включённом экране
         
         serviceScope.launch {
             audioEngine?.isChannelsSwapped?.collectLatest { swapped ->
@@ -244,8 +257,9 @@ class BinauralPlaybackService : Service() {
             }
         }
         
-        // Периодическое обновление notification во время воспроизведения
-        startNotificationUpdateJob()
+        // Периодическое обновление notification НЕ запускается здесь:
+        // оно стартует/останавливается вместе с воспроизведением (см. коллектор
+        // audioEngine.isPlaying выше), а не крутится вечно от onCreate().
         
         // Запускаем ежесекундное обновление частот для UI сразу при создании сервиса.
         // Это гарантирует, что частоты обновляются с момента запуска приложения,
@@ -336,30 +350,14 @@ class BinauralPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val title = _currentPresetName.value ?: getString(R.string.notification_playing)
-
-        val content = if (_isPlaying.value) {
-            // Показываем частоты только если они установлены (не 0)
-            if (_currentBeatFrequency.value > 0 && _currentCarrierFrequency.value > 0) {
-                getString(
-                    R.string.notification_title,
-                    _currentBeatFrequency.value,
-                    _currentCarrierFrequency.value
-                )
-            } else {
-                // Если частоты ещё не установлены - показываем название пресета
-                _currentPresetName.value ?: getString(R.string.notification_playing)
-            }
-        } else {
-            getString(R.string.notification_paused)
-        }
+        val content = currentNotificationContent()
 
         val playPauseIcon = if (_isPlaying.value) R.drawable.ic_pause else R.drawable.ic_play
         val playPauseText = if (_isPlaying.value) getString(R.string.action_pause) else getString(R.string.action_play)
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(content)
+            .setContentTitle(content.title)
+            .setContentText(content.text)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pendingIntent)
             .setOngoing(_isPlaying.value)
@@ -377,38 +375,104 @@ class BinauralPlaybackService : Service() {
     }
 
     /**
+     * Содержимое уведомления, которое реально видно пользователю.
+     * Сравнивается с предыдущим значением, чтобы не дергать system_server зря.
+     *
+     * Текст форматируется как "Биения: %.1f Гц | Несущая: %.0f Гц", поэтому
+     * дробный шум частот (движок обновляет их каждую секунду) всё равно
+     * схлопывается в одну строку — реально текст меняется раз в секунды/минуты,
+     * а не раз в секунду.
+     */
+    private data class NotificationContent(
+        val title: String,
+        val text: String,
+        val playing: Boolean
+    )
+
+    /**
+     * Вычисляет текущее содержимое уведомления по состоянию сервиса.
+     * Единая точка истины для notification и для MediaSession metadata.
+     */
+    private fun currentNotificationContent(): NotificationContent {
+        val title = _currentPresetName.value ?: getString(R.string.notification_playing)
+        val text = if (_isPlaying.value) {
+            // Показываем частоты только если они установлены (не 0).
+            // Частота биений — величина ЗНАКОВАЯ, поэтому проверяем именно «не 0»,
+            // а не «больше нуля»: иначе отрицательная частота биений скрывала бы
+            // показания. Несущая — физический тон, она всегда > 0.
+            if (_currentBeatFrequency.value != 0.0f && _currentCarrierFrequency.value > 0) {
+                getString(
+                    R.string.notification_title,
+                    _currentBeatFrequency.value,
+                    _currentCarrierFrequency.value
+                )
+            } else {
+                // Если частоты ещё не установлены - показываем название пресета
+                title
+            }
+        } else {
+            getString(R.string.notification_paused)
+        }
+        return NotificationContent(title, text, _isPlaying.value)
+    }
+
+    // Замок для кэша последнего опубликованного уведомления: джобы обновления
+    // частот работают на Dispatchers.Default, а смена состояния — из
+    // audioFocus/receiver-колбэков, то есть из разных потоков.
+    private val notificationLock = Any()
+
+    // Последнее реально отправленное в NotificationManager содержимое.
+    private var lastNotifiedContent: NotificationContent? = null
+
+    /**
+     * Публикует уведомление, если его содержимое изменилось.
+     *
+     * `NotificationManager.notify()` — это binder-транзакция, которая будит
+     * system_server и SystemUI, плюс полная пересборка Notification с тремя
+     * PendingIntent и MediaStyle. До оптимизации это происходило 1 раз в секунду
+     * (3600 раз в час) круглосуточно, даже когда текст не менялся.
+     *
+     * @param force публиковать без сравнения (смена play/pause, старт, остановка)
+     * @return true, если уведомление действительно было отправлено
+     */
+    private fun publishNotification(force: Boolean): Boolean {
+        val content = currentNotificationContent()
+        synchronized(notificationLock) {
+            if (!force && content == lastNotifiedContent) return false
+            lastNotifiedContent = content
+        }
+        return try {
+            val notification = createNotification()
+            // Используем флаг FLAG_ONLY_ALERT_ONCE через setSilent (API 29+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                notification.extras.putBoolean("android.silent", true)
+            }
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            notificationManager.notify(NOTIFICATION_ID, notification)
+            true
+        } catch (e: Exception) {
+            android.util.Log.e("BinauralPlaybackService", "Failed to update notification", e)
+            // Сбрасываем кэш: публикация не удалась, следующая попытка должна пройти
+            synchronized(notificationLock) { lastNotifiedContent = null }
+            false
+        }
+    }
+
+    /**
      * Немедленное обновление notification (только для изменения состояния воспроизведения)
      */
     private fun updateNotificationImmediately() {
-        try {
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.notify(NOTIFICATION_ID, createNotification())
-        } catch (e: Exception) {
-            android.util.Log.e("BinauralPlaybackService", "Failed to update notification", e)
-        }
+        publishNotification(force = true)
     }
-    
+
     /**
-     * Тихое обновление notification (только текст, без мерцания иконки)
-     * Использует setSilent для предотвращения визуального мерцания
+     * Тихое обновление notification: публикует, только если текст реально изменился.
+     * Используется из периодических джоб, тикающих раз в секунду.
      */
     private fun updateNotificationSilently() {
-        try {
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            val notification = createNotification()
-            // Используем флаг FLAG_ONLY_ALERT_ONCE через setSilent (API 29+)
-            val silentNotification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                notification.extras.putBoolean("android.silent", true)
-                notification
-            } else {
-                notification
-            }
-            notificationManager.notify(NOTIFICATION_ID, silentNotification)
-        } catch (e: Exception) {
-            android.util.Log.e("BinauralPlaybackService", "Failed to update notification silently", e)
-        }
+        publishNotification(force = false)
     }
-    
+
     // Job для периодического обновления уведомления
     private var notificationUpdateJob: Job? = null
     
@@ -616,31 +680,57 @@ class BinauralPlaybackService : Service() {
     
     /**
      * Запускает периодическое обновление уведомления во время воспроизведения.
-     * Фиксированный интервал 10 секунд для уведомления.
      *
-     * O(1) операция: использует предвычисленную lookup table в C++ движке.
-     * Это позволяет отображать актуальные частоты в уведомлении каждые 10 секунд,
-     * даже когда приложение в фоне и генерация буфера происходит каждые N минут.
+     * Джоб существует ТОЛЬКО во время воспроизведения: раньше он стартовал в
+     * onCreate() и крутился бесконечно (while(true) с delay(10с)), просыпаясь
+     * 360 раз в час даже на паузе. Теперь старт/стоп привязаны к состоянию
+     * audioEngine.isPlaying (см. onCreate).
+     *
+     * Интервал 30 секунд: текст уведомления имеет гранулярность 0.1 Гц / 1 Гц,
+     * за 30 секунд кривая пресета успевает уйти далеко не на одну десятую —
+     * частота обновления, заметная пользователю, не страдает.
      */
     private fun startNotificationUpdateJob() {
+        if (notificationUpdateJob?.isActive == true) return
         notificationUpdateJob?.cancel()
+        android.util.Log.d("BinauralPlaybackService", "startNotificationUpdateJob")
         notificationUpdateJob = serviceScope.launch {
             while (true) {
-                delay(10_000) // Каждые 10 секунд
-                if (_isPlaying.value) {
-                    // O(1) получение частот из lookup table
-                    audioEngine?.updateCurrentFrequencies()
-                    // Копируем значения из audioEngine в сервис для UI
-                    audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
-                    audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
-                    // Обновляем уведомление с актуальными частотами
-                    if (_currentBeatFrequency.value > 0) {
-                        updateMediaMetadata()
-                        updateNotificationSilently()
-                    }
+                delay(NOTIFICATION_UPDATE_INTERVAL_MS)
+                if (!_isPlaying.value) continue
+                // Экран выключен — уведомление никто не читает, а пробуждение
+                // CPU ради binder-транзакции в system_server стоит батареи.
+                if (!isScreenInteractive()) continue
+                // O(1) получение частот из lookup table
+                audioEngine?.updateCurrentFrequencies()
+                // Копируем значения из audioEngine в сервис для UI
+                audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
+                audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
+                // Обновляем уведомление с актуальными частотами.
+                // updateMediaMetadata()/updateNotificationSilently() сами
+                // отсекают публикацию, если текст не изменился.
+                // Частота биений знаковая — sentinel «не 0», а не «> 0».
+                if (_currentBeatFrequency.value != 0.0f) {
+                    updateMediaMetadata()
+                    updateNotificationSilently()
                 }
             }
         }
+    }
+
+    private fun stopNotificationUpdateJob() {
+        if (notificationUpdateJob?.isActive != true) {
+            notificationUpdateJob = null
+            return
+        }
+        android.util.Log.d("BinauralPlaybackService", "stopNotificationUpdateJob")
+        notificationUpdateJob?.cancel()
+        notificationUpdateJob = null
+    }
+
+    private fun isScreenInteractive(): Boolean {
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        return pm?.isInteractive ?: true
     }
     
     /**
@@ -665,8 +755,9 @@ class BinauralPlaybackService : Service() {
                     // Копируем значения из audioEngine в сервис для UI
                     audioEngine?.currentBeatFrequency?.value?.let { _currentBeatFrequency.value = it }
                     audioEngine?.currentCarrierFrequency?.value?.let { _currentCarrierFrequency.value = it }
-                    // Обновляем уведомление с актуальными частотами
-                    if (_currentBeatFrequency.value > 0) {
+                    // Обновляем уведомление с актуальными частотами.
+                    // Частота биений знаковая — sentinel «не 0», а не «> 0».
+                    if (_currentBeatFrequency.value != 0.0f) {
                         updateMediaMetadata()
                         updateNotificationSilently()
                     }
@@ -793,28 +884,23 @@ class BinauralPlaybackService : Service() {
     /**
      * Обновляет метаданные MediaSession (название пресета и подзаголовок)
      */
+    // Последние метаданные, отправленные в MediaSession.
+    private var lastMetadataContent: NotificationContent? = null
+
     private fun updateMediaMetadata() {
-        val title = _currentPresetName.value ?: getString(R.string.notification_playing)
-        
-        // Подзаголовок: частоты при воспроизведении, "Пауза" при паузе
-        val subtitle = if (_isPlaying.value) {
-            if (_currentBeatFrequency.value > 0 && _currentCarrierFrequency.value > 0) {
-                getString(
-                    R.string.notification_title,
-                    _currentBeatFrequency.value,
-                    _currentCarrierFrequency.value
-                )
-            } else {
-                _currentPresetName.value ?: getString(R.string.notification_playing)
-            }
-        } else {
-            getString(R.string.notification_paused)
+        val content = currentNotificationContent()
+        // setMetadata() рассылает изменение всем подписчикам MediaSession
+        // (SystemUI, Wear OS, Android Auto) — вызывать её раз в секунду ради
+        // неизменившегося текста слишком дорого.
+        synchronized(notificationLock) {
+            if (content == lastMetadataContent) return
+            lastMetadataContent = content
         }
-        
+
         mediaSession?.setMetadata(
             MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, content.title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, content.text)
                 .build()
         )
     }

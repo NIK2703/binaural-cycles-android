@@ -504,11 +504,14 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeInterpolate(
     jfloat p3,
     jfloat t,
     jint interpolationType,
-    jfloat tension
+    jfloat tension,
+    jboolean allowNegative
 ) {
+    // allowNegative=true — для знаковых величин (частота биений):
+    // beat = right − left, знак кодирует раскладку каналов.
     return binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
-        p0, p1, p2, p3, t, tension
+        p0, p1, p2, p3, t, tension, (allowNegative == JNI_TRUE)
     );
 }
 
@@ -520,7 +523,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     jfloatArray values,
     jint numOutputPoints,
     jint interpolationType,
-    jfloat tension
+    jfloat tension,
+    jboolean allowNegative
 ) {
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
@@ -589,7 +593,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                 outputValues[i] = binaural::Interpolation::interpolate(
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
-                    clampedRatio, tension
+                    clampedRatio, tension,
+                    (allowNegative == JNI_TRUE)
                 );
                 continue;
             }
@@ -605,7 +610,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
         outputValues[i] = binaural::Interpolation::interpolate(
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
-            clampedRatio, tension
+            clampedRatio, tension,
+            (allowNegative == JNI_TRUE)
         );
     }
 
@@ -739,11 +745,12 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeInterpolate(
     jfloat p3,
     jfloat t,
     jint interpolationType,
-    jfloat tension
+    jfloat tension,
+    jboolean allowNegative
 ) {
     return binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
-        p0, p1, p2, p3, t, tension
+        p0, p1, p2, p3, t, tension, (allowNegative == JNI_TRUE)
     );
 }
 
@@ -755,7 +762,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     jfloatArray values,
     jint numOutputPoints,
     jint interpolationType,
-    jfloat tension
+    jfloat tension,
+    jboolean allowNegative
 ) {
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
@@ -824,7 +832,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                 outputValues[i] = binaural::Interpolation::interpolate(
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
-                    clampedRatio, tension
+                    clampedRatio, tension,
+                    (allowNegative == JNI_TRUE)
                 );
                 continue;
             }
@@ -840,7 +849,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
         outputValues[i] = binaural::Interpolation::interpolate(
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
-            clampedRatio, tension
+            clampedRatio, tension,
+            (allowNegative == JNI_TRUE)
         );
     }
 

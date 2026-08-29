@@ -36,11 +36,26 @@ class BinauralStreamImpl(
         const val DEFAULT_FADE_MS = 250L
         private const val FADE_GUARD_MS = 60L
         private const val TRACK_BUFFER_MS = 3000          // внутренний буфер AudioTrack
-        private const val WRITE_CHUNK_MS = 500            // гранулярность записи/реакции
+        /**
+         * Гранулярность записи. Было 500 мс — писатель просыпался 2 раза в
+         * секунду на всём протяжении сеанса, не давая CPU уйти в глубокий idle.
+         * Отзывчивость на stop() от размера чанка не зависит: писателя
+         * разблокируют track.pause()/stop()/release() в releaseInternal(),
+         * а пауза/фейд идут через VolumeShaper на нити актёра.
+         * 2000 мс → 0.5 пробуждения в секунду (в 4 раза реже), при этом чанк
+         * всё ещё меньше внутреннего буфера трека (3 с), так что подпитка
+         * гарантирована без риска underrun.
+         */
+        private const val WRITE_CHUNK_MS = 2000           // гранулярность записи/реакции
         private const val MAX_BUFFER_MINUTES = 60
         private const val MAX_BUFFER_BYTES = 256 * 1024 * 1024
-        /** Сколько ждём выхода писателя перед уничтожением нативного движка. */
-        private const val WRITER_EXIT_WAIT_MS = 2500L
+        /**
+         * Сколько ждём выхода писателя перед уничтожением нативного движка.
+         * ОБЯЗАН покрывать один полный чанк записи (WRITE_CHUNK_MS), иначе
+         * таймаут наступит, пока писатель штатно стоит в track.write(), и
+         * владение движком передастся ему без необходимости.
+         */
+        private const val WRITER_EXIT_WAIT_MS = WRITE_CHUNK_MS + 1500L
     }
 
     private val lifecycleRef = AtomicReference(StreamLifecycle.CREATED)

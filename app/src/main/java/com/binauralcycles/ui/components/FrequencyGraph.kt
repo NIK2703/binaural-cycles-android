@@ -25,6 +25,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.Interpolation
@@ -74,7 +75,7 @@ private data class PointDragState(
  * Вычисляет максимальную частоту биений для заданной несущей частоты
  * Формула: (carrierFrequency - 20) * 2 (гарантирует, что нижняя боковая частота останется >= 20 Гц)
  */
-fun maxBeatForCarrier(carrierFrequency: Float): Float {
+private fun maxBeatForCarrier(carrierFrequency: Float): Float {
     return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
 }
 
@@ -88,7 +89,16 @@ private data class GraphParams(
     val beatRange: FrequencyRange
 ) {
     val carrierRangeSize: Float get() = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
-    val maxBeat: Float get() = beatRange.max
+
+    /**
+     * Максимальный МОДУЛЬ частоты биений на графике.
+     *
+     * Диапазон биений может быть несимметричным (например, у старых пресeтов
+     * (0; 1000), у новых — (-1000; 1000)), поэтому в качестве масштаба
+     * берётся наибольший модуль границы: это делает размер маркера точки
+     * одинаковым для +beat и −beat. Пол ещё отсекает деление на ноль.
+     */
+    val maxBeat: Float get() = maxOf(beatRange.max, -beatRange.min).coerceAtLeast(1.0f)
     
     fun timeToX(time: LocalTime): Float {
         val seconds = time.toSecondOfDay()
@@ -110,20 +120,25 @@ private data class GraphParams(
     }
     
     /**
-     * Вычисляет Y-координату верхней границы области биений
-     * Верхняя граница соответствует частоте канала: carrier + beat/2
+     * Вычисляет Y-координату «верхней» границы области биений.
+     * Граница соответствует ПРАВОМУ каналу: carrier + beat/2.
+     *
+     * При ОТРИЦАТЕЛЬНОЙ частоте биений правый канал звучит НИЖЕ левого, и
+     * эта координата окажется ниже [beatLowerY]. Вызывающий код рисует
+     * полосу между ними, поэтому порядок не важен — важно, что обе границы
+     * считаются по одной и той же формуле каналов.
      */
     fun beatUpperY(carrier: Float, beat: Float): Float {
-        val upperFrequency = carrier + beat / 2.0f
+        val upperFrequency = FrequencyMath.rightChannelFrequency(carrier, beat)
         return carrierToY(upperFrequency)
     }
-    
+
     /**
-     * Вычисляет Y-координату нижней границы области биений
-     * Нижняя граница соответствует частоте канала: carrier - beat/2
+     * Вычисляет Y-координату «нижней» границы области биений.
+     * Граница соответствует ЛЕВОМУ каналу: carrier − beat/2 (см. [beatUpperY]).
      */
     fun beatLowerY(carrier: Float, beat: Float): Float {
-        val lowerFrequency = carrier - beat / 2.0f
+        val lowerFrequency = FrequencyMath.leftChannelFrequency(carrier, beat)
         return carrierToY(lowerFrequency)
     }
 }
@@ -163,7 +178,10 @@ fun FrequencyGraph(
     externalCurrentTime: LocalTime? = null,
     modifier: Modifier = Modifier
 ) {
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+    // УДАЛЕНО: `val sortedPoints = points.sortedBy { ... }` вычислялось на каждой
+    // рекомпозиции (3-4 раза в секунду при воспроизведении) и нигде не
+    // использовалось — в drawBehind передаётся allPoints. Отсортированный список
+    // берётся из remember ниже (displayPoints).
     var dragState by remember { mutableStateOf(PointDragState()) }
     var showRangeDialog by remember { mutableStateOf(false) }
     var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
@@ -172,7 +190,7 @@ fun FrequencyGraph(
     // Локализованный формат Гц - объявляем здесь для использования во всём компоненте
     val hzFormat = stringResource(R.string.hz_value_format)
 
-    // Единое время приходит из uiState.currentTime (StateFlow сервиса);
+    // Единое время приходит из PlaybackTelemetry (StateFlow сервиса);
     // приватный тикер удалён - график живёт тем же потоком данных, что и карточки
     val currentLocalTime = externalCurrentTime
         ?: Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).time
@@ -204,7 +222,6 @@ fun FrequencyGraph(
 
             val primaryColor = MaterialTheme.colorScheme.primary
             val errorColor = MaterialTheme.colorScheme.error
-            val relaxationColor = MaterialTheme.colorScheme.tertiary
 
             // Объединяем реальные и виртуальные точки для отрисовки
             // В ADVANCED и SMOOTH режимах используем только виртуальные точки (кривая проходит только через них)
@@ -217,25 +234,46 @@ fun FrequencyGraph(
                 }
             }
             
+            // Статичная геометрия графика (сетка + кривые) строится ТОЛЬКО при
+            // изменении точек/параметров. Тиканье телеметрии (время, частоты)
+            // перерисовывает лишь указатель — интерполяция кривых не запускается.
+            val staticPaths = remember(
+                allPoints,
+                displayPoints,
+                graphParams,
+                interpolationType,
+                splineTension,
+                relaxationModeSettings
+            ) {
+                buildGraphStaticPaths(
+                    sortedPoints = allPoints,
+                    realPoints = displayPoints,
+                    params = graphParams,
+                    interpolationType = interpolationType,
+                    splineTension = splineTension,
+                    relaxationModeSettings = relaxationModeSettings
+                )
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .drawBehind {
-                        drawGraphContent(
-                            sortedPoints = allPoints,
-                            realPoints = displayPoints,
-                            graphParams = graphParams,
-                            currentLocalTime = currentLocalTime,
-                            currentCarrierFrequency = currentCarrierFrequency,
-                            currentBeatFrequency = currentBeatFrequency,
-                            primaryColor = primaryColor,
-                            indicatorColor = errorColor,
-                            relaxationColor = relaxationColor,
-                            interpolationType = interpolationType,
-                            splineTension = splineTension,
-                            isPlaying = isPlaying,
-                            relaxationModeSettings = relaxationModeSettings
-                        )
+                        drawGrid(primaryColor)
+                        drawGraphPaths(staticPaths, primaryColor)
+                    }
+                    // Отдельный слой под динамичный указатель: он единственный
+                    // зависит от времени и частот, и он же самый дешёвый.
+                    .drawBehind {
+                        if (isPlaying) {
+                            drawCurrentTimeIndicator(
+                                graphParams = graphParams,
+                                currentLocalTime = currentLocalTime,
+                                currentCarrierFrequency = currentCarrierFrequency,
+                                currentBeatFrequency = currentBeatFrequency,
+                                indicatorColor = errorColor
+                            )
+                        }
                     }
                     .pointerInput(Unit) {
                         detectTapGestures(
@@ -246,15 +284,24 @@ fun FrequencyGraph(
                                 val snappedSeconds = (graphParams.xToTime(offset.x).toSecondOfDay() / stepSeconds) * stepSeconds
                                 val time = LocalTime.fromSecondOfDay(snappedSeconds)
                                 val carrier = graphParams.yToCarrier(offset.y)
-                                // Оценка частоты биений по канальным кривым (как в движке): beat = u - l
+                                // Оценка частоты биений по канальным кривым (как в движке):
+                                // beat = right − left — величина ЗНАКОВАЯ.
+                                val effectiveBeatRange = FrequencyMath.symmetricBeatRange(beatRange)
                                 val interpolatedBeat = if (displayPoints.size >= 2) {
-                                    val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                                        displayPoints, time, interpolationType, splineTension
+                                    val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
+                                        displayPoints, time, interpolationType, splineTension,
+                                        presorted = true
                                     )
-                                    kotlin.math.round(upperFreq - lowerFreq)
-                                        .coerceIn(beatRange.min, maxBeatForCarrier(carrier))
+                                    FrequencyMath.clampBeat(
+                                        carrier,
+                                        kotlin.math.round(rightFreq - leftFreq),
+                                        effectiveBeatRange
+                                    )
                                 } else {
-                                    beatRange.min
+                                    // 0 или 1 точка: берём частоту биений единственной точки
+                                    displayPoints.firstOrNull()?.let {
+                                        FrequencyMath.clampBeat(carrier, it.beatFrequency, effectiveBeatRange)
+                                    } ?: 0.0f
                                 }
                                 onAddPoint(time, carrier, interpolatedBeat)
                             }
@@ -422,91 +469,195 @@ fun FrequencyGraph(
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawGraphContent(
+private typealias DrawScope = androidx.compose.ui.graphics.drawscope.DrawScope
+
+/**
+ * Геометрия статичного слоя графика: сетка и кривые зависят ТОЛЬКО от точек
+ * пресета и параметров шкалы — но не от текущего времени и частот.
+ *
+ * Раньше эти пути строились прямо внутри `drawBehind`, а лямбда захватывала
+ * `currentLocalTime`/`currentCarrierFrequency`/`currentBeatFrequency`. Из-за
+ * этого любое тиканье телеметрии (1–2 раза в секунду) запускало полную
+ * перерисовку: ~1000 вызовов интерполяции на каждый кадр. Теперь пути строятся
+ * один раз в `remember` и переиспользуются — фаза отрисовки сводится к
+ * нескольким `drawPath`, а интерполяция выполняется только при изменении
+ * самой кривой.
+ */
+private data class GraphStaticPaths(
+    val beatCombined: Path? = null,
+    val beatUpper: Path? = null,
+    val beatLower: Path? = null,
+    val dashedBase: Path? = null
+)
+
+/**
+ * Строит статичную геометрию графика. Чистая функция без DrawScope:
+ * все размеры берутся из [GraphParams], что позволяет кэшировать результат.
+ */
+private fun buildGraphStaticPaths(
     sortedPoints: List<FrequencyPoint>,
     realPoints: List<FrequencyPoint>,
-    graphParams: GraphParams,
-    currentLocalTime: LocalTime,
-    currentCarrierFrequency: Float,
-    currentBeatFrequency: Float,
-    primaryColor: Color,
-    indicatorColor: Color,
-    relaxationColor: Color,
+    params: GraphParams,
     interpolationType: InterpolationType,
-    splineTension: Float = 0.0f,
-    isPlaying: Boolean = false,
-    relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
-) {
+    splineTension: Float,
+    relaxationModeSettings: RelaxationModeSettings
+): GraphStaticPaths {
+    val beatPaths = if (sortedPoints.size >= 2) {
+        buildBeatPaths(sortedPoints, params, interpolationType, splineTension)
+    } else {
+        null
+    }
+
+    // В режимах STEP и SMOOTH — пунктирная линия базовой кривой (через основные точки)
+    val showDashedBase = relaxationModeSettings.enabled &&
+        (relaxationModeSettings.mode == RelaxationMode.STEP ||
+            relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+        relaxationModeSettings.carrierReductionPercent > 0 &&
+        realPoints.size >= 2
+    val dashedBase = if (showDashedBase) {
+        buildDashedBaseCurvePath(realPoints, params, interpolationType, splineTension)
+    } else {
+        null
+    }
+
+    return GraphStaticPaths(
+        beatCombined = beatPaths?.combined,
+        beatUpper = beatPaths?.upper,
+        beatLower = beatPaths?.lower,
+        dashedBase = dashedBase
+    )
+}
+
+/** Сетка: зависит только от размера и цвета, интерполяций не делает. */
+private fun DrawScope.drawGrid(primaryColor: Color) {
     val width = size.width
     val height = size.height
     val gridColor = primaryColor.copy(alpha = 0.15f)
-    
+
     // Горизонтальные линии сетки
     for (i in 0..4) {
         val y = height * i / 4
         drawLine(color = gridColor, start = Offset(0f, y), end = Offset(width, y), strokeWidth = 1f)
     }
-    
+
     // Вертикальные линии каждые 3 часа (8 линий + границы)
     for (hour in 0..24 step 3) {
         val x = width * hour / 24
         drawLine(color = gridColor, start = Offset(x, 0f), end = Offset(x, height), strokeWidth = 1f)
     }
-    
-    if (sortedPoints.size >= 2) {
-        drawBeatArea(sortedPoints, graphParams, primaryColor, interpolationType, splineTension)
+}
+
+/** Отрисовка уже готовых путей — дешёвая операция, безопасная на каждом кадре. */
+private fun DrawScope.drawGraphPaths(paths: GraphStaticPaths, primaryColor: Color) {
+    val combined = paths.beatCombined
+    if (combined != null) {
+        drawPath(path = combined, color = primaryColor.copy(alpha = 0.2f), style = Fill)
     }
-    
-    // В режимах STEP и SMOOTH рисуем пунктирную линию базовой кривой (через основные точки)
-    if (relaxationModeSettings.enabled && 
-        (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
-        relaxationModeSettings.carrierReductionPercent > 0 &&
-        realPoints.size >= 2) {
-        drawDashedBaseCurve(realPoints, graphParams, primaryColor, interpolationType, splineTension)
+    paths.beatUpper?.let {
+        drawPath(path = it, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
     }
-    
-    // Рисуем указатель текущей частоты только если воспроизводится этот график
-    if (isPlaying) {
-        val currentX = graphParams.timeToX(currentLocalTime)
-        val currentUpperY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val currentLowerY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        
-        // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
-        // внутри области биений — ярче. Точку пересечения с несущей убираем.
-        val indicatorAlpha = 0.3f
-        drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, 0f), end = Offset(currentX, currentUpperY), strokeWidth = 2f)
-        drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, currentLowerY), end = Offset(currentX, height), strokeWidth = 2f)
-        // Вертикальная линия показывающая диапазон частот каналов (от lower до upper)
-        drawLine(color = indicatorColor.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+    paths.beatLower?.let {
+        drawPath(path = it, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
+    }
+    paths.dashedBase?.let { path ->
+        // Параметры штриха и толщины сохранены один-в-один с прежней
+        // реализацией drawDashedBaseCurve (alpha 0.3, width 2, даш 10/10).
+        drawPath(
+            path = path,
+            color = primaryColor.copy(alpha = 0.3f),
+            style = Stroke(
+                width = 2f,
+                pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f)
+            )
+        )
     }
 }
 
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
+/**
+ * Указатель текущего момента — единственная по-настоящему динамичная часть
+ * графика. Рисуется отдельным слоем, чтобы не пересчитывать кривые.
+ */
+private fun DrawScope.drawCurrentTimeIndicator(
+    graphParams: GraphParams,
+    currentLocalTime: LocalTime,
+    currentCarrierFrequency: Float,
+    currentBeatFrequency: Float,
+    indicatorColor: Color
+) {
+    val height = size.height
+    val currentX = graphParams.timeToX(currentLocalTime)
+    val rightChannelY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+    val leftChannelY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
+    // При ОТРИЦАТЕЛЬНОЙ частоте биений каналы меняются местами, поэтому
+    // верх/низ полосы берём по координатам, а не по именам «upper/lower».
+    val currentUpperY = minOf(rightChannelY, leftChannelY)
+    val currentLowerY = maxOf(rightChannelY, leftChannelY)
+
+    // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
+    // внутри области биений — ярче. Точку пересечения с несущей убираем.
+    val indicatorAlpha = 0.3f
+    drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, 0f), end = Offset(currentX, currentUpperY), strokeWidth = 2f)
+    drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, currentLowerY), end = Offset(currentX, height), strokeWidth = 2f)
+    // Вертикальная линия показывающая диапазон частот каналов
+    drawLine(color = indicatorColor.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+}
+
+private data class BeatPaths(
+    val upper: Path,
+    val lower: Path,
+    val combined: Path
+)
+
+/**
+ * Строит пути области биений. Чистая функция: результат кэшируется в
+ * [buildGraphStaticPaths], поэтому ~1000 интерполяций выполняются один раз на
+ * изменение кривой, а не на каждый тик времени (1–2 раза в секунду).
+ *
+ * Ширина берётся из [GraphParams.widthPx] (а не из `DrawScope.size`), чтобы
+ * геометрию можно было посчитать вне фазы отрисовки.
+ */
+private fun buildBeatPaths(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
-    primaryColor: Color,
     interpolationType: InterpolationType,
     splineTension: Float = 0.0f
-) {
-    val width = size.width
+): BeatPaths {
+    val width = params.widthPx.toFloat()
     // Динамическое количество сэмплов: минимум 500, для плавных кривых - больше
     val numSamples = (sortedPoints.size * 4).coerceAtLeast(500)
-    
+
     val upperPath = Path()
     val lowerPath = Path()
-    
+
     // Начинаем с левой границы
     val startTime = LocalTime.fromSecondOfDay(0)
     // Канальные кривые интерполируются напрямую общей функцией (как в движке)
-    val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension
+    //
+    // presorted = true: sortedPoints УЖЕ отсортирован вызывающей стороной
+    // (displayPoints и virtualPoints кэшируются через remember и сортируются
+    // один раз). Раньше interpolateChannels сортировал копию списка на каждом
+    // из ~1000 вызовов за кадр — тысячи аллокаций в секунду на главном потоке.
+    //
+    // ВАЖНО: пара — (ЛЕВЫЙ, ПРАВЫЙ) канал, а не «нижний/верхний». Пути ниже
+    // названы upperPath/lowerPath исторически, но при ОТРИЦАТЕЛЬНОЙ частоте
+    // биений левый канал звучит ВЫШЕ правого, и роли путей меняются. Заливка
+    // от этого не зависит — это полоса между двумя канальными кривыми.
+    val (startLeftFreq, startRightFreq) = Interpolation.interpolateChannels(
+        sortedPoints, startTime, interpolationType, splineTension, presorted = true
     )
-    val startUpperY = params.carrierToY(startUpperFreq)
-    val startLowerY = params.carrierToY(startLowerFreq)
-    
+    val startUpperY = params.carrierToY(startRightFreq)
+    val startLowerY = params.carrierToY(startLeftFreq)
+
     upperPath.moveTo(0f, startUpperY)
     lowerPath.moveTo(0f, startLowerY)
-    
+
+    // Y нижней границы на каждом сэмпле.
+    // Раньше второй (обратный) проход заново интерполировал нижнюю кривую —
+    // те же ~500 вызовов, уже посчитанных в прямом проходе. Теперь значения
+    // запоминаются: интерполяций ровно в 2 раза меньше.
+    val lowerY = FloatArray(numSamples + 1)
+    lowerY[0] = startLowerY
+
     // Для ступенчатой интерполяции используем специальный алгоритм отрисовки
     if (interpolationType == InterpolationType.STEP) {
         // Рисуем ступеньки напрямую по точкам
@@ -514,8 +665,9 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
         
         // Находим значение на левой границе (до первой точки)
         val firstPointX = params.timeToX(sortedPoints.first().time)
-        val firstUpperY = params.carrierToY(sortedPoints.last().carrierFrequency + sortedPoints.last().beatFrequency / 2.0f)
-        val firstLowerY = params.carrierToY(sortedPoints.last().carrierFrequency - sortedPoints.last().beatFrequency / 2.0f)
+        // Формулы каналов, а не «нижний/верхний»: при beat < 0 левый канал выше.
+        val firstUpperY = params.carrierToY(sortedPoints.last().rightChannelFrequency)
+        val firstLowerY = params.carrierToY(sortedPoints.last().leftChannelFrequency)
         
         // От левой границы до первой точки - значение последней точки (переход через полночь)
         upperPath.lineTo(firstPointX, firstUpperY)
@@ -533,8 +685,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
                 params.timeToX(nextPoint.time)
             }
             
-            val currentUpperY = params.carrierToY(currentPoint.carrierFrequency + currentPoint.beatFrequency / 2.0f)
-            val currentLowerY = params.carrierToY(currentPoint.carrierFrequency - currentPoint.beatFrequency / 2.0f)
+            val currentUpperY = params.carrierToY(currentPoint.rightChannelFrequency)
+            val currentLowerY = params.carrierToY(currentPoint.leftChannelFrequency)
             
             // Вертикальный переход в точке (если не первая точка)
             if (i > 0 || currentUpperY != firstUpperY) {
@@ -548,20 +700,31 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
             upperPath.lineTo(nextX, currentUpperY)
             lowerPath.lineTo(nextX, currentLowerY)
         }
+
+        // Равномерная выборка нижней кривой для замыкания заливки.
+        // Для STEP это те же hold-last значения, что давал старый обратный проход.
+        for (i in 1..numSamples) {
+            val t = i.toDouble() / numSamples
+            val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
+            lowerY[i] = params.carrierToY(
+                Interpolation.interpolateChannels(
+                    sortedPoints, time, interpolationType, splineTension, presorted = true
+                ).first // левый канал
+            )
+        }
     } else {
         // Обычная интерполяция для других типов
         for (i in 1..numSamples) {
             val t = i.toDouble() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-            // Канальные кривые через общую функцию (как в движке)
-            val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension
+            // Канальные кривые через общую функцию (как в движке): (левый, правый)
+            val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
+                sortedPoints, time, interpolationType, splineTension, presorted = true
             )
-            val upperY = params.carrierToY(upperFreq)
-            val lowerY = params.carrierToY(lowerFreq)
+            lowerY[i] = params.carrierToY(leftFreq)
             val x = (t * width).toFloat()
-            upperPath.lineTo(x, upperY)
-            lowerPath.lineTo(x, lowerY)
+            upperPath.lineTo(x, params.carrierToY(rightFreq))
+            lowerPath.lineTo(x, lowerY[i])
         }
     }
 
@@ -569,46 +732,41 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawBeatArea(
     val combinedPath = Path()
     combinedPath.addPath(upperPath)
 
-    // Обратный путь по нижней границе
+    // Обратный путь по нижней границе — по уже посчитанным значениям,
+    // без повторной интерполяции
     for (i in numSamples downTo 0) {
         val t = i.toDouble() / numSamples
-        val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val (lowerFreq, _) = Interpolation.interpolateChannels(
-            sortedPoints, time, interpolationType, splineTension
-        )
-        val lowerY = params.carrierToY(lowerFreq)
         val x = (t * width).toFloat()
-        combinedPath.lineTo(x, lowerY)
+        combinedPath.lineTo(x, lowerY[i])
     }
-    
+
     combinedPath.close()
-    
-    // Заливка области биений
-    drawPath(path = combinedPath, color = primaryColor.copy(alpha = 0.2f), style = Fill)
-    // Границы области (кривые частот каналов)
-    drawPath(path = upperPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
-    drawPath(path = lowerPath, color = primaryColor.copy(alpha = 0.4f), style = Stroke(width = 1f))
+
+    return BeatPaths(upper = upperPath, lower = lowerPath, combined = combinedPath)
 }
 
 private enum class RangeType { MIN, MAX }
 
 /**
- * Рисует пунктирную линию базовой кривой (проходящей через основные точки)
- * Используется в режимах ADVANCED и SMOOTH для отображения исходной кривой
+ * Строит пунктирную линию базовой кривой (проходящей через основные точки).
+ * Используется в режимах ADVANCED и SMOOTH для отображения исходной кривой.
+ *
+ * Как и [buildBeatPaths] — чистая функция, результат кэшируется.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDashedBaseCurve(
+private fun buildDashedBaseCurvePath(
     realPoints: List<FrequencyPoint>,
     params: GraphParams,
-    primaryColor: Color,
     interpolationType: InterpolationType,
     splineTension: Float
-) {
-    val width = size.width
+): Path {
+    val width = params.widthPx.toFloat()
     val carrierPath = Path()
     
     // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
-    val startCarrier = interpolateCarrierFrequency(realPoints, startTime, interpolationType, splineTension)
+    val startCarrier = interpolateCarrierFrequency(
+        realPoints, startTime, interpolationType, splineTension, presorted = true
+    )
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
     
@@ -617,43 +775,40 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawDashedBaseCurve
     for (i in 1..numSamples) {
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
-        val carrier = interpolateCarrierFrequency(realPoints, time, interpolationType, splineTension)
+        val carrier = interpolateCarrierFrequency(
+            realPoints, time, interpolationType, splineTension, presorted = true
+        )
         val y = params.carrierToY(carrier)
         val x = (t * width).toFloat()
         carrierPath.lineTo(x, y)
     }
-    
-    // Рисуем пунктирной линией
-    val dashPattern = floatArrayOf(10f, 10f)
-    drawPath(
-        path = carrierPath,
-        color = primaryColor.copy(alpha = 0.3f),
-        style = Stroke(
-            width = 2f,
-            pathEffect = PathEffect.dashPathEffect(dashPattern)
-        )
-    )
+
+    return carrierPath
 }
 
 /**
  * Вычисляет максимальную частоту биений для верхней границы (2000 Гц).
  * Формула: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
  */
-fun maxBeatForUpperLimit(carrierFrequency: Float): Float {
+private fun maxBeatForUpperLimit(carrierFrequency: Float): Float {
     return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0f)
 }
 
 /**
  * Вычисляет скорректированную частоту биения для заданной несущей частоты.
  * Учитывает обе границы: нижнюю (20 Гц) и верхнюю (2000 Гц).
- * Нижняя граница: carrier - beat/2 >= MIN_AUDIBLE_FREQUENCY => beat <= 2 * (carrier - MIN_AUDIBLE_FREQUENCY)
- * Верхняя граница: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
+ *
+ * ЗНАК СОХРАНЯЕТСЯ: клампится только МОДУЛЬ (beat = right − left — величина
+ * знаковая; при смене знака боковые частоты просто меняются местами, поэтому
+ * ограничение симметрично):
+ *   |beat| <= 2 * (carrier − 20 Гц)    — нижняя боковая >= 20 Гц;
+ *   |beat| <= 2 * (2000 Гц − carrier)  — верхняя боковая <= 2000 Гц.
  */
 fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
     val maxBeatForLower = maxBeatForCarrier(carrier)  // для нижней границы (20 Гц)
     val maxBeatForUpper = maxBeatForUpperLimit(carrier)  // для верхней границы (2000 Гц)
-    val maxBeat = minOf(maxBeatForLower, maxBeatForUpper)
-    return currentBeat.coerceAtMost(maxBeat)
+    val maxBeat = minOf(maxBeatForLower, maxBeatForUpper).coerceAtLeast(0.0f)
+    return currentBeat.coerceIn(-maxBeat, maxBeat)
 }
 
 @Composable
@@ -737,7 +892,11 @@ fun DraggablePoint(
                 )
             }
     ) {
-        val beatIndicatorSize = with(density) { ((point.beatFrequency / maxBeat) * 12).toFloat().toDp().coerceAtLeast(4.dp) }
+        // Размер индикатора — по МОДУЛЮ частоты биений: знак задаёт только
+        // раскладку каналов, а «толщина» пульсации определяется |beat|.
+        val beatIndicatorSize = with(density) {
+            abs(point.beatFrequency / maxBeat * 12).toFloat().toDp().coerceAtLeast(4.dp)
+        }
         Box(modifier = Modifier.size(beatIndicatorSize).background(Color.White.copy(alpha = 0.6f), CircleShape).align(Alignment.Center))
     }
 }
@@ -774,17 +933,27 @@ fun interpolateCarrierFrequency(
     points: List<FrequencyPoint>,
     time: LocalTime,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
-    splineTension: Float = 0.0f
-): Float = interpolateFrequency(points, time, interpolationType, splineTension) { it.carrierFrequency }
+    splineTension: Float = 0.0f,
+    presorted: Boolean = false
+): Float = interpolateFrequency(
+    points, time, interpolationType, splineTension, presorted
+) { it.carrierFrequency }
 
 fun interpolateFrequency(
-    points: List<FrequencyPoint>, 
-    time: LocalTime, 
+    points: List<FrequencyPoint>,
+    time: LocalTime,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f,
+    /**
+     * true, если [points] уже отсортирован по времени суток.
+     * Горячий путь (drawDashedBaseCurve) передаёт отсортированный список и
+     * вызывает эту функцию >=300 раз за кадр — без флага каждый вызов
+     * аллоцировал и сортировал копию списка.
+     */
+    presorted: Boolean = false,
     frequencySelector: (FrequencyPoint) -> Float
 ): Float {
-    val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+    val sortedPoints = if (presorted) points else points.sortedBy { it.time.toSecondOfDay() }
     if (sortedPoints.isEmpty()) return 0.0f
     if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
     

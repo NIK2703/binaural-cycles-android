@@ -114,13 +114,21 @@ inline float step(float p1) {
  * @param p3 точка после правой границы
  * @param t нормализованная позиция в интервале [0, 1]
  * @param tension параметр натяжения для CARDINAL (0.0=Catmull-Rom, 1.0=почти линейный)
+ * @param allowNegative разрешить отрицательный результат.
+ *        false (по умолчанию) — результат клампится к [0, +inf): так
+ *        интерполируются ФИЗИЧЕСКИЕ частоты каналов, которые не бывают
+ *        отрицательными.
+ *        true — знак сохраняется: обязательно для ЧАСТОТЫ БИЕНИЙ, которая
+ *        величина знаковая (beat = right − left; знак кодирует раскладку
+ *        каналов, |beat| — слышимую пульсацию). См. FrequencyMath.kt.
  * @return интерполированное значение
  */
 inline float interpolate(
     InterpolationType type,
     float p0, float p1, float p2, float p3,
     float t,
-    float tension = 0.0f
+    float tension = 0.0f,
+    bool allowNegative = false
 ) {
     float result;
     switch (type) {
@@ -139,7 +147,7 @@ inline float interpolate(
         default:
             result = linear(p1, p2, t);
     }
-    return std::max(0.0f, result);
+    return allowNegative ? result : std::max(0.0f, result);
 }
 
 } // namespace Interpolation
@@ -164,10 +172,11 @@ inline void FrequencyCurve::buildLookupTableInternal() {
     }
     
     if (points.size() == 1) {
-        // Одна точка - вычисляем частоты из неё
+        // Одна точка - вычисляем частоты из неё.
+        // Кламп >= 0 — физический: сам тон не может иметь отрицательную частоту.
         const auto& p = points[0];
-        const float lowerFreq = p.carrierFrequency - p.beatFrequency / 2.0;
-        const float upperFreq = p.carrierFrequency + p.beatFrequency / 2.0;
+        const float lowerFreq = std::max(0.0f, p.carrierFrequency - p.beatFrequency / 2.0f);
+        const float upperFreq = std::max(0.0f, p.carrierFrequency + p.beatFrequency / 2.0f);
         lowerFreqTable.assign(FREQUENCY_TABLE_SIZE, lowerFreq);
         upperFreqTable.assign(FREQUENCY_TABLE_SIZE, upperFreq);
         return;
@@ -199,7 +208,17 @@ inline void FrequencyCurve::buildLookupTableInternal() {
     lowerFreqTable.resize(tableSize);
     upperFreqTable.resize(tableSize);
     
-    // Селекторы для частот каналов
+    // Селекторы для частот каналов.
+    //
+    // ВАЖНО (знаковая частота биений): beat = right − left, поэтому
+    //   left  = carrier − beat/2   (исторически называется "lower")
+    //   right = carrier + beat/2   (исторически называется "upper")
+    // При ОТРИЦАТЕЛЬНОМ beat имена меняются местами лишь по звучанию:
+    // «нижняя» таблица (левый канал) реально держит более высокий тон.
+    // Формулы от этого не меняются, и знак beat сохраняется автоматически —
+    // ниже beatFreq считается как upper − lower и остаётся знаковым.
+    // Кламп >= 0 применяется только к готовому каналу (физический предел тона),
+    // но НЕ к beat: интерполяция каналов идёт с allowNegative=true.
     auto getLowerFreq = [](const FrequencyPoint& p) {
         return p.carrierFrequency - p.beatFrequency / 2.0;
     };
@@ -278,22 +297,27 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         const int prevIndex = (effectiveLeftIndex - 1 + numPoints) % numPoints;
         const int nextNextIndex = (rightIndex + 1) % numPoints;
         
-        // Интерполируем нижнюю частоту
+        // Интерполируем левую (исторически «нижнюю») частоту.
+        // allowNegative=true: внутри сплайна канал может уйти в минус между
+        // узлами, но по физике тон не бывает отрицательным — внешний
+        // std::max(0.0f, ...) и есть единственный физический кламп.
         float lowerP0 = getLowerFreq(sortedPoints[prevIndex]);
         float lowerP1 = getLowerFreq(leftPoint);
         float lowerP2 = getLowerFreq(rightPoint);
         float lowerP3 = getLowerFreq(sortedPoints[nextNextIndex]);
         lowerFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
-            interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, splineTension
+            interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, splineTension,
+            /*allowNegative=*/true
         ));
-        
-        // Интерполируем верхнюю частоту
+
+        // Интерполируем правую (исторически «верхнюю») частоту
         float upperP0 = getUpperFreq(sortedPoints[prevIndex]);
         float upperP1 = getUpperFreq(leftPoint);
         float upperP2 = getUpperFreq(rightPoint);
         float upperP3 = getUpperFreq(sortedPoints[nextNextIndex]);
         upperFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
-            interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, splineTension
+            interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, splineTension,
+            /*allowNegative=*/true
         ));
     }
 }
