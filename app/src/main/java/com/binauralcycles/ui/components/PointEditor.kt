@@ -105,7 +105,6 @@ private fun String.trimLeadingZeros(): String {
 fun PointEditor(
     point: FrequencyPoint,
     carrierRange: FrequencyRange,
-    beatRange: FrequencyRange,
     autoExpandGraphRange: Boolean,
     onCarrierFrequencyChange: (Float) -> Unit,
     onBeatFrequencyChange: (Float) -> Unit,
@@ -143,27 +142,25 @@ fun PointEditor(
     //   2. |beat| <= 2*(2000 Гц − carrier):  обе боковые остаются <= 2000 Гц;
     //   3. если autoExpandGraphRange = false, дополнительно границами графика:
     //      |beat| <= 2*(carrier − carrierRange.min) и 2*(carrierRange.max − carrier).
-    // Диапазон самой кривой (beatRange) тоже учитывается — см. FrequencyMath.beatBounds.
-    val effectiveBeatRange = FrequencyMath.symmetricBeatRange(beatRange)
+    // Иначе говоря, предел — это УДВОЕННОЕ РАССТОЯНИЕ ОТ НЕСУЩЕЙ ВЫБРАННОЙ
+    // ТОЧКИ ДО БЛИЖАЙШЕЙ ГРАНИЦЫ. Хранимый в пресете beatRange здесь НЕ
+    // участвует: это масштаб для размера маркера на графике, а не разрешённый
+    // предел, поэтому старый потолок 1000 Гц больше не режет выбор.
 
     // Максимальный МОДУЛЬ частоты биений вычисляется от текущего значения
-    // в текстовом поле (для валидации) или от значения точки (для слайдера)
+    // в текстовом поле (для валидации) или от значения точки (для слайдера).
+    // Пол 1 Гц — чтобы слайдер остался невырожденным для точки, стоящей прямо
+    // на границе графика (там геометрический предел равен нулю).
     val maxBeatMagnitudeForValidation = run {
         val carrierForLimit = if (carrierValue != null && isCarrierValid) carrierValue
                               else point.carrierFrequency
         val range = if (autoExpandGraphRange) null else carrierRange
-        minOf(
-            FrequencyMath.maxBeatMagnitude(carrierForLimit, range),
-            maxOf(effectiveBeatRange.max, -effectiveBeatRange.min)
-        ).coerceAtLeast(0.0f)
+        FrequencyMath.maxBeatMagnitude(carrierForLimit, range).coerceAtLeast(1.0f)
     }
 
     val maxBeatMagnitudeForSlider = run {
         val range = if (autoExpandGraphRange) null else carrierRange
-        minOf(
-            FrequencyMath.maxBeatMagnitude(point.carrierFrequency, range),
-            maxOf(effectiveBeatRange.max, -effectiveBeatRange.min)
-        ).coerceAtLeast(0.0f)
+        FrequencyMath.maxBeatMagnitude(point.carrierFrequency, range).coerceAtLeast(1.0f)
     }
 
     // Валидация частоты биений: проверяем МОДУЛЬ (знак разрешён всегда),

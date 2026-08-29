@@ -146,14 +146,18 @@ private data class GraphParams(
 /**
  * Генерирует виртуальные точки режима расслабления.
  * Единая реализация в core-модели (RelaxationModeSettings.generateVirtualPoints).
+ *
+ * [carrierRange] обязателен: его минимум ограничивает частоту КАНАЛА
+ * виртуальных точек, поэтому диапазон должен приходить из редактируемой кривой.
  */
 fun generateRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
-    splineTension: Float = 0.0f
+    splineTension: Float = 0.0f,
+    carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER
 ): List<FrequencyPoint> {
-    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension)
+    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension, carrierRange)
 }
 
 @Composable
@@ -199,9 +203,17 @@ fun FrequencyGraph(
     // Используем кэшированные sortedPoints если доступны (оптимизация)
     val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
     
-    // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции
-    val virtualPoints = remember(points, relaxationModeSettings, interpolationType, splineTension) {
-        generateRelaxationVirtualPoints(points, relaxationModeSettings, interpolationType, splineTension)
+    // Генерируем виртуальные точки режима расслабления с учётом типа интерполяции.
+    // ВАЖНО: carrierRange в ключе — его минимум задаёт пол частоты канала
+    // виртуальных точек, поэтому смена минимума частот обязана пересчитывать
+    // точки (иначе график показывает устаревшие значения до следующей правки).
+    val virtualPoints = remember(
+        points, relaxationModeSettings, interpolationType, splineTension,
+        carrierRange.min, carrierRange.max
+    ) {
+        generateRelaxationVirtualPoints(
+            points, relaxationModeSettings, interpolationType, splineTension, carrierRange
+        )
     }
 
     Column(
@@ -286,7 +298,12 @@ fun FrequencyGraph(
                                 val carrier = graphParams.yToCarrier(offset.y)
                                 // Оценка частоты биений по канальным кривым (как в движке):
                                 // beat = right − left — величина ЗНАКОВАЯ.
-                                val effectiveBeatRange = FrequencyMath.symmetricBeatRange(beatRange)
+                                //
+                                // Предел модуля — ГЕОМЕТРИЧЕСКИЙ (хранимый beatRange
+                                // не участвует: он задаёт только масштаб маркеров).
+                                // Границы графика учитываются, чтобы новая точка
+                                // не провалилась ниже минимума частот пресета —
+                                // ровно так же её клампит addEditingPoint.
                                 val interpolatedBeat = if (displayPoints.size >= 2) {
                                     val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
                                         displayPoints, time, interpolationType, splineTension,
@@ -295,12 +312,13 @@ fun FrequencyGraph(
                                     FrequencyMath.clampBeat(
                                         carrier,
                                         kotlin.math.round(rightFreq - leftFreq),
-                                        effectiveBeatRange
+                                        carrierRange = carrierRange
                                     )
                                 } else {
                                     // 0 или 1 точка: берём частоту биений единственной точки
                                     displayPoints.firstOrNull()?.let {
-                                        FrequencyMath.clampBeat(carrier, it.beatFrequency, effectiveBeatRange)
+                                        FrequencyMath.clampBeat(
+                                            carrier, it.beatFrequency, carrierRange = carrierRange)
                                     } ?: 0.0f
                                 }
                                 onAddPoint(time, carrier, interpolatedBeat)
@@ -894,8 +912,12 @@ fun DraggablePoint(
     ) {
         // Размер индикатора — по МОДУЛЮ частоты биений: знак задаёт только
         // раскладку каналов, а «толщина» пульсации определяется |beat|.
+        // Сверху ограничен самим маркером: геометрический предел модуля
+        // (до 1980 Гц) превышает масштаб maxBeat, и индикатор не должен
+        // вылезать за круг.
         val beatIndicatorSize = with(density) {
-            abs(point.beatFrequency / maxBeat * 12).toFloat().toDp().coerceAtLeast(4.dp)
+            abs(point.beatFrequency / maxBeat * 12).toFloat().toDp()
+                .coerceIn(4.dp, pointSize)
         }
         Box(modifier = Modifier.size(beatIndicatorSize).background(Color.White.copy(alpha = 0.6f), CircleShape).align(Alignment.Center))
     }

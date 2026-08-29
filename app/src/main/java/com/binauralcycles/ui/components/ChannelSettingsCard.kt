@@ -1001,7 +1001,7 @@ fun RelaxationModeCard(
                         onCarrierReductionChange(localCarrierReduction)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..50f
+                    valueRange = 0f..RelaxationModeSettings.MAX_CARRIER_REDUCTION_PERCENT.toFloat()
                 )
             }
             
@@ -1033,7 +1033,7 @@ fun RelaxationModeCard(
                         onBeatReductionChange(localBeatReduction)
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    valueRange = 0f..100f
+                    valueRange = 0f..RelaxationModeSettings.MAX_BEAT_REDUCTION_PERCENT.toFloat()
                 )
             }
         }

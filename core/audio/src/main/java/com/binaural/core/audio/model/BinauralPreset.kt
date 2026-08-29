@@ -10,6 +10,7 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import java.util.UUID
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.pow
 
@@ -151,8 +152,13 @@ data class FrequencyCurve(
      *
      * Пресеты, сохранённые до появления отрицательных частот биений, держат
      * beatRange = (0; 1000). Зеркальное расширение делает знак доступным
-     * независимо от версии пресета и не меняет смысл старых значений:
-     * модуль по-прежнему ограничен тем же максимумом.
+     * независимо от версии пресета.
+     *
+     * ВАЖНО: это МАСШТАБ ОТРИСОВКИ (размер маркера точки на графике), а НЕ
+     * разрешённый предел частоты биений. Предел модуля всегда выводится из
+     * геометрии — удвоенное расстояние от несущей до ближайшей границы
+     * (см. FrequencyMath.maxBeatMagnitude / FrequencyMath.UNBOUNDED_BEAT_RANGE).
+     * Иначе старый потолок 1000 Гц продолжал бы резать выбор пользователя.
      */
     val effectiveBeatRange: FrequencyRange
         get() = FrequencyMath.symmetricBeatRange(beatRange)
@@ -219,18 +225,22 @@ data class FrequencyCurve(
     }
 
     /**
-     * Допустимый интервал частоты биений для точки с заданной несущей
-     * (физика ∩ границы графика ∩ диапазон кривой). Симметричен по модулю.
+     * Допустимый интервал частоты биений для точки с заданной несущей.
+     *
+     * Предел — ГЕОМЕТРИЧЕСКИЙ: физика (каналы в 20…2000 Гц) ∩ вертикальные
+     * границы графика. Хранимый beatRange в расчёт не входит: он задаёт только
+     * масштаб маркеров и не должен резать выбор пользователя.
+     * Интервал симметричен по модулю.
      */
     fun beatBoundsForCarrier(carrierFrequency: Float): ClosedFloatingPointRange<Float> =
-        FrequencyMath.beatBounds(carrierFrequency, effectiveBeatRange, carrierRange)
+        FrequencyMath.beatBounds(carrierFrequency, carrierRange = carrierRange)
 
     /**
      * Привести частоту биений к допустимому интервалу для заданной несущей.
-     * Знак сохраняется, клампится только модуль.
+     * Знак сохраняется, клампится только модуль; предел берётся из геометрии.
      */
     fun clampBeatForCarrier(carrierFrequency: Float, beatFrequency: Float): Float =
-        FrequencyMath.clampBeat(carrierFrequency, beatFrequency, effectiveBeatRange, carrierRange)
+        FrequencyMath.clampBeat(carrierFrequency, beatFrequency, carrierRange = carrierRange)
 
     /**
      * @param allowNegative false (по умолчанию) — результат клампится к >= 0
@@ -515,8 +525,32 @@ enum class RelaxationMode {
 data class RelaxationModeSettings(
     val enabled: Boolean = false,
     val mode: RelaxationMode = RelaxationMode.STEP,
-    val carrierReductionPercent: Int = 25,  // 0-50%
-    val beatReductionPercent: Int = 50,      // 0-100%
+    /**
+     * Снижение несущей частоты в периодах расслабления: 0-100%.
+     *
+     * ПОЛ — не минимум несущей, а минимум частоты КАНАЛА: сниженная точка
+     * обязана остаться внутри нарисованного графика, поэтому нижняя боковая
+     * (carrier − |beat|/2) не уходит ниже минимума диапазона пресета
+     * ([FrequencyCurve.carrierRange].min). Абсолютный пол 20 Гц действует
+     * всегда, даже если минимум графика задан ниже.
+     *
+     * На 100% несущая опускается НАСТОЛЬКО НИЗКО, НАСКОЛЬКО ПОЗВОЛЯЕТ
+     * частота биений: carrier = min + |beat'|/2, то есть нижняя боковая
+     * садится ровно на минимум. Полнее нельзя — иначе биения пришлось бы
+     * погасить, а период расслабления выродился бы в чистый тон без
+     * бинаурального эффекта. При полностью погашенных биениях
+     * (beatReductionPercent = 100%) несущая на 100% доходит до минимума.
+     */
+    val carrierReductionPercent: Int = 25,  // 0-100%
+    /**
+     * Снижение частоты биений в периодах расслабления: 0-200%.
+     *
+     * Свыше 100% величина уходит за ноль: биения сначала гаснут (ровно 100%),
+     * затем нарастают снова, но с ОБРАТНЫМ знаком — каналы меняются местами.
+     * На 200% модуль равен исходному, раскладка каналов инвертирована.
+     * Знак имеет смысл только благодаря знаковой семантике beat = right − left.
+     */
+    val beatReductionPercent: Int = 50,      // 0-200%
     // Параметры для расширенного режима
     val gapBetweenRelaxationMinutes: Int = 45,  // Интервал МЕЖДУ периодами расслабления: 0-120 минут
     val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 1-10 минут
@@ -524,9 +558,33 @@ data class RelaxationModeSettings(
     // Параметры для плавного режима
     val smoothIntervalMinutes: Int = 30         // Интервал между точками: 5-60 минут
 ) {
+    companion object {
+        /**
+         * Верхний предел снижения несущей частоты (%).
+         *
+         * 100% означает «опустить несущую к минимуму диапазона пресета
+         * настолько, насколько позволяет частота биений» — ниже частота
+         * канала не уйдёт благодаря полу в [reduceFrequencies].
+         */
+        const val MAX_CARRIER_REDUCTION_PERCENT = 100
+
+        /**
+         * Верхний предел снижения частоты биений (%).
+         *
+         * 100% гасит биения полностью; всё, что выше, — инверсия каналов
+         * (модуль нарастает снова с обратным знаком). Предел живёт здесь,
+         * чтобы модель, ViewModel и слайдер в UI не расходились.
+         */
+        const val MAX_BEAT_REDUCTION_PERCENT = 200
+    }
+
     init {
-        require(carrierReductionPercent in 0..50) { "Снижение несущей частоты должно быть от 0% до 50%" }
-        require(beatReductionPercent in 0..100) { "Снижение частоты биений должно быть от 0% до 100%" }
+        require(carrierReductionPercent in 0..MAX_CARRIER_REDUCTION_PERCENT) {
+            "Снижение несущей частоты должно быть от 0% до $MAX_CARRIER_REDUCTION_PERCENT%"
+        }
+        require(beatReductionPercent in 0..MAX_BEAT_REDUCTION_PERCENT) {
+            "Снижение частоты биений должно быть от 0% до $MAX_BEAT_REDUCTION_PERCENT%"
+        }
         require(gapBetweenRelaxationMinutes in 0..120) { "Интервал между периодами расслабления должен быть от 0 до 120 минут" }
         require(transitionPeriodMinutes in 1..10) { "Период перехода должен быть от 1 до 10 минут" }
         require(relaxationDurationMinutes in 5..60) { "Длительность периода расслабления должна быть от 5 до 60 минут" }
@@ -541,32 +599,88 @@ data class RelaxationModeSettings(
      * @param curve Базовая кривая частот (из основных точек)
      */
     fun generateVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> =
-        generateVirtualPoints(curve.points, curve.interpolationType, curve.splineTension)
+        generateVirtualPoints(curve.points, curve.interpolationType, curve.splineTension, curve.carrierRange)
 
     /**
      * Снижает частоты на период расслабления.
      *
-     * Знак частоты биений СОХРАНЯЕТСЯ: снижается её модуль, а раскладка каналов
-     * (какое ухо слышит более высокий тон) не меняется — иначе режим расслабления
-     * молча переставлял бы каналы местами на отрицательных участках кривой.
+     * Знак частоты биений при снижении ДО 100% СОХРАНЯЕТСЯ: гаснет модуль, а
+     * раскладка каналов (какое ухо слышит более высокий тон) не меняется — иначе
+     * режим расслабления молча переставлял бы каналы местами на отрицательных
+     * участках кривой.
+     *
+     * Формула `beat * (1 - beatReduction)` продолжается и СВЫШЕ 100%:
+     * - 100% — биения полностью погашены (beat = 0, чистый тон без пульсации);
+     * - 150% — beat = −0.5 * beat₀, каналы поменяны местами, модуль вдвое меньше;
+     * - 200% — beat = −beat₀, модуль исходный, раскладка каналов инвертирована.
+     * Это осознанное следствие знаковой семантики beat = right − left, а не
+     * ошибка: физически инверсия валидна (боковые частоты просто меняются
+     * ролями), поэтому знаковый результат НЕ клампится к нулю.
      *
      * Несущая не уходит ниже слышимого минимума; если из-за этого клампа
      * соотношение carrier/beat нарушается, модуль beat приводится к физически
-     * допустимому (боковая частота не должна уйти ниже 0 Гц).
+     * допустимому (боковая частота не должна уйти ниже 0 Гц). При снижении выше
+     * 100% это ограничение может дополнительно урезать модуль инвертированных
+     * биений — сниженная несущая физически не держит прежний разнос каналов.
+     *
+     * ПОЛ ЧАСТОТЫ ([minCarrier]) — ограничение накладывается на ФАКТИЧЕСКУЮ
+     * частоту канала, а не только на несущую: нижняя боковая
+     * (carrier − |beat|/2) обязана остаться не ниже минимума диапазона
+     * пресета, иначе кривая уезжает за нижнюю границу графика. Абсолютный пол
+     * 20 Гц при этом сохраняется (минимум графика можно задать и ниже
+     * слышимого диапазона).
+     *
+     * Пол выполняется ПОДЪЁМОМ несущей, а не гашением биений: сниженная
+     * несущая опускается лишь до `floor + |beat|/2`, при котором нижняя
+     * боковая садится ровно на пол. Иначе максимальное снижение несущей
+     * обнуляло бы биения (при carrier = floor разнос каналов физически
+     * невозможен) и период расслабления вырождался бы в чистый тон — для
+     * бинаурального ритма это потеря смысла режима.
+     *
+     * ПОРЯДОК ШАГОВ (важен для граничных случаев):
+     * 1. снижаются обе частоты (несущая и биения) — знак beat сохраняется;
+     * 2. несущая поднимается до `floor + |beat'|/2`, если ушла ниже;
+     * 3. несущая НЕ может стать выше исходной — снижение не повышает частоту
+     *    (случай «минимум графика подняли выше самих точек»);
+     * 4. если после этого пол всё равно нарушен (базовая точка сама лежит
+     *    ниже минимума), клампится модуль биений, знак сохраняется.
      */
     private fun reduceFrequencies(
         carrier: Float,
         beat: Float,
         carrierReduction: Float,
-        beatReduction: Float
+        beatReduction: Float,
+        minCarrier: Float
     ): Pair<Float, Float> {
-        val reducedCarrier = (carrier * (1.0f - carrierReduction))
-            .coerceAtLeast(FrequencyMath.MIN_TONE_FREQUENCY)
+        // Пол частоты КАНАЛА: минимум графика, но не ниже слышимого абсолютного minima.
+        val floor = maxOf(minCarrier, FrequencyMath.MIN_TONE_FREQUENCY)
+
+        val rawCarrier = carrier * (1.0f - carrierReduction)
+        val rawBeat = beat * (1.0f - beatReduction)
+
+        // Несущая, при которой нижняя боковая (carrier − |beat|/2) садится на пол.
+        val carrierForFloor = floor + abs(rawBeat) / 2.0f
+
+        val reducedCarrier = maxOf(rawCarrier, carrierForFloor, floor)
+            // Снижение не должно ПОДНИМАТЬ частоту: если базовая точка сама
+            // лежит ниже пола (минимум графика подняли выше точек), оставляем её.
+            .coerceAtMost(carrier)
+
+        // Страховка: базовая точка вне диапазона (ниже пола) — пол физически
+        // недостижим, иначе предел выродился бы в ноль и погасил биения.
+        val maxBeatMagnitude = if (reducedCarrier >= floor) {
+            (2.0f * (reducedCarrier - floor)).coerceAtLeast(0.0f)
+        } else {
+            Float.POSITIVE_INFINITY
+        }
+        // Предел модуля — геометрический (хранимый beatRange здесь не у дел:
+        // он лишь масштаб маркеров и не должен срезать биения, которые
+        // пользователь имел право задать вплоть до границы графика).
         val reducedBeat = FrequencyMath.clampBeat(
             reducedCarrier,
-            beat * (1.0f - beatReduction),
-            FrequencyRange.DEFAULT_BEAT
-        )
+            rawBeat,
+            FrequencyMath.UNBOUNDED_BEAT_RANGE
+        ).coerceIn(-maxBeatMagnitude, maxBeatMagnitude)
         return reducedCarrier to reducedBeat
     }
 
@@ -575,16 +689,23 @@ data class RelaxationModeSettings(
      * Каноническое правило: базовые кривые carrier/beat оцениваются сплайном
      * interpolationType+splineTension по исходным точкам. Обе кривые знаковые:
      * beat интерполируется без клампа к >= 0.
+     *
+     * ВАЖНО: [carrierRange] обязан передаваться из редактируемой кривой — его
+     * минимум задаёт пол частоты КАНАЛА виртуальных точек. Если вызвать
+     * перегрузку без диапазона, точки посчитаются по умолчанию (100 Гц) и
+     * разойдутся с графиком пресета, у которого минимум свой.
      */
     fun generateVirtualPoints(
         points: List<FrequencyPoint>,
         interpolationType: InterpolationType,
-        splineTension: Float
+        splineTension: Float,
+        carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER
     ): List<FrequencyPoint> {
         if (!enabled || points.size < 2) return emptyList()
 
         val baseCurve = FrequencyCurve(
             points = points,
+            carrierRange = carrierRange,
             interpolationType = interpolationType,
             splineTension = splineTension
         )
@@ -645,7 +766,8 @@ data class RelaxationModeSettings(
                     curve.getCarrierFrequencyAt(time2),
                     curve.getBeatFrequencyAt(time2),
                     carrierReduction,
-                    beatReduction
+                    beatReduction,
+                    curve.carrierRange.min
                 )
                 virtualPoints.add(FrequencyPoint(time2, carrier2, beat2))
             }
@@ -658,7 +780,8 @@ data class RelaxationModeSettings(
                     curve.getCarrierFrequencyAt(time3),
                     curve.getBeatFrequencyAt(time3),
                     carrierReduction,
-                    beatReduction
+                    beatReduction,
+                    curve.carrierRange.min
                 )
                 virtualPoints.add(FrequencyPoint(time3, carrier3, beat3))
             }
@@ -716,7 +839,8 @@ data class RelaxationModeSettings(
                     curve.getCarrierFrequencyAt(time),
                     curve.getBeatFrequencyAt(time),
                     carrierReduction,
-                    beatReduction
+                    beatReduction,
+                    curve.carrierRange.min
                 )
                 virtualPoints.add(FrequencyPoint(time, carrier, beat))
             }

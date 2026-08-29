@@ -108,9 +108,13 @@ fun MiniFrequencyGraph(
         }
     }
     
-    // Получаем геометрию из глобального кэша
-    val cachedGeometry = remember(widthPx, heightPx, sortedPoints, frequencyCurve.interpolationType, 
-                                   frequencyCurve.splineTension, relaxationModeSettings) {
+    // Получаем геометрию из глобального кэша.
+    // ВАЖНО: carrierRange в ключе — его минимум задаёт пол частоты канала
+    // виртуальных точек расслабления, поэтому смена минимума частот обязана
+    // пересчитывать геометрию, а не отдавать устаревший кэш.
+    val cachedGeometry = remember(widthPx, heightPx, sortedPoints, frequencyCurve.interpolationType,
+                                   frequencyCurve.splineTension, relaxationModeSettings,
+                                   carrierRange.min, carrierRange.max) {
         if (widthPx > 0 && heightPx > 0) {
             MiniGraphCache.getOrCreate(
                 points = sortedPoints,
@@ -188,12 +192,14 @@ private fun computeGraphGeometry(
         maxBeat = 1.0f  // Временное значение
     )
     
-    // Генерируем виртуальные точки
+    // Генерируем виртуальные точки; carrierRange передаём обязательно —
+    // по его минимуму виртуальные точки ограничиваются снизу.
     val virtualPoints = createRelaxationVirtualPoints(
-        sortedPoints, 
-        relaxationModeSettings, 
-        interpolationType, 
-        splineTension
+        sortedPoints,
+        relaxationModeSettings,
+        interpolationType,
+        splineTension,
+        carrierRange
     )
     
     // Вычисляем maxBeat — по МОДУЛЮ частоты биений: знак задаёт только
@@ -461,10 +467,12 @@ private fun createRelaxationVirtualPoints(
     points: List<FrequencyPoint>,
     relaxationModeSettings: RelaxationModeSettings,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    carrierRange: FrequencyRange
 ): List<FrequencyPoint> {
-    // Единая реализация в core-модели (RelaxationModeSettings)
-    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension)
+    // Единая реализация в core-модели (RelaxationModeSettings).
+    // Диапазон несущей обязателен: по его минимуму клампятся виртуальные точки.
+    return relaxationModeSettings.generateVirtualPoints(points, interpolationType, splineTension, carrierRange)
 }
 
 // Функции вычисления путей

@@ -787,8 +787,10 @@ class BinauralViewModel @Inject constructor(
             
             val (newBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
+                // Предел модуля — геометрический (20/2000 Гц), хранимый beatRange
+                // в расчёт не входит: это масштаб маркеров, а не разрешённый предел.
                 val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, frequency, curve.effectiveBeatRange)
+                    oldPoint.carrierFrequency, frequency)
 
                 // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
                 val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
@@ -808,7 +810,7 @@ class BinauralViewModel @Inject constructor(
             } else {
                 // Ограничение частот заданными границами графика (новое поведение по умолчанию)
                 val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, frequency, curve.effectiveBeatRange, curve.carrierRange)
+                    oldPoint.carrierFrequency, frequency, carrierRange = curve.carrierRange)
                 Pair(beat, curve.carrierRange)
             }
             
@@ -891,8 +893,10 @@ class BinauralViewModel @Inject constructor(
             
             val (clampedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
+                // Предел модуля — геометрический (20/2000 Гц), хранимый beatRange
+                // в расчёт не входит: это масштаб маркеров, а не разрешённый предел.
                 val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, newBeat, curve.effectiveBeatRange)
+                    oldPoint.carrierFrequency, newBeat)
 
                 // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
                 val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
@@ -912,7 +916,7 @@ class BinauralViewModel @Inject constructor(
             } else {
                 // Ограничение частот заданными границами графика (новое поведение по умолчанию)
                 val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, newBeat, curve.effectiveBeatRange, curve.carrierRange)
+                    oldPoint.carrierFrequency, newBeat, carrierRange = curve.carrierRange)
                 Pair(beat, curve.carrierRange)
             }
             
@@ -933,8 +937,14 @@ class BinauralViewModel @Inject constructor(
         // Ограничение частоты биений по МОДУЛЮ (знак сохраняется — см. FrequencyMath):
         // 1. Нижняя боковая >= 20 Гц:   |beat| <= 2*(carrier - 20)
         // 2. Верхняя боковая <= 2000 Гц: |beat| <= 2*(2000 - carrier)
+        // 3. Боковые не выходят за вертикальные границы графика: новая точка не
+        //    должна провалиться ниже минимума частот пресета — иначе она
+        //    нарушит инвариант, на который опираются виртуальные точки
+        //    периодов расслабления.
+        // Хранимый beatRange НЕ является пределом — он задаёт только масштаб
+        // маркеров на графике.
         val clampedBeat = FrequencyMath.clampBeat(
-            clampedCarrier, beatFrequency, curve.effectiveBeatRange)
+            clampedCarrier, beatFrequency, carrierRange = curve.carrierRange)
         
         val points = curve.points.toMutableList()
         points.add(FrequencyPoint(
@@ -957,17 +967,33 @@ class BinauralViewModel @Inject constructor(
         }
     }
     
+    /**
+     * Изменить вертикальные границы графика несущей.
+     *
+     * Точки приводятся к новому диапазону ПОЛНОСТЬЮ, а не только по несущей:
+     * частота КАНАЛА (carrier − |beat|/2) тоже должна остаться внутри
+     * [min; max], иначе кривая уедет за границы графика. Именно минимум
+     * диапазона задаёт пол для виртуальных точек режима расслабления, поэтому
+     * после смены границ точки обязаны пересчитаться — старые значения
+     * оставлять нельзя.
+     *
+     * Знак частоты биений сохраняется: клампится только модуль.
+     */
     fun updateEditingCarrierRange(min: Float, max: Float) {
         if (max <= min) return
-        
+
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         val newRange = FrequencyRange(min, max)
-        
+
         val updatedPoints = curve.points.map { point ->
-            point.copy(carrierFrequency = newRange.clamp(point.carrierFrequency))
+            val clampedCarrier = newRange.clamp(point.carrierFrequency)
+            val clampedBeat = FrequencyMath.clampBeat(
+                clampedCarrier, point.beatFrequency, carrierRange = newRange
+            )
+            point.copy(carrierFrequency = clampedCarrier, beatFrequency = clampedBeat)
         }
-        
+
         updateEditingCurve(updatedPoints, newRange, curve.beatRange, curve.interpolationType)
     }
 
@@ -1065,7 +1091,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingCarrierReductionPercent(percent: Int) {
         val state = _uiState.value
-        val clampedPercent = percent.coerceIn(0, 50)
+        val clampedPercent = percent.coerceIn(0, RelaxationModeSettings.MAX_CARRIER_REDUCTION_PERCENT)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(carrierReductionPercent = clampedPercent)
@@ -1074,11 +1100,14 @@ class BinauralViewModel @Inject constructor(
     }
     
     /**
-     * Установить процент снижения частоты биений
+     * Установить процент снижения частоты биений.
+     *
+     * Диапазон 0..200: ровно 100% гасит биения, выше — они нарастают снова с
+     * обратным знаком (каналы меняются местами), на 200% модуль исходный.
      */
     fun setEditingBeatReductionPercent(percent: Int) {
         val state = _uiState.value
-        val clampedPercent = percent.coerceIn(0, 100)
+        val clampedPercent = percent.coerceIn(0, RelaxationModeSettings.MAX_BEAT_REDUCTION_PERCENT)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)

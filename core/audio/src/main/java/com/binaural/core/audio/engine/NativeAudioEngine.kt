@@ -202,9 +202,11 @@ class NativeAudioEngine {
         // с нарисованной кривой — в том числе по знаку частоты биений.
         val playbackPoints = if (relaxationSettings.enabled && curve.points.size >= 2) {
             // В STEP и SMOOTH режимах используются ТОЛЬКО виртуальные точки
-            relaxationSettings.generateVirtualPoints(
-                curve.points, curve.interpolationType, curve.splineTension
-            ).takeIf { it.size >= 2 } ?: curve.points
+            // Кривая передаётся целиком: её carrierRange задаёт пол частоты
+            // канала виртуальных точек (иначе движок ушёл бы ниже минимума
+            // графика и разошёлся с нарисованной кривой).
+            relaxationSettings.generateVirtualPoints(curve)
+                .takeIf { it.size >= 2 } ?: curve.points
         } else {
             curve.points
         }

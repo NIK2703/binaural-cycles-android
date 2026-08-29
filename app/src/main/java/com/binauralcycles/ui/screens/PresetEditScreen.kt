@@ -243,7 +243,6 @@ fun PresetEditScreen(
                         PointEditor(
                             point = selectedPoint,
                             carrierRange = editingCurve.carrierRange,
-                            beatRange = editingCurve.beatRange,
                             autoExpandGraphRange = uiState.autoExpandGraphRange,
                             onCarrierFrequencyChange = { viewModel.updateEditingPointCarrierFrequency(it) },
                             onBeatFrequencyChange = { viewModel.updateEditingPointBeatFrequency(it) },

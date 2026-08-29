@@ -94,6 +94,7 @@ Thumbs.db
 
 # Kotlin
 *.kotlin_module
+.kotlin/
 
 # Logs
 logs/
