@@ -15,11 +15,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import com.binauralcycles.ui.components.BatteryOptimizationPromptDialog
 import com.binauralcycles.ui.components.BottomPlaybackPanel
 import com.binauralcycles.ui.screens.PresetEditScreen
 import com.binauralcycles.ui.screens.PresetListScreen
@@ -48,7 +52,22 @@ fun BinauralNavigation(
     val telemetry by viewModel.telemetry.collectAsState()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // Системный диалог добавления в исключения энергосбережения не возвращает
+    // результата, поэтому состояние исключения перечитываем при каждом
+    // возврате приложения на экран — так переключатель в настройках сразу
+    // показывает, разрешил пользователь исключение или нет
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshBatteryOptimizationState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // Панель отображается только когда есть активный пресет
     val showBottomPanel = uiState.activePreset != null
     
@@ -193,6 +212,15 @@ fun BinauralNavigation(
                 onVolumeChange = { viewModel.setVolumeImmediate(it) },
                 onVolumeSave = { viewModel.saveVolume() },
                 modifier = Modifier.align(Alignment.BottomCenter)
+            )
+        }
+
+        // Стартовое напоминание об исключении фонового энергосбережения.
+        // Лежит в корне, поэтому показывается поверх любого экрана
+        if (uiState.showBatteryOptimizationPrompt) {
+            BatteryOptimizationPromptDialog(
+                onConfirm = { viewModel.requestBatteryOptimizationExemption() },
+                onCancel = { viewModel.dismissBatteryOptimizationPrompt() }
             )
         }
     }

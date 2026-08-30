@@ -143,6 +143,14 @@
     <string name="auto_resume_on_app_start">Автовозобновление при запуске</string>
     <string name="auto_resume_on_app_start_desc">Автоматически возобновлять воспроизведение при запуске приложения</string>
     
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Бесперебойное воспроизведение в фоне</string>
+    <string name="uninterrupted_background_playback_desc">Добавьте приложение в исключения фонового энергосбережения для бесперебойного воспроизведения ритмов в фоне</string>
+    <string name="battery_optimization_prompt_title">Бесперебойная работа в фоне</string>
+    <string name="battery_optimization_prompt_message">Система может приостанавливать фоновую работу приложения для экономии заряда — из-за этого воспроизведение ритмов будет прерываться. Добавьте приложение в исключения фонового энергосбережения, чтобы звук не останавливался.</string>
+    <string name="battery_optimization_prompt_confirm">Ок</string>
+    <string name="battery_optimization_settings_unavailable">Не удалось открыть настройки энергопотребления</string>
+    
     <!-- Time units -->
     <string name="seconds_short">сек</string>
     <string name="hz">Гц</string>

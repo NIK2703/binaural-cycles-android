@@ -127,6 +127,23 @@ fun SettingsScreen(
             
             Spacer(modifier = Modifier.height(8.dp))
             
+            // Исключение фонового энергосбережения.
+            // Состояние переключателя = фактическое состояние системы: выдать или
+            // отозвать исключение может только пользователь, поэтому оба
+            // направления открывают системный экран, а не пишут локальный флаг
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.uninterrupted_background_playback)) },
+                supportingContent = { Text(stringResource(R.string.uninterrupted_background_playback_desc)) },
+                trailingContent = {
+                    Switch(
+                        checked = uiState.isIgnoringBatteryOptimizations,
+                        onCheckedChange = { viewModel.setBatteryOptimizationExemption(it) }
+                    )
+                }
+            )
+            
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            
             // Настройки энергопотребления
             PowerSettingsCard(
                 sampleRate = uiState.sampleRate,

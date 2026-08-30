@@ -143,6 +143,14 @@
     <string name="auto_resume_on_app_start">Auto-resume on start</string>
     <string name="auto_resume_on_app_start_desc">Automatically resume playback when app starts</string>
     
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Uninterrupted background playback</string>
+    <string name="uninterrupted_background_playback_desc">Add the app to the background battery optimization exceptions for uninterrupted rhythm playback in the background</string>
+    <string name="battery_optimization_prompt_title">Uninterrupted background operation</string>
+    <string name="battery_optimization_prompt_message">The system may suspend background work to save battery, which will interrupt the rhythms. Add the app to the battery optimization exceptions to keep the sound playing without pauses.</string>
+    <string name="battery_optimization_prompt_confirm">OK</string>
+    <string name="battery_optimization_settings_unavailable">Unable to open power settings</string>
+    
     <!-- Time units -->
     <string name="seconds_short">sec</string>
     <string name="hz">Hz</string>

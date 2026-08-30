@@ -148,6 +148,9 @@ class BinauralPreferencesRepository @Inject constructor(
         private val RESUME_ON_HEADSET_CONNECT_KEY = booleanPreferencesKey("resume_on_headset_connect")
         // Автовозобновление воспроизведения при запуске приложения
         private val AUTO_RESUME_ON_APP_START_KEY = booleanPreferencesKey("auto_resume_on_app_start")
+        // Стартовое напоминание об исключении фонового энергосбережения уже показано
+        private val BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY =
+            booleanPreferencesKey("battery_optimization_prompt_shown")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -529,6 +532,33 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveAutoResumeOnAppStart(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[AUTO_RESUME_ON_APP_START_KEY] = enabled
+        }
+    }
+
+    // Методы для стартового напоминания об исключении фонового энергосбережения
+
+    /**
+     * Получить признак того, что стартовое напоминание об энергосбережении уже показано.
+     *
+     * Напоминание показывается один раз за всё время жизни установки: и «Ок»,
+     * и «Отмена» закрывают его окончательно. Дальше точка входа — переключатель
+     * в настройках.
+     *
+     * @return true — напоминание уже отработало и больше не нужно
+     */
+    fun getBatteryOptimizationPromptShown(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY] ?: false
+        }
+    }
+
+    /**
+     * Сохранить признак того, что стартовое напоминание об энергосбережении отработало
+     * @param shown true — напоминание больше не показывать
+     */
+    suspend fun saveBatteryOptimizationPromptShown(shown: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY] = shown
         }
     }
     

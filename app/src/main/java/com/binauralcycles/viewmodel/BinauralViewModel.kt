@@ -8,7 +8,9 @@ import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.binauralcycles.R
 import com.binauralcycles.service.BinauralPlaybackService
+import com.binauralcycles.util.BatteryOptimizationHelper
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.BinauralPreset
@@ -98,7 +100,16 @@ data class BinauralUiState(
     // Возобновление воспроизведения при подключении гарнитуры
     val resumeOnHeadsetConnect: Boolean = false,
     // Автовозобновление воспроизведения при запуске приложения
-    val autoResumeOnAppStart: Boolean = false
+    val autoResumeOnAppStart: Boolean = false,
+    // Приложение уже добавлено в исключения фонового энергосбережения (состояние системы,
+    // а не настройка: перечитывается при каждом возврате приложения на экран)
+    val isIgnoringBatteryOptimizations: Boolean = false,
+    // Стартовое напоминание об энергосбережении уже показано.
+    // null — значение ещё не прочитано из DataStore: до чтения напоминание не показываем,
+    // иначе у тех, кто уже его закрыл, диалог мелькнёт на старте.
+    val batteryOptimizationPromptShown: Boolean? = null,
+    // true — прямо сейчас нужно показать стартовое напоминание
+    val showBatteryOptimizationPrompt: Boolean = false
 )
 
 @HiltViewModel
@@ -190,6 +201,9 @@ class BinauralViewModel @Inject constructor(
         bindToService()
         loadPreferences()
         observePlaybackState()
+        // Состояние исключения энергосбережения читается синхронно и сразу:
+        // от него зависит, нужно ли показывать стартовое напоминание
+        refreshBatteryOptimizationState()
     }
     
     private fun bindToService() {
@@ -304,11 +318,106 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
             }
         }
+        // Признак «стартовое напоминание об энергосбережении уже показано»
+        viewModelScope.launch {
+            preferencesRepository.getBatteryOptimizationPromptShown().collect { shown ->
+                _uiState.update { it.copy(batteryOptimizationPromptShown = shown) }
+                // Видимость напоминания зависит от двух источников (система + этот флаг),
+                // поэтому пересчитываем её при каждом изменении любого из них
+                updateBatteryOptimizationPromptVisibility()
+            }
+        }
         // Автоматическое расширение границ графика при редактировании
         viewModelScope.launch {
             preferencesRepository.getAutoExpandGraphRange().collect { enabled ->
                 _uiState.update { it.copy(autoExpandGraphRange = enabled) }
             }
+        }
+    }
+
+    /**
+     * Перечитать фактическое состояние исключения фонового энергосбережения.
+     *
+     * Вызывается при старте и при каждом возврате приложения на экран: системный
+     * диалог не даёт результата, поэтому узнать, разрешил пользователь исключение
+     * или нет, можно только повторным опросом системы.
+     */
+    fun refreshBatteryOptimizationState() {
+        val ignoring = BatteryOptimizationHelper.isIgnoringBatteryOptimizations(context)
+        _uiState.update { it.copy(isIgnoringBatteryOptimizations = ignoring) }
+        updateBatteryOptimizationPromptVisibility()
+    }
+
+    /**
+     * Видимость стартового напоминания: показываем один раз и только тем,
+     * кто ещё не добавил приложение в исключения.
+     */
+    private fun updateBatteryOptimizationPromptVisibility() {
+        _uiState.update { state ->
+            state.copy(
+                showBatteryOptimizationPrompt =
+                    state.batteryOptimizationPromptShown == false && !state.isIgnoringBatteryOptimizations
+            )
+        }
+    }
+
+    /**
+     * «Ок» в стартовом напоминании: закрываем напоминание и открываем системный
+     * диалог добавления в исключения фонового энергосбережения.
+     */
+    fun requestBatteryOptimizationExemption() {
+        markBatteryOptimizationPromptHandled()
+        openBatteryOptimizationScreen(enable = true)
+    }
+
+    /**
+     * «Отмена» в стартовом напоминании: напоминание больше не показывается
+     * ни при каком последующем запуске.
+     */
+    fun dismissBatteryOptimizationPrompt() {
+        markBatteryOptimizationPromptHandled()
+    }
+
+    /**
+     * Переключатель «Бесперебойное воспроизведение в фоне» в настройках.
+     *
+     * Переключатель не хранит собственного состояния — оно целиком определяется
+     * системой, а выдать или отозвать исключение может только пользователь.
+     * Поэтому оба направления просто открывают нужный системный экран:
+     * включение — прямой диалог подтверждения, выключение — список оптимизаций,
+     * где исключение отзывается. Фактический результат подхватит
+     * [refreshBatteryOptimizationState] при возврате на экран.
+     */
+    fun setBatteryOptimizationExemption(enabled: Boolean) {
+        // Если пользователь дошёл до настроек, стартовое напоминание ему уже не нужно
+        markBatteryOptimizationPromptHandled()
+        openBatteryOptimizationScreen(enable = enabled)
+    }
+
+    private fun openBatteryOptimizationScreen(enable: Boolean) {
+        val opened = if (enable) {
+            BatteryOptimizationHelper.requestIgnoreBatteryOptimizations(context)
+        } else {
+            BatteryOptimizationHelper.openBatteryOptimizationSettings(context)
+        }
+        if (!opened) {
+            android.util.Log.w(
+                "BinauralViewModel",
+                "Не удалось открыть системный экран энергопотребления (enable=$enable)"
+            )
+            android.widget.Toast.makeText(
+                context,
+                context.getString(R.string.battery_optimization_settings_unavailable),
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    private fun markBatteryOptimizationPromptHandled() {
+        _uiState.update { it.copy(batteryOptimizationPromptShown = true) }
+        updateBatteryOptimizationPromptVisibility()
+        viewModelScope.launch {
+            preferencesRepository.saveBatteryOptimizationPromptShown(true)
         }
     }
 
