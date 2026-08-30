@@ -241,6 +241,13 @@ class BinauralStreamManager(private val context: Context) {
             if (kotlin.math.abs(this.volume - v) < 0.0001f) return@post
             this.volume = v
             current?.setVolume(v)   // live, без handoff
+            // NEXT уже вооружён, но ЕЩЁ НЕ ЗВУЧИТ — громкость обязана дойти и до
+            // него. Иначе правка уровня внутри окна кроссфейда (~250 мс между
+            // beginHandoff и promoteNextToCurrent) досталась бы только уходящему
+            // потоку: он замолкает, а новый пресет зазвучит по-старому.
+            // Безопасно: на PREPARED-треке setVolume — это база, фейд-ин её
+            // перемножает (шейпер 0->1), звука до старта нет.
+            next?.setVolume(v)
         }
     }
 
@@ -485,9 +492,12 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     /**
-     * HANDOFF-КРОССФЕЙД: NEXT готовится и СТАРТУЕТ (фейд-ин) параллельно с фейд-аутом
-     * CURRENT. «Дырки» тишины нет: окно перекрытия = длительность фейда.
-     * Ошибка подготовки/старта NEXT — НЕ повод трогать старый поток.
+     * HANDOFF-КРОССФЕЙД: фейд-аут CURRENT стартует НЕМЕДЛЕННО (до всякой
+     * подготовки), NEXT готовится внутри окна фейд-аута и начинает фейд-ин
+     * ровно в момент тишины CURRENT — см. [onStreamSilent]/[promoteNextToCurrent].
+     *
+     * Порядок строго последовательный (сначала гасим старое, потом поднимаем
+     * новое), но БЕЗ разрыва: переходы стыкуются в одном сообщении актёра.
      */
     private fun beginHandoff() {
         val spec = queue.peek() ?: return
@@ -500,6 +510,12 @@ class BinauralStreamManager(private val context: Context) {
                 "старого трека spec#${orphanReleasing?.spec?.serial}")
             return
         }
+        if (current == null) {
+            // Гасить нечего — это не кроссфейд, а обычный запуск.
+            StreamLogger.d(TAG, "beginHandoff: current==null — обычный запуск spec#${spec.serial}")
+            launchSpec(queue.poll() ?: return)
+            return
+        }
         // ФИКС 3. Захватываем живые координаты CURRENT ДО его fade-out — точку на
         // кривой и пройденное время. NEXT стартует ровно отсюда => бесшовный
         // кроссфейд без скачка фазы/частоты и без сброса часов сессии.
@@ -507,46 +523,58 @@ class BinauralStreamManager(private val context: Context) {
         pendingHandoff = true
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
-        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: кроссфейд — NEXT стартует одновременно с fade-out CURRENT (curveTod=$switchCurveTod, elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
+        // Обогащённую спеку кладём обратно в очередь: если prepare() не успеет к
+        // моменту тишины CURRENT, спеку поднимет onStreamFullyStopped() — и она
+        // обязана нести continuity, иначе новый поток стартовал бы с нуля.
+        queue.offer(enriched)
+        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: фейд-аут CURRENT стартует немедленно, " +
+            "фейд-ин NEXT — ровно в момент его тишины (curveTod=$switchCurveTod, " +
+            "elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
+
+        // 1. ФЕЙД-АУТ ПЕРВЫМ, до всякой подготовки.
+        //
+        // Раньше первым готовился NEXT и только потом гасился CURRENT: реакция
+        // на нажатие откладывалась на prepare() (создание AudioTrack через
+        // binder + allocateDirect + генерация первого пакета — десятки
+        // миллисекунд на нити актёра, а актёр в это время не исполняет вообще
+        // ничего, включая сам фейд). Теперь звук уходит в тишину в первом же
+        // сообщении актёра.
+        //
+        // Порядок строго последовательный, а не параллельный: два бинауральных
+        // пресета с РАЗНЫМИ несущими и биениями, звучащие одновременно, дают
+        // биения между собой (разностная частота |f1-f2| попадает в слышимый
+        // диапазон и воспринимается как грязь/гул) — ровно поэтому
+        // перекрывающийся equal-power кроссфейд здесь звучит хуже, чем
+        // «догасить старое, поднять новое». Перекрытия нет, но и разрыва нет:
+        // фейд-ин стартует в том же сообщении актёра, где CURRENT дошёл до нуля.
+        fadeOutCurrent(FadeTarget.SWITCH)
+
+        // 2. NEXT готовится ПОД ПРИКРЫТИЕМ фейд-аута: 250 мс с большим запасом
+        //    хватает на prepare(). Если подготовка всё же не успела к моменту
+        //    тишины — спека не теряется, её поднимет onStreamFullyStopped().
         val candidate = createStream(enriched)
         if (!candidate.prepare()) {
-            StreamLogger.e(TAG, "beginHandoff: prepare NEXT spec#${spec.serial} не удался — старый продолжает играть")
-            listener?.onError("stream prepare failed (spec#${spec.serial}), keeping current playback")
+            StreamLogger.e(TAG, "beginHandoff: prepare NEXT spec#${spec.serial} не удался — " +
+                "фейд-аут уже идёт, спеку поднимет onStreamFullyStopped")
+            listener?.onError("stream prepare failed (spec#${spec.serial}); restarting")
             pendingHandoff = false
-            return // старый продолжает играть; спека остаётся в очереди для повторной попытки
-        }
-        next = candidate
-        setState(ManagerState.HANDOFF)
-        // Громкость ДО start(): база нужна к первому кадру под множителем ~0.
-        candidate.setVolume(volume)
-
-        // NEXT начинает фейд-ин (equal-power sin) первым, на ~1 мс раньше фейд-аута
-        // CURRENT: лучше микроскопическое перекрытие, чем микродырка тишины.
-        if (!candidate.start(
-                onFullyStarted = {
-                    StreamLogger.d(TAG, "beginHandoff: NEXT spec#${spec.serial} fade-in завершён, ждём повышения")
-                },
-                shape = FadeShape.EQUAL_POWER
-            )
-        ) {
-            StreamLogger.e(TAG, "beginHandoff: start NEXT spec#${spec.serial} не удался — старый продолжает играть")
-            candidate.abort()   // ни разу не звучал — тихо
-            next = null
-            pendingHandoff = false
-            setState(ManagerState.RUNNING)
-            listener?.onError("next stream start failed; keeping current playback")
             return
         }
-        // CURRENT уходит в зеркальный фейд-аут (equal-power cos); onSilent повысит NEXT.
-        fadeOutCurrent(FadeTarget.SWITCH)
+        next = candidate
+        // Громкость ДО start(): база нужна к первому кадру под множителем ~0.
+        candidate.setVolume(volume)
+        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: NEXT вооружён и ждёт тишины CURRENT")
     }
 
     /**
      * Шторм настроек во время кроссфейда.
-     * - NEXT уже ЗВУЧИТ: повышаем его досрочно до current и запускаем новый кроссфейд
-     *   к новейшей спеке (хвост очереди разбирает promoteNextToCurrent). Осиротевший
-     *   старый поток доигрывает свой фейд сам — его колбэки отфильтрованы.
-     * - NEXT не звучит (armed/отсутствует): бесшумная замена + немедленный старт.
+     * - NEXT уже ЗВУЧИТ (защитная ветка): повышаем его досрочно до current,
+     *   хвост очереди разберёт [promoteNextToCurrent].
+     * - NEXT не звучит (вооружён/отсутствует) — тихая замена вооружённого
+     *   потока. Стартовать его здесь НЕЛЬЗЯ: фейд-ин обязан начаться ровно в
+     *   момент тишины CURRENT, иначе два пресета зазвучат одновременно
+     *   (см. комментарий про биения в [beginHandoff]). Стартует его
+     *   [promoteNextToCurrent] из [onStreamSilent].
      */
     private fun rearmNextIfStale() {
         val spec = queue.peek() ?: return
@@ -558,16 +586,13 @@ class BinauralStreamManager(private val context: Context) {
             // Повышенный NEXT тут же получает fade-out от нового beginHandoff(),
             // а applyShaper() в ветке «замена активного шейпера» между
             // setVolume(base) и apply(PLAY) даёт эффективную громкость
-            // userVolume·fromC² — провал втрое при fromC≈0.3. Формально
-            // EQUAL_POWER тоже перестаёт быть корректным: он рассчитан ровно
-            // на два потока, а звучать начинают три.
+            // userVolume·fromC² — провал втрое при fromC≈0.3.
             //
             // Правильно — дождаться конца fade-in: спека уже лежит в очереди
-            // (latest-wins), и её разберёт promoteNextToCurrent(), когда
-            // CURRENT дойдёт до тишины (onStreamSilent) и повысит NEXT.
+            // (latest-wins), и её разберёт promoteNextToCurrent().
             if (n.isFadingIn) {
                 StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} ещё в fade-in — " +
-                    "повышение отложено до тишины CURRENT; spec#${spec.serial} ждёт в очереди")
+                    "повышение отложено до конца фейд-ина; spec#${spec.serial} ждёт в очереди")
                 return
             }
             StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} играет — повышаем и новый хэндофф к spec#${spec.serial}")
@@ -591,15 +616,7 @@ class BinauralStreamManager(private val context: Context) {
         }
         next = candidate
         candidate.setVolume(volume)
-        if (!candidate.start(
-                onFullyStarted = { StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${spec.serial} fade-in завершён") },
-                shape = FadeShape.EQUAL_POWER
-            )
-        ) {
-            candidate.abort()
-            next = null
-            pendingHandoff = false
-        }
+        StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${spec.serial} вооружён и ждёт тишины CURRENT")
     }
 
     /** Сменить цель идущего/нового фейда И запустить фейд. */
@@ -626,13 +643,17 @@ class BinauralStreamManager(private val context: Context) {
 
     /**
      * CURRENT дошёл до нуля в кроссфейде: уже тих, релиз ещё может идти.
-     * Повышаем играющий NEXT до current — без повторного запуска и без паузы.
+     *
+     * Это и есть точка старта фейд-ина NEXT. Важно, что повышение и старт
+     * происходят В ТОМ ЖЕ сообщении актёра, в котором CURRENT сообщил о тишине:
+     * между окончанием фейд-аута и началом фейд-ина нет ни ожидания релиза
+     * старого трека, ни таймера — только длительность самого перехода.
      */
     private fun onStreamSilent(s: BinauralStreamImpl) {
         if (s !== current) return   // осиротел (шторм/стоп) — его судьба решена отдельно
         if (fadeTarget != FadeTarget.SWITCH || state != ManagerState.HANDOFF) return
         val n = next ?: return
-        if (n.lifecycle != StreamLifecycle.PLAYING) return
+        if (n.lifecycle != StreamLifecycle.PREPARED) return
         promoteNextToCurrent()
     }
 
@@ -657,13 +678,22 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     /**
-     * NEXT уже играет: делаем его current ровно в момент тишины старого.
+     * Повышение NEXT — ровно в момент тишины CURRENT.
+     *
+     * Кроссфейд ПОСЛЕДОВАТЕЛЬНЫЙ: до этой точки звучал только CURRENT (фейд-аут),
+     * отсюда звучит только NEXT (фейд-ин). Перекрытия нет — два бинауральных
+     * пресета с разными несущими, sounding одновременно, порождают слышимые
+     * разностные биения. Разрыва тоже нет: [onStreamSilent] приходит из того же
+     * сообщения актёра, в котором CURRENT дошёл до нуля, и start() NEXT
+     * исполняется сразу за ним.
+     *
      * Фикс 3 сохранён: NEXT несёт switchCurveTod/switchElapsedMs из обогащённой спеки.
      */
     private fun promoteNextToCurrent() {
         val n = next ?: return
         val outgoing = current
-        StreamLogger.d(TAG, "promoteNextToCurrent: spec#${n.spec.serial} — кроссфейд завершён")
+        StreamLogger.d(TAG, "promoteNextToCurrent: spec#${n.spec.serial} — CURRENT в тишине, " +
+            "фейд-ин NEXT стартует без паузы")
         next = null
         current = n
         currentRef.set(n)
@@ -676,9 +706,35 @@ class BinauralStreamManager(private val context: Context) {
         accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
         segmentStartWallMs = System.currentTimeMillis()
         pendingHandoff = false
-        setState(ManagerState.RUNNING)
         _isPlaying.value = true
         updateWakeLock()
+
+        if (n.lifecycle == StreamLifecycle.PREPARED) {
+            // Штатный путь: NEXT молчит, стартуем его фейд-ин здесь же.
+            setState(ManagerState.FADE_IN)
+            if (!n.start(
+                    onFullyStarted = {
+                        StreamLogger.d(TAG, "promoteNextToCurrent: NEXT spec#${n.spec.serial} " +
+                            "фейд-ин завершён — кроссфейд окончен")
+                        if (state == ManagerState.FADE_IN) setState(ManagerState.RUNNING)
+                    },
+                    shape = FadeShape.EQUAL_POWER
+                )
+            ) {
+                StreamLogger.e(TAG, "promoteNextToCurrent: start NEXT spec#${n.spec.serial} не удался")
+                n.abort()
+                current = null
+                currentRef.set(null)
+                _isPlaying.value = false
+                setState(ManagerState.IDLE)
+                listener?.onError("next stream start failed")
+                updateWakeLock()
+                return
+            }
+        } else {
+            // Защитная ветка: NEXT уже звучит (промоушен из rearmNextIfStale).
+            setState(ManagerState.RUNNING)
+        }
         // Хвост шторма: если за время кроссфейда прилетела спека новее — сразу новый хэндофф.
         val tail = queue.poll()
         if (tail != null && !tail.audioEquals(n.spec)) {
@@ -779,28 +835,19 @@ class BinauralStreamManager(private val context: Context) {
             }
 
             FadeTarget.SWITCH -> {
-                if (current != null) {
-                    // Нормальный кроссфейд: повышение уже состоялось (а релиз старого
-                    // отфильтрован по идентичности в onStreamReleased). Сюда попадаем,
-                    // только если NEXT не дожил до повышения (например, погиб в рантайме):
-                    // спека в очереди — повторяем хэндофф против живого current.
-                    val spec = queue.poll()
-                    if (spec != null && !current!!.spec.audioEquals(spec)) {
-                        StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH, NEXT не выжил — повторный хэндофф spec#${spec.serial}")
-                        queue.offer(spec)
-                        beginHandoff()
-                    }
+                // Сюда попадаем, только если кроссфейд не состоялся: NEXT не был
+                // подготовлен к моменту тишины CURRENT (prepare не удался или не
+                // успел) либо погиб в рантайме. current к этому моменту уже
+                // занулён выше, поэтому «повторить хэндофф против живого current»
+                // невозможно — поднимаем спеку обычным запуском.
+                val spec = queue.poll()
+                if (spec == null) {
+                    resetSession()
+                    StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH без спек — IDLE")
+                    setState(ManagerState.IDLE)
                 } else {
-                    // Вырожденный случай (ток был без звука) — легаси-последовательная схема
-                    val spec = queue.poll()
-                    if (spec == null) {
-                        resetSession()
-                        StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH без спек — IDLE")
-                        setState(ManagerState.IDLE)
-                    } else {
-                        StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH -> launchSpec spec#${spec.serial}")
-                        launchSpec(spec)
-                    }
+                    StreamLogger.w(TAG, "onStreamFullyStopped: SWITCH без NEXT -> launchSpec spec#${spec.serial}")
+                    launchSpec(spec)
                 }
             }
         }

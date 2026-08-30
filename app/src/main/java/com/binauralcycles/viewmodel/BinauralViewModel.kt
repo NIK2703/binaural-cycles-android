@@ -8,10 +8,7 @@ import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.binauralcycles.BuildConfig
 import com.binauralcycles.R
-import com.binauralcycles.debug.DebugCommandBus
-import com.binauralcycles.debug.DebugCommandExecutor
 import com.binauralcycles.service.BinauralPlaybackService
 import com.binauralcycles.util.BatteryOptimizationHelper
 import com.binaural.core.audio.engine.SampleRate
@@ -127,6 +124,34 @@ data class BinauralUiState(
  */
 private const val SETTINGS_FADE_DEBOUNCE_MS = 300L
 
+/**
+ * Сборка [BinauralConfig] из кривой пресета и ГЛОБАЛЬНЫХ настроек — тех, что
+ * не лежат в пресете (громкость, перестановка каналов, нормализация).
+ *
+ * Вынесена из [BinauralViewModel] потому, что ровно ту же сборку повторяет
+ * отладочный исполнитель команд: он работает БЕЗ ViewModel (экран выключен,
+ * активити уничтожена) и читает глобальные настройки напрямую из репозитория.
+ * Две копии этой сборки разошлись бы при первом же новом поле конфига.
+ */
+internal fun buildPlaybackConfig(
+    frequencyCurve: FrequencyCurve,
+    volume: Float,
+    channelSwap: ChannelSwapSettings,
+    normalization: VolumeNormalizationSettings
+): BinauralConfig = BinauralConfig(
+    frequencyCurve = frequencyCurve,
+    volume = volume,
+    channelSwapEnabled = channelSwap.enabled,
+    channelSwapIntervalSeconds = channelSwap.intervalSeconds,
+    channelSwapMode = channelSwap.mode,
+    channelSwapTrendPoints = channelSwap.trendPoints,
+    channelSwapFadeEnabled = channelSwap.fadeEnabled,
+    channelSwapFadeDurationMs = channelSwap.fadeDurationMs,
+    channelSwapPauseDurationMs = channelSwap.pauseDurationMs,
+    normalizationType = normalization.type,
+    volumeNormalizationStrength = normalization.strength
+)
+
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -184,10 +209,6 @@ class BinauralViewModel @Inject constructor(
     
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
-
-    // Исполнитель adb-команд (см. com.binauralcycles.debug.DebugCommandReceiver).
-    // В release блок ниже вырезается R8: BuildConfig.DEBUG — константа false.
-    private var debugCommandExecutor: DebugCommandExecutor? = null
 
     // Переключение пресета — синхронный кроссфейд: UPDATE config уходит в beginHandoff(),
     // NEXT начинает фейд-ин одновременно с фейд-аутом CURRENT. Никаких корутин, задержек
@@ -252,10 +273,6 @@ class BinauralViewModel @Inject constructor(
         // Состояние исключения энергосбережения читается синхронно и сразу:
         // от него зависит, нужно ли показывать стартовое напоминание
         refreshBatteryOptimizationState()
-        if (BuildConfig.DEBUG) {
-            debugCommandExecutor = DebugCommandExecutor(context, this)
-                .also { DebugCommandBus.attach(it) }
-        }
     }
     
     private fun bindToService() {
@@ -546,18 +563,11 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.setCurrentPresetId(presetId)
         
         // Формируем конфиг из глобальных настроек каналов и нормализации
-        val config = BinauralConfig(
+        val config = buildPlaybackConfig(
             frequencyCurve = preset.frequencyCurve,
             volume = state.volume,
-            channelSwapEnabled = state.channelSwapSettings.enabled,
-            channelSwapIntervalSeconds = state.channelSwapSettings.intervalSeconds,
-            channelSwapMode = state.channelSwapSettings.mode,
-            channelSwapTrendPoints = state.channelSwapSettings.trendPoints,
-            channelSwapFadeEnabled = state.channelSwapSettings.fadeEnabled,
-            channelSwapFadeDurationMs = state.channelSwapSettings.fadeDurationMs,
-            channelSwapPauseDurationMs = state.channelSwapSettings.pauseDurationMs,
-            normalizationType = state.volumeNormalizationSettings.type,
-            volumeNormalizationStrength = state.volumeNormalizationSettings.strength
+            channelSwap = state.channelSwapSettings,
+            normalization = state.volumeNormalizationSettings
         )
 
         val relaxationSettings = preset.relaxationModeSettings
@@ -1558,18 +1568,11 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
-        val config = BinauralConfig(
+        val config = buildPlaybackConfig(
             frequencyCurve = frequencyCurve,
             volume = state.volume,
-            channelSwapEnabled = channelSwapSettings.enabled,
-            channelSwapIntervalSeconds = channelSwapSettings.intervalSeconds,
-            channelSwapMode = channelSwapSettings.mode,
-            channelSwapTrendPoints = channelSwapSettings.trendPoints,
-            channelSwapFadeEnabled = channelSwapSettings.fadeEnabled,
-            channelSwapFadeDurationMs = channelSwapSettings.fadeDurationMs,
-            channelSwapPauseDurationMs = channelSwapSettings.pauseDurationMs,
-            normalizationType = volumeNormalizationSettings.type,
-            volumeNormalizationStrength = volumeNormalizationSettings.strength
+            channelSwap = channelSwapSettings,
+            normalization = volumeNormalizationSettings
         )
         
         android.util.Log.d("BinauralViewModel", "updateAudioConfig: activePreset=${state.activePreset?.name}, " +
@@ -1759,9 +1762,6 @@ class BinauralViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        // Иначе шина держала бы мёртвый ViewModel до конца жизни процесса
-        debugCommandExecutor?.let { DebugCommandBus.detach(it) }
-        debugCommandExecutor = null
         // Зануляем callback, чтобы сервис не держал ссылку на уничтоженный ViewModel
         playbackService?.onPresetSwitch = null
         try {

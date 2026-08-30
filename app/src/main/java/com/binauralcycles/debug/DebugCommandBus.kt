@@ -18,15 +18,23 @@ internal val DEBUG_HELP = """
               пробелом, и команда из двух слов развалилась бы)
     Ответ:    печатается в resultData вызова am broadcast; то же самое
               дублируется в logcat (тег BinauralDebug).
-    Требование: MainActivity на экране — исполнитель команд живёт
-              в BinauralViewModel.
+    Условие:  процесс приложения жив. Экран может быть выключен и активити
+              уничтожена — исполнитель подключён в Application и работает
+              через сервис, поэтому фоновые проверки никого не будят.
+              Команды, меняющие звук, требуют запущенного воспроизведения
+              (сервис останавливает сам себя при остановке).
 
     help                     этот список
     ui                       открыть главный экран
     exit                     закрыть приложение
     status | st              сводка состояния
     presets                  список пресетов (* — активный)
-    play | pause | toggle    воспроизведение
+    state                    состояние автомата звука (HANDOFF/FADE_IN/…)
+    play                     старт воспроизведения
+    stop                     полная остановка с фейд-аутом (утилизация)
+    pause                    мягкая пауза с фейд-аутом (поток жив)
+    resume                   возобновление после мягкой паузы
+    toggle                   play/stop
     preset <n|id|имя>        выбрать и запустить пресет (n — с 1)
     next | prev              соседний пресет
     switch <n> [мс]          n быстрых смен подряд (стресс кроссфейда)
@@ -56,7 +64,8 @@ internal val DEBUG_HELP = """
 /**
  * Точка, умеющая выполнять одну текстовую команду и возвращать результат.
  *
- * Единственная реализация — [DebugCommandExecutor] поверх `BinauralViewModel`.
+ * Единственная реализация — [DebugCommandExecutor] поверх сервиса и
+ * репозитория настроек.
  */
 interface DebugCommandTarget {
     fun execute(command: String): String
@@ -65,8 +74,8 @@ interface DebugCommandTarget {
 /**
  * Процессный «почтовый ящик» для adb-команд (только debug).
  *
- * Живёт в `main`, потому что исполнителю нужен доступ к `BinauralViewModel`,
- * который лежит там же. В release это ничего не стоит: `BuildConfig.DEBUG`
+ * Живёт в `main`, потому что исполнителю нужны сервис воспроизведения и
+ * репозиторий настроек, а они там же. В release это ничего не стоит: `BuildConfig.DEBUG`
  * — константа `false`, R8 вырезает и саму регистрацию, и тела методов.
  *
  * Зачем шина, а не прямой вызов из приёмника: приёмник объявлен в source set
@@ -79,7 +88,7 @@ object DebugCommandBus {
     @Volatile
     private var target: DebugCommandTarget? = null
 
-    /** Регистрируется в `BinauralViewModel.init`, снимается в `onCleared`. */
+    /** Регистрируется в `BinauralCyclesApp.onCreate` — живёт, пока жив процесс. */
     fun attach(target: DebugCommandTarget) {
         if (BuildConfig.DEBUG) this.target = target
     }
@@ -102,10 +111,10 @@ object DebugCommandBus {
         if (line.isEmpty()) {
             return "Пустая команда. Отправьте \"help\" для списка команд."
         }
-        // help отвечает всегда: подсказка нужнее всего именно когда UI не запущен.
+        // help отвечает всегда: подсказка нужнее всего именно когда что-то не так.
         if (line.equals("help", ignoreCase = true) || line == "?") return DEBUG_HELP
-        val t = target ?: return "ViewModel не подключён (UI не на экране). " +
-            "Запустите приложение и повторите команду."
+        val t = target ?: return "Исполнитель не подключён — процесс приложения не запущен. " +
+            "Откройте приложение один раз (или пошлите `ui`) и повторите команду."
         return try {
             t.execute(line)
         } catch (e: Throwable) {

@@ -295,6 +295,28 @@ class BinauralStreamImpl(
     /** Runnable завершения фейда: хранится, чтобы "разворот рампы" мог его отменить. */
     @Volatile private var fadeCompletion: Runnable? = null
 
+    /**
+     * Отложенный колбэк «поток тих» — РОВНО в конце рампы fade-out, на
+     * [FADE_GUARD_MS] раньше [fadeCompletion].
+     *
+     * Разделённые точки обязательны: менеджер стартует фейд-ин NEXT именно в
+     * момент тишины, а утилизация старого трека (setVolume(0) + pause +
+     * release) идёт с гарантийным запасом — рампа VolumeShaper начинается не
+     * мгновенно, а на следующем цикле микшера. Если бы фейд-ин ждал
+     * [fadeCompletion], между пресетами зияла бы дыра в [FADE_GUARD_MS] мс
+     * тишины; если бы утилизация не ждала вовсе — обрыв рампы на ненулевой
+     * громкости дал бы щелчок.
+     */
+    @Volatile private var silentCompletion: Runnable? = null
+
+    /** Снять оба отложенных колбэка фейда (завершение и точку тишины). */
+    private fun cancelFadeCallbacks() {
+        fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+        fadeCompletion = null
+        silentCompletion?.let { controlHandler.removeCallbacks(it) }
+        silentCompletion = null
+    }
+
     // -------------------------------------------------- мягкая пауза (состояние)
     /**
      * true — поток заморожен: трек на паузе, писатель припаркован, пакет и
@@ -705,7 +727,7 @@ class BinauralStreamImpl(
             // рампа не нужна (шейпер на приостановленном треке и не пошёл бы).
             // Утилизируем сразу, не растягивая stop на длительность фейда.
             StreamLogger.d(TAG, "stop spec#${spec.serial}: на мягкой паузе — утилизация без рампы")
-            fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+            cancelFadeCallbacks()
             fadeMode = FadeMode.OUT
             pendingOnSilent = onSilent
             finalizeStop(onFullyStopped)
@@ -713,7 +735,7 @@ class BinauralStreamImpl(
         }
         fadeMode = FadeMode.OUT
         pendingOnSilent = onSilent
-        fadeCompletion?.let { controlHandler.removeCallbacks(it) }   // снять фейд-ин, если был
+        cancelFadeCallbacks()   // снять фейд-ин, если был
 
         // Текущее значение рампы: если остановили посреди fade-in — фейд-аут короткий.
         val cur = currentMultiplier()
@@ -725,6 +747,25 @@ class BinauralStreamImpl(
             // Уже в нуле: гасим базу и снимаем активный фейд-ин-шейпер (тишина).
             try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
             closeShaper()
+        }
+        // Точка тишины — ровно в конце рампы. Именно здесь менеджер стартует
+        // фейд-ин NEXT (см. [silentCompletion]): ждать ещё FADE_GUARD_MS значит
+        // вставить между пресетами 60 мс тишины.
+        if (onSilent != null && dur > 0L) {
+            val silent = Runnable {
+                if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.OUT) {
+                    silentCompletion = null
+                    StreamLogger.d(TAG, "stop spec#${spec.serial}: ТОЧКА ТИШИНЫ " +
+                        "(остаток рампы=${currentMultiplier()}) — менеджер стартует фейд-ин NEXT")
+                    val cb = pendingOnSilent
+                    pendingOnSilent = null
+                    try { cb?.invoke() } catch (t: Throwable) {
+                        Log.e(TAG, "onSilent failed: ${t.message}")
+                    }
+                }
+            }
+            silentCompletion = silent
+            controlHandler.postDelayed(silent, dur)
         }
         val completion = Runnable { finalizeStop(onFullyStopped) }
         fadeCompletion = completion
@@ -739,16 +780,37 @@ class BinauralStreamImpl(
         // финал звучит вспышкой — тот самый хлопок в конце пресета.
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
 
-        // Поток гарантированно тих (рампа в нуле, база 0) — сообщаем менеджеру
-        // ДО перехода в STOPPING: это точка повышения NEXT при кроссфейде.
+        // Если точка тишины по какой-то причине не сработала (dur == 0, стоп с
+        // паузы, отменённый колбэк) — сообщаем менеджеру здесь, ДО перехода в
+        // STOPPING: это страховка повышения NEXT при кроссфейде, а не основной
+        // путь (основной — отдельный колбэк ровно в конце рампы, см. stop()).
         pendingOnSilent?.let {
             pendingOnSilent = null
+            StreamLogger.d(TAG, "finalizeStop spec#${spec.serial}: onSilent по страховке")
             try { it() } catch (t: Throwable) { Log.e(TAG, "onSilent failed: ${t.message}") }
         }
 
         if (!lifecycleRef.compareAndSet(StreamLifecycle.PLAYING, StreamLifecycle.STOPPING)) {
             onFullyStopped(); return
         }
+
+        // Снимаем трек СРАЗУ, а не в releaseInternal() после опроса латча.
+        //
+        // pause() прерывает заблокированный write(WRITE_BLOCKING)
+        // (mProxy->interrupt): писатель возвращается из записи немедленно, а не
+        // доигрывает остаток чанка. WRITE_CHUNK_MS = 8000 мс, а write()
+        // разблокируется лишь когда в кольце есть место под ВЕСЬ чанк, то есть
+        // писатель может провисеть в нём до ~4.5 с (кольцо 2 МБ ≈ 5.5 с @48 кГц
+        // минус маржа 1 с). Всё это время трек живёт в AudioFlinger, а
+        // orphan-гейт менеджера ([handoffBlocked]) держит СЛЕДУЮЩИЙ хэндофф
+        // ровно на остаток чанка — отсюда и «случайная» задержка смены пресета
+        // (замер на устройстве: 1.7–4.9 с).
+        //
+        // Неслышно: к этому моменту громкость уже в нуле (setVolume(0) выше,
+        // плюс множитель шейпера), остаток кольца не нужен. pause() идемпотентен,
+        // повторный вызов в releaseInternal() безвреден.
+        try { audioTrack?.pause() } catch (_: Exception) {}
+
         // Писатель выходит не дольше одного чанка; ждём неблокирующим опросом на актёре.
         // Всё это время трек рендерит тишину (база 0 и/или множитель 0).
         // Дедлайн чуть больше полного ожидания в releaseInternal (WRITER_EXIT_WAIT_MS):
@@ -777,7 +839,7 @@ class BinauralStreamImpl(
         }
         val cur = currentMultiplier()
         fadeMode = FadeMode.IN
-        fadeCompletion?.let { controlHandler.removeCallbacks(it) }   // отменить утилизацию
+        cancelFadeCallbacks()   // отменить утилизацию и точку тишины
         val dur = (fadeInMs * (1f - cur)).toLong().coerceAtLeast(40L)
         StreamLogger.d(TAG, "reverseFadeToPlaying spec#${spec.serial}: разворот cur=$cur dur=${dur}ms")
         applyShaper(from = cur, to = 1f, durationMs = dur)
@@ -808,8 +870,7 @@ class BinauralStreamImpl(
         // Идущий фейд (например кроссфейд переключения) перехватываем: его
         // финалом была утилизация, теперь — заморозка. Отменять рампу НЕЛЬЗЯ:
         // пауза посреди громкого участка дала бы щелчок.
-        fadeCompletion?.let { controlHandler.removeCallbacks(it) }
-        fadeCompletion = null
+        cancelFadeCallbacks()
 
         if (fadeMode != FadeMode.OUT) {
             fadeMode = FadeMode.OUT
@@ -857,7 +918,7 @@ class BinauralStreamImpl(
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
         closeShaper()
         fadeMode = FadeMode.NONE
-        fadeCompletion = null
+        cancelFadeCallbacks()
 
         // Слышимая позиция — по голове воспроизведения, а не по UI-часам:
         // пауза любой длительности не сдвинет ни график, ни точку возобновления.
@@ -878,7 +939,7 @@ class BinauralStreamImpl(
             StreamLogger.w(TAG, "resume spec#${spec.serial}: не на паузе — нечего возобновлять")
             return false
         }
-        fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+        cancelFadeCallbacks()
         fadeMode = FadeMode.IN
 
         // Позиция графика размораживается ДО play(): указатель продолжает ровно

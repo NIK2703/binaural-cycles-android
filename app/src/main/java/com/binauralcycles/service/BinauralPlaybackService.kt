@@ -28,6 +28,7 @@ import com.binauralcycles.BuildConfig
 import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.stream.BinauralStreamManager
+import com.binaural.core.audio.stream.ManagerState
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
@@ -90,6 +91,17 @@ class BinauralPlaybackService : Service() {
         // Ссылка на экземпляр сервиса для статических методов
         @Volatile
         private var serviceInstance: BinauralPlaybackService? = null
+
+        /**
+         * Живой экземпляр сервиса или `null`.
+         *
+         * `null` — это норма, а не ошибка: сервис `START_STICKY`, но сам себя
+         * останавливает (`stopSelf()`) при остановке воспроизведения. Поэтому
+         * вызыватель обязан уметь работать и без экземпляра — запускать сервис
+         * интентами [ACTION_START]/[ACTION_STOP] и читать состояние из
+         * статических [StateFlow] выше, которые переживают сам сервис.
+         */
+        internal val liveInstance: BinauralPlaybackService? get() = serviceInstance
         
         /**
          * Приложение на экране - запускаем частое обновление частот (1 сек)
@@ -1175,6 +1187,12 @@ class BinauralPlaybackService : Service() {
     fun switchPresetWithFade(config: BinauralConfig) {
         audioEngine?.switchPresetWithFade(config)
     }
+
+    /**
+     * Состояние актёра звукового менеджера — только для диагностики
+     * (отладочный командный интерфейс). null, пока движок не создан.
+     */
+    fun managerState(): ManagerState? = audioEngine?.managerState?.value
     
     fun setCurrentPresetName(name: String?) {
         _currentPresetName.value = name
