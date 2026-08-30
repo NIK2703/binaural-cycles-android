@@ -1,5 +1,9 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -60,6 +64,15 @@ private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 
 // Максимальная частота для графика
 private const val MAX_FREQUENCY = 2000.0f
+
+// Диаметр маркера точки на графике. Вынесен в константу, чтобы размер в
+// расчёте разъезда меток оси Y совпадал с размером нарисованного круга —
+// иначе метка уезжала бы от воображаемой точки, а не от настоящей.
+private val POINT_MARKER_SIZE = 24.dp
+private val POINT_MARKER_SELECTED_SIZE = 30.dp
+
+// Вынос оси Y влево за область графика (метки торчат наружу).
+private val Y_AXIS_LABEL_OFFSET_X = (-8).dp
 
 /**
  * Направление перетаскивания
@@ -507,16 +520,100 @@ fun FrequencyGraph(
 
             }
 
+            // Метки оси Y: прижаты к краям области графика, и при
+            // пересечении с маркером точки уезжают внутрь (наружу
+            // нельзя — край карточки). Сдвиг минимальный, ровно
+            // настолько, чтобы круг не пересекал прямоугольник метки.
+            // Размер узнаём после первой раскладки.
+            var maxLabelSize by remember { mutableStateOf(IntSize.Zero) }
+            var minLabelSize by remember { mutableStateOf(IntSize.Zero) }
+
+            // Радиусы маркеров в пикселях — те же, что рисует
+            // DraggablePoint, иначе метка уезжала бы от воображаемой
+            // точки, а не от нарисованной.
+            val markerRadiusPx = with(density) { (POINT_MARKER_SIZE / 2).roundToPx().toFloat() }
+            val selectedMarkerRadiusPx = with(density) { (POINT_MARKER_SELECTED_SIZE / 2).roundToPx().toFloat() }
+
+            // Положение каждой точки на графике с учётом текущего
+            // перетаскивания (displayTime/displayCarrier), как и
+            // отрисовка. Без этого метка уезжала бы от сохранённого
+            // положения, пока пользователь тащит точку по экрану.
+            val markers = remember(
+                displayPoints, points, graphParams, selectedPointIndex, dragState,
+                markerRadiusPx, selectedMarkerRadiusPx
+            ) {
+                displayPoints.map { point ->
+                    val originalIndex = points.indexOf(point)
+                    val time = if (dragState.startIndex == originalIndex && dragState.currentTime != null)
+                        dragState.currentTime!!
+                    else
+                        point.time
+                    val carrier = if (dragState.startIndex == originalIndex &&
+                        (dragState.direction == DragDirection.VERTICAL || dragState.direction == DragDirection.NONE)
+                    ) dragState.currentCarrier else point.carrierFrequency
+                    PointMarker(
+                        cx = graphParams.timeToX(time),
+                        cy = graphParams.carrierToY(carrier),
+                        radius = if (selectedPointIndex == originalIndex) selectedMarkerRadiusPx else markerRadiusPx
+                    )
+                }
+            }
+
+            // Левый край метки в координатах области графика
+            // (ось смещена влево за пределы Box'а на Y_AXIS_LABEL_OFFSET_X).
+            val labelLeftPx = with(density) { Y_AXIS_LABEL_OFFSET_X.roundToPx() }.toFloat()
+            val graphHeightF = heightPx.toFloat()
+
+            // При активном перетаскивании анимация выключена: метка
+            // должна идти вровень с маркером, иначе она бы на ходу
+            // пересекала точку. В остальных случаях — короткий tween,
+            // чтобы скачок при добавлении/выделении точки выглядел как
+            // плавный разъезд, а не дёрганье.
+            val isDragging = dragState.startIndex >= 0
+            val shiftSpec: AnimationSpec<Float> =
+                if (isDragging) snap() else tween(durationMillis = 150)
+
+            val maxLabelTargetPx = if (maxLabelSize == IntSize.Zero) 0f else
+                minimalLabelShift(
+                    markers = markers,
+                    labelLeft = labelLeftPx,
+                    labelRight = labelLeftPx + maxLabelSize.width,
+                    labelHeight = maxLabelSize.height.toFloat(),
+                    graphHeight = graphHeightF,
+                    shiftDown = true
+                )
+            val minLabelTargetPx = if (minLabelSize == IntSize.Zero) 0f else
+                minimalLabelShift(
+                    markers = markers,
+                    labelLeft = labelLeftPx,
+                    labelRight = labelLeftPx + minLabelSize.width,
+                    labelHeight = minLabelSize.height.toFloat(),
+                    graphHeight = graphHeightF,
+                    shiftDown = false
+                )
+            val maxLabelShiftPx by animateFloatAsState(
+                targetValue = maxLabelTargetPx, animationSpec = shiftSpec, label = "maxLabelShift"
+            )
+            val minLabelShiftPx by animateFloatAsState(
+                targetValue = minLabelTargetPx, animationSpec = shiftSpec, label = "minLabelShift"
+            )
+
             // Ось Y
-            Column(modifier = Modifier.align(Alignment.CenterStart).offset(x = (-8).dp)) {
+            Column(modifier = Modifier.align(Alignment.CenterStart).offset(x = Y_AXIS_LABEL_OFFSET_X)) {
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
-                    modifier = Modifier.clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
+                    modifier = Modifier
+                        .onSizeChanged { maxLabelSize = it }
+                        .offset { IntOffset(0, maxLabelShiftPx.roundToInt()) }
+                        .clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
                 Spacer(modifier = Modifier.weight(1f))
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
-                    modifier = Modifier.clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
+                    modifier = Modifier
+                        .onSizeChanged { minLabelSize = it }
+                        .offset { IntOffset(0, (-minLabelShiftPx).roundToInt()) }
+                        .clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
                 }
@@ -1013,7 +1110,7 @@ fun DraggablePoint(
     var startCarrier by remember { mutableStateOf(0.0f) }
     var startBeat by remember { mutableStateOf(0.0f) }
     
-    val pointSize = if (isSelected) 30.dp else 24.dp
+    val pointSize = if (isSelected) POINT_MARKER_SELECTED_SIZE else POINT_MARKER_SIZE
     val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
     
     Box(
@@ -1080,6 +1177,84 @@ fun DraggablePoint(
 
 // Шаг перемещения по времени (в минутах)
 private const val TIME_STEP_MINUTES = 5
+
+/**
+ * Маркер точки на графике: центр в координатах области графика и радиус.
+ * Радиус — половина размера круга, рисуемого в [DraggablePoint]; у
+ * выбранной точки он больше, поэтому метка уезжает и от неё.
+ */
+private data class PointMarker(val cx: Float, val cy: Float, val radius: Float)
+
+/**
+ * Минимальный вертикальный сдвиг метки оси Y, при котором она перестаёт
+ * пересекать маркеры точек.
+ *
+ * Метка прижата к краю области графика (к верхнему у максимума, к нижнему
+ * у минимума) и может уйти только ВНУТРЬ графика — снаружи карточка, и
+ * метка уехала бы за её пределы. Поэтому метка максимума смещается вниз
+ * ([shiftDown] = true), а метка минимума — вверх ([shiftDown] = false).
+ * Во втором случае координаты зеркалятся, и дальше задача одна: метка
+ * занимает вертикальный отрезок [s, s + labelHeight] в «нормальных»
+ * координатах (0 — край, к которому она прижата; вниз — внутрь графика).
+ *
+ * Пересечение круга и прямоугольника сводится к одномерной задаче: по
+ * горизонтали метка неподвижна, поэтому для каждой точки считается
+ * «полувысота» [dy] зоны, в которой метка её задевает (как у круга,
+ * рассечённого вертикальными краями метки). Точки, проходящие сбоку
+ * (зазор по горизонтали >= радиусу), метке не мешают вовсе.
+ *
+ * Сдвиг минимален: перебираются по возрастанию только те позиции, где
+ * метка может оказаться свободной, — текущая (0) и «ровно под очередной
+ * мешающей точкой». Первая же позиция, не пересекающая НИ ОДНУ точку, и
+ * есть ответ. Если внутри графика свободного места нет, метка остаётся
+ * на исходном краю — лучше пересечься, чем уехать за противоположный.
+ */
+private fun minimalLabelShift(
+    markers: List<PointMarker>,
+    labelLeft: Float,
+    labelRight: Float,
+    labelHeight: Float,
+    graphHeight: Float,
+    shiftDown: Boolean
+): Float {
+    if (labelHeight <= 0f) return 0f
+
+    // Зоны, в которых метка пересекает точку: (верх, низ) в координатах
+    // «0 — край, к которому прижата метка; вниз — внутрь графика».
+    val zones = ArrayList<FloatArray>(markers.size)
+    for (marker in markers) {
+        val dx = maxOf(labelLeft - marker.cx, 0f, marker.cx - labelRight)
+        if (dx >= marker.radius) continue   // точка сбоку: вертикально не мешает
+        val dy = kotlin.math.sqrt((marker.radius * marker.radius - dx * dx).coerceAtLeast(0f))
+        val center = if (shiftDown) marker.cy else graphHeight - marker.cy
+        zones.add(floatArrayOf(center - dy, center + dy))
+    }
+    if (zones.isEmpty()) return 0f
+
+    val limit = (graphHeight - labelHeight).coerceAtLeast(0f)
+    // Кандидаты: 0 (остаться на месте) и «ровно под очередной мешающей
+    // точкой» — выше её метке всё равно не встать, только дальше.
+    val candidates = ArrayList<Float>(zones.size + 1)
+    candidates.add(0f)
+    for (zone in zones) candidates.add(zone[1])
+    candidates.sort()
+
+    for (s in candidates) {
+        if (s < 0f) continue
+        if (s > limit) break
+        var free = true
+        for (zone in zones) {
+            // Свободно, если метка целиком выше зоны или целиком ниже её
+            if (!(s + labelHeight <= zone[0] || s >= zone[1])) {
+                free = false
+                break
+            }
+        }
+        if (free) return s
+    }
+    // Внутри графика места нет — оставляем метку на месте.
+    return 0f
+}
 
 /**
  * Вычисляет время из перетаскивания с шагом в 5 минут.
