@@ -142,7 +142,34 @@ data class FrequencyCurve(
     
     // Массив секунд для быстрого бинарного поиска
     private val pointSeconds: IntArray = sortedPoints.map { it.time.toSecondOfDay() }.toIntArray()
-    
+
+    /**
+     * Веса касательных кардинального сплайна — регулировка overshoot.
+     *
+     * Считаются ОДИН РАЗ на объект кривой: [sortedPoints], тип интерполяции,
+     * натяжение и вертикальные границы [carrierRange] — всё это неизменяемые
+     * поля конструктора, так что кэш всегда согласован с кривой.
+     *
+     * null означает «регулировка не нужна»: тип не CARDINAL либо номинальный
+     * сплайн никуда не вылетает. Это же значение уезжает в нативный движок
+     * (пустой массив ⇒ движок строит таблицу с номинальными касательными),
+     * поэтому звук и график получают РОВНО ОДИН И ТОТ ЖЕ результат по
+     * построению: вторая реализация алгоритма просто не существует.
+     *
+     * Веса ОБЩИЕ для обоих каналов — см. [CardinalTension]. Благодаря этому
+     * каналы не схлопываются в точке касания с границей: beat(t) остаётся
+     * точной интерполяцией узлов частоты биений, а carrier(t) — узлов несущей.
+     *
+     * Индексируются по [sortedPoints] (порядок по времени суток).
+     */
+    val tensionWeights: FloatArray? = CardinalTension.forPoints(
+        points = sortedPoints,
+        type = interpolationType,
+        tension = splineTension,
+        carrierRange = carrierRange,
+        presorted = true
+    )
+
     init {
         require(points.size >= 2) { "Кривая должна содержать минимум 2 точки" }
     }
@@ -197,7 +224,8 @@ data class FrequencyCurve(
      */
     fun getChannelFrequenciesAt(time: LocalTime): Pair<Float, Float> =
         Interpolation.interpolateChannels(
-            sortedPoints, time, interpolationType, splineTension, presorted = true
+            sortedPoints, time, interpolationType, splineTension,
+            presorted = true, weights = tensionWeights
         )
 
     /**
@@ -267,7 +295,8 @@ data class FrequencyCurve(
                 time,
                 frequencySelector,
                 allowNegative,
-                isWrapping = true
+                isWrapping = true,
+                weights = tensionWeights
             )
         }
 
@@ -278,7 +307,8 @@ data class FrequencyCurve(
             time,
             frequencySelector,
             allowNegative,
-            isWrapping = false
+            isWrapping = false,
+            weights = tensionWeights
         )
     }
     
@@ -318,7 +348,8 @@ data class FrequencyCurve(
         time: LocalTime,
         frequencySelector: (FrequencyPoint) -> Float,
         allowNegative: Boolean = false,
-        isWrapping: Boolean
+        isWrapping: Boolean,
+        weights: FloatArray? = null
     ): Float {
         val leftPoint = sortedPoints[leftIndex]
         val rightPoint = sortedPoints[rightIndex]
@@ -346,13 +377,21 @@ data class FrequencyCurve(
         val p1 = frequencySelector(leftPoint)
         val p2 = frequencySelector(rightPoint)
         val p3 = getNeighborPoint(rightIndex, +1, frequencySelector, isWrapping)
-        
+
+        // Веса те же, что у канальных кривых: сплайн линеен, поэтому
+        // carrier = (left+right)/2 и beat = right−left интерполируются
+        // РОВНО теми же весами, что и каналы. Иначе несущая и частота биений
+        // разошлись бы с нарисованными каналами.
+        val w = if (weights != null && weights.size == sortedPoints.size) weights else null
+        val w1 = w?.get(leftIndex) ?: 1.0f
+        val w2 = w?.get(rightIndex) ?: 1.0f
+
         // Используем общий объект интерполяции с параметром tension для CARDINAL.
         // allowNegative=false клампит результат к >= 0 (несущая и каналы —
         // физические частоты); для частоты биений знак сохраняется.
         return Interpolation.interpolate(
             interpolationType, p0, p1, p2, p3, ratio, splineTension,
-            allowNegative = allowNegative
+            allowNegative = allowNegative, w1 = w1, w2 = w2
         )
     }
     

@@ -43,6 +43,7 @@ endif()
 # Исполняемый файл тестов
 add_executable(buffer_package_tests
     BufferPackageTest.cpp
+    FrequencyTableTest.cpp
 )
 
 target_include_directories(buffer_package_tests

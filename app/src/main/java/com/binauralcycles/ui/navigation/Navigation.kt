@@ -3,9 +3,13 @@ package com.binauralcycles.ui.navigation
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExperimentalSharedTransitionApi
 import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material3.*
@@ -122,7 +126,16 @@ fun BinauralNavigation(
                         // Добавляем снизу место для панели воспроизведения
                         .padding(bottom = if (showBottomPanel) bottomPanelHeight else 0.dp)
                         // Добавляем padding для navigation bar
-                        .navigationBarsPadding()
+                        .navigationBarsPadding(),
+                    // Переходы заданы явно: дефолт navigation-compose — fade 700 мс,
+                    // из-за чего на pop оба экрана 700 мс держатся в композиции и
+                    // анимация сворачивания «съедается» двойной перерисовкой.
+                    // Для pop входящий список показываем мгновенно (EnterTransition.None)
+                    // — его проявляет сам общий элемент, а фейд поверх него только мешает.
+                    enterTransition = { fadeIn(animationSpec = tween(300)) },
+                    exitTransition = { fadeOut(animationSpec = tween(300)) },
+                    popEnterTransition = { EnterTransition.None },
+                    popExitTransition = { fadeOut(animationSpec = tween(300)) }
                 ) {
                 composable(Screen.PresetList.route) {
                     PresetListScreen(

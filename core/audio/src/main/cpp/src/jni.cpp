@@ -38,6 +38,41 @@ static inline binaural::BinauralEngine* engineFromHandle(jlong h) {
     return reinterpret_cast<binaural::BinauralEngine*>(h);
 }
 
+/**
+ * Прочитать веса касательных кардинального сплайна, присланные Kotlin
+ * (CardinalTension.forPoints), в [out].
+ *
+ * Возвращает false, если регулировка невозможна: массива нет, размер не равен
+ * числу узлов или JNI не отдал элементы. Это ЕДИНСТВЕННО безопасное поведение —
+ * применить веса к чужим узлам хуже, чем построить номинальную кривую, поэтому
+ * вызывающая сторона при false просто работает с весами 1.0.
+ *
+ * Значения вне [0; 1], NaN и Inf заменяются на нейтральный вес 1.0: проверка
+ * `v >= 0 && v <= 1` отсекает и NaN (для него оба сравнения ложны).
+ * Публикует результат только после полного заполнения — частично заполненный
+ * вектор наружу не виден.
+ */
+static bool readTensionWeights(JNIEnv* env, jfloatArray src, jint expectedSize,
+                               std::vector<float>& out) {
+    out.clear();
+    if (src == nullptr || expectedSize <= 0) return false;
+    if (env->GetArrayLength(src) != expectedSize) return false;
+
+    jfloat* w = env->GetFloatArrayElements(src, nullptr);
+    if (!w) return false;
+
+    std::vector<float> local;
+    local.reserve(static_cast<size_t>(expectedSize));
+    for (jint i = 0; i < expectedSize; ++i) {
+        const float v = w[i];
+        local.push_back((v >= 0.0f && v <= 1.0f) ? v : 1.0f);
+    }
+    env->ReleaseFloatArrayElements(src, w, JNI_ABORT);
+
+    out = std::move(local);
+    return true;
+}
+
 extern "C" {
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
@@ -100,7 +135,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jlong channelSwapPauseDurationMs,
     jint channelSwapTrendPoints,
     jint normalizationType,
-    jfloat volumeNormalizationStrength
+    jfloat volumeNormalizationStrength,
+    jfloatArray tensionWeights
 ) {
     auto* engine = engineFromHandle(handle);
     if (!engine) return;
@@ -141,7 +177,18 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
 
     // Устанавливаем параметры
     config.curve.interpolationType = static_cast<binaural::InterpolationType>(interpolationType);
-    config.curve.splineTension = splineTension;
+    // Кламп: вне [0;1] формула s = (1 − tension)/2 даёт ОТРИЦАТЕЛЬНОЕ s, т.е.
+    // касательные разворачиваются и сплайн начинает петлять — визуально и на
+    // слух это уже не «натяжение», а поломка кривой.
+    config.curve.splineTension = std::clamp(splineTension, 0.0f, 1.0f);
+
+    // Веса касательных кардинального сплайна (регуляция overshoot).
+    // Считает их Kotlin на той же кривой, что рисует график (CardinalTension);
+    // здесь — только приём и защитная валидация. Любое несоответствие
+    // (нет массива / размер не равен числу точек / мусор вместо веса) =>
+    // регулировка выключается, таблица строится с номинальными касательными.
+    readTensionWeights(env, tensionWeights, numPoints, config.curve.tensionWeights);
+
     config.volume = volume;
     config.channelSwapEnabled = channelSwapEnabled;
     config.channelSwapIntervalSec = channelSwapIntervalSec;
@@ -575,7 +622,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
     jint numOutputPoints,
     jint interpolationType,
     jfloat tension,
-    jboolean allowNegative
+    jboolean allowNegative,
+    jfloatArray weights
 ) {
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
@@ -594,6 +642,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
         if (vals) env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
+
+    // Веса касательных (регуляция overshoot) — от Kotlin, по числу узлов.
+    // Не совпало/не передано => работаем с номинальными касательными.
+    std::vector<float> wts;
+    const bool haveWeights = readTensionWeights(env, weights, numInputPoints, wts);
 
     jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
@@ -630,6 +683,12 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
         int t1 = times[leftIndex];
         int t2 = times[rightIndex];
 
+        // Вес ОБЩИЙ для обоих каналов: если эта кривая — канальная, то
+        // beat = right − left останется точной интерполяцией узлов beat и
+        // каналы не схлопнутся в точке касания границы.
+        const float w1 = haveWeights ? wts[leftIndex]  : 1.0f;
+        const float w2 = haveWeights ? wts[rightIndex] : 1.0f;
+
         bool isWrapping = (leftIndex == numInputPoints - 1);
         if (isWrapping) {
             t2 += SECONDS_PER_DAY;
@@ -645,7 +704,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
                     clampedRatio, tension,
-                    (allowNegative == JNI_TRUE)
+                    (allowNegative == JNI_TRUE), w1, w2
                 );
                 continue;
             }
@@ -662,7 +721,7 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGenerateInterpolated
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
             clampedRatio, tension,
-            (allowNegative == JNI_TRUE)
+            (allowNegative == JNI_TRUE), w1, w2
         );
     }
 
@@ -682,7 +741,8 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
     jfloatArray beatFreqs,
     jint targetTimeSeconds,
     jint interpolationType,
-    jfloat tension
+    jfloat tension,
+    jfloatArray weights
 ) {
     if (!timePoints || !carrierFreqs || !beatFreqs) {
         return nullptr;
@@ -754,16 +814,24 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetChannelFrequencie
     const int prevIndex = (leftIndex - 1 + numPoints) % numPoints;
     const int nextNextIndex = (rightIndex + 1) % numPoints;
 
+    // Вес ОБЩИЙ для обоих каналов — только при общем весе beat = right − left
+    // остаётся точной интерполяцией узлов beat, и каналы не схлопываются в
+    // точке касания границы. Без весов — номинальные касательные.
+    std::vector<float> wts;
+    const bool haveWeights = readTensionWeights(env, weights, numPoints, wts);
+    const float w1 = haveWeights ? wts[leftIndex]  : 1.0f;
+    const float w2 = haveWeights ? wts[rightIndex] : 1.0f;
+
     float lowerFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         lowerFreqs[prevIndex], lowerFreqs[leftIndex], lowerFreqs[rightIndex], lowerFreqs[nextNextIndex],
-        ratio, tension
+        ratio, tension, /*allowNegative=*/false, w1, w2
     );
 
     float upperFreq = binaural::Interpolation::interpolate(
         static_cast<binaural::InterpolationType>(interpolationType),
         upperFreqs[prevIndex], upperFreqs[leftIndex], upperFreqs[rightIndex], upperFreqs[nextNextIndex],
-        ratio, tension
+        ratio, tension, /*allowNegative=*/false, w1, w2
     );
 
     lowerFreq = std::max(0.0f, lowerFreq);
@@ -814,7 +882,8 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
     jint numOutputPoints,
     jint interpolationType,
     jfloat tension,
-    jboolean allowNegative
+    jboolean allowNegative,
+    jfloatArray weights
 ) {
     if (!timePoints || !values || numOutputPoints <= 0) {
         return nullptr;
@@ -833,6 +902,10 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
         if (vals) env->ReleaseFloatArrayElements(values, vals, JNI_ABORT);
         return nullptr;
     }
+
+    // Веса касательных (регуляция overshoot) — от Kotlin, по числу узлов.
+    std::vector<float> wts;
+    const bool haveWeights = readTensionWeights(env, weights, numInputPoints, wts);
 
     jfloatArray result = env->NewFloatArray(numOutputPoints);
     if (!result) {
@@ -869,6 +942,9 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
         int t1 = times[leftIndex];
         int t2 = times[rightIndex];
 
+        const float w1 = haveWeights ? wts[leftIndex]  : 1.0f;
+        const float w2 = haveWeights ? wts[rightIndex] : 1.0f;
+
         bool isWrapping = (leftIndex == numInputPoints - 1);
         if (isWrapping) {
             t2 += SECONDS_PER_DAY;
@@ -884,7 +960,7 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
                     static_cast<binaural::InterpolationType>(interpolationType),
                     vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
                     clampedRatio, tension,
-                    (allowNegative == JNI_TRUE)
+                    (allowNegative == JNI_TRUE), w1, w2
                 );
                 continue;
             }
@@ -901,7 +977,7 @@ Java_com_binaural_core_audio_engine_NativeInterpolation_nativeGenerateInterpolat
             static_cast<binaural::InterpolationType>(interpolationType),
             vals[prevIndex], vals[leftIndex], vals[rightIndex], vals[nextNextIndex],
             clampedRatio, tension,
-            (allowNegative == JNI_TRUE)
+            (allowNegative == JNI_TRUE), w1, w2
         );
     }
 

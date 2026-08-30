@@ -264,13 +264,24 @@ class BinauralPlaybackService : Service() {
         // Запускаем ежесекундное обновление частот для UI сразу при создании сервиса.
         // Это гарантирует, что частоты обновляются с момента запуска приложения,
         // даже если onAppForeground() был вызван до установки serviceInstance.
-        startUiFrequencyUpdateJob()
+        //
+        // НО только при включённом экране. Этот джоб останавливается лишь из
+        // onAppBackground(), а сервис — sticky: если система пересоздаст его,
+        // пока приложение в фоне, onAppBackground() уже не придёт никогда, и без
+        // этой проверки цикл крутился бы 1 Гц при выключенном экране до конца
+        // жизни процесса (3600 итераций/час: JNI-опрос частот + сборка
+        // NotificationContent/MetadataContent для дедупликации). Дублирующий
+        // guard внутри цикла — на случай, если экран выключили уже после старта.
+        if (isScreenInteractive()) {
+            startUiFrequencyUpdateJob()
+        }
         
         // Регистрируем приёмник для режима энергосбережения
         registerPowerSaveReceiver()
         
         // Регистрируем приёмники для отслеживания отключения гарнитуры
         registerNoisyAudioReceiver()
+        registerScreenStateReceiver()
         registerAudioDeviceCallback()
         
         // Инициализируем MediaSession для обработки кнопок гарнитуры
@@ -484,6 +495,11 @@ class BinauralPlaybackService : Service() {
     
     // BroadcastReceiver для отключения гарнитуры (ACTION_AUDIO_BECOMING_NOISY)
     private var noisyAudioReceiver: BroadcastReceiver? = null
+
+    // Кэш состояния экрана (ACTION_SCREEN_ON / ACTION_SCREEN_OFF), чтобы не делать
+    // binder-IPC isInteractive каждую секунду из циклов обновления UI/уведомлений (U2).
+    private var screenStateReceiver: BroadcastReceiver? = null
+    private var isScreenOn: Boolean = true
     
     // AudioDeviceCallback для отслеживания отключения аудиоустройств (API 23+)
     private var audioDeviceCallback: AudioDeviceCallback? = null
@@ -533,6 +549,47 @@ class BinauralPlaybackService : Service() {
         noisyAudioReceiver = null
     }
     
+    /**
+     * Регистрирует приёмник ACTION_SCREEN_ON/ACTION_SCREEN_OFF, кэширующий состояние
+     * экрана (U2). Без него isScreenInteractive() делал бы binder-IPC (PowerManager
+     * .isInteractive) каждую секунду из циклов обновления UI и уведомлений — лишнее
+     * пробуждение CPU ради значения, которое меняется крайне редко.
+     */
+    private fun registerScreenStateReceiver() {
+        if (screenStateReceiver != null) return
+        // Инициализируем текущим состоянием, чтобы не делать IPC в момент регистрации.
+        isScreenOn = (getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive ?: true
+        screenStateReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_ON -> isScreenOn = true
+                    Intent.ACTION_SCREEN_OFF -> isScreenOn = false
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(screenStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(screenStateReceiver, filter)
+        }
+    }
+
+    private fun unregisterScreenStateReceiver() {
+        screenStateReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (e: Exception) {
+                android.util.Log.e("BinauralPlaybackService", "Error unregistering screen state receiver", e)
+            }
+        }
+        screenStateReceiver = null
+    }
+
     /**
      * Регистрирует AudioDeviceCallback для отслеживания подключения/отключения гарнитуры
      */
@@ -728,10 +785,9 @@ class BinauralPlaybackService : Service() {
         notificationUpdateJob = null
     }
 
-    private fun isScreenInteractive(): Boolean {
-        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
-        return pm?.isInteractive ?: true
-    }
+    // U2: возвращает кэш состояния экрана вместо binder-IPC isInteractive.
+    // Кэш обновляется приёмником ACTION_SCREEN_ON/OFF (см. registerScreenStateReceiver).
+    private fun isScreenInteractive(): Boolean = isScreenOn
     
     /**
      * Запускает периодическое обновление частот в UI (каждую секунду).
@@ -746,6 +802,11 @@ class BinauralPlaybackService : Service() {
         uiFrequencyUpdateJob = serviceScope.launch {
             while (true) {
                 delay(1000) // Каждую секунду
+                // Экран выключен — UI никто не видит. Пробуждение CPU ради опроса
+                // частот и сборки контента уведомления стоит батареи, а толку ноль.
+                // Guard обязателен: джоб останавливается только из onAppBackground(),
+                // который при пересоздании sticky-сервиса в фоне не вызывается.
+                if (!isScreenInteractive()) continue
                 // Время суток (реальное/виртуальное) обновляем всегда,
                 // чтобы указатель времени на экране был актуальным даже без воспроизведения.
                 audioEngine?.updateCurrentFrequencies()
@@ -1173,6 +1234,7 @@ class BinauralPlaybackService : Service() {
         notificationUpdateJob?.cancel()
         unregisterPowerSaveReceiver()
         unregisterNoisyAudioReceiver()
+        unregisterScreenStateReceiver()
         unregisterAudioDeviceCallback()
         
         // Освобождаем MediaSession

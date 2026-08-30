@@ -110,7 +110,7 @@
     
     <!-- App Settings -->
     <string name="buffer_generation_minutes">Интервал генерации буфера</string>
-    <string name="buffer_generation_description">На сколько минут вперёд генерируется аудиобуфер. Большой интервал снижает частоту пробуждений процессора и экономит батарею</string>
+    <string name="buffer_generation_description">На сколько вперёд генерируется аудиобуфер (от 1 до 10 минут). Чем длиннее буфер, тем реже движок пересчитывает пакет и тем меньше пересборок потока при смене настроек. Предел 10 минут (600 с) выбран так, чтобы буфер целиком помещался в доступную память на любой частоте дискретизации.</string>
     <string name="update_interval">Интервал обновления частоты</string>
     <string name="update_interval_description">Как часто пересчитываются частоты воспроизведения</string>
     <string name="audio_quality">Частота дискретизации</string>

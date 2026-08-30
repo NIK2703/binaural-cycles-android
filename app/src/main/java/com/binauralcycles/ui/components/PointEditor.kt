@@ -1,8 +1,10 @@
 package com.binauralcycles.ui.components
 
+import android.view.HapticFeedbackConstants
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,16 +19,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusEvent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChangeIgnoreConsumed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -42,6 +47,9 @@ import com.binaural.core.audio.model.FrequencyRange
 import com.binauralcycles.R
 import kotlinx.datetime.LocalTime
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.round
 import kotlin.math.roundToInt
 
 private const val MIN_AUDIBLE_FREQUENCY = 20.0f
@@ -69,6 +77,199 @@ val POINT_POPUP_SCREEN_MARGIN = 10.dp
 
 /** Горизонтальные поля вокруг области графика: карточка + экран. */
 val POINT_POPUP_OUTER_PADDING = 32.dp
+
+/**
+ * Сколько пикселей вертикального свайпа приходится на одно «деление» значения
+ * в полях контекстного окна.
+ *
+ * 16 dp — компромисс между точностью и скоростью: за взмах пальца на высоту
+ * экрана (~500 dp) проходится около 30 делений. Часы (24 деления на весь
+ * диапазон) и минуты (12) перебираются одним движением, у несущей и биений
+ * остаётся разумная точность для подстройки.
+ */
+private val VALUE_SWIPE_STEP = 16.dp
+
+/**
+ * Внутренние поля [BasicTextField] в [FrequencyField] и [TimeField].
+ *
+ * Вынесены в константу потому, что от них зависит вторая величина: тап,
+ * перехваченный свайпом, ищет позицию курсора по раскладке текста, а
+ * раскладка считает от ВНУТРЕННЕЙ границы поля, тогда как точка касания
+ * приходит в координатах обёртки. Два числа, обязанные совпадать, живут
+ * рядом — иначе курсор уедет на символ в сторону.
+ */
+private val FIELD_INNER_PADDING = 4.dp
+
+/**
+ * Вертикальный свайп, меняющий значение «делениями»: каждые [stepPx] пикселей
+ * хода пальца — одно деление. Свайп ВВЕРХ увеличивает значение.
+ *
+ * Обычный тап работает штатно: касание НЕ поглощается и доходит до вложенного
+ * `BasicTextField` — тот сам ставит курсор, показывает ручку перемещения и
+ * открывает клавиатуру, как любое текстовое поле.
+ *
+ * Жест забирает себе только вертикальную ПРОТЯЖКУ. Пока палец не ушёл за
+ * порог скролла, события не поглощаются и доходят до поля — значит, короткое
+ * касание остаётся тапом. Как только движение становится свайпом, все
+ * последующие события поглощаются, чтобы поле не тащило курсор/выделение, а
+ * значение меняется «делениями». Клавиатуру и фокус прячет вызывающий
+ * ([onStep] на первом делении), так что под пальцем во время свайпа нет ни
+ * клавиатуры, ни мигающего курсора.
+ *
+ * @param onStep по одному вызову на деление; аргумент — направление (+1 вверх,
+ *        −1 вниз). Возвращает true, если значение реально изменилось: у
+ *        границы диапазона деление может ничего не сдвинуть, и тогда
+ *        тактильный отклик только сбивал бы с толку.
+ * @param onGestureEnd конец жеста — и после свайпа, и после тапа, и при
+ *        отмене. Даёт вызывающему сбросить то, что жест накопил.
+ */
+@Composable
+private fun Modifier.verticalValueSwipe(
+    stepPx: Float,
+    onStep: (direction: Int) -> Boolean,
+    onGestureEnd: () -> Unit
+): Modifier {
+    // Тактильный отклик — через View, а не через LocalHapticFeedback:
+    // CLOCK_TICK — это ровно тот «тик барабанчика», который нужен для
+    // делений, а обёртки Compose для него нет.
+    val view = LocalView.current
+    // Колбэки читаются через rememberUpdatedState, а ключ pointerInput — только
+    // stepPx: иначе жест перезапускался бы на каждой перекомпозиции, а она
+    // случается на каждое же деление (значение уходит наверх).
+    val onStepState = rememberUpdatedState(onStep)
+    val onGestureEndState = rememberUpdatedState(onGestureEnd)
+
+    return pointerInput(stepPx) {
+        val slop = viewConfiguration.touchSlop
+        awaitPointerEventScope {
+            while (true) {
+                val down = awaitFirstDown(pass = PointerEventPass.Initial)
+                // Касание намеренно НЕ поглощаем: поле получает его и ставит
+                // курсор стандартным образом. Честный тап так и остаётся тапом.
+                var travel = 0f     // вертикальный ход пальца от точки касания
+                var notches = 0     // сколько делений отдано наверх
+                var swiping = false
+                try {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                            ?: break            // палец пропал — жест отменён
+                        // Сдвиг читаем ДО consume(): positionChange() обнуляется,
+                        // как только сдвиг помечен использованным — иначе ход
+                        // пальца всегда равен нулю и жест не сдвинет значение.
+                        // IgnoreConsumed страхует и от чужого consume() на этом
+                        // же событии.
+                        val deltaY = change.positionChangeIgnoreConsumed().y
+                        travel += deltaY
+
+                        // До порога жест ещё может оказаться тапом — не
+                        // поглощаем события, отпускание отдаём полю.
+                        if (!swiping) {
+                            if (abs(travel) <= slop) {
+                                if (!change.pressed) break   // честный тап
+                                continue
+                            }
+                            swiping = true
+                            // Отсчёт ведём ОТ порога: иначе первое деление
+                            // стоило бы на slop больше остальных, и свайп
+                            // начинался бы рывком.
+                            travel -= if (travel > 0f) slop else -slop
+                        }
+                        // Дальше — только свайп: гасим события, чтобы поле не
+                        // реагировало на протяжку (не тащило курсор/выделение).
+                        if (swiping) change.consume()
+
+                        // Целое число делений, уложившихся в ход. Ось Y на
+                        // экране смотрит вниз, поэтому у свайпа вверх сдвиг
+                        // отрицательный — отсюда минус.
+                        val target = -(travel / stepPx).toInt()
+                        while (notches != target) {
+                            val direction = if (target > notches) 1 else -1
+                            notches += direction
+                            if (onStepState.value(direction)) {
+                                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                            }
+                        }
+
+                        if (!change.pressed) break
+                    }
+                } finally {
+                    onGestureEndState.value()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Сдвиг к [gridValue], который никогда не уводит значение «назад».
+ *
+ * Текущее значение может стоять ВНЕ сетки: его набрали руками (несущая 5 Гц
+ * при нижней границе 20 Гц) или его зажало при изменении несущей (частота
+ * биений у предела). Ближайший узел сетки тогда лежит в стороне,
+ * ПРОТИВОПОЛОЖНОЙ свайпу, и без этой проверки жест «уменьшить» внезапно
+ * увеличил бы значение.
+ *
+ * @return [gridValue], если он сдвинут в сторону свайпа, иначе [current]
+ *         — то есть «сдвига нет» (и вызывающий не даст отклик).
+ */
+private fun stepWithinGrid(gridValue: Float, current: Float, delta: Int): Float =
+    if (delta > 0) maxOf(gridValue, current) else minOf(gridValue, current)
+
+/**
+ * Обёртка над полем ввода контекстного окна: вертикальный свайп по полю
+ * меняет значение «делениями», а обычный тап оставляет полю — оно само
+ * открывает клавиатуру и ставит курсор, как стандартное текстовое поле.
+ *
+ * @param stepPx пикселей на одно деление
+ * @param read текущее значение: набранное в поле, а если оно не число — из точки
+ * @param shift значение на [delta] делений выше/ниже, приведённое к сетке
+ *        и зажатое границами
+ * @param write применение нового значения (уходит наверх, в точку)
+ */
+@Composable
+private fun ValueSwipeBox(
+    stepPx: Float,
+    read: () -> Float,
+    shift: (current: Float, delta: Int) -> Float,
+    write: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    val readState = rememberUpdatedState(read)
+    val shiftState = rememberUpdatedState(shift)
+    val writeState = rememberUpdatedState(write)
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+
+    // Значение, которым управляет текущий свайп. Держатель нужен потому, что
+    // за один кадр может прийти несколько делений, а результат [write] дойдёт
+    // до [read] только после перекомпозиции: без держателя все деления кадра
+    // считались бы от одной точки и слились бы в одно.
+    var swiped by remember { mutableStateOf<Float?>(null) }
+
+    Box(
+        modifier = modifier.verticalValueSwipe(
+            stepPx = stepPx,
+            onStep = { delta ->
+                val from = swiped ?: run {
+                    // Свайп — это не ввод с клавиатуры: прячем клавиатуру и
+                    // снимаем фокус с поля, чтобы под пальцем не вскакивала
+                    // клавиатура и не мелькал курсор. Стандартный тап этого не
+                    // задевает — фокус и клавиатура появляются только по нему.
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                    readState.value()
+                }
+                val next = shiftState.value(from, delta)
+                swiped = next
+                writeState.value(next)
+                next != from
+            },
+            onGestureEnd = { swiped = null }
+        )
+    ) { content() }
+}
 
 /**
  * Парсит строку в Float, принимая как точку, так и запятую как разделитель
@@ -307,9 +508,13 @@ fun PointEditorPopup(
         beatValue >= -maxBeatMagnitudeForValidation &&
         beatValue <= maxBeatMagnitudeForValidation
 
-    // Управление фокусом и клавиатурой
+    // Управление фокусом и клавиатурой (нужны свайпу, чтобы прятать их во время
+    // протяжки — см. ValueSwipeBox). Обычный тап поле обрабатывает само.
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+
+    // Пикселей на одно деление свайпа.
+    val valueStepPx = with(LocalDensity.current) { VALUE_SWIPE_STEP.toPx() }
 
     // Локализованные строки
     val deleteLabel = stringResource(R.string.delete)
@@ -318,15 +523,24 @@ fun PointEditorPopup(
     val hzLabel = stringResource(R.string.hz)
 
     // Состояние для редактирования времени
-    var tempHours by remember(point.time.hour) { mutableStateOf(point.time.hour.toString().padStart(2, '0')) }
-    var tempMinutes by remember(point.time.minute) { mutableStateOf(point.time.minute.toString().padStart(2, '0')) }
+    var tempHours by remember(point.time.hour) {
+        mutableStateOf(TextFieldValue(point.time.hour.toString().padStart(2, '0')))
+    }
+    var tempMinutes by remember(point.time.minute) {
+        mutableStateOf(TextFieldValue(point.time.minute.toString().padStart(2, '0')))
+    }
     var hoursWasFocused by remember { mutableStateOf(false) }
     var minutesWasFocused by remember { mutableStateOf(false) }
 
+    // Текущее время «как видит его пользователь»: набранное в полях, а где
+    // набрано не число — фактическое значение точки. Отсюда же отсчитываются
+    // деления свайпа, поэтому и сохранение по потере фокуса, и свайп всегда
+    // спорят об одном и том же значении.
+    fun currentHours(): Int = tempHours.text.toIntOrNull()?.coerceIn(0, 23) ?: point.time.hour
+    fun currentMinutes(): Int = tempMinutes.text.toIntOrNull()?.coerceIn(0, 59) ?: point.time.minute
+
     fun validateAndSaveTime() {
-        val hours = tempHours.toIntOrNull()?.coerceIn(0, 23) ?: point.time.hour
-        val minutes = tempMinutes.toIntOrNull()?.coerceIn(0, 59) ?: point.time.minute
-        onTimeChange(LocalTime(hours, minutes))
+        onTimeChange(LocalTime(currentHours(), currentMinutes()))
     }
 
     // Снимок набранного. Держатель переживает перекомпозиции (remember), а
@@ -339,8 +553,8 @@ fun PointEditorPopup(
         pendingValues.value = PendingPointValues(
             carrierText = tempCarrierFrequency.text,
             beatText = tempBeatFrequency.text,
-            hours = tempHours,
-            minutes = tempMinutes,
+            hours = tempHours.text,
+            minutes = tempMinutes.text,
             maxBeatMagnitude = maxBeatMagnitudeForValidation,
             currentCarrier = point.carrierFrequency,
             currentBeat = point.beatFrequency,
@@ -388,39 +602,77 @@ fun PointEditorPopup(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        TimeField(
+                        ValueSwipeBox(
                             modifier = Modifier.weight(1f),
-                            value = tempHours,
-                            onValueChange = { input ->
-                                tempHours = input.filter { it.isDigit() }.take(2)
-                                if (tempHours.length == 2) validateAndSaveTime()
+                            stepPx = valueStepPx,
+                            read = { currentHours().toFloat() },
+                            // Деление — 1 час. Сетка целая, но значение могло
+                            // быть набрано руками и стоять вне её, поэтому
+                            // сдвиг страхуется от «увода назад».
+                            shift = { current, delta ->
+                                stepWithinGrid((round(current) + delta).coerceIn(0f, 23f), current, delta)
                             },
-                            wasFocused = hoursWasFocused,
-                            onFocusChanged = { hoursWasFocused = it },
-                            onCommit = {
-                                validateAndSaveTime()
-                                tempHours = point.time.hour.toString().padStart(2, '0')
-                            }
-                        )
+                            write = { hours ->
+                                onTimeChange(LocalTime(hours.roundToInt(), currentMinutes()))
+                            },
+                        ) {
+                            TimeField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = tempHours,
+                                onValueChange = { input ->
+                                    val digits = input.text.filter { it.isDigit() }.take(2)
+                                    tempHours = TextFieldValue(digits, selection = TextRange(digits.length))
+                                    if (digits.length == 2) validateAndSaveTime()
+                                },
+                                wasFocused = hoursWasFocused,
+                                onFocusChanged = { hoursWasFocused = it },
+                                onCommit = {
+                                    validateAndSaveTime()
+                                    tempHours = TextFieldValue(point.time.hour.toString().padStart(2, '0'))
+                                }
+                            )
+                        }
                         Text(
                             ":",
                             style = MaterialTheme.typography.titleSmall,
                             color = onSurfaceColor
                         )
-                        TimeField(
+                        ValueSwipeBox(
                             modifier = Modifier.weight(1f),
-                            value = tempMinutes,
-                            onValueChange = { input ->
-                                tempMinutes = input.filter { it.isDigit() }.take(2)
-                                if (tempMinutes.length == 2) validateAndSaveTime()
+                            stepPx = valueStepPx,
+                            read = { currentMinutes().toFloat() },
+                            // Деление — 5 минут, сетка кратна пяти: та же, что
+                            // при перетаскивании точки по графику (5-минутный
+                            // снап), поэтому оба жеста дают одинаковые значения.
+                            // Верхний узел — 55: 59 минут сетке недоступны,
+                            // как и при перетаскивании.
+                            shift = { current, delta ->
+                                stepWithinGrid(
+                                    ((round(current / 5f).toInt() + delta) * 5f).coerceIn(0f, 55f),
+                                    current,
+                                    delta
+                                )
                             },
-                            wasFocused = minutesWasFocused,
-                            onFocusChanged = { minutesWasFocused = it },
-                            onCommit = {
-                                validateAndSaveTime()
-                                tempMinutes = point.time.minute.toString().padStart(2, '0')
-                            }
-                        )
+                            write = { minutes ->
+                                onTimeChange(LocalTime(currentHours(), minutes.roundToInt()))
+                            },
+                        ) {
+                            TimeField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = tempMinutes,
+                                onValueChange = { input ->
+                                    val digits = input.text.filter { it.isDigit() }.take(2)
+                                    tempMinutes = TextFieldValue(digits, selection = TextRange(digits.length))
+                                    if (digits.length == 2) validateAndSaveTime()
+                                },
+                                wasFocused = minutesWasFocused,
+                                onFocusChanged = { minutesWasFocused = it },
+                                onCommit = {
+                                    validateAndSaveTime()
+                                    tempMinutes = TextFieldValue(point.time.minute.toString().padStart(2, '0'))
+                                }
+                            )
+                        }
                         // Не IconButton: тот тянет за собой минимальный тач-таргет
                         // 48 dp и отбирает ширину у полей часов и минут.
                         Box(
@@ -452,31 +704,52 @@ fun PointEditorPopup(
                     // Строка 3: поле несущей и Гц. Поле тянется до конца строки,
                     // «Гц» прижато к правому краю — пустого хвоста нет.
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        FrequencyField(
+                        ValueSwipeBox(
                             modifier = Modifier.weight(1f),
-                            value = tempCarrierFrequency,
-                            isValid = isCarrierValid,
-                            onValueChange = { newValue ->
-                                val limited = limitFrequencyInput(newValue.text)
-                                tempCarrierFrequency = if (limited != newValue.text) {
-                                    TextFieldValue(limited, selection = TextRange(limited.length))
-                                } else {
-                                    newValue
-                                }
+                            stepPx = valueStepPx,
+                            read = { parseFrequency(tempCarrierFrequency.text) ?: point.carrierFrequency },
+                            // Шаг и сетка — те же, что при перетаскивании точки
+                            // по графику: 1% разницы границ, округлённый вверх.
+                            // Иначе два жеста давали бы разные значения на
+                            // одной и той же высоте.
+                            shift = { current, delta ->
+                                stepWithinGrid(
+                                    quantizeCarrier(
+                                        current + delta * carrierStep(carrierRange),
+                                        carrierRange
+                                    ),
+                                    current,
+                                    delta
+                                )
                             },
-                            onCommit = { commit ->
-                                val value = parseFrequency(tempCarrierFrequency.text)
-                                if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
-                                    onCarrierFrequencyChange(value)
-                                } else {
-                                    tempCarrierFrequency = TextFieldValue(formatFrequency(point.carrierFrequency))
+                            write = { onCarrierFrequencyChange(it) },
+                        ) {
+                            FrequencyField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = tempCarrierFrequency,
+                                isValid = isCarrierValid,
+                                onValueChange = { newValue ->
+                                    val limited = limitFrequencyInput(newValue.text)
+                                    tempCarrierFrequency = if (limited != newValue.text) {
+                                        TextFieldValue(limited, selection = TextRange(limited.length))
+                                    } else {
+                                        newValue
+                                    }
+                                },
+                                onCommit = { commit ->
+                                    val value = parseFrequency(tempCarrierFrequency.text)
+                                    if (value != null && value >= MIN_AUDIBLE_FREQUENCY && value <= 2000.0f) {
+                                        onCarrierFrequencyChange(value)
+                                    } else {
+                                        tempCarrierFrequency = TextFieldValue(formatFrequency(point.carrierFrequency))
+                                    }
+                                    if (commit) {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
+                                    }
                                 }
-                                if (commit) {
-                                    keyboardController?.hide()
-                                    focusManager.clearFocus()
-                                }
-                            }
-                        )
+                            )
+                        }
                         Text(
                             text = hzLabel,
                             style = MaterialTheme.typography.labelMedium,
@@ -497,35 +770,55 @@ fun PointEditorPopup(
 
                     // Строка 5: поле биений и Гц. Так же тянется до конца строки.
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        FrequencyField(
+                        ValueSwipeBox(
                             modifier = Modifier.weight(1f),
-                            value = tempBeatFrequency,
-                            isValid = isBeatValid,
-                            onValueChange = { newValue ->
-                                // allowNegative=true: частота биений знаковая
-                                val limited = limitFrequencyInput(newValue.text, allowNegative = true)
-                                tempBeatFrequency = if (limited != newValue.text) {
-                                    TextFieldValue(limited, selection = TextRange(limited.length))
-                                } else {
-                                    newValue
-                                }
+                            stepPx = valueStepPx,
+                            read = { parseFrequency(tempBeatFrequency.text) ?: point.beatFrequency },
+                            // Деление — 1 Гц. Сетка целая по МОДУЛЮ: знак
+                            // задаёт раскладку каналов и свайпом не меняется.
+                            // Предел берётся ЦЕЛОЙ частью, иначе последний
+                            // узел упёрся бы в дробную границу и значение
+                            // залипло бы на ней.
+                            shift = { current, delta ->
+                                val limit = floor(maxBeatMagnitudeForValidation).coerceAtLeast(1f)
+                                stepWithinGrid(
+                                    (round(current) + delta).coerceIn(-limit, limit),
+                                    current,
+                                    delta
+                                )
                             },
-                            onCommit = { commit ->
-                                val value = parseFrequency(tempBeatFrequency.text)
-                                if (value != null &&
-                                    value >= -maxBeatMagnitudeForValidation &&
-                                    value <= maxBeatMagnitudeForValidation
-                                ) {
-                                    onBeatFrequencyChange(value)
-                                } else {
-                                    tempBeatFrequency = TextFieldValue(formatFrequency(point.beatFrequency))
+                            write = { onBeatFrequencyChange(it) },
+                        ) {
+                            FrequencyField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = tempBeatFrequency,
+                                isValid = isBeatValid,
+                                onValueChange = { newValue ->
+                                    // allowNegative=true: частота биений знаковая
+                                    val limited = limitFrequencyInput(newValue.text, allowNegative = true)
+                                    tempBeatFrequency = if (limited != newValue.text) {
+                                        TextFieldValue(limited, selection = TextRange(limited.length))
+                                    } else {
+                                        newValue
+                                    }
+                                },
+                                onCommit = { commit ->
+                                    val value = parseFrequency(tempBeatFrequency.text)
+                                    if (value != null &&
+                                        value >= -maxBeatMagnitudeForValidation &&
+                                        value <= maxBeatMagnitudeForValidation
+                                    ) {
+                                        onBeatFrequencyChange(value)
+                                    } else {
+                                        tempBeatFrequency = TextFieldValue(formatFrequency(point.beatFrequency))
+                                    }
+                                    if (commit) {
+                                        keyboardController?.hide()
+                                        focusManager.clearFocus()
+                                    }
                                 }
-                                if (commit) {
-                                    keyboardController?.hide()
-                                    focusManager.clearFocus()
-                                }
-                            }
-                        )
+                            )
+                        }
                         Text(
                             text = hzLabel,
                             style = MaterialTheme.typography.labelMedium,
@@ -569,7 +862,6 @@ private fun FrequencyField(
     onCommit: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val focusRequester = remember { FocusRequester() }
     var wasFocused by remember { mutableStateOf(false) }
 
     BasicTextField(
@@ -583,7 +875,6 @@ private fun FrequencyField(
         singleLine = true,
         modifier = modifier
             .widthIn(min = 56.dp)
-            .focusRequester(focusRequester)
             .onFocusEvent { focusState ->
                 if (focusState.isFocused) {
                     wasFocused = true
@@ -600,7 +891,7 @@ private fun FrequencyField(
                         else MaterialTheme.colorScheme.outline,
                 shape = MaterialTheme.shapes.small
             )
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(FIELD_INNER_PADDING),
         textStyle = MaterialTheme.typography.titleSmall.copy(
             textAlign = TextAlign.End,
             color = if (!isValid && value.text.isNotEmpty()) MaterialTheme.colorScheme.error
@@ -615,15 +906,13 @@ private fun FrequencyField(
  */
 @Composable
 private fun TimeField(
-    value: String,
+    value: TextFieldValue,
     wasFocused: Boolean,
-    onValueChange: (String) -> Unit,
+    onValueChange: (TextFieldValue) -> Unit,
     onFocusChanged: (Boolean) -> Unit,
     onCommit: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val focusRequester = remember { FocusRequester() }
-
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
@@ -636,7 +925,6 @@ private fun TimeField(
         modifier = modifier
             // 36 dp — историческая ширина полей часов и минут: уже не сдавлены.
             .widthIn(min = 36.dp)
-            .focusRequester(focusRequester)
             .onFocusEvent { focusState ->
                 if (focusState.isFocused) {
                     onFocusChanged(true)
@@ -652,7 +940,7 @@ private fun TimeField(
                 color = MaterialTheme.colorScheme.outline,
                 shape = MaterialTheme.shapes.small
             )
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(FIELD_INNER_PADDING),
         textStyle = MaterialTheme.typography.titleSmall.copy(
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurface

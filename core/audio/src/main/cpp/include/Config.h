@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <memory>
 #include <cstdint>
 
 namespace binaural {
@@ -11,16 +12,49 @@ namespace binaural {
 constexpr int SECONDS_PER_DAY = 86400;
 
 /**
- * Интервал дискретизации таблицы частот (в миллисекундах)
- * Фиксированное значение обеспечивает постоянное разрешение 100 мс
- * Размер таблицы: 86400 сек / 0.1 сек = 864000 значений на канал
+ * Границы шага дискретизации таблицы частот (в миллисекундах).
+ *
+ * Шаг АДАПТИВНЫЙ и выбирается для каждой кривой отдельно (см.
+ * FrequencyCurve::tableIntervalMs и buildLookupTableInternal):
+ *
+ *   step = clamp(minGapBetweenPoints * 1000 / FREQUENCY_TABLE_CELLS_PER_GAP,
+ *                FREQUENCY_TABLE_MIN_INTERVAL_MS,
+ *                FREQUENCY_TABLE_MAX_INTERVAL_MS)
+ *
+ * ПОЛ шага = 100 мс — это историческое разрешение, с которым таблица жила
+ * всегда. Поэтому адаптивный шаг НИКОГДА не даёт ошибки больше, чем раньше:
+ * самая «частая» кривая просто упирается в пол и ведёт себя по-старому.
+ * Потолок 1000 мс выбран по замеру (tools-бенч: ошибка против точного сплайна
+ * для типовых пресетов 1e-4 Гц при шаге 1 с против 2e-4 Гц при 100 мс).
+ *
+ * Зачем это нужно: при фиксированных 100 мс таблица занимала
+ * 864000 значений × 2 канала × 4 байта = 6.6 МБ, а её пересборка
+ * (updateCache, вызывается на КАЖДОЕ изменение настроек) стоила
+ * 19 мс (LINEAR) … 37 мс (MONOTONE). У типового пресета точки разнесены на
+ * часы, и 100 мс избыточны на два-три порядка.
  */
-constexpr int FREQUENCY_TABLE_INTERVAL_MS = 100;
+constexpr int FREQUENCY_TABLE_MIN_INTERVAL_MS = 100;
+constexpr int FREQUENCY_TABLE_MAX_INTERVAL_MS = 1000;
 
 /**
- * Размер таблицы частот (количество значений на канал)
+ * Сколько ячеек таблицы приходится на минимальный зазор между соседними
+ * точками кривой. Определяет качество аппроксимации: ошибка линейной
+ * интерполяции внутри ячейки ~ (1/8)·f''·Δt², т.е. убывает как квадрат
+ * этого числа. 1000 даёт запас с большим запасом (см. замер выше).
  */
-constexpr int FREQUENCY_TABLE_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_INTERVAL_MS;
+constexpr int FREQUENCY_TABLE_CELLS_PER_GAP = 1000;
+
+/**
+ * Максимальный размер таблицы частот (количество значений на канал) —
+ * достигается при самом мелком шаге FREQUENCY_TABLE_MIN_INTERVAL_MS.
+ * Это верхняя граница памяти, а не рабочий размер.
+ */
+constexpr int FREQUENCY_TABLE_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_MIN_INTERVAL_MS;
+
+/**
+ * Минимальный размер таблицы — при самом крупном шаге.
+ */
+constexpr int FREQUENCY_TABLE_MIN_SIZE = SECONDS_PER_DAY * 1000 / FREQUENCY_TABLE_MAX_INTERVAL_MS;
 
 /**
  * Полуокно оценки трендовой производной: Δbeat = beat(t+h) − beat(t−h),
@@ -79,13 +113,48 @@ struct FrequencyPoint {
 };
 
 /**
+ * Lookup-таблица частот одного канала.
+ *
+ * Таблица НЕИЗМЕНЯЕМА после постройки и разделяется через shared_ptr.
+ *
+ * Почему именно shared_ptr: движок копирует конфиг на КАЖДЫЙ генерируемый
+ * пакет (`config = m_config;` под shared_lock в generateBatch/generateAudioBuffer).
+ * При владении таблицами по значению это означает memcpy 6.6 МБ (0.651 мс по
+ * замеру) плюс две аллокации по 3.3 МБ на каждый пакет, хотя за пакет
+ * читается 0.2–0.4 % таблицы. Через shared_ptr копирование конфига становится
+ * O(1): инкремент двух счётчиков ссылок. Пересборка (setConfig) создаёт НОВЫЕ
+ * таблицы, старые при этом остаются валидны у тех, кто их держит.
+ */
+using FreqTablePtr = std::shared_ptr<const std::vector<float>>;
+
+/**
  * Кривая зависимости частот от времени
  */
 struct FrequencyCurve {
     std::vector<FrequencyPoint> points;
     InterpolationType interpolationType = InterpolationType::LINEAR;
     float splineTension = 0.0f;  // 0.0 = Catmull-Rom, 1.0 = почти линейный
-    
+
+    // Веса касательных кардинального сплайна — регулировка overshoot.
+    //
+    // Вес w[i] ∈ [0;1] домножает касательную в узле i: 1 — номинальная
+    // касательная, 0 — нулевая. Подобраны так, чтобы кривая не перескакивала
+    // вертикальные границы графика, а касалась их.
+    //
+    // Вес ОБЩИЙ для обоих каналов (и, как следствие линейности сплайна, для
+    // несущей и частоты биений). Каналы от этого НЕ схлопываются: при общем
+    // весе beat(t) = right(t) − left(t) остаётся ТОЧНОЙ интерполяцией узлов
+    // частоты биений, а carrier(t) = (right+left)/2 — узлов несущей.
+    //
+    // Веса считает Kotlin (CardinalTension.forPoints) на той же кривой, что
+    // рисует график, и присылает вместе с точками: второй реализации алгоритма
+    // в нативе НЕТ, поэтому звук и график совпадают по построению. Пустой
+    // массив (или размер != числу узлов) — регулировка выключена.
+    //
+    // Порядок: по времени суток, после сортировки и схлопывания дублей —
+    // ровно как точки, к которым применяется (см. buildLookupTableInternal).
+    std::vector<float> tensionWeights;
+
     // Кэш для оптимизации
     float minLowerFreq = 0.0;
     float maxLowerFreq = 0.0;
@@ -94,10 +163,19 @@ struct FrequencyCurve {
     float minChannelFreq = 0.0;  // Минимальная частота среди обоих каналов (min(lower, upper) в каждой точке)
     int32_t cachedHash = -1;
     
-    // Lookup table для O(1) доступа к частотам
-    // Фиксированный размер: FREQUENCY_TABLE_SIZE (864000 значений при шаге 100 мс)
-    std::vector<float> lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
-    std::vector<float> upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
+    // Lookup table для O(1) доступа к частотам.
+    // Размер таблицы адаптивный: SECONDS_PER_DAY * 1000 / tableIntervalMs,
+    // от FREQUENCY_TABLE_MIN_SIZE до FREQUENCY_TABLE_SIZE записей.
+    FreqTablePtr lowerFreqTable;  // Нижняя частота канала (carrier - beat/2)
+    FreqTablePtr upperFreqTable;  // Верхняя частота канала (carrier + beat/2)
+
+    /**
+     * Рабочий шаг таблицы в миллисекундах (адаптивный, см.
+     * FREQUENCY_TABLE_MIN_INTERVAL_MS). Вычисляется в buildLookupTable().
+     * Значение по умолчанию = самому мелкому шагу, т.е. историческому
+     * разрешению: пока таблица не построена, безопаснее assumes худшее.
+     */
+    int32_t tableIntervalMs = FREQUENCY_TABLE_MIN_INTERVAL_MS;
     // Кэш нулей трендовой производной beat(t+h) − beat(t−h), beat = upper − lower,
     // h = TREND_HALF_WINDOW_SEC. Строится один раз в updateCache() вместе с
     // lookup-таблицей (профиль сохранён → экстремумы частоты биений известны);
@@ -105,6 +183,21 @@ struct FrequencyCurve {
     std::vector<TrendCrossing> trendCrossings;
     bool trendCrossingsValid = false;
     
+    /**
+     * Таблицы построены и готовы к чтению (обе непустые).
+     */
+    bool hasFreqTables() const {
+        return lowerFreqTable && upperFreqTable &&
+               !lowerFreqTable->empty() && !upperFreqTable->empty();
+    }
+
+    /**
+     * Число записей в таблице (0, если не построена).
+     */
+    int freqTableSize() const {
+        return lowerFreqTable ? static_cast<int>(lowerFreqTable->size()) : 0;
+    }
+
     /**
      * Получить частоты каналов для заданного времени через lookup table
      * Возвращает интерполированные частоты для конкретного момента времени
@@ -120,7 +213,7 @@ struct FrequencyCurve {
     void updateCache();
     
     /**
-     * Построить lookup table с фиксированным шагом FREQUENCY_TABLE_INTERVAL_MS
+     * Построить lookup table с адаптивным шагом tableIntervalMs
      */
     void buildLookupTable();
 
@@ -132,9 +225,15 @@ struct FrequencyCurve {
 
 private:
     /**
-     * Внутренняя реализация построения таблицы
+     * Внутренняя реализация построения таблицы (адаптивный шаг)
      */
     void buildLookupTableInternal();
+
+    /**
+     * Залить обе таблицы константой заданного размера.
+     * Случаи «нет точек» и «одна точка»: кривая вырождена, шаг не важен.
+     */
+    void fillTablesConstant(float lowerFreq, float upperFreq, int entries);
 };
 
 /**

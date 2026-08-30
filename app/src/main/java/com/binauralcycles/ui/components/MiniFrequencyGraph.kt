@@ -5,7 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.binaural.core.audio.model.CardinalTension
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
@@ -75,7 +76,6 @@ fun MiniFrequencyGraph(
     modifier: Modifier = Modifier,
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     indicatorColor: Color = MaterialTheme.colorScheme.error,
-    relaxationColor: Color = MaterialTheme.colorScheme.tertiary,
     isPlaying: Boolean = false,
     currentTime: LocalTime = LocalTime(12, 0),
     currentCarrierFrequency: Float = 0.0f,
@@ -89,10 +89,7 @@ fun MiniFrequencyGraph(
     }
     
     val carrierRange = frequencyCurve.carrierRange
-    
-    var widthPx by remember { mutableIntStateOf(0) }
-    var heightPx by remember { mutableIntStateOf(0) }
-    
+
     // Paint объекты создаём один раз с учётом масштаба интерфейса
     val labelPaint = remember(density) {
         Paint().apply {
@@ -100,27 +97,30 @@ fun MiniFrequencyGraph(
             isAntiAlias = true
         }
     }
-    
+
     val axisPaint = remember(density) {
         Paint().apply {
             textSize = with(density) { 10.sp.toPx() }
             isAntiAlias = true
         }
     }
-    
-    // Получаем геометрию из глобального кэша.
-    // ВАЖНО: carrierRange в ключе — его минимум задаёт пол частоты канала
-    // виртуальных точек расслабления, поэтому смена минимума частот обязана
-    // пересчитывать геометрию, а не отдавать устаревший кэш.
-    val cachedGeometry = remember(widthPx, heightPx, sortedPoints, frequencyCurve.interpolationType,
-                                   frequencyCurve.splineTension, relaxationModeSettings,
-                                   carrierRange.min, carrierRange.max) {
-        if (widthPx > 0 && heightPx > 0) {
+
+    // Геометрия считается ЛЕНИВО в фазе отрисовки из DrawScope.size, а не через
+    // состояние размера + onSizeChanged. Раньше размер приходил асинхронно
+    // (после первого layout), из-за чего первый кадр рисовал пустоту, а геометрия
+    // пересчитывалась для всех карточек только со второго кадра — ровно тогда,
+    // когда shared-анимация сворачивания должна была уже «ехать». Теперь size
+    // известен в draw сразу, MiniGraphCache возвращает закэшированные Path'и, а
+    // тяжёлый computeGraphGeometry отрабатывает один раз на пару (размер, параметры).
+    val geometryFor: (Int, Int) -> CachedGraphGeometry? = { w, h ->
+        if (w <= 0 || h <= 0) {
+            null
+        } else {
             MiniGraphCache.getOrCreate(
                 points = sortedPoints,
                 virtualPoints = emptyList(),  // Виртуальные точки вычисляются внутри
-                widthPx = widthPx,
-                heightPx = heightPx,
+                widthPx = w,
+                heightPx = h,
                 carrierRangeMin = carrierRange.min,
                 carrierRangeMax = carrierRange.max,
                 interpolationType = frequencyCurve.interpolationType,
@@ -129,46 +129,66 @@ fun MiniFrequencyGraph(
             ) {
                 computeGraphGeometry(
                     sortedPoints = sortedPoints,
-                    widthPx = widthPx,
-                    heightPx = heightPx,
+                    widthPx = w,
+                    heightPx = h,
                     carrierRange = carrierRange,
                     interpolationType = frequencyCurve.interpolationType,
                     splineTension = frequencyCurve.splineTension,
                     relaxationModeSettings = relaxationModeSettings
                 )
             }
-        } else {
-            null
         }
     }
-    
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .onSizeChanged { size ->
-                widthPx = size.width
-                heightPx = size.height
+            .drawWithCache {
+                onDrawBehind {
+                    val geometry = geometryFor(size.width.toInt(), size.height.toInt()) ?: return@onDrawBehind
+                    drawCachedGeometry(
+                        geometry = geometry,
+                        primaryColor = primaryColor,
+                        indicatorColor = indicatorColor,
+                        sortedPoints = sortedPoints,
+                        width = size.width,
+                        height = size.height,
+                        isPlaying = false,
+                        currentTime = currentTime,
+                        currentCarrierFrequency = currentCarrierFrequency,
+                        currentBeatFrequency = currentBeatFrequency,
+                        relaxationModeSettings = relaxationModeSettings,
+                        labelPaint = labelPaint,
+                        axisPaint = axisPaint,
+                        carrierRange = carrierRange,
+                        drawIndicatorOnly = false
+                    )
+                }
             }
+            // Динамичный слой: указатель текущего момента. Перерисовывается на
+            // каждом тике телеметрии (isPlaying / currentTime), но дёшев — только
+            // 3 линии. Статичный слой выше закэширован через drawWithCache.
             .drawBehind {
-                val geometry = cachedGeometry ?: return@drawBehind
-                
-                drawCachedGeometry(
-                    geometry = geometry,
-                    primaryColor = primaryColor,
-                    indicatorColor = indicatorColor,
-                    relaxationColor = relaxationColor,
-                    sortedPoints = sortedPoints,
-                    width = size.width,
-                    height = size.height,
-                    isPlaying = isPlaying,
-                    currentTime = currentTime,
-                    currentCarrierFrequency = currentCarrierFrequency,
-                    currentBeatFrequency = currentBeatFrequency,
-                    relaxationModeSettings = relaxationModeSettings,
-                    labelPaint = labelPaint,
-                    axisPaint = axisPaint,
-                    carrierRange = carrierRange
-                )
+                val geometry = geometryFor(size.width.toInt(), size.height.toInt()) ?: return@drawBehind
+                if (isPlaying) {
+                    drawCachedGeometry(
+                        geometry = geometry,
+                        primaryColor = primaryColor,
+                        indicatorColor = indicatorColor,
+                        sortedPoints = sortedPoints,
+                        width = size.width,
+                        height = size.height,
+                        isPlaying = isPlaying,
+                        currentTime = currentTime,
+                        currentCarrierFrequency = currentCarrierFrequency,
+                        currentBeatFrequency = currentBeatFrequency,
+                        relaxationModeSettings = relaxationModeSettings,
+                        labelPaint = labelPaint,
+                        axisPaint = axisPaint,
+                        carrierRange = carrierRange,
+                        drawIndicatorOnly = true
+                    )
+                }
             }
     )
 }
@@ -230,16 +250,28 @@ private fun computeGraphGeometry(
         else -> sortedPoints
     }
     
+    // Веса касательных — ОДИН РАЗ на геометрию (MiniGraphCache держит её до
+    // смены размера или параметров), а не на каждый из ~800 сэмплов ниже.
+    //
+    // ДВА набора: основной — по pointsForInterpolation (в режиме расслабления
+    // это виртуальные точки), базовый — по sortedPoints (пунктир исходной кривой).
+    val weights = CardinalTension.forPoints(
+        pointsForInterpolation, interpolationType, splineTension, carrierRange, presorted = true
+    )
+    val baseWeights = CardinalTension.forPoints(
+        sortedPoints, interpolationType, splineTension, carrierRange, presorted = true
+    )
+
     // Вычисляем пути
-    val carrierPath = computeCarrierPath(pointsForInterpolation, finalParams, interpolationType, splineTension)
-    val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, finalParams, interpolationType, splineTension)
+    val carrierPath = computeCarrierPath(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
+    val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
     
     // Вычисляем путь базовой кривой (по основным точкам) для режимов STEP и SMOOTH
     val baseCarrierPath = if (relaxationModeSettings.enabled && 
         (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
         relaxationModeSettings.carrierReductionPercent > 0 &&
         sortedPoints.size >= 2) {
-        computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension)
+        computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension, baseWeights)
     } else {
         null
     }
@@ -286,7 +318,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     geometry: CachedGraphGeometry,
     primaryColor: Color,
     indicatorColor: Color,
-    relaxationColor: Color,
     sortedPoints: List<FrequencyPoint>,
     width: Float,
     height: Float,
@@ -297,8 +328,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     relaxationModeSettings: RelaxationModeSettings,
     labelPaint: Paint,
     axisPaint: Paint,
-    carrierRange: FrequencyRange
+    carrierRange: FrequencyRange,
+    drawIndicatorOnly: Boolean = false
 ) {
+    if (!drawIndicatorOnly) {
     // Получаем сетку из глобального кэша (одна на все карточки)
     val cachedGrid = GridCache.getOrCreate(width.toInt(), height.toInt())
     
@@ -323,8 +356,13 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         )
     }
     
-    // Выбираем цвет графика
-    val graphColor = if (geometry.isRelaxationMode) relaxationColor else primaryColor
+    // Выбираем цвет графика.
+    // Все карточки пресетов используют единый цвет monet (primary) независимо
+    // от режима расслабления: иначе кастомные пресеты с включённым режимом
+    // расслабления перекрашивались в tertiary (красноватый оттенок), а
+    // стандартные — в primary, что ломало визуальное единообразие списка.
+    // Форма кривой расслабления по-прежнему рисуется, меняется только цвет.
+    val graphColor = primaryColor
     
     // Область биений
     drawPath(
@@ -419,8 +457,10 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
         axisPaint
     )
     
+    }
+
     // Индикатор воспроизведения
-    if (isPlaying) {
+    if (isPlaying || drawIndicatorOnly) {
         val carrierRangeSize = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
         fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (24.0f * 3600f) * width)
         fun carrierToY(carrier: Float): Float = height - ((carrier - carrierRange.min) / carrierRangeSize * height)
@@ -481,7 +521,13 @@ private fun computeCarrierPath(
     sortedPoints: List<FrequencyPoint>,
     params: MiniGraphParams,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    /**
+     * Веса касательных кардинального сплайна (см. CardinalTension). Приходят
+     * снаружи: внутри ~400 вызовов interpolateChannels, пересчёт весов на
+     * каждом из них превратил бы O(n) в O(n²).
+     */
+    weights: FloatArray? = null
 ): Path {
     val carrierPath = Path()
     val width = params.widthPx.toFloat()
@@ -490,7 +536,8 @@ private fun computeCarrierPath(
     // Линия несущей отображается как (l+u)/2 от канальных кривых — как в движке
     // presorted = true: вызывающие стороны передают уже отсортированный список
     val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension, presorted = true
+        sortedPoints, startTime, interpolationType, splineTension,
+        presorted = true, weights = weights
     )
     val startY = params.carrierToY((startLowerFreq + startUpperFreq) / 2.0f)
     carrierPath.moveTo(0f, startY)
@@ -519,7 +566,8 @@ private fun computeCarrierPath(
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension, presorted = true
+                sortedPoints, time, interpolationType, splineTension,
+                presorted = true, weights = weights
             )
             val y = params.carrierToY((lowerFreq + upperFreq) / 2.0f)
             val x = t * width
@@ -534,7 +582,9 @@ private fun computeBeatPaths(
     sortedPoints: List<FrequencyPoint>,
     params: MiniGraphParams,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    /** Веса касательных кардинального сплайна (см. [computeCarrierPath]). */
+    weights: FloatArray? = null
 ): Triple<Path, Path, Path> {
     val width = params.widthPx.toFloat()
     val numSamples = (sortedPoints.size * 4).coerceAtLeast(400)
@@ -546,7 +596,8 @@ private fun computeBeatPaths(
     // Канальные кривые интерполируются напрямую — как в движке
     // presorted = true: вызывающие стороны передают уже отсортированный список
     val (startLowerFreq, startUpperFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension, presorted = true
+        sortedPoints, startTime, interpolationType, splineTension,
+        presorted = true, weights = weights
     )
 
     // Кэш Y нижней кривой: раньше обратный проход для combinedPath
@@ -585,7 +636,8 @@ private fun computeBeatPaths(
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             val (lowerFreq, _) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension, presorted = true
+                sortedPoints, time, interpolationType, splineTension,
+                presorted = true, weights = weights
             )
             lowerY[i] = params.carrierToY(lowerFreq)
         }
@@ -594,7 +646,8 @@ private fun computeBeatPaths(
             val t = i.toFloat() / numSamples
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             val (lowerFreq, upperFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension, presorted = true
+                sortedPoints, time, interpolationType, splineTension,
+                presorted = true, weights = weights
             )
             val x = t * width
             lowerY[i] = params.carrierToY(lowerFreq)

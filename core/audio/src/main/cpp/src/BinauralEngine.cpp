@@ -306,8 +306,7 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
                         m_state.channelsSwapped = false;
                     }
                 } else if (resumeCfg.channelSwapMode == ChannelSwapMode::TREND &&
-                           !resumeCfg.curve.lowerFreqTable.empty() &&
-                           !resumeCfg.curve.upperFreqTable.empty()) {
+                           resumeCfg.curve.hasFreqTables()) {
                     // BOTH: реалайн по знаку тренда (прежнее поведение). Для
                     // PEAKS/TROUGHS абсолютного эталона нет — фаза зависит от числа
                     // пройденных суток (теряется при wrap позиции), поэтому держим
@@ -458,7 +457,7 @@ void BinauralEngine::setPhases(float leftPhase, float rightPhase) {
 
 bool BinauralEngine::isCurveConfigured() const {
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
-    return !m_config.curve.lowerFreqTable.empty() && !m_config.curve.upperFreqTable.empty();
+    return m_config.curve.hasFreqTables();
 }
 
 int32_t BinauralEngine::getCurrentTimeSeconds() const {
@@ -515,15 +514,18 @@ std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
     const auto& curve = m_config.curve;
     
     // Проверяем что lookup table построена
-    if (curve.lowerFreqTable.empty() || curve.upperFreqTable.empty()) {
+    if (!curve.hasFreqTables()) {
         return {0.0f, 0.0f};
     }
-    
-    // O(1) доступ к предвычисленной таблице
-    // Индекс: время в мс / шаг таблицы (100 мс)
+
+    // O(1) доступ к предвычисленной таблице.
+    // Индекс: время в мс / шаг таблицы. Шаг АДАПТИВНЫЙ (100…1000 мс) и лежит
+    // в самой кривой — брать константу нельзя, у разных кривых он разный.
     const float timeMs = currentSeconds * 1000.0f;
-    const float indexFloat = timeMs / FREQUENCY_TABLE_INTERVAL_MS;
-    const int tableSize = static_cast<int>(curve.lowerFreqTable.size());
+    const float indexFloat = timeMs / static_cast<float>(curve.tableIntervalMs);
+    const std::vector<float>& lo = *curve.lowerFreqTable;
+    const std::vector<float>& up = *curve.upperFreqTable;
+    const int tableSize = static_cast<int>(lo.size());
 
     // Линейная интерполяция между соседними ячейками — та же модель, что в
     // аудио-пути (FrequencyCurve::getChannelFrequenciesAt). Раньше брался целый
@@ -537,10 +539,8 @@ std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
     const int i0 = ((baseIndex % tableSize) + tableSize) % tableSize;
     const int i1 = (i0 + 1) % tableSize;
 
-    const float lowerFreq = curve.lowerFreqTable[i0] +
-        (curve.lowerFreqTable[i1] - curve.lowerFreqTable[i0]) * frac;
-    const float upperFreq = curve.upperFreqTable[i0] +
-        (curve.upperFreqTable[i1] - curve.upperFreqTable[i0]) * frac;
+    const float lowerFreq = lo[i0] + (lo[i1] - lo[i0]) * frac;
+    const float upperFreq = up[i0] + (up[i1] - up[i0]) * frac;
     
     // Вычисляем beat и carrier частоты
     const float beatFreq = upperFreq - lowerFreq;

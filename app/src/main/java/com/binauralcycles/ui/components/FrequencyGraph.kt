@@ -43,6 +43,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import com.binaural.core.audio.model.CardinalTension
 import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
@@ -59,7 +60,9 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 import kotlin.math.abs
 import kotlin.math.PI
+import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.round
 import kotlin.math.roundToInt
 
 // Порог для определения направления перетаскивания
@@ -336,6 +339,30 @@ fun FrequencyGraph(
                 }
             }
             
+            // Веса касательных кардинального сплайна (регуляция overshoot).
+            //
+            // Считаются ОДИН РАЗ на смену кривой/параметров, а не на сэмпл:
+            // внутри buildBeatPaths интерполяция вызывается ~1000 раз, и
+            // пересчёт весов на каждом вызове дал бы O(n²) на кадр.
+            //
+            // ДВА набора, потому что кривых тоже две: allPoints — та, что
+            // РИСУЕТСЯ (в режиме расслабления — виртуальные точки),
+            // displayPoints — базовая, по ней идёт пунктирная линия.
+            val beatWeights = remember(
+                allPoints, interpolationType, splineTension, carrierRange
+            ) {
+                CardinalTension.forPoints(
+                    allPoints, interpolationType, splineTension, carrierRange, presorted = true
+                )
+            }
+            val baseWeights = remember(
+                displayPoints, interpolationType, splineTension, carrierRange
+            ) {
+                CardinalTension.forPoints(
+                    displayPoints, interpolationType, splineTension, carrierRange, presorted = true
+                )
+            }
+
             // Статичная геометрия графика (сетка + кривые) строится ТОЛЬКО при
             // изменении точек/параметров. Тиканье телеметрии (время, частоты)
             // перерисовывает лишь указатель — интерполяция кривых не запускается.
@@ -353,7 +380,9 @@ fun FrequencyGraph(
                     params = graphParams,
                     interpolationType = interpolationType,
                     splineTension = splineTension,
-                    relaxationModeSettings = relaxationModeSettings
+                    relaxationModeSettings = relaxationModeSettings,
+                    beatWeights = beatWeights,
+                    baseWeights = baseWeights
                 )
             }
 
@@ -397,7 +426,7 @@ fun FrequencyGraph(
                                 val interpolatedBeat = if (displayPoints.size >= 2) {
                                     val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
                                         displayPoints, time, interpolationType, splineTension,
-                                        presorted = true
+                                        presorted = true, weights = baseWeights
                                     )
                                     FrequencyMath.clampBeat(
                                         carrier,
@@ -930,10 +959,14 @@ private fun buildGraphStaticPaths(
     params: GraphParams,
     interpolationType: InterpolationType,
     splineTension: Float,
-    relaxationModeSettings: RelaxationModeSettings
+    relaxationModeSettings: RelaxationModeSettings,
+    /** Веса касательных для [sortedPoints] — той кривой, что рисуется. */
+    beatWeights: FloatArray? = null,
+    /** Веса касательных для [realPoints] — базовой кривой пунктира. */
+    baseWeights: FloatArray? = null
 ): GraphStaticPaths {
     val beatPaths = if (sortedPoints.size >= 2) {
-        buildBeatPaths(sortedPoints, params, interpolationType, splineTension)
+        buildBeatPaths(sortedPoints, params, interpolationType, splineTension, beatWeights)
     } else {
         null
     }
@@ -945,7 +978,7 @@ private fun buildGraphStaticPaths(
         relaxationModeSettings.carrierReductionPercent > 0 &&
         realPoints.size >= 2
     val dashedBase = if (showDashedBase) {
-        buildDashedBaseCurvePath(realPoints, params, interpolationType, splineTension)
+        buildDashedBaseCurvePath(realPoints, params, interpolationType, splineTension, baseWeights)
     } else {
         null
     }
@@ -1050,7 +1083,13 @@ private fun buildBeatPaths(
     sortedPoints: List<FrequencyPoint>,
     params: GraphParams,
     interpolationType: InterpolationType,
-    splineTension: Float = 0.0f
+    splineTension: Float = 0.0f,
+    /**
+     * Веса касательных кардинального сплайна (см. CardinalTension). ОБЯЗАНЫ
+     * приходить снаружи: здесь ~1000 вызовов interpolateChannels, и пересчёт
+     * весов на каждом из них — это O(n²) на кадр вместо O(n) на кривую.
+     */
+    weights: FloatArray? = null
 ): BeatPaths {
     val width = params.widthPx.toFloat()
     // Динамическое количество сэмплов: минимум 500, для плавных кривых - больше
@@ -1073,7 +1112,8 @@ private fun buildBeatPaths(
     // биений левый канал звучит ВЫШЕ правого, и роли путей меняются. Заливка
     // от этого не зависит — это полоса между двумя канальными кривыми.
     val (startLeftFreq, startRightFreq) = Interpolation.interpolateChannels(
-        sortedPoints, startTime, interpolationType, splineTension, presorted = true
+        sortedPoints, startTime, interpolationType, splineTension,
+        presorted = true, weights = weights
     )
     val startUpperY = params.carrierToY(startRightFreq)
     val startLowerY = params.carrierToY(startLeftFreq)
@@ -1138,7 +1178,8 @@ private fun buildBeatPaths(
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             lowerY[i] = params.carrierToY(
                 Interpolation.interpolateChannels(
-                    sortedPoints, time, interpolationType, splineTension, presorted = true
+                    sortedPoints, time, interpolationType, splineTension,
+                    presorted = true, weights = weights
                 ).first // левый канал
             )
         }
@@ -1149,7 +1190,8 @@ private fun buildBeatPaths(
             val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
             // Канальные кривые через общую функцию (как в движке): (левый, правый)
             val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
-                sortedPoints, time, interpolationType, splineTension, presorted = true
+                sortedPoints, time, interpolationType, splineTension,
+                presorted = true, weights = weights
             )
             lowerY[i] = params.carrierToY(leftFreq)
             val x = (t * width).toFloat()
@@ -1187,15 +1229,24 @@ private fun buildDashedBaseCurvePath(
     realPoints: List<FrequencyPoint>,
     params: GraphParams,
     interpolationType: InterpolationType,
-    splineTension: Float
+    splineTension: Float,
+    /**
+     * Веса касательных для [realPoints] — базовой кривой.
+     *
+     * НЕ те же, что у канальных кривых: пунктир идёт по РЕАЛЬНЫМ точкам,
+     * а канальные кривые в режиме расслабления — по виртуальным. Веса
+     * считаются по своим узлам в каждом случае.
+     */
+    weights: FloatArray? = null
 ): Path {
     val width = params.widthPx.toFloat()
     val carrierPath = Path()
-    
+
     // Начинаем с левой границы (время 0)
     val startTime = LocalTime.fromSecondOfDay(0)
     val startCarrier = interpolateCarrierFrequency(
-        realPoints, startTime, interpolationType, splineTension, presorted = true
+        realPoints, startTime, interpolationType, splineTension,
+        presorted = true, weights = weights
     )
     val startY = params.carrierToY(startCarrier)
     carrierPath.moveTo(0f, startY)
@@ -1206,7 +1257,8 @@ private fun buildDashedBaseCurvePath(
         val t = i.toDouble() / numSamples
         val time = LocalTime.fromSecondOfDay((t * 24 * 3600).toInt().coerceAtMost(86399))
         val carrier = interpolateCarrierFrequency(
-            realPoints, time, interpolationType, splineTension, presorted = true
+            realPoints, time, interpolationType, splineTension,
+            presorted = true, weights = weights
         )
         val y = params.carrierToY(carrier)
         val x = (t * width).toFloat()
@@ -1431,8 +1483,53 @@ private fun calculateTimeFromDrag(startSeconds: Int, dragX: Float, minSeconds: I
     return LocalTime.fromSecondOfDay(finalSeconds)
 }
 
+/**
+ * Шаг «в одно деление» несущей частоты: 1% разницы между верхней и нижней
+ * границами диапазона, округлённый до ближайшего целого СВЕРХУ.
+ *
+ * Округление вверх гарантирует, что шаг не выродится в 0 на узких
+ * диапазонах: у диапазона 100–140 Гц разница 40 Гц, 1% — это 0,4 Гц, и
+ * округление «вниз» или «до ближайшего» обнулило бы шаг, а «вверх»
+ * даёт 1 Гц. На широком диапазоне (20–2000 Гц) шаг равен 20 Гц.
+ *
+ * Шаг ОБЩИЙ для перетаскивания точки по графику и для свайпа по полю
+ * несущей в контекстном окне ([PointEditorPopup]) — иначе два жеста давали
+ * бы разные значения на одной и той же высоте.
+ *
+ * @return шаг в герцах; 0, если диапазон вырожден ([FrequencyRange] не
+ *         допускает max <= min, но границы могут быть сколь угодно близки)
+ */
+internal fun carrierStep(carrierRange: FrequencyRange): Float {
+    val span = carrierRange.max - carrierRange.min
+    if (span <= 0f) return 0f
+    return ceil(span / 100f)
+}
+
+/**
+ * Приводит несущую частоту к сетке с шагом [carrierStep].
+ *
+ * Сетка привязана к НИЖНЕЙ границе диапазона, а не к значению, с которого
+ * началось перетаскивание: тогда точка, отпущенная в одной и той же
+ * позиции, получает одно и то же значение независимо от стартового, и
+ * две разные точки, поставленные на одну высоту, совпадут по частоте.
+ *
+ * Значение сначала зажимается границами, а уже потом округляется до
+ * ближайшего узла сетки — иначе у верхней границы округление «задирало»
+ * бы частоту выше максимума, и после [FrequencyRange.clamp] точка
+ * прилипала бы к краю раньше, чем следовало.
+ */
+internal fun quantizeCarrier(value: Float, carrierRange: FrequencyRange): Float {
+    val step = carrierStep(carrierRange)
+    if (step <= 0f) return carrierRange.clamp(value)
+    val clamped = carrierRange.clamp(value)
+    val stepsFromMin = round((clamped - carrierRange.min) / step)
+    return carrierRange.clamp(carrierRange.min + stepsFromMin * step)
+}
+
 private fun calculateCarrierFromDrag(startCarrier: Float, dragY: Float, carrierRange: FrequencyRange, graphHeight: Float): Float {
-    return carrierRange.clamp(kotlin.math.round(startCarrier - dragY * (carrierRange.max - carrierRange.min) / graphHeight))
+    if (graphHeight <= 0f) return carrierRange.clamp(startCarrier)
+    val rawCarrier = startCarrier - dragY * (carrierRange.max - carrierRange.min) / graphHeight
+    return quantizeCarrier(rawCarrier, carrierRange)
 }
 
 // Функции интерполяции
@@ -1446,9 +1543,10 @@ fun interpolateCarrierFrequency(
     time: LocalTime,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
     splineTension: Float = 0.0f,
-    presorted: Boolean = false
+    presorted: Boolean = false,
+    weights: FloatArray? = null
 ): Float = interpolateFrequency(
-    points, time, interpolationType, splineTension, presorted
+    points, time, interpolationType, splineTension, presorted, weights
 ) { it.carrierFrequency }
 
 fun interpolateFrequency(
@@ -1463,12 +1561,25 @@ fun interpolateFrequency(
      * аллоцировал и сортировал копию списка.
      */
     presorted: Boolean = false,
+    /**
+     * Веса касательных кардинального сплайна (см. CardinalTension).
+     *
+     * Те же, что у канальных кривых: сплайн линеен, поэтому carrier = (left+right)/2
+     * интерполируется РОВНО теми же весами. Иначе пунктирная базовая кривая
+     * разошлась бы с нарисованными каналами — она бы вылетала за границы там,
+     * где каналы уже прижаты.
+     */
+    weights: FloatArray? = null,
     frequencySelector: (FrequencyPoint) -> Float
 ): Float {
     val sortedPoints = if (presorted) points else points.sortedBy { it.time.toSecondOfDay() }
     if (sortedPoints.isEmpty()) return 0.0f
     if (sortedPoints.size == 1) return frequencySelector(sortedPoints[0])
-    
+
+    // Веса привязаны к узлам; при несовпадении размера молча игнорируются —
+    // безопаснее отдать номинальный сплайн, чем применить чужие веса.
+    val w = if (weights != null && weights.size == sortedPoints.size) weights else null
+
     val targetSeconds = time.toSecondOfDay()
     
     // Находим интервал, в который попадает время
@@ -1492,7 +1603,8 @@ fun interpolateFrequency(
             frequencySelector,
             interpolationType,
             splineTension,
-            isWrapping = true
+            isWrapping = true,
+            weights = w
         )
     }
     
@@ -1504,7 +1616,8 @@ fun interpolateFrequency(
         frequencySelector,
         interpolationType,
         splineTension,
-        isWrapping = false
+        isWrapping = false,
+        weights = w
     )
 }
 
@@ -1519,7 +1632,8 @@ private fun interpolateBetweenPoints(
     frequencySelector: (FrequencyPoint) -> Float,
     interpolationType: InterpolationType,
     splineTension: Float,
-    isWrapping: Boolean
+    isWrapping: Boolean,
+    weights: FloatArray? = null
 ): Float {
     val leftPoint = sortedPoints[leftIndex]
     val rightPoint = sortedPoints[rightIndex]
@@ -1548,8 +1662,13 @@ private fun interpolateBetweenPoints(
     val p2 = frequencySelector(rightPoint)
     val p3 = getNeighborPoint(sortedPoints, rightIndex, +1, frequencySelector, isWrapping)
     
+    val w1 = weights?.get(leftIndex) ?: 1.0f
+    val w2 = weights?.get(rightIndex) ?: 1.0f
+
     // Используем общий объект интерполяции с параметром tension
-    return Interpolation.interpolate(interpolationType, p0, p1, p2, p3, ratio, splineTension)
+    return Interpolation.interpolate(
+        interpolationType, p0, p1, p2, p3, ratio, splineTension, false, w1, w2
+    )
 }
 
 /**

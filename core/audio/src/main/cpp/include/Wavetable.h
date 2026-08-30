@@ -216,6 +216,41 @@ public:
         __m128 diff = _mm_sub_ps(vy1, vy0);
         return _mm_add_ps(vy0, _mm_mul_ps(fractions, diff));
     }
+
+    /**
+     * SSE-вариант БЕЗ ветки на отрицательную дробь.
+     *
+     * Вызывающая сторона гарантирует phase >= 0 — иначе индекс и дробь берутся
+     * не от той ячейки (усечение к нулю, а не вниз) и на 4 сэмплах появляется
+     * ошибка ~0.6 шага таблицы. В генераторе это выполняется по построению:
+     * фаза обматывается в [0, 2π), частота тона >= 20 Гц, а прирост за 4 сэмпла
+     * (< 4π при SR 8000 и тоне 2000 Гц) перекрывается двумя условными
+     * вычитаниями. Один max_ps страхует младшую грань на крутом спаде частоты
+     * внутри короткого сегмента (3·omegaStep > 3·omega).
+     *
+     * Экономия против fastSinSse — 7 векторных операций на 4 сэмпла.
+     */
+    static inline __m128 fastSinSseNonNeg(__m128 phasesScaled) {
+        phasesScaled = _mm_max_ps(phasesScaled, _mm_setzero_ps());
+        const __m128i ints = _mm_cvttps_epi32(phasesScaled);
+        const __m128 fractions = _mm_sub_ps(phasesScaled, _mm_cvtepi32_ps(ints));
+        const __m128i indices = _mm_and_si128(ints, _mm_set1_epi32(s_tableSizeMask));
+
+        int idx[4] __attribute__((aligned(16)));
+        _mm_store_si128((__m128i*)idx, indices);
+
+        float y0[4] __attribute__((aligned(16)));
+        float y1[4] __attribute__((aligned(16)));
+        for (int i = 0; i < 4; ++i) {
+            y0[i] = s_sineTable[idx[i]];
+            y1[i] = s_sineTable[idx[i] + 1];
+        }
+
+        const __m128 vy0 = _mm_load_ps(y0);
+        const __m128 vy1 = _mm_load_ps(y1);
+        const __m128 diff = _mm_sub_ps(vy1, vy0);
+        return _mm_add_ps(vy0, _mm_mul_ps(fractions, diff));
+    }
 #endif
 
 private:

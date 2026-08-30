@@ -29,16 +29,35 @@ object Interpolation {
      * - tension = 1.0 -> почти линейная интерполяция
      * - tension > 0 -> более "тугая" кривая, меньше overshoot
      * - Проходит через все контрольные точки
+     *
+     * @param w1 вес касательной в узле p1 (1 — номинальная, 0 — нулевая)
+     * @param w2 вес касательной в узле p2
+     *
+     * ВЕСА — это регулировка overshoot, см. [CardinalTension]. Они ОБЩИЕ для обоих
+     * каналов (и, как следствие линейности сплайна, для производных кривых —
+     * несущей и частоты биений), поэтому:
+     *   - каналы НЕ схлопываются: beat(t) остаётся точной интерполяцией узлов beat;
+     *   - carrier(t) = (left+right)/2 остаётся точной интерполяцией узлов carrier;
+     *   - C¹-непрерывность сохранена (смежные интервалы делят один и тот же вес).
      */
-    fun cardinal(p0: Float, p1: Float, p2: Float, p3: Float, t: Float, tension: Float = 0.0f): Float {
+    fun cardinal(
+        p0: Float, p1: Float, p2: Float, p3: Float,
+        t: Float,
+        tension: Float = 0.0f,
+        w1: Float = 1.0f,
+        w2: Float = 1.0f
+    ): Float {
         val t2 = t * t
         val t3 = t2 * t
-        
-        // Вычисляем касательные с учётом натяжения
+
+        // Вычисляем касательные с учётом натяжения.
+        // w1/w2 — единственное отличие от классического кардинального сплайна:
+        // касательные укорачиваются там, где номинальная кривая вылетает за
+        // вертикальные границы графика (см. [CardinalTension]).
         val s = (1.0f - tension) / 2.0f
-        val m1 = (p2 - p0) * s
-        val m2 = (p3 - p1) * s
-        
+        val m1 = (p2 - p0) * s * w1
+        val m2 = (p3 - p1) * s * w2
+
         val h00 = 2.0f * t3 - 3.0f * t2 + 1.0f
         val h10 = t3 - 2.0f * t2 + t
         val h01 = -2.0f * t3 + 3.0f * t2
@@ -127,6 +146,8 @@ object Interpolation {
      *        отрицательными быть не могут. true — знак результата сохраняется:
      *        так интерполируется ЧАСТОТА БИЕНИЙ, у которой знак кодирует
      *        раскладку каналов (см. [FrequencyPoint.beatFrequency]).
+     * @param w1 вес касательной в узле p1 (только CARDINAL, см. [CardinalTension])
+     * @param w2 вес касательной в узле p2 (только CARDINAL)
      * @return интерполированное значение
      */
     fun interpolate(
@@ -134,11 +155,13 @@ object Interpolation {
         p0: Float, p1: Float, p2: Float, p3: Float,
         t: Float,
         tension: Float = 0.0f,
-        allowNegative: Boolean = false
+        allowNegative: Boolean = false,
+        w1: Float = 1.0f,
+        w2: Float = 1.0f
     ): Float {
         val result = when (type) {
             InterpolationType.LINEAR -> linear(p1, p2, t)
-            InterpolationType.CARDINAL -> cardinal(p0, p1, p2, p3, t, tension)
+            InterpolationType.CARDINAL -> cardinal(p0, p1, p2, p3, t, tension, w1, w2)
             InterpolationType.MONOTONE -> monotone(p0, p1, p2, p3, t)
             InterpolationType.STEP -> step(p1)
         }
@@ -163,6 +186,10 @@ object Interpolation {
      * @param type тип интерполяции
      * @param tension натяжение для CARDINAL
      * @param presorted true, если points уже отсортированы по времени суток
+     * @param weights веса касательных (см. [CardinalTension.forPoints]). Индексируются
+     *        В ТОМ ЖЕ ПОРЯДКЕ, что и points; при несовпадении размера молча
+     *        игнорируются (безопаснее отдать номинальный сплайн, чем применить
+     *        чужие веса к чужим узлам). null — регулировка не нужна.
      * @return Pair(левый канал, правый канал) = (carrier − beat/2, carrier + beat/2);
      *         отображаемые carrier=(l+r)/2, beat=r−l
      */
@@ -171,7 +198,8 @@ object Interpolation {
         time: LocalTime,
         type: InterpolationType,
         tension: Float = 0.0f,
-        presorted: Boolean = false
+        presorted: Boolean = false,
+        weights: FloatArray? = null
     ): Pair<Float, Float> {
         val sortedPoints = if (presorted) points else points.sortedBy { it.time.toSecondOfDay() }
         if (sortedPoints.isEmpty()) return 0.0f to 0.0f
@@ -187,6 +215,7 @@ object Interpolation {
         // Выбор интервала как в C++: время до первой точки принадлежит
         // wrap-интервалу [последняя точка → первая + 24ч]
         val numPoints = sortedPoints.size
+        val w = if (weights != null && weights.size == numPoints) weights else null
         val targetSeconds = time.toSecondOfDay()
         var leftIndex = 0
         val isWrapping: Boolean
@@ -214,12 +243,17 @@ object Interpolation {
         val prevIndex = (leftIndex - 1 + numPoints) % numPoints
         val nextNextIndex = (rightIndex + 1) % numPoints
 
+        // Веса ОБЩИЕ для обоих каналов: только при общем весе beat = right − left
+        // остаётся точной интерполяцией узлов beat и каналы не схлопываются.
+        val w1 = w?.get(leftIndex) ?: 1.0f
+        val w2 = w?.get(rightIndex) ?: 1.0f
+
         fun evaluate(selector: (FrequencyPoint) -> Float): Float {
             val p0 = selector(sortedPoints[prevIndex])
             val p1 = selector(sortedPoints[leftIndex])
             val p2 = selector(sortedPoints[rightIndex])
             val p3 = selector(sortedPoints[nextNextIndex])
-            return interpolate(type, p0, p1, p2, p3, ratio, tension)
+            return interpolate(type, p0, p1, p2, p3, ratio, tension, false, w1, w2)
         }
 
         return evaluate(lowerSelector) to evaluate(upperSelector)

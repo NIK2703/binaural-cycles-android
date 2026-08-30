@@ -35,6 +35,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalTime
@@ -128,6 +131,23 @@ class BinauralViewModel @Inject constructor(
      */
     private val _telemetry = MutableStateFlow(PlaybackTelemetry())
     val telemetry: StateFlow<PlaybackTelemetry> = _telemetry.asStateFlow()
+
+    /**
+     * Не-квантованное время суток — исключительно для DEBUG-панели управления
+     * виртуальным временем (её слайдеру нужна посекундная точность). Берём
+     * [BinauralPlaybackService.currentTimeOfDaySeconds] напрямую, минуя
+     * 60-секундное квантование [telemetry] (см. U1). В release эта панель не
+     * рендерится, поэтому в production лишних перекомпозиций от этого потока нет
+     * (сборка начинается только при подписке из debug-панели).
+     */
+    val debugCurrentTime: StateFlow<LocalTime> =
+        BinauralPlaybackService.currentTimeOfDaySeconds
+            .map { LocalTime.fromSecondOfDay(it.coerceIn(0, 86399)) }
+            .stateIn(
+                scope = viewModelScope,
+                started = SharingStarted.WhileSubscribed(5000),
+                initialValue = LocalTime(12, 0)
+            )
     
     // Ссылка на сервис (может быть null если сервис не привязан)
     private var playbackService: BinauralPlaybackService? = null
@@ -270,10 +290,10 @@ class BinauralViewModel @Inject constructor(
         // Интервал генерации буфера (в минутах)
         viewModelScope.launch {
             preferencesRepository.getBufferGenerationMinutes().collect { minutes ->
-                // Шкала всегда полная (1..60 мин) на любой частоте. Если
-                // интервал больше ёмкости direct-буфера, движок сам урежет
-                // длину пакета по фактической ёмкости — звук при этом идёт.
-                val clamped = minutes.coerceIn(1, 60)
+                // Максимум 10 мин (600 с): выше — упирается в RSS-бюджет LMK,
+                // и движку пришлось бы урезать буфер. Слайдер не даёт выбрать
+                // больше, здесь — страховка для значений из хранилища/старых версий.
+                val clamped = minutes.coerceIn(1, 10)
                 _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
                 // Преобразуем минуты в миллисекунды для частоты обновления
                 // Большой буфер = реже обновления = лучше энергопотребление
@@ -439,12 +459,21 @@ class BinauralViewModel @Inject constructor(
                 BinauralPlaybackService.isChannelsSwapped,
                 BinauralPlaybackService.currentTimeOfDaySeconds
             ) { playing, beat, carrier, swapped, timeSeconds ->
+                // U1: квантуем время суток до 60 с. Ни один production-экран не
+                // показывает секунды, а MiniFrequencyGraph сдвигает указатель на
+                // ~0.07% ширины за 60 с (неразличимо). Это режет эмиссии
+                // телеметрии с ~1/с до ~1/мин, поэтому список пресетов и экраны
+                // редактирования перекомпонуются в 60 раз реже в фоне и на паузе
+                // (где beat/carrier постоянны и единственный движущийся сигнал —
+                // это время). Debug-панель времени берёт отдельный неквантованный
+                // поток (см. debugCurrentTime), поэтому её слайдер не страдает.
+                val quantizedSeconds = (timeSeconds / 60) * 60
                 PlaybackTelemetry(
                     isPlaying = playing,
                     currentBeatFrequency = beat,
                     currentCarrierFrequency = carrier,
                     isChannelsSwapped = swapped,
-                    currentTime = LocalTime.fromSecondOfDay(timeSeconds.coerceIn(0, 86399))
+                    currentTime = LocalTime.fromSecondOfDay(quantizedSeconds.coerceIn(0, 86399))
                 )
             }
                 // Схлопываем повторы: на паузе сервис шлёт те же значения,
@@ -677,29 +706,25 @@ class BinauralViewModel @Inject constructor(
             updatedAt = System.currentTimeMillis()
         )
         
-        // Если сохраняем активный пресет - применяем изменения с затуханием
+        // При сохранении НЕ делаем fade-рестарт: restartWithFadeIfNeeded ждал
+        // 300 мс и затем «выстреливал» пакетом перекомпозиции (activePreset +
+        // updateAudioConfig) как раз посередине shared-анимации сворачивания,
+        // из-за чего переход дропал кадры. Активный пресет обновляем сразу:
+        // меняем состояние и применяем конфиг к сервису, а запись в БД
+        // асинхронна. updateAudioConfig сам не применяется во время смены
+        // пресета (guard isPresetSwitchInProgress), так что аудио не дёрнется.
         if (isActivePreset) {
-            restartWithFadeIfNeeded {
-                // Обновляем состояние UI
-                _uiState.update { 
-                    it.copy(
-                        activePreset = updatedPreset,
-                        carrierRange = curve.carrierRange,
-                        beatRange = curve.beatRange
-                    )
-                }
-                // Применяем новый конфиг к сервису
-                updateAudioConfig()
-                // Сохраняем в preferences
-                viewModelScope.launch {
-                    preferencesRepository.updatePreset(updatedPreset)
-                }
+            _uiState.update {
+                it.copy(
+                    activePreset = updatedPreset,
+                    carrierRange = curve.carrierRange,
+                    beatRange = curve.beatRange
+                )
             }
-        } else {
-            // Не активный пресет - просто сохраняем
-            viewModelScope.launch {
-                preferencesRepository.updatePreset(updatedPreset)
-            }
+            updateAudioConfig()
+        }
+        viewModelScope.launch {
+            preferencesRepository.updatePreset(updatedPreset)
         }
     }
     
@@ -1324,7 +1349,7 @@ class BinauralViewModel @Inject constructor(
      * Большой интервал = меньше пробуждений CPU = лучше энергопотребление
      */
     fun setBufferGenerationMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(1, 60)
+        val clampedMinutes = minutes.coerceIn(1, 10)
         _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
         // Преобразуем минуты в миллисекунды
         playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)

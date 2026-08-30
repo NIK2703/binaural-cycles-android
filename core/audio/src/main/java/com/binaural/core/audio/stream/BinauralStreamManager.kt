@@ -39,6 +39,17 @@ class BinauralStreamManager(private val context: Context) {
         private const val TAG = "BinauralStreamMgr"
         private const val WAKE_LOCK_TAG = "BinauralBeats:StreamManager"
         private const val POWER_SAVE_MULTIPLIER = 3
+        /**
+         * Границы интервала генерации (длины пакета) — пользовательская
+         * настройка. Верхняя = 600 с (10 мин): это потолок, с которым буфер
+         * влезает целиком на любом SR (600 с @48 кГц = 230 МБ на поток <
+         * 256 МБ предела BinauralStreamImpl.maxBufferBytes на 64-бит). Выше —
+         * упирается в RSS-бюджет LMK и на мощном устройстве, поэтому слайдер
+         * не даёт выбрать больше. Нижняя — чтобы пакет покрывал хотя бы один
+         * WRITE_CHUNK_MS.
+         */
+        private const val MIN_BUFFER_INTERVAL_MS = 1_000
+        private const val MAX_BUFFER_INTERVAL_MS = 600_000
         /** Как часто подтверждаем удержание CPU во время воспроизведения. */
         private const val WAKE_LOCK_RENEW_MS = 5 * 60 * 1000L
     }
@@ -54,6 +65,21 @@ class BinauralStreamManager(private val context: Context) {
     private var relaxation = RelaxationModeSettings()
     @Volatile private var sampleRate = SampleRate.MEDIUM
     private var volume = 1.0f
+    /**
+     * Интервал генерации (= длина одного пакета, который нативный движок
+     * считает за один JNI-вызов). Пользовательская настройка, дефолт 600 с
+     * (10 мин) — слайдер ограничен ровно этим значением.
+     *
+     * История: до оптимизации здесь стояло 600_000 и кламп 1 ч, но длинный
+     * пакет реально не экономил CPU (генерация ≈ 6.4 нс/кадр при любом
+     * размере; CPU/час одинаков при 2 с и 190 с — 1.02 с), а платил 67 МБ
+     * на поток (134 МБ в кроссфейде) + page-fault'ы + дорогую пересборку
+     * потока на каждом handoff. Поэтому рабочий потолок осознанно снижен до
+     * 600 с — ровно столько, сколько влезает в 256 МБ direct-буфера на
+     * любом SR (см. BinauralStreamImpl.maxBufferBytes), то есть настройка
+     * работает «как задумано», без тихого усечения. Дефолт совпадает с
+     * MAX_BUFFER_INTERVAL_MS, поэтому не упирается в кламп и честно виден в UI.
+     */
     private var bufferIntervalMs = 600_000
     private var lastUserIntervalMs = 600_000
 
@@ -204,7 +230,14 @@ class BinauralStreamManager(private val context: Context) {
     fun getSampleRate(): SampleRate = sampleRate
 
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        val clamped = intervalMs.coerceIn(1000, 60 * 60 * 1000)
+        // Верхний предел 60 с — не «разумный расход памяти», а структурная
+        // граница. Замер (docs/hotpath_optimization_analysis_2026-08-30.md):
+        // длина пакета НЕ влияет на CPU/час (1.02 с при пакете и 2 с, и 190 с)
+        // и НЕ влияет на wakeups писателя (их задаёт WRITE_CHUNK_MS). Платит
+        // длинный пакет только памятью: 60 с @48 кГц = 23 МБ на поток.
+        // Держим предел здесь, чтобы никакое значение из UI не могло вернуть
+        // 67-мегабайтные буферы, на которых проект ловил OOM.
+        val clamped = intervalMs.coerceIn(MIN_BUFFER_INTERVAL_MS, MAX_BUFFER_INTERVAL_MS)
         actor.post {
             // Повтор того же значения обязан быть пустым: иначе режим
             // энергосбережения (applyPowerSaveMode утром/вечером) каждый раз
@@ -227,16 +260,16 @@ class BinauralStreamManager(private val context: Context) {
      * 60 минут = 3_600_000 мс.
      *
      * Правильная семантика: в энергосбережении буфер НЕ короче заданного
-     * пользователем (иначе смысл настройки теряется), но и не больше часа —
-     * это одновременно предел `setFrequencyUpdateInterval` и предел
-     * разумного расхода памяти.
+     * пользователем (иначе смысл настройки теряется), но и не больше
+     * MAX_BUFFER_INTERVAL_MS — предела структурного, а не «разумного»:
+     * длина пакета не влияет ни на CPU, ни на wakeups, только на память.
      */
     fun applyPowerSaveMode() {
         actor.post {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             bufferIntervalMs = if (pm.isPowerSaveMode) {
                 (lastUserIntervalMs * POWER_SAVE_MULTIPLIER)
-                    .coerceIn(lastUserIntervalMs, 60 * 60 * 1000)
+                    .coerceIn(lastUserIntervalMs, MAX_BUFFER_INTERVAL_MS)
             } else {
                 lastUserIntervalMs
             }

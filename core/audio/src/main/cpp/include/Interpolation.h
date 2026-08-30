@@ -32,16 +32,29 @@ inline float linear(float y1, float y2, float t) {
  * - tension = 1.0 -> почти линейная интерполяция
  * - tension > 0 -> более "тугая" кривая, меньше overshoot
  * - Проходит через все контрольные точки
+ *
+ * w1, w2 — веса касательных в узлах p1 и p2 (см. CardinalTension.kt):
+ *   1.0 — номинальная касательная (как раньше), 0.0 — нулевая.
+ * Это и есть регулировка overshoot: на участках, где кривая вылетает за
+ * вертикальные границы, касательные укорачиваются настолько, чтобы кривая
+ * границу КАСАЛАСЬ, а не перескакивала.
+ *
+ * Вес ОБЩИЙ для обоих каналов. Сплайн линеен по касательным, поэтому
+ *   right(t) − left(t) = spline(beat; w·M^beat):
+ * каналы НЕ схлопываются в точке касания, частота биений остаётся точной
+ * интерполяцией своих узлов. Свой на канал вес это тождество разрушил бы,
+ * каналы почти слиплись бы, а overshoot просто переехал бы в другое место.
  */
-inline float cardinal(float p0, float p1, float p2, float p3, float t, float tension = 0.0) {
+inline float cardinal(float p0, float p1, float p2, float p3, float t,
+                      float tension = 0.0, float w1 = 1.0f, float w2 = 1.0f) {
     const float t2 = t * t;
     const float t3 = t2 * t;
-    
+
     // Вычисляем касательные с учётом натяжения
     const float s = (1.0 - tension) / 2.0;
-    const float m1 = (p2 - p0) * s;
-    const float m2 = (p3 - p1) * s;
-    
+    const float m1 = (p2 - p0) * s * w1;
+    const float m2 = (p3 - p1) * s * w2;
+
     const float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
     const float h10 = t3 - 2.0 * t2 + t;
     const float h01 = -2.0 * t3 + 3.0 * t2;
@@ -121,6 +134,8 @@ inline float step(float p1) {
  *        true — знак сохраняется: обязательно для ЧАСТОТЫ БИЕНИЙ, которая
  *        величина знаковая (beat = right − left; знак кодирует раскладку
  *        каналов, |beat| — слышимую пульсацию). См. FrequencyMath.kt.
+ * @param w1 вес касательной в узле p1 (только CARDINAL, см. cardinal())
+ * @param w2 вес касательной в узле p2 (только CARDINAL)
  * @return интерполированное значение
  */
 inline float interpolate(
@@ -128,7 +143,9 @@ inline float interpolate(
     float p0, float p1, float p2, float p3,
     float t,
     float tension = 0.0f,
-    bool allowNegative = false
+    bool allowNegative = false,
+    float w1 = 1.0f,
+    float w2 = 1.0f
 ) {
     float result;
     switch (type) {
@@ -136,7 +153,7 @@ inline float interpolate(
             result = linear(p1, p2, t);
             break;
         case InterpolationType::CARDINAL:
-            result = cardinal(p0, p1, p2, p3, t, tension);
+            result = cardinal(p0, p1, p2, p3, t, tension, w1, w2);
             break;
         case InterpolationType::MONOTONE:
             result = monotone(p0, p1, p2, p3, t);
@@ -157,8 +174,22 @@ inline float interpolate(
  */
 
 /**
+ * Залить обе таблицы константой (вырожденные кривые: 0 или 1 точка).
+ */
+inline void FrequencyCurve::fillTablesConstant(float lowerFreq, float upperFreq,
+                                               int entries) {
+    // КРИТИЧНО: создаём НОВЫЕ векторы, а не перезаписываем старые — прежние
+    // таблицы может ещё держать другой поток через shared_ptr (писатель берёт
+    // копию конфига на время генерации пакета).
+    lowerFreqTable = std::make_shared<std::vector<float>>(
+        static_cast<size_t>(entries), lowerFreq);
+    upperFreqTable = std::make_shared<std::vector<float>>(
+        static_cast<size_t>(entries), upperFreq);
+}
+
+/**
  * Внутренняя реализация построения таблицы
- * Использует фиксированный шаг FREQUENCY_TABLE_INTERVAL_MS (100 мс)
+ * Использует АДАПТИВНЫЙ шаг (см. FREQUENCY_TABLE_MIN_INTERVAL_MS в Config.h)
  *
  * ОПТИМИЗАЦИЯ: Использует итеративный поиск O(n) вместо бинарного O(n log n)
  * т.к. время монотонно возрастает при построении таблицы.
@@ -166,8 +197,8 @@ inline float interpolate(
 inline void FrequencyCurve::buildLookupTableInternal() {
     if (points.empty()) {
         // Нет точек - используем значения по умолчанию
-        lowerFreqTable.assign(1, 200.0);
-        upperFreqTable.assign(1, 210.0);
+        tableIntervalMs = FREQUENCY_TABLE_MAX_INTERVAL_MS;
+        fillTablesConstant(200.0f, 210.0f, FREQUENCY_TABLE_MIN_SIZE);
         return;
     }
     
@@ -177,13 +208,11 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         const auto& p = points[0];
         const float lowerFreq = std::max(0.0f, p.carrierFrequency - p.beatFrequency / 2.0f);
         const float upperFreq = std::max(0.0f, p.carrierFrequency + p.beatFrequency / 2.0f);
-        lowerFreqTable.assign(FREQUENCY_TABLE_SIZE, lowerFreq);
-        upperFreqTable.assign(FREQUENCY_TABLE_SIZE, upperFreq);
+        // Кривая константна — любая ячейка даёт то же значение, берём крупный шаг.
+        tableIntervalMs = FREQUENCY_TABLE_MAX_INTERVAL_MS;
+        fillTablesConstant(lowerFreq, upperFreq, FREQUENCY_TABLE_MIN_SIZE);
         return;
     }
-    
-    // Фиксированный размер таблицы
-    const int tableSize = FREQUENCY_TABLE_SIZE;
     
     // Сортируем копию стабильно по времени; при равных временах оставляем последнюю точку
     std::vector<FrequencyPoint> sortedPoints = points;
@@ -203,10 +232,58 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         sortedPoints.resize(outIndex);
     }
     const int numPoints = static_cast<int>(sortedPoints.size());
-    
-    // Выделяем память
-    lowerFreqTable.resize(tableSize);
-    upperFreqTable.resize(tableSize);
+
+    // ---------------- Веса касательных (регуляция overshoot) ----------------
+    // Веса относились к узлам в том порядке, в котором точки прислал Kotlin, и
+    // привязаны к отсортированным и схлопнутым по времени точкам — ровно к тем,
+    // что в sortedPoints. При ЛЮБОМ расхождении размера регулировка
+    // отключается: безопаснее построить таблицу с номинальными касательными,
+    // чем применить веса к чужим узлам.
+    const float* tw = nullptr;
+    if (tensionWeights.size() == static_cast<size_t>(numPoints)) {
+        tw = tensionWeights.data();
+    }
+
+    // ---------------- Адаптивный шаг таблицы ----------------
+    // Шаг привязан к МИНИМАЛЬНОМУ зазору между соседними точками (с учётом
+    // wrap-зазора через полночь): чем чаще точки, тем мельче шаг.
+    //
+    // ПОЛ шага = FREQUENCY_TABLE_MIN_INTERVAL_MS (100 мс) — историческое
+    // разрешение таблицы. Тем самым ошибка адаптивной таблицы НИКОГДА не
+    // превышает ошибку прежней фиксированной: кривая с часто расставленными
+    // точками просто упирается в пол и ведёт себя по-старому.
+    //
+    // Выгода — на типовых пресетах: у кривой по умолчанию точки разнесены на
+    // 3 часа, шаг упирается в потолок 1 с, и таблица становится в 10 раз
+    // меньше (86 400 записей вместо 864 000): 0.69 МБ вместо 6.6 МБ и
+    // updateCache ~4 мс вместо ~37 мс (MONOTONE).
+    {
+        int minGap = SECONDS_PER_DAY;
+        for (int i = 0; i < numPoints; ++i) {
+            const int a = sortedPoints[i].timeSeconds;
+            const int b = sortedPoints[(i + 1) % numPoints].timeSeconds;
+            int gap = b - a;
+            if (gap <= 0) gap += SECONDS_PER_DAY;   // wrap через полночь
+            minGap = std::min(minGap, gap);
+        }
+        if (minGap < 1) minGap = 1;
+        tableIntervalMs = std::clamp(
+            static_cast<int>(static_cast<float>(minGap) * 1000.0f /
+                             static_cast<float>(FREQUENCY_TABLE_CELLS_PER_GAP)),
+            FREQUENCY_TABLE_MIN_INTERVAL_MS,
+            FREQUENCY_TABLE_MAX_INTERVAL_MS);
+    }
+
+    const int tableSize = SECONDS_PER_DAY * 1000 / tableIntervalMs;
+
+    // Выделяем СВЕЖИЕ таблицы: старые могут быть ещё видны писателю, который
+    // держит копию конфига на время генерации пакета. Пишем в локальные
+    // ссылки, наружу публикуем только готовые — иначе читатель мог бы увидеть
+    // наполовину построенную таблицу.
+    auto newLower = std::make_shared<std::vector<float>>(static_cast<size_t>(tableSize));
+    auto newUpper = std::make_shared<std::vector<float>>(static_cast<size_t>(tableSize));
+    std::vector<float>& lowerFreqTable = *newLower;
+    std::vector<float>& upperFreqTable = *newUpper;
     
     // Селекторы для частот каналов.
     //
@@ -243,9 +320,10 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         // с шагом 1 секунда (10 одинаковых ячеек подряд) вместо заявленных
         // 100 мс. Из-за этого частоты в UI стояли на месте до секунды,
         // а при крутых кривых «ступеньки» были слышны и в отчётах частот.
+        // Сейчас шаг адаптивный (tableIntervalMs) и дробный.
         const float timeSecondsF =
             static_cast<float>(tableIndex) *
-            (static_cast<float>(FREQUENCY_TABLE_INTERVAL_MS) / 1000.0f);
+            (static_cast<float>(tableIntervalMs) / 1000.0f);
 
         // Выбираем левый индекс интервала для данной записи.
         int effectiveLeftIndex;
@@ -297,6 +375,12 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         const int prevIndex = (effectiveLeftIndex - 1 + numPoints) % numPoints;
         const int nextNextIndex = (rightIndex + 1) % numPoints;
         
+        // Веса касательных ОБЩИЕ для обоих каналов — иначе частота биений
+        // перестала бы быть интерполяцией своих узлов и каналы слиплись бы
+        // в точке касания с границей.
+        const float w1 = tw ? tw[effectiveLeftIndex] : 1.0f;
+        const float w2 = tw ? tw[rightIndex]         : 1.0f;
+
         // Интерполируем левую (исторически «нижнюю») частоту.
         // allowNegative=true: внутри сплайна канал может уйти в минус между
         // узлами, но по физике тон не бывает отрицательным — внешний
@@ -307,7 +391,7 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         float lowerP3 = getLowerFreq(sortedPoints[nextNextIndex]);
         lowerFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
             interpolationType, lowerP0, lowerP1, lowerP2, lowerP3, ratio, splineTension,
-            /*allowNegative=*/true
+            /*allowNegative=*/true, w1, w2
         ));
 
         // Интерполируем правую (исторически «верхнюю») частоту
@@ -317,13 +401,18 @@ inline void FrequencyCurve::buildLookupTableInternal() {
         float upperP3 = getUpperFreq(sortedPoints[nextNextIndex]);
         upperFreqTable[tableIndex] = std::max(0.0f, Interpolation::interpolate(
             interpolationType, upperP0, upperP1, upperP2, upperP3, ratio, splineTension,
-            /*allowNegative=*/true
+            /*allowNegative=*/true, w1, w2
         ));
     }
+
+    // Публикуем готовые таблицы одной парой присваиваний: до этой точки
+    // наружу видны предыдущие (или пустые) таблицы целиком.
+    this->lowerFreqTable = std::move(newLower);
+    this->upperFreqTable = std::move(newUpper);
 }
 
 /**
- * Построить lookup table с фиксированным шагом FREQUENCY_TABLE_INTERVAL_MS
+ * Построить lookup table с адаптивным шагом tableIntervalMs
  */
 inline void FrequencyCurve::buildLookupTable() {
     buildLookupTableInternal();
@@ -405,8 +494,7 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
                                   std::vector<TrendCrossing>& out) {
     out.clear();
 
-    if (curve.lowerFreqTable.empty() || curve.upperFreqTable.empty() ||
-        curve.points.size() < 2) {
+    if (!curve.hasFreqTables() || curve.points.size() < 2) {
         return; // таблица/точки не заданы — переходов нет
     }
 
@@ -500,7 +588,7 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
 inline void FrequencyCurve::buildTrendCrossings() {
     trendCrossingsValid = false;
 
-    if (lowerFreqTable.empty() || upperFreqTable.empty()) {
+    if (!hasFreqTables()) {
         trendCrossings.clear();
         return; // таблица не построена — тренд не определён, кэш невалиден
     }
@@ -515,6 +603,10 @@ inline void FrequencyCurve::buildTrendCrossings() {
  * ВАЖНО: min/max для lower/upper частот вычисляются по lookup-таблице,
  * т.к. при интерполяции CARDINAL возможен overshoot и реальные значения
  * могут отличаться от значений в контрольных точках.
+ *
+ * Для CARDINAL overshoot к моменту построения таблицы уже укрощён весами
+ * касательных (FrequencyCurve::tensionWeights, см. cardinal()) — таблица
+ * считается с ними, поэтому min/max по ней и есть реальные границы звучания.
  *
  * minChannelFreq вычисляется по КОНТРОЛЬНЫМ ТОЧКАМ (не по lookup-таблице!),
  * используя формулу: carrier - |beat|/2
@@ -544,11 +636,19 @@ inline void FrequencyCurve::updateCache() {
     minUpperFreq = std::numeric_limits<float>::max();
     maxUpperFreq = std::numeric_limits<float>::lowest();
     
-    for (size_t i = 0; i < lowerFreqTable.size(); ++i) {
-        minLowerFreq = std::min(minLowerFreq, lowerFreqTable[i]);
-        maxLowerFreq = std::max(maxLowerFreq, lowerFreqTable[i]);
-        minUpperFreq = std::min(minUpperFreq, upperFreqTable[i]);
-        maxUpperFreq = std::max(maxUpperFreq, upperFreqTable[i]);
+    // Ссылки и размер вынесены из цикла: иначе компилятор обязан перезагружать
+    // size() и разыменовывать shared_ptr на каждой итерации (не может доказать
+    // отсутствие алиасинга с min*/max*, которые тоже доступны по this).
+    if (hasFreqTables()) {
+        const std::vector<float>& lo = *lowerFreqTable;
+        const std::vector<float>& up = *upperFreqTable;
+        const size_t n = lo.size();
+        for (size_t i = 0; i < n; ++i) {
+            minLowerFreq = std::min(minLowerFreq, lo[i]);
+            maxLowerFreq = std::max(maxLowerFreq, lo[i]);
+            minUpperFreq = std::min(minUpperFreq, up[i]);
+            maxUpperFreq = std::max(maxUpperFreq, up[i]);
+        }
     }
     
     // minChannelFreq вычисляем по КОНТРОЛЬНЫМ ТОЧКАМ
@@ -582,7 +682,7 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
     FrequencyTableResult result = {200.0, 210.0};
     
     // Если lookup table не построена, возвращаем значения по умолчанию
-    if (lowerFreqTable.empty() || upperFreqTable.empty()) {
+    if (!hasFreqTables()) {
         return result;
     }
     
@@ -633,9 +733,13 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
         return result;
     }
 
-    // Фиксированный шаг таблицы 0.1 сек (100 мс)
-    constexpr float intervalSeconds = static_cast<float>(FREQUENCY_TABLE_INTERVAL_MS) / 1000.0f;
-    const int tableSize = static_cast<int>(lowerFreqTable.size());
+    // Шаг таблицы АДАПТИВНЫЙ и лежит в себе же (100…1000 мс). Читать его
+    // обязательно из кривой: у разных кривых шаг разный, а постоянная
+    // FREQUENCY_TABLE_INTERVAL_MS больше не существует.
+    const float intervalSeconds = static_cast<float>(tableIntervalMs) / 1000.0f;
+    const std::vector<float>& lo = *lowerFreqTable;
+    const std::vector<float>& up = *upperFreqTable;
+    const int tableSize = static_cast<int>(lo.size());
     
     // Вычисляем непрерывную позицию в таблице (дробная)
     const float continuousIndex = timeSeconds / intervalSeconds;
@@ -657,20 +761,20 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
     // Предзагружаем значение, которое потребуется в следующем вызове
     #ifdef __GNUC__
     if (safeNextIndex + 1 < tableSize) {
-        __builtin_prefetch(&lowerFreqTable[safeNextIndex + 1], 0, 0);
-        __builtin_prefetch(&upperFreqTable[safeNextIndex + 1], 0, 0);
+        __builtin_prefetch(&lo[safeNextIndex + 1], 0, 0);
+        __builtin_prefetch(&up[safeNextIndex + 1], 0, 0);
     }
     #endif
     
     // Линейная интерполяция между соседними значениями таблицы
     result.lowerFreq = Interpolation::linear(
-        lowerFreqTable[safeCurrentIndex],
-        lowerFreqTable[safeNextIndex],
+        lo[safeCurrentIndex],
+        lo[safeNextIndex],
         t
     );
     result.upperFreq = Interpolation::linear(
-        upperFreqTable[safeCurrentIndex],
-        upperFreqTable[safeNextIndex],
+        up[safeCurrentIndex],
+        up[safeNextIndex],
         t
     );
     

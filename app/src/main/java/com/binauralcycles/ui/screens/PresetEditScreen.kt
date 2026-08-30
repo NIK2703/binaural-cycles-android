@@ -76,8 +76,12 @@ fun PresetEditScreen(
         // Предотвращаем повторный вызов во время навигации
         if (isNavigating) return
         isNavigating = true
-        
+
         val curve = uiState.editingFrequencyCurve ?: return
+        // СНАЧАЛА запускаем анимацию выхода. Сохранение в сервис/БД и обновление
+        // состояния перенесены ПОСЛЕ навигации, чтобы главный поток был свободен
+        // в первые кадры перехода — иначе shared-анимация «съедается» этой работой.
+        onNavigateBack()
         if (presetId == null) {
             // Создаём новый пресет
             viewModel.createPreset(
@@ -94,24 +98,24 @@ fun PresetEditScreen(
                 relaxationModeSettings = uiState.editingRelaxationModeSettings
             )
         }
-        // Завершаем редактирование без очистки состояния для плавной анимации
-        viewModel.finishEditingWithoutClear()
-        onNavigateBack()
+        // editingFrequencyCurve намеренно НЕ очищаем: это состояние перезапишется
+        // при следующем входе в редактор, а сейчас оно не мешает списку.
     }
-    
+
     fun navigateBackWithCheck() {
         // Предотвращаем повторный вызов во время навигации
         if (isNavigating) return
         isNavigating = true
-        
+
         if (hasChanges) {
             showUnsavedDialog = true
             isNavigating = false  // Сбрасываем если показываем диалог
         } else {
-            // Восстанавливаем кривую активного пресета в сервисе (если нужно)
-            // Но не очищаем editingFrequencyCurve - это позволит анимации работать плавно
-            viewModel.cancelEditingInService()
+            // СНАЧАЛА анимация, потом восстановление кривой активного пресета
+            // в сервисе — чтобы работа на главном потоке не откладывала старт
+            // shared-перехода.
             onNavigateBack()
+            viewModel.cancelEditingInService()
         }
     }
     
@@ -168,7 +172,12 @@ fun PresetEditScreen(
                         sharedContentState = rememberSharedContentState(
                             key = "preset-$presetId"
                         ),
-                        animatedVisibilityScope = animatedVisibilityScope
+                        animatedVisibilityScope = animatedVisibilityScope,
+                        // Симметричный клип с карточкой: на списке
+                        // clipInOverlayDuringTransition = OverlayClip(shapes.large),
+                        // здесь дефолтный ParentClip давал перескок картинки при
+                        // передаче между концами перехода.
+                        clipInOverlayDuringTransition = OverlayClip(MaterialTheme.shapes.large)
                     )
                     .pointerInput(Unit) {
                         detectTapGestures(onTap = {
@@ -320,12 +329,11 @@ fun PresetEditScreen(
                         // Предотвращаем повторный вызов
                         if (isNavigating) return@TextButton
                         isNavigating = true
-                        
+
                         showUnsavedDialog = false
-                        // Восстанавливаем кривую активного пресета в сервисе
-                        // Но не очищаем editingFrequencyCurve - это произойдёт после анимации
-                        viewModel.cancelEditingInService()
+                        // СНАЧАЛА анимация, потом восстановление кривой в сервисе
                         onNavigateBack()
+                        viewModel.cancelEditingInService()
                     },
                     enabled = !isNavigating
                 ) {

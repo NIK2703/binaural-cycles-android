@@ -35,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.binauralcycles.viewmodel.BinauralViewModel
-import kotlinx.coroutines.flow.map
 import kotlinx.datetime.LocalTime
 import kotlin.math.roundToInt
 
@@ -47,9 +46,10 @@ import kotlin.math.roundToInt
 @Composable
 fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
     val uiState by viewModel.uiState.collectAsState()
-    // Текущее время живёт в телеметрии (тикает раз в секунду), а не в uiState.
-    val currentTime by remember { viewModel.telemetry.map { it.currentTime } }
-        .collectAsState(initial = LocalTime(12, 0))
+    // Берём неквантованное время напрямую из сервиса: telemetry.currentTime теперь
+    // квантуется до 60 с (U1), а слайдеру нужна посекундная точность. DebugCurrentTime
+    // — отдельный неквантованный поток (see BinauralViewModel.debugCurrentTime).
+    val currentTime by viewModel.debugCurrentTime.collectAsState(initial = LocalTime(12, 0))
 
     // Локальное состояние слайдера времени, чтобы не "воевать"
     // с обновляющимся во время перетаскивания значением.

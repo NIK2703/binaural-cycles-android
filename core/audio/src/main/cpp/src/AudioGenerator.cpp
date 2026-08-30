@@ -613,16 +613,17 @@ void AudioGenerator::generateSolidBufferNeon(
             #endif
             
             // Сначала обновляем фазу с текущими значениями omega
+            // Дешёвая обмотка фазы: вместо floor через приведение к int
+            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+            // Выход побитово совпадает с прежней формулой.
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            if (leftPhaseBase < 0.0f) {
-                leftPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
-            if (rightPhaseBase < 0.0f) {
-                rightPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
             
             // Затем обновляем omega для следующей итерации
             leftOmega += leftOmegaStep * 4;
@@ -674,16 +675,17 @@ void AudioGenerator::generateSolidBufferNeon(
                 vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
             #endif
             
+            // Дешёвая обмотка фазы: вместо floor через приведение к int
+            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+            // Выход побитово совпадает с прежней формулой.
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            if (leftPhaseBase < 0.0f) {
-                leftPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
-            if (rightPhaseBase < 0.0f) {
-                rightPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -702,17 +704,15 @@ void AudioGenerator::generateSolidBufferNeon(
         const float leftSample = Wavetable::fastSin(state.leftPhase);
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
+        // Та же дешёвая обмотка (см. основной SSE-цикл): прирост за один
+        // сэмпл <= pi/2 (SR 8000, тон 2000 Гц), одного вычитания хватает.
         state.leftPhase += leftOmega;
-        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-        if (state.leftPhase < 0.0f) {
-            state.leftPhase += TWO_PI;
-        }
-        
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+
         state.rightPhase += rightOmega;
-        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-        if (state.rightPhase < 0.0f) {
-            state.rightPhase += TWO_PI;
-        }
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
@@ -899,17 +899,15 @@ bool AudioGenerator::generateFadeBufferNeon(
         const float leftSample = Wavetable::fastSin(state.leftPhase);
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
+        // Та же дешёвая обмотка (см. основной SSE-цикл): прирост за один
+        // сэмпл <= pi/2 (SR 8000, тон 2000 Гц), одного вычитания хватает.
         state.leftPhase += leftOmega;
-        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-        if (state.leftPhase < 0.0f) {
-            state.leftPhase += TWO_PI;
-        }
-        
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+
         state.rightPhase += rightOmega;
-        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-        if (state.rightPhase < 0.0f) {
-            state.rightPhase += TWO_PI;
-        }
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
         const float baseAmp = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmp * leftAmplitude;
@@ -1007,8 +1005,8 @@ void AudioGenerator::generateSolidBufferSse(
             __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
             __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
             
-            __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
-            __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+            __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
+            __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
             
             __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
             __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
@@ -1016,16 +1014,17 @@ void AudioGenerator::generateSolidBufferSse(
             vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
             vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
             
+            // Дешёвая обмотка фазы: вместо floor через приведение к int
+            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+            // Выход побитово совпадает с прежней формулой.
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            if (leftPhaseBase < 0.0f) {
-                leftPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
-            if (rightPhaseBase < 0.0f) {
-                rightPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -1069,8 +1068,8 @@ void AudioGenerator::generateSolidBufferSse(
             __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
             __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
             
-            __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
-            __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+            __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
+            __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
             
             __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
             __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
@@ -1078,16 +1077,17 @@ void AudioGenerator::generateSolidBufferSse(
             vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
             vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
             
+            // Дешёвая обмотка фазы: вместо floor через приведение к int
+            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+            // Выход побитово совпадает с прежней формулой.
             leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            leftPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(leftPhaseBase * ONE_OVER_TWO_PI);
-            if (leftPhaseBase < 0.0f) {
-                leftPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
             rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            rightPhaseBase -= static_cast<float>(TWO_PI) * static_cast<int>(rightPhaseBase * ONE_OVER_TWO_PI);
-            if (rightPhaseBase < 0.0f) {
-                rightPhaseBase += static_cast<float>(TWO_PI);
-            }
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
             
             leftOmega += leftOmegaStep * 4;
             rightOmega += rightOmegaStep * 4;
@@ -1113,17 +1113,15 @@ void AudioGenerator::generateSolidBufferSse(
         const float leftSample = Wavetable::fastSin(state.leftPhase);
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
+        // Та же дешёвая обмотка (см. основной SSE-цикл): прирост за один
+        // сэмпл <= pi/2 (SR 8000, тон 2000 Гц), одного вычитания хватает.
         state.leftPhase += leftOmega;
-        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-        if (state.leftPhase < 0.0f) {
-            state.leftPhase += TWO_PI;
-        }
-        
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+
         state.rightPhase += rightOmega;
-        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-        if (state.rightPhase < 0.0f) {
-            state.rightPhase += TWO_PI;
-        }
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
@@ -1211,8 +1209,8 @@ bool AudioGenerator::generateFadeBufferSse(
         __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
         __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
         
-        __m128 vLeftSamples = Wavetable::fastSinSse(vLeftPhasesScaled);
-        __m128 vRightSamples = Wavetable::fastSinSse(vRightPhasesScaled);
+        __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
+        __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
         
         float fadeMultipliers[4] __attribute__((aligned(16)));
         for (int j = 0; j < 4; ++j) {
@@ -1294,17 +1292,15 @@ bool AudioGenerator::generateFadeBufferSse(
         const float leftSample = Wavetable::fastSin(state.leftPhase);
         const float rightSample = Wavetable::fastSin(state.rightPhase);
         
+        // Та же дешёвая обмотка (см. основной SSE-цикл): прирост за один
+        // сэмпл <= pi/2 (SR 8000, тон 2000 Гц), одного вычитания хватает.
         state.leftPhase += leftOmega;
-        state.leftPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-        if (state.leftPhase < 0.0f) {
-            state.leftPhase += TWO_PI;
-        }
-        
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+        if (state.leftPhase >= TWO_PI) state.leftPhase -= TWO_PI;
+
         state.rightPhase += rightOmega;
-        state.rightPhase -= static_cast<float>(TWO_PI) * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-        if (state.rightPhase < 0.0f) {
-            state.rightPhase += TWO_PI;
-        }
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
+        if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
         const float baseAmp = baseVolumeFactor * fadeMultiplier;
         const float leftAmp = baseAmp * leftAmplitude;

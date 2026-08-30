@@ -33,6 +33,11 @@ import com.binauralcycles.R
 // Время блокировки навигации после перехода на экран (для защиты от "пробивания" касаний)
 private const val NAVIGATION_BLOCK_DURATION_MS = 500L
 
+// Константа времени для неактивных карточек списка (U1): передаём её вместо
+// «живого» telemetry.currentTime, чтобы Compose пропускал перекомпозицию
+// неактивных карточек при каждом тике телеметрии (их индикатор всё равно скрыт).
+private val INACTIVE_CARD_TIME = LocalTime(12, 0)
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalSharedTransitionApi::class)
 @Composable
 fun PresetListScreen(
@@ -126,13 +131,19 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
-                        // Используем методы BinauralPreset для учёта виртуальных точек расслабления
-                        // Время: единое из uiState (реальное в release, виртуальное в debug)
-                        // Канальная оценка как в движке: carrier=(l+u)/2, beat=u−l
-                        val (lowerFreq, upperFreq) = preset.getChannelFrequenciesAt(telemetry.currentTime)
+                        // U1: только активная карточка получает «живое» время и частоты.
+                        // Остальные получают константу, поэтому при каждом тике телеметрии
+                        // Compose пропускает их перекомпозицию (параметры не меняются).
+                        // У неактивных карточек индикатор всё равно скрыт (isPlaying = false),
+                        // так что график визуально идентичен — экономим 6 из 7 перерисовок.
+                        val cardTime = if (isActivePreset) telemetry.currentTime else INACTIVE_CARD_TIME
+                        val (lowerFreq, upperFreq) = if (isActivePreset)
+                            preset.getChannelFrequenciesAt(telemetry.currentTime)
+                        else
+                            (0.0f to 0.0f)
                         val carrierFreq = (lowerFreq + upperFreq) / 2.0f
                         val beatFreq = upperFreq - lowerFreq
-                        
+
                         PresetCard(
                             presetId = preset.id,
                             name = preset.name,
@@ -140,13 +151,13 @@ fun PresetListScreen(
                             relaxationModeSettings = preset.relaxationModeSettings,
                             isActive = isActivePreset,
                             isPlaying = isActivePreset && telemetry.isPlaying,
-                            currentCarrierFrequency = carrierFreq,
-                            currentBeatFrequency = beatFreq,
-                            currentTime = telemetry.currentTime, // Передаём время из родителя
+                            currentCarrierFrequency = if (isActivePreset) carrierFreq else 0.0f,
+                            currentBeatFrequency = if (isActivePreset) beatFreq else 0.0f,
+                            currentTime = cardTime,
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
                             onPlayClick = { onPresetClick(preset.id) },
-                            onEditClick = { 
+                            onEditClick = {
                                 if (canNavigate()) {
                                     recordNavigation()
                                     onEditPreset(preset.id)
@@ -241,19 +252,18 @@ private fun PresetCard(
                         relaxationModeSettings = relaxationModeSettings
                     )
                     
-                    // Название пресета поверх графика (сверху слева)
+                    // Название пресета поверх графика (сверху слева).
+                    // Без sharedBounds: раньше здесь висел общий элемент
+                    // "preset-name-$presetId", но у экрана редактирования нет
+                    // пары (название там только в TopAppBar), и односторонний
+                    // shared-элемент лишь впустую поднимал вложенный слой в
+                    // оверлей на каждом кадре перехода.
                     Text(
                         text = name,
                         style = MaterialTheme.typography.titleMedium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .sharedBounds(
-                                sharedContentState = rememberSharedContentState(
-                                    key = "preset-name-$presetId"
-                                ),
-                                animatedVisibilityScope = animatedVisibilityScope
-                            )
                             .align(Alignment.TopStart)
                             .padding(8.dp)
                     )

@@ -35,18 +35,39 @@ class BinauralStreamImpl(
         private const val TAG = "BinauralStream"
         const val DEFAULT_FADE_MS = 250L
         private const val FADE_GUARD_MS = 60L
-        private const val TRACK_BUFFER_MS = 3000          // внутренний буфер AudioTrack
+        /** Байт в кадре: стерео × ENCODING_PCM_FLOAT. */
+        private const val frameBytes = 2 * 4
+        private const val TRACK_BUFFER_MS = 10000         // внутренний буфер AudioTrack
         /**
-         * Гранулярность записи. Было 500 мс — писатель просыпался 2 раза в
-         * секунду на всём протяжении сеанса, не давая CPU уйти в глубокий idle.
+         * Гранулярность записи — и она же определяет, как часто просыпается
+         * писатель. write(WRITE_BLOCKING) возвращается, только когда в кольце
+         * трека есть место под ВЕСЬ чанк, то есть заполненность упала до
+         * `buffer - chunk`; в установившемся режиме период между записями
+         * равен ровно длительности чанка:
+         *
+         *     пробуждений в час = 3_600_000 / WRITE_CHUNK_MS
+         *
+         * Было 500 мс (7200/час) → 2000 мс (1800/час) → 8000 мс (450/час).
+         * Проверено замером: стоимость самой генерации от этого не зависит
+         * (6.4 нс/кадр при любом размере пакета), так что это и есть основной
+         * рычаг энергопотребления писателя — не DSP.
+         *
          * Отзывчивость на stop() от размера чанка не зависит: писателя
          * разблокируют track.pause()/stop()/release() в releaseInternal(),
          * а пауза/фейд идут через VolumeShaper на нити актёра.
-         * 2000 мс → 0.5 пробуждения в секунду (в 4 раза реже), при этом чанк
-         * всё ещё меньше внутреннего буфера трека (3 с), так что подпитка
-         * гарантирована без риска underrun.
+         *
+         * Ограничение: чанк ОБЯЗАН быть меньше буфера трека минимум на
+         * MIN_WRITE_MARGIN_MS, иначе подпитка не гарантирована. См. writerLoop().
          */
-        private const val WRITE_CHUNK_MS = 2000           // гранулярность записи/реакции
+        private const val WRITE_CHUNK_MS = 8000           // гранулярность записи/реакции
+        /**
+         * Гарантированный запас аудио в кольце трека в момент разблокировки
+         * write(). Именно столько остаётся проиграть, если писатель встанет
+         * (GC, конкуренция за CPU, смена частоты) — то есть это и есть запас
+         * до underrun: `buffer - chunk`. Держим его явно, чтобы фактический
+         * размер буфера, урезанный HAL, не съел запас молча.
+         */
+        private const val MIN_WRITE_MARGIN_MS = 2000
         /**
          * Опрос парковки писателя на паузе. wait() с таймаутом, а не вечное
          * ожидание: пропущенный notify не превращается в зависший поток —
@@ -58,16 +79,29 @@ class BinauralStreamImpl(
         private const val SECONDS_PER_DAY = 86400
         private const val MAX_BUFFER_MINUTES = 60
         /**
-         * Потолок размера direct-буфера. Был 1 ГБ — то есть потолок фактически
-         * не работал: при bufferIntervalMs = 10 мин на 44.1 кГц один поток
-         * забирал 212 МБ нативной памяти, а при живых CURRENT + NEXT
-         * в кроссфейде — 424 МБ. На фоне (активити уничтожена, куча зажата
-         * системой) это прямой путь в OutOfMemoryError внутри prepare() и
-         * в падение воспроизведения. Реальная потребность: WRITE_CHUNK_MS = 2 с,
-         * так что
-         * 64 МБ = 6,7 мин стерео float при 44.1 кГц — запас более чем десятикратный.
+         * Потолок размера direct-буфера НА ПОТОК (native-память, вне Java-heap,
+         * но в пределах RSS-бюджета LMK).
+         *
+         * Буфер — сырые PCM_FLOAT: 8 байт/кадр × SR × interval. Это НЕ сжатие —
+         * уменьшить нельзя, не поменяв формат. Отсюда пределы:
+         *   600 с @48 кГц = 230 МБ/поток  — влезает на любом 64-битном устройстве;
+         *   3600 с @48 кГц = 1.38 ГБ/поток (2.76 ГБ в кроссфейде CURRENT+NEXT) —
+         *     физически невозможно: LMK убьёт процесс ещё до этого, а на 32-bit
+         *     ABI allocateDirect не выделит смежные 1+ ГБ из-за узкого VA.
+         * Поэтому потолок — не «жадность», а гарантия, что настройка bufferInterval
+         * не уронит воспроизведение: он честно ограничивает то, что устройство
+         * реально может держать, а реальное значение пишется в лог (см. prepare()).
+         *
+         * Выбор числа: 256 МБ на 64-бит — это ~11 мин при 48 кГц на ПОТОК, то есть
+         * дефолтный 600 с (10 мин) честно влезает целиком при ЛЮБОМ SR, а
+         * усекается только 3600 с (где физика не пускает). На 32-bit VA узок —
+         * 96 МБ, иначе allocateDirect падает с OOM ещё до 200 МБ. При желании
+         * поднять предел (например, до 512 МБ) — имейте в виду фоновый RSS-бюджет
+         * LMK: часы воспроизведения с выключенным экраном не прощают лишней памяти.
          */
-        private const val MAX_BUFFER_BYTES = 64 * 1024 * 1024
+        private val maxBufferBytes: Long
+            get() = if (android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
+                256L * 1024 * 1024 else 96L * 1024 * 1024
         /**
          * Сколько ждём выхода писателя перед уничтожением нативного движка.
          * ОБЯЗАН покрывать один полный чанк записи (WRITE_CHUNK_MS), иначе
@@ -212,7 +246,7 @@ class BinauralStreamImpl(
             //    maxOf(audioTrackBufferSize, rate*2*4), а audioTrackBufferSize
             //    заполняется именно внутри createAudioTrack(). При обратном
             //    порядке предел равнялся НУЛЮ: на устройстве с нехваткой памяти
-            //    буфер схлопывался до 1 с аудио при 3-секундном внутреннем
+            //    буфер схлопывался до 1 с аудио при 10-секундном внутреннем
             //    буфере трека — писатель физически не успевал подпитывать трек,
             //    и каждый такой просадкой давался underrun (щелчок).
             //    Трек создан, но НЕ запущен — поток ещё беззвучен.
@@ -220,12 +254,23 @@ class BinauralStreamImpl(
 
             // 4. Буферы с теми же капами, что и в старом движке.
             val maxSamplesByMinutes = rate.toLong() * 60 * MAX_BUFFER_MINUTES
-            val maxSamplesByBytes = MAX_BUFFER_BYTES / 8L
+            val maxSamplesByBytes = maxBufferBytes / 8L
+            val requestedSamples = rate.toLong() * bufferIntervalMs / 1000L
             samplesPerChannel = minOf(
-                rate.toLong() * bufferIntervalMs / 1000L,
+                requestedSamples,
                 maxSamplesByMinutes,
                 maxSamplesByBytes
             ).toInt()
+            // Потолок по байтам — это предел устройства (см. maxBufferBytes),
+            // а не рабочий предел. Дефолтный 600 с влезает целиком при любом SR
+            // (максимум 230 МБ на HIGH); урезается только то, что физически не
+            // держится (напр. 3600 с @44.1 кГц = 1.27 ГБ/поток). Усечение
+            // не молчит: пишем запрошенный и реальный интервал в лог.
+            if (samplesPerChannel < requestedSamples) {
+                StreamLogger.w(TAG, "prepare spec#${spec.serial}: buffer interval clamped " +
+                    "by device RAM limit ${maxBufferBytes / (1024 * 1024)}MB: " +
+                    "requested ${bufferIntervalMs}ms -> effective ${samplesPerChannel * 1000L / rate}ms @ ${rate}Hz")
+            }
             directBuffer = allocateDirect(samplesPerChannel * 2 * 4, rate)
                 ?: throw OutOfMemoryError("direct buffer unavailable")
             // Реальная ёмкость может оказаться меньше запрошенной: при OOM
@@ -234,6 +279,9 @@ class BinauralStreamImpl(
             val capacitySamples = directBuffer!!.capacity() / 8
             if (capacitySamples in 1 until samplesPerChannel) {
                 samplesPerChannel = capacitySamples
+                StreamLogger.w(TAG, "prepare spec#${spec.serial}: allocateDirect halved to " +
+                    "${capacitySamples * 1000L / rate}s @ ${rate}Hz (requested " +
+                    "${requestedSamples * 1000L / rate}s) — недостаточно RAM")
             }
             // Запас по времени: если буфер урезан OOM ниже внутреннего буфера
             // трека, писатель не успеет подпитывать трек — это гарантированный
@@ -268,7 +316,9 @@ class BinauralStreamImpl(
 
     private fun createAudioTrack(rate: Int) {
         val minBuffer = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
-        val size = maxOf(minBuffer, rate * 2 * 4 * TRACK_BUFFER_MS / 1000)
+        // Long на всём пути: rate * 8 байт/кадр * TRACK_BUFFER_MS(10 с) = 3.5e9 —
+        // в Int уже не влезает (на 3 с влезало, на 10 — нет).
+        val size = maxOf(minBuffer.toLong(), rate.toLong() * 2 * 4 * TRACK_BUFFER_MS / 1000).toInt()
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -286,8 +336,24 @@ class BinauralStreamImpl(
             .setBufferSizeInBytes(size)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
-        audioTrackBufferSize = size
-        audioTrack?.setVolume(userVolume)   // база; VolumeShaper — множитель поверх
+        // Читаем ФАКТИЧЕСКИЙ размер кольца, а не запрошенный: HAL вправе его
+        // урезать, и тогда чанк записи, посчитанный от запрошенного, оказался бы
+        // больше реального зазора. write(WRITE_BLOCKING) разблокируется при
+        // заполненности `buffer - chunk`, то есть запас до underrun равен
+        // ровно `buffer - chunk`; если считать от завышенного buffer, запас
+        // молча уезжает в ноль. minSdk 26 — getBufferSizeInFrames() доступен
+        // (API 23) без проверки версии.
+        val track = audioTrack
+        val actualBytes = if (track != null) {
+            (track.bufferSizeInFrames.toLong() * 2 * 4).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        } else {
+            0
+        }
+        audioTrackBufferSize = if (actualBytes > 0) actualBytes else size
+        StreamLogger.d(TAG, "createAudioTrack spec#${spec.serial}: кольцо запрошено $size б "
+            + "(${size * 1000L / (rate.toLong() * frameBytes)} мс), выделено $audioTrackBufferSize б "
+            + "(${audioTrackBufferSize * 1000L / (rate.toLong() * frameBytes)} мс) @${rate}Гц")
+        track?.setVolume(userVolume)   // база; VolumeShaper — множитель поверх
     }
 
     private fun allocateDirect(sizeBytes: Int, rateHz: Int): ByteBuffer? {
@@ -423,7 +489,8 @@ class BinauralStreamImpl(
     private fun finalizeStop(onFullyStopped: () -> Unit) {
         // ФИКС 1.2. Рампа дошла до 0. ДО закрытия шейпера и паузы гасим базовую
         // громкость: закрытие/окончание шейпера возвращает громкость к базе, а во
-        // внутреннем буфере трека ещё до ~3 с полноамплитудного PCM. Без этого шага
+        // внутреннем буфере трека ещё до TRACK_BUFFER_MS (10 с) полноамплитудного
+        // PCM. Без этого шага
         // финал звучит вспышкой — тот самый хлопок в конце пресета.
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
 
@@ -540,7 +607,8 @@ class BinauralStreamImpl(
         wakeWriter()
 
         // База в нуль ДО закрытия шейпера: во внутреннем буфере трека ещё до
-        // 3 с полноамплитудного PCM, и закрытие вернуло бы их на полную.
+        // TRACK_BUFFER_MS (10 с) полноамплитудного PCM, и закрытие вернуло бы
+        // их на полную. Мера та же, что и при 3 с, — просто запас больше.
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
         closeShaper()
         fadeMode = FadeMode.NONE
@@ -918,6 +986,25 @@ class BinauralStreamImpl(
                 // ФИКС RC-1: если пакет уже записан в start() (прайминг), стартуем
                 // со смещения, чтобы не дублировать и не оставлять трек без данных.
                 var offset = if (preparedPrefilled) preparedPacketBytes else 0
+
+                // Верхняя граница чанка записи — инвариант подпитки.
+                // write(WRITE_BLOCKING) разблокируется, когда в кольце трека
+                // есть место под ВЕСЬ чанк, то есть заполненность упала до
+                // `buffer - chunk`. Значит ровно столько аудио и остаётся
+                // проиграть, если писатель встанет: это и есть запас до underrun.
+                // Держим его не меньше MIN_WRITE_MARGIN_MS, считая от
+                // ФАКТИЧЕСКОГО размера кольца (HAL вправе урезать запрошенный).
+                // Период пробуждений = длительность чанка, поэтому этот же
+                // предел задаёт и частоту wakeups: 3600/8 = 450 в час.
+                val rate = spec.sampleRate.value.toLong()
+                val targetChunk = rate * frameBytes * WRITE_CHUNK_MS / 1000
+                val marginBytes = rate * frameBytes * MIN_WRITE_MARGIN_MS / 1000
+                val byMargin = audioTrackBufferSize.toLong() - marginBytes
+                val maxChunkBytes =
+                    if (byMargin >= frameBytes.toLong()) minOf(targetChunk, byMargin)
+                    // Вырожденное кольцо (меньше маржи + одного кадра): пишем
+                    // половиной кольца — иначе write() не разблокируется вовсе.
+                    else maxOf(audioTrackBufferSize.toLong() / 2, frameBytes.toLong())
                 while (lifecycleRef.get() == StreamLifecycle.PLAYING) {
                     // ПАУЗА: парковка ДО генерации и ДО записи.
                     //   * генерация запрещена — она продвинула бы фронтир кривой
@@ -946,11 +1033,7 @@ class BinauralStreamImpl(
                         generatedFrames += generated.toLong()
                     }
                     val buf = directBuffer ?: break
-                    val chunk = minOf(
-                        packetBytes - offset,
-                        audioTrackBufferSize,
-                        spec.sampleRate.value * 2 * 4 * WRITE_CHUNK_MS / 1000
-                    )
+                    val chunk = minOf((packetBytes - offset).toLong(), maxChunkBytes).toInt()
                     buf.position(offset)
                     buf.limit(offset + chunk)
                     val written = track.write(buf, chunk, AudioTrack.WRITE_BLOCKING)

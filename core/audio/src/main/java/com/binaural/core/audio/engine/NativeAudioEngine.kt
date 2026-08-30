@@ -3,6 +3,7 @@ package com.binaural.core.audio.engine
 import android.util.Log
 import com.binaural.core.audio.BuildConfig
 import com.binaural.core.audio.model.BinauralConfig
+import com.binaural.core.audio.model.CardinalTension
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.Interpolation
@@ -92,7 +93,9 @@ class NativeAudioEngine {
         channelSwapPauseDurationMs: Long,
         channelSwapTrendPoints: Int,
         normalizationType: Int,
-        volumeNormalizationStrength: Float
+        volumeNormalizationStrength: Float,
+        /** Веса касательных кардинального сплайна (см. CardinalTension); null — регулировка не нужна. */
+        tensionWeights: FloatArray?
     )
     private external fun nativeSetSampleRate(handle: Long, sampleRate: Int)
     private external fun nativeResetState(handle: Long)
@@ -142,7 +145,9 @@ class NativeAudioEngine {
         numOutputPoints: Int,
         interpolationType: Int,
         tension: Float,
-        allowNegative: Boolean
+        allowNegative: Boolean,
+        /** Веса касательных (см. [CardinalTension]); null — номинальный сплайн. */
+        weights: FloatArray?
     ): FloatArray?
 
     private external fun nativeGetChannelFrequencies(
@@ -151,7 +156,9 @@ class NativeAudioEngine {
         beatFreqs: FloatArray,
         targetTimeSeconds: Int,
         interpolationType: Int,
-        tension: Float
+        tension: Float,
+        /** Веса касательных (см. [CardinalTension]); null — номинальный сплайн. */
+        weights: FloatArray?
     ): FloatArray?
 
     /** Снимок хэндла для нативного вызова. 0 => движок освобождён. */
@@ -226,6 +233,20 @@ class NativeAudioEngine {
         val carrierFreqs = FloatArray(numPoints) { playbackPoints[it].carrierFrequency }
         val beatFreqs = FloatArray(numPoints) { playbackPoints[it].beatFrequency }
 
+        // Веса считаются по ТЕМ ЖЕ точкам, что уходят в движок. Это принципиально:
+        // в режиме расслабления движок получает виртуальные точки, и веса обязаны
+        // соответствовать именно им — иначе движок гасил бы касательные не там,
+        // где график, и звук разошёлся бы с нарисованной кривой.
+        //
+        // Индексация — по возрастанию времени суток, ровно как точки
+        // отсортирует натив (порядок точек в UI может быть любым).
+        val playbackWeights = CardinalTension.forPoints(
+            points = playbackPoints,
+            type = curve.interpolationType,
+            tension = curve.splineTension,
+            carrierRange = curve.carrierRange
+        )
+
         val interpolationType = when (curve.interpolationType) {
             InterpolationType.LINEAR -> 0
             InterpolationType.CARDINAL -> 1
@@ -255,11 +276,13 @@ class NativeAudioEngine {
             channelSwapPauseDurationMs = config.channelSwapPauseDurationMs,
             channelSwapTrendPoints = config.channelSwapTrendPoints.ordinal,
             normalizationType = normalizationType,
-            volumeNormalizationStrength = config.volumeNormalizationStrength
+            volumeNormalizationStrength = config.volumeNormalizationStrength,
+            tensionWeights = playbackWeights
         )
 
         Log.d(TAG, "Config updated with ${curve.points.size} real points, " +
-            "${if (relaxationSettings.enabled) "relaxation mode enabled" else "relaxation mode disabled"}")
+            "${if (relaxationSettings.enabled) "relaxation mode enabled" else "relaxation mode disabled"}" +
+            "${if (playbackWeights != null) ", cardinal tension weights applied" else ""}")
     }
 
     /**
@@ -630,6 +653,10 @@ class NativeAudioEngine {
      * @param tension параметр натяжения для CARDINAL
      * @param allowNegative разрешить отрицательные значения (true для частоты
      *        биений — величина знаковая; см. [FrequencyMath])
+     * @param weights веса касательных для CARDINAL (см. [CardinalTension.forPoints]);
+     *        ОБЩИЕ для обоих каналов и индексированные теми же узлами, что
+     *        [timePoints] — иначе кривая уедет от той, что строит движок по
+     *        своей таблице. null — номинальный сплайн.
      * @return массив интерполированных значений или null при ошибке
      */
     fun generateInterpolatedCurve(
@@ -638,7 +665,8 @@ class NativeAudioEngine {
         numOutputPoints: Int,
         interpolationType: InterpolationType,
         tension: Float = 0.0f,
-        allowNegative: Boolean = false
+        allowNegative: Boolean = false,
+        weights: FloatArray? = null
     ): FloatArray? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -648,12 +676,16 @@ class NativeAudioEngine {
         }
         if (nativeUnavailable()) return null
         return nativeGenerateInterpolatedCurve(
-            timePoints, values, numOutputPoints, typeInt, tension, allowNegative
+            timePoints, values, numOutputPoints, typeInt, tension, allowNegative, weights
         )
     }
 
     /**
      * Получение частот каналов для заданного времени (для UI)
+     *
+     * @param weights веса касательных для CARDINAL (см. [CardinalTension.forPoints]) —
+     *        те же, что применяет движок к своей таблице, иначе график разойдётся
+     *        со звуком. null — номинальный сплайн.
      * @return Pair(нижняя частота, верхняя частота) или null при ошибке
      */
     fun getChannelFrequenciesAt(
@@ -662,7 +694,8 @@ class NativeAudioEngine {
         beatFreqs: FloatArray,
         targetTimeSeconds: Int,
         interpolationType: InterpolationType,
-        tension: Float = 0.0f
+        tension: Float = 0.0f,
+        weights: FloatArray? = null
     ): Pair<Float, Float>? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -673,7 +706,7 @@ class NativeAudioEngine {
         if (nativeUnavailable()) return null
         val result = nativeGetChannelFrequencies(
             timePoints, carrierFreqs, beatFreqs,
-            targetTimeSeconds, typeInt, tension
+            targetTimeSeconds, typeInt, tension, weights
         )
         return result?.let { Pair(it[0], it[1]) }
     }

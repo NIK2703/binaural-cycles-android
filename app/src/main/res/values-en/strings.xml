@@ -110,7 +110,7 @@
     
     <!-- App Settings -->
     <string name="buffer_generation_minutes">Buffer generation interval</string>
-    <string name="buffer_generation_description">How many minutes of audio buffer is generated ahead. Larger interval reduces the frequency of CPU wake-ups and saves battery</string>
+    <string name="buffer_generation_description">How far ahead audio is generated (1 to 10 minutes). A longer buffer means the engine recomputes the package less often and rebuilds the stream less on setting changes. The 10-minute (600 s) cap is chosen so the whole buffer fits in available memory at any sample rate.</string>
     <string name="update_interval">Frequency update interval</string>
     <string name="update_interval_description">How often playback frequencies are recalculated</string>
     <string name="audio_quality">Sample rate</string>

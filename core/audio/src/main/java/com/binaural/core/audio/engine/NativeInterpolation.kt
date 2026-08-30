@@ -53,7 +53,9 @@ object NativeInterpolation {
         numOutputPoints: Int,
         interpolationType: Int,
         tension: Float,
-        allowNegative: Boolean
+        allowNegative: Boolean,
+        /** Веса касательных (см. [CardinalTension]); null — номинальный сплайн. */
+        weights: FloatArray?
     ): FloatArray?
     
     /**
@@ -106,6 +108,10 @@ object NativeInterpolation {
      * @param tension параметр натяжения
      * @param allowNegative разрешить отрицательные значения (true для частоты
      *        биений — величина знаковая)
+     * @param weights веса касательных для CARDINAL (см. [CardinalTension.forPoints]).
+     *        Те же, что применяет движок к своей таблице: без них построенная
+     *        здесь кривая разойдётся со звуком ровно на участках overshoot.
+     *        null — номинальный сплайн.
      * @return массив интерполированных значений или null при ошибке
      */
     fun generateInterpolatedCurve(
@@ -114,7 +120,8 @@ object NativeInterpolation {
         numOutputPoints: Int,
         interpolationType: InterpolationType,
         tension: Float = 0.0f,
-        allowNegative: Boolean = false
+        allowNegative: Boolean = false,
+        weights: FloatArray? = null
     ): FloatArray? {
         val typeInt = when (interpolationType) {
             InterpolationType.LINEAR -> 0
@@ -124,7 +131,7 @@ object NativeInterpolation {
         }
         return try {
             nativeGenerateInterpolatedCurve(
-                timePoints, values, numOutputPoints, typeInt, tension, allowNegative
+                timePoints, values, numOutputPoints, typeInt, tension, allowNegative, weights
             )
         } catch (e: UnsatisfiedLinkError) {
             logFallback()
