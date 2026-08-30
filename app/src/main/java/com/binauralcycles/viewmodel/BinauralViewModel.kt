@@ -8,11 +8,15 @@ import android.net.Uri
 import android.os.IBinder
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.binauralcycles.BuildConfig
 import com.binauralcycles.R
+import com.binauralcycles.debug.DebugCommandBus
+import com.binauralcycles.debug.DebugCommandExecutor
 import com.binauralcycles.service.BinauralPlaybackService
 import com.binauralcycles.util.BatteryOptimizationHelper
 import com.binaural.core.audio.engine.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
+import com.binaural.core.audio.model.PointIntentMemory
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
@@ -115,6 +119,14 @@ data class BinauralUiState(
     val showBatteryOptimizationPrompt: Boolean = false
 )
 
+/**
+ * Дебаунс серии однотипных изменений настроек (протяжка слайдера, перемотка
+ * debug-времени): пока серия идёт, ни одного кроссфейда не запускается —
+ * применится только последнее значение. Ровно столько же ждал и старый
+ * «stopWithFade -> play», но там это время звучал не старый поток, а тишина.
+ */
+private const val SETTINGS_FADE_DEBOUNCE_MS = 300L
+
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -123,6 +135,21 @@ class BinauralViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
+
+    /**
+     * Память ЖЕЛАЕМЫХ значений точек редактора: несущей и частоты биений.
+     *
+     * Хранит не то, что получилось после обрезки у границы, а то, что задал
+     * пользователь (или что сохранено в пресете, если он ещё ничего не менял).
+     * Эффективное значение каждый раз выводится из желаемого — поэтому точка,
+     * отодвинутая от границы, возвращает свою частоту биений, а при расширении
+     * диапазона точки возвращаются туда, где их оставил пользователь.
+     *
+     * Живёт только внутри сессии редактирования: наполняется в
+     * [startEditingPreset]/[startNewPreset], очищается в [cancelEditing]/
+     * [finishEditing].
+     */
+    private val pointIntent = PointIntentMemory()
 
     /**
      * Отдельный поток телеметрии: его читают только те компоненты, которые
@@ -158,12 +185,13 @@ class BinauralViewModel @Inject constructor(
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
 
-    // Single-flight для playPreset: отмена предыдущей корутины при быстрых тапах по пресетам
-    private var playPresetJob: kotlinx.coroutines.Job? = null
+    // Исполнитель adb-команд (см. com.binauralcycles.debug.DebugCommandReceiver).
+    // В release блок ниже вырезается R8: BuildConfig.DEBUG — константа false.
+    private var debugCommandExecutor: DebugCommandExecutor? = null
 
-    // Guard: идёт переключение пресета с фейдом - updateAudioConfig отложен до его завершения
-    @Volatile
-    private var isPresetSwitchInProgress = false
+    // Переключение пресета — синхронный кроссфейд: UPDATE config уходит в beginHandoff(),
+    // NEXT начинает фейд-ин одновременно с фейд-аутом CURRENT. Никаких корутин, задержек
+    // и стопов между пресетами, поэтому single-flight-джобы и guard'ы больше не нужны.
     
     // ServiceConnection для привязки к сервису
     private val serviceConnection = object : ServiceConnection {
@@ -224,6 +252,10 @@ class BinauralViewModel @Inject constructor(
         // Состояние исключения энергосбережения читается синхронно и сразу:
         // от него зависит, нужно ли показывать стартовое напоминание
         refreshBatteryOptimizationState()
+        if (BuildConfig.DEBUG) {
+            debugCommandExecutor = DebugCommandExecutor(context, this)
+                .also { DebugCommandBus.attach(it) }
+        }
     }
     
     private fun bindToService() {
@@ -498,11 +530,6 @@ class BinauralViewModel @Inject constructor(
             return
         }
 
-        // Single-flight: отменяем предыдущую незавершённую корутину переключения,
-        // чтобы исключить interleaving и двойной fade при быстрых тапах
-        playPresetJob?.cancel()
-        isPresetSwitchInProgress = false
-
         // Устанавливаем активный пресет
         _uiState.update {
             it.copy(
@@ -534,27 +561,23 @@ class BinauralViewModel @Inject constructor(
         )
 
         val relaxationSettings = preset.relaxationModeSettings
-        
-        // Если воспроизводится другой пресет - используем stopWithFade + play для плавного переключения
-        // Сначала fade-out на старом пресете, затем fade-in на новом
-        if (_telemetry.value.isPlaying) {
-            // Guard от гонки с коллектором пресетов: пока идёт фейд, updateAudioConfig
-            // не должен применять конфиг к ещё звучащему старому пресету
-            isPresetSwitchInProgress = true
-            // Сначала останавливаем с fade-out на старом пресете
-            playbackService?.stopWithFade()
-            // Ждем завершения fade-out (250мс + запас), затем запускаем новый пресет
-            playPresetJob = viewModelScope.launch {
-                kotlinx.coroutines.delay(300)
-                // Применяем новый конфиг
-                playbackService?.updateConfig(config, relaxationSettings)
-                // Запускаем воспроизведение с fade-in
-                playbackService?.play()
-            }
-            playPresetJob?.invokeOnCompletion { isPresetSwitchInProgress = false }
-        } else {
-            // Не воспроизводится - просто обновляем конфиг и запускаем
-            playbackService?.updateConfig(config, relaxationSettings)
+
+        // ПЕРЕКЛЮЧЕНИЕ = КРОССФЕЙД, а не «стоп, потом старт».
+        //
+        // updateConfig() во время воспроизведения уходит в BinauralStreamManager
+        // .requestHandoff() -> beginHandoff(): NEXT готовится и начинает фейд-ин
+        // ОДНОВРЕМЕННО с фейд-аутом CURRENT. Окно перекрытия равно длительности
+        // фейда (250 мс), тишины между пресетами нет, а часы сессии, точка на
+        // кривой и фазы несущих переносятся на NEXT без скачка.
+        //
+        // Прежняя схема stopWithFade() -> delay(300) -> play() давала до 8 с
+        // тишины: play() приходил в FADE_OUT_STOP и лишь откладывался в
+        // pendingPlaySpec, а реальный старт дожидался, пока писатель выйдет из
+        // track.write(WRITE_BLOCKING) на весь WRITE_CHUNK_MS.
+        playbackService?.updateConfig(config, relaxationSettings)
+        // Не воспроизводится (IDLE/PAUSED) — конфиг применён, нужен явный старт.
+        // Во время воспроизведения play() был бы no-op: старт делает сам хэндофф.
+        if (!_telemetry.value.isPlaying) {
             playbackService?.play()
         }
         
@@ -584,7 +607,11 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = preset.relaxationModeSettings
             )
         }
-        
+
+        // Желаемой частотой биений становится сохранённая в пресете: пока
+        // пользователь не задал её сам, это и есть его намерение.
+        pointIntent.seedFrom(preset.frequencyCurve.points)
+
         // Обновляем кривую в сервисе только если редактируется активный пресет
         // Это позволяет слышать изменения в реальном времени при редактировании активного пресета
         if (isActivePreset) {
@@ -607,6 +634,9 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
+        // У нового пресета «пользовательского» значения ещё нет — желаемыми
+        // становятся частоты биений кривой по умолчанию.
+        pointIntent.seedFrom(defaultCurve.points)
         // Не обновляем кривую в сервисе при создании нового пресета
         // Воспроизведение продолжает использовать активный пресет
     }
@@ -616,6 +646,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun cancelEditing() {
         val activePreset = _uiState.value.activePreset
+        pointIntent.clear()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
@@ -648,6 +679,7 @@ class BinauralViewModel @Inject constructor(
      * Очищает состояние редактирования БЕЗ восстановления кривой в сервисе
      */
     fun finishEditing() {
+        pointIntent.clear()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
@@ -711,8 +743,8 @@ class BinauralViewModel @Inject constructor(
         // updateAudioConfig) как раз посередине shared-анимации сворачивания,
         // из-за чего переход дропал кадры. Активный пресет обновляем сразу:
         // меняем состояние и применяем конфиг к сервису, а запись в БД
-        // асинхронна. updateAudioConfig сам не применяется во время смены
-        // пресета (guard isPresetSwitchInProgress), так что аудио не дёрнется.
+        // асинхронна. updateAudioConfig применяет конфиг к сервису, а во время
+        // воспроизведения это кроссфейд, так что звук не дёрнется.
         if (isActivePreset) {
             _uiState.update {
                 it.copy(
@@ -818,126 +850,26 @@ class BinauralViewModel @Inject constructor(
 
     // ============= Методы для редактирования точек (редактируемая кривая) =============
     
-    companion object {
-        /**
-         * Вычисляет скорректированную частоту биения для заданной несущей частоты.
-         *
-         * ЗНАК СОХРАНЯЕТСЯ: клампится только МОДУЛЬ частоты биений, т.к. beat —
-         * величина знаковая (beat = right − left; знак задаёт раскладку каналов,
-         * |beat| — слышимую пульсацию). Ограничение симметрично:
-         *   |beat| <= 2 * (carrier − 20 Гц)   — нижняя боковая не ниже 20 Гц;
-         *   |beat| <= 2 * (2000 Гц − carrier) — верхняя боковая не выше 2000 Гц.
-         */
-        private fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
-            val maxBeat = FrequencyMath.maxBeatMagnitude(carrier)
-            return currentBeat.coerceIn(-maxBeat, maxBeat)
-        }
-
-        /**
-         * Вычисляет скорректированную частоту биения с учётом границ графика.
-         * Дополнительно учитывает, что боковые частоты не должны выходить
-         * за вертикальные границы графика. Знак также сохраняется.
-         */
-        private fun adjustBeatForCarrierWithRange(carrier: Float, currentBeat: Float, carrierRange: FrequencyRange): Float {
-            val maxBeat = FrequencyMath.maxBeatMagnitude(carrier, carrierRange)
-            return currentBeat.coerceIn(-maxBeat, maxBeat)
-        }
-    }
-    
+    /**
+     * Изменить несущую ВЫБРАННОЙ точки.
+     *
+     * Ровно то же, что [updateEditingPointCarrierFrequencyDirect], но для
+     * точки, отмеченной в [BinauralUiState.selectedPointIndex]. Реализация
+     * не дублируется намеренно: частота биений выводится из желаемого
+     * значения ([PointIntentMemory]), и две копии этой логики разошлись бы.
+     */
     fun updateEditingPointCarrierFrequency(frequency: Float) {
-        val state = _uiState.value
-        val curve = state.editingFrequencyCurve ?: return
-        val index = state.selectedPointIndex ?: return
-        
-        val points = curve.points.toMutableList()
-        if (index in points.indices) {
-            val oldPoint = points[index]
-            
-            val (newCarrier, adjustedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
-                // Автоматическое расширение границ (старое поведение)
-                val carrier = frequency.coerceIn(
-                    FrequencyMath.MIN_TONE_FREQUENCY, FrequencyMath.MAX_TONE_FREQUENCY)
-                val beat = adjustBeatForCarrier(carrier, oldPoint.beatFrequency)
-
-                // Границы расширяем по РЕАЛЬНО более высокой/низкой боковой:
-                // при beat < 0 формулы каналов меняются местами, поэтому берём модуль.
-                val upperFrequency = carrier + FrequencyMath.beatMagnitude(beat) / 2.0f
-                val lowerFrequency = carrier - FrequencyMath.beatMagnitude(beat) / 2.0f
-                
-                val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
-                } else {
-                    curve.carrierRange.min
-                }
-                val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
-                } else {
-                    curve.carrierRange.max
-                }
-                Triple(carrier, beat, FrequencyRange(newMin, newMax))
-            } else {
-                // Ограничение частот заданными границами графика (новое поведение по умолчанию)
-                // Ограничиваем несущую частоту диапазоном графика
-                val carrier = curve.carrierRange.clamp(frequency)
-                // Корректируем частоту биений с учётом границ
-                val beat = adjustBeatForCarrierWithRange(carrier, oldPoint.beatFrequency, curve.carrierRange)
-                Triple(carrier, beat, curve.carrierRange)
-            }
-            
-            points[index] = FrequencyPoint(
-                time = oldPoint.time,
-                carrierFrequency = newCarrier,
-                beatFrequency = adjustedBeat
-            )
-            updateEditingCurve(points, newCarrierRange, curve.beatRange, curve.interpolationType)
-        }
+        val index = _uiState.value.selectedPointIndex ?: return
+        updateEditingPointCarrierFrequencyDirect(index, frequency)
     }
 
+    /**
+     * Изменить частоту биений ВЫБРАННОЙ точки — см.
+     * [updateEditingPointBeatFrequencyDirect].
+     */
     fun updateEditingPointBeatFrequency(frequency: Float) {
-        val state = _uiState.value
-        val curve = state.editingFrequencyCurve ?: return
-        val index = state.selectedPointIndex ?: return
-        
-        val points = curve.points.toMutableList()
-        if (index in points.indices) {
-            val oldPoint = points[index]
-            
-            val (newBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
-                // Автоматическое расширение границ (старое поведение)
-                // Предел модуля — геометрический (20/2000 Гц), хранимый beatRange
-                // в расчёт не входит: это масштаб маркеров, а не разрешённый предел.
-                val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, frequency)
-
-                // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
-                val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
-                val lowerFrequency = oldPoint.carrierFrequency - FrequencyMath.beatMagnitude(beat) / 2.0f
-                
-                val newMin = if (lowerFrequency < curve.carrierRange.min) {
-                    (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
-                } else {
-                    curve.carrierRange.min
-                }
-                val newMax = if (upperFrequency > curve.carrierRange.max) {
-                    (upperFrequency * 1.1f).coerceAtLeast(upperFrequency + 10.0f).coerceAtMost(2000.0f)
-                } else {
-                    curve.carrierRange.max
-                }
-                Pair(beat, FrequencyRange(newMin, newMax))
-            } else {
-                // Ограничение частот заданными границами графика (новое поведение по умолчанию)
-                val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, frequency, carrierRange = curve.carrierRange)
-                Pair(beat, curve.carrierRange)
-            }
-            
-            points[index] = FrequencyPoint(
-                time = oldPoint.time,
-                carrierFrequency = oldPoint.carrierFrequency,
-                beatFrequency = newBeat
-            )
-            updateEditingCurve(points, newCarrierRange, curve.beatRange, curve.interpolationType)
-        }
+        val index = _uiState.value.selectedPointIndex ?: return
+        updateEditingPointBeatFrequencyDirect(index, frequency)
     }
     
     fun updateEditingPointTimeDirect(index: Int, newTime: LocalTime) {
@@ -946,13 +878,34 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
+            // Память желаемой частоты биений привязана к ВРЕМЕНИ точки,
+            // поэтому переезд по оси времени переносит и её — иначе частота
+            // «останется» на покинутой секунде, а переехавшая точка потеряет
+            // своё желаемое значение.
+            pointIntent.rekey(oldPoint.time, newTime)
             points[index] = FrequencyPoint(
                 time = newTime,
                 carrierFrequency = oldPoint.carrierFrequency,
                 beatFrequency = oldPoint.beatFrequency
             )
-            val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
-            updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange, curve.interpolationType)
+            // Сортировка переставляет отредактированную точку на новое место
+            // в списке, а выделение хранит ИНДЕКС. Без пересчёта окно после
+            // сдвига времени показывало бы уже соседнюю точку: раньше сдвиг
+            // приходил делениями по одному и это было незаметно, а теперь
+            // весь жест применяется разом и точка может уехать далеко.
+            // Порядок тот же, что у sortedBy (при равном времени — прежний
+            // порядок, sortedBy устойчив), поэтому индекс считается однозначно.
+            val sorted = points.withIndex().sortedWith(
+                compareBy<IndexedValue<FrequencyPoint>> { it.value.time.toSecondOfDay() }
+                    .thenBy { it.index }
+            )
+            val newIndex = sorted.indexOfFirst { it.index == index }
+            updateEditingCurve(sorted.map { it.value }, curve.carrierRange, curve.beatRange, curve.interpolationType)
+            // Выделение ведём за точкой, только если редактировалась именно
+            // выделенная: индекс здесь явно передаёт вызывающий.
+            if (newIndex >= 0 && state.selectedPointIndex == index) {
+                _uiState.update { it.copy(selectedPointIndex = newIndex) }
+            }
         }
     }
     
@@ -967,7 +920,11 @@ class BinauralViewModel @Inject constructor(
                 // Автоматическое расширение границ (старое поведение)
                 val clampedCarrier = newCarrier.coerceIn(
                     FrequencyMath.MIN_TONE_FREQUENCY, FrequencyMath.MAX_TONE_FREQUENCY)
-                val beat = adjustBeatForCarrier(clampedCarrier, oldPoint.beatFrequency)
+                // Частота биений выводится из ЖЕЛАЕМОГО значения, а не из
+                // текущего сохранённого: иначе точка, однажды прижатая к
+                // границе, навсегда потеряла бы свою пульсацию. Здесь предел
+                // только геометрический (20/2000 Гц) — границы расширяются.
+                val beat = pointIntent.resolveBeat(oldPoint, clampedCarrier)
 
                 // Модуль beat: при beat < 0 каналы меняются местами, а границы
                 // графика должны расширяться по реально низкой/высокой боковой.
@@ -988,10 +945,18 @@ class BinauralViewModel @Inject constructor(
             } else {
                 // Ограничение частот заданными границами графика (новое поведение по умолчанию)
                 val clampedCarrier = curve.carrierRange.clamp(newCarrier)
-                val beat = adjustBeatForCarrierWithRange(clampedCarrier, oldPoint.beatFrequency, curve.carrierRange)
+                // Желаемое значение обрезается по модулю под новое удаление
+                // от границы — и ровно настолько же восстанавливается, когда
+                // точка от границы отодвигается.
+                val beat = pointIntent.resolveBeat(oldPoint, clampedCarrier, curve.carrierRange)
                 Triple(clampedCarrier, beat, curve.carrierRange)
             }
-            
+
+            // ПРЯМАЯ правка несущей — источник желаемого значения. Как и в
+            // случае частоты биений, запоминается ПРИМЕНЁННОЕ значение: оно же
+            // осталось в поле ввода и на графике.
+            pointIntent.rememberCarrier(oldPoint.time, carrier)
+
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = carrier,
@@ -1037,6 +1002,11 @@ class BinauralViewModel @Inject constructor(
                 Pair(beat, curve.carrierRange)
             }
             
+            // РУЧНАЯ установка — единственный источник «желаемого» значения.
+            // Запоминается именно применённое (обрезанное) значение: оно же
+            // осталось в поле ввода, и расхождение выглядело бы обманом.
+            pointIntent.rememberBeat(oldPoint.time, clampedBeat)
+
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
                 carrierFrequency = oldPoint.carrierFrequency,
@@ -1062,7 +1032,13 @@ class BinauralViewModel @Inject constructor(
         // маркеров на графике.
         val clampedBeat = FrequencyMath.clampBeat(
             clampedCarrier, beatFrequency, carrierRange = curve.carrierRange)
-        
+
+        // Желаемыми становятся ЗАПРОШЕННЫЕ значения, а не обрезанные: точка,
+        // рождённая у самой границы, всё равно наберёт свою пульсацию и вернёт
+        // свою несущую, когда её отодвинут от края.
+        pointIntent.rememberCarrier(time, carrierFrequency)
+        pointIntent.rememberBeat(time, beatFrequency)
+
         val points = curve.points.toMutableList()
         points.add(FrequencyPoint(
             time = time,
@@ -1078,6 +1054,7 @@ class BinauralViewModel @Inject constructor(
         
         val points = curve.points.toMutableList()
         if (points.size > 2 && index in points.indices) {
+            pointIntent.forget(points[index].time)
             points.removeAt(index)
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
             _uiState.update { it.copy(selectedPointIndex = null) }
@@ -1094,6 +1071,17 @@ class BinauralViewModel @Inject constructor(
      * после смены границ точки обязаны пересчитаться — старые значения
      * оставлять нельзя.
      *
+     * Приводятся ЖЕЛАЕМЫЕ значения ([PointIntentMemory]), а не текущие. Отсюда
+     * симметрия с перетаскиванием точки: сузили диапазон — точка прижалась к
+     * границе и биения погасли, вернули диапазон — точка вернулась туда, где
+     * её оставил пользователь, и биения вернулись. Раньше обрезанные значения
+     * перезаписывали точку, и обратное расширение диапазона уже ничего не
+     * восстанавливало: прижатая несущая оставалась у границы навсегда.
+     *
+     * Порядок важен: сначала несущая (к желаемой, обрезанной по новым
+     * границам), потом частота биений — под уже окончательное удаление несущей
+     * от границы.
+     *
      * Знак частоты биений сохраняется: клампится только модуль.
      */
     fun updateEditingCarrierRange(min: Float, max: Float) {
@@ -1104,11 +1092,12 @@ class BinauralViewModel @Inject constructor(
         val newRange = FrequencyRange(min, max)
 
         val updatedPoints = curve.points.map { point ->
-            val clampedCarrier = newRange.clamp(point.carrierFrequency)
-            val clampedBeat = FrequencyMath.clampBeat(
-                clampedCarrier, point.beatFrequency, carrierRange = newRange
-            )
-            point.copy(carrierFrequency = clampedCarrier, beatFrequency = clampedBeat)
+            // Несущая берётся из ЖЕЛАЕМОЙ, а не из той, куда точку загнал
+            // прошлый суженный диапазон: иначе при возврате диапазона она
+            // осталась бы лежать у границы, к которой её прижало.
+            val carrier = pointIntent.resolveCarrier(point, newRange)
+            val beat = pointIntent.resolveBeat(point, carrier, newRange)
+            point.copy(carrierFrequency = carrier, beatFrequency = beat)
         }
 
         updateEditingCurve(updatedPoints, newRange, curve.beatRange, curve.interpolationType)
@@ -1300,17 +1289,27 @@ class BinauralViewModel @Inject constructor(
     // ============= Методы для управления общими настройками приложения =============
     
     /**
-     * Перезапустить воспроизведение с затуханием при изменении настроек.
-     * Если воспроизводится - делает fade-out, применяет изменения, затем fade-in.
-     * Если не воспроизводится - просто применяет изменения.
+     * Применить изменение настроек с КРОССФЕЙДОМ.
      *
-     * Каждое событие перезапускает ЕДИНСТВЕННЫЙ trailing-job: предыдущий отменяется,
-     * новый после delay применяет изменения и возобновляет звук.
-     * Это гарантирует возобновление звука после ЛЮБОЙ серии событий (например, drag слайдера).
+     * Если воспроизводится — звук НЕ прерывается: [applyChanges] пушит новые
+     * настройки в менеджер, а тот сам поднимает NEXT и гасит CURRENT
+     * (requestHandoff -> beginHandoff); окно перекрытия равно длительности
+     * фейда. Если не воспроизводится — изменения просто применяются.
+     *
+     * Каждое событие перезапускает ЕДИНСТВЕННЫЙ trailing-job: предыдущий
+     * отменяется, новый после [SETTINGS_FADE_DEBOUNCE_MS] применяет изменения.
+     * Это гарантирует применение после ЛЮБОЙ серии событий (например, drag
+     * слайдера) — и ровно один кроссфейд на серию.
+     *
+     * Прежняя схема `stopWithFade() -> delay(300) -> play()` давала здесь до 8 с
+     * тишины: play() приходил в FADE_OUT_STOP и лишь откладывался в
+     * pendingPlaySpec, а реальный старт дожидался, пока писатель выйдет из
+     * track.write(WRITE_BLOCKING) на весь WRITE_CHUNK_MS. Теперь старый поток
+     * играет всё время дебаунса — гасить его незачем.
      */
     private fun restartWithFadeIfNeeded(applyChanges: () -> Unit) {
         // Незавершённый job означает продолжение серии событий:
-        // воспроизведение было активным до её начала (во время fade-out isPlaying уже false)
+        // воспроизведение было активным до её начала
         val hasPendingRestart = restartJob?.isActive == true
         val wasPlaying = hasPendingRestart ||
             (_telemetry.value.isPlaying && _uiState.value.isServiceConnected)
@@ -1323,14 +1322,15 @@ class BinauralViewModel @Inject constructor(
             return
         }
 
-        // Fade-out запускаем один раз на серию событий
-        if (!hasPendingRestart) {
-            playbackService?.stopWithFade()
-        }
         restartJob = viewModelScope.launch {
-            kotlinx.coroutines.delay(300) // Ждём завершения fade-out
+            // Дебаунс серии, а не ожидание тишины: старый поток звучит всё это время.
+            kotlinx.coroutines.delay(SETTINGS_FADE_DEBOUNCE_MS)
             applyChanges()
-            playbackService?.play()
+            // play() больше НЕ нужен для перезапуска — хэндофф стартует NEXT сам.
+            // Он остаётся страховкой: если поток успел погаснуть (отказ трека,
+            // пауза), изменения применились бы в никуда. В RUNNING/FADE_IN/
+            // HANDOFF play() идемпотентен.
+            if (!_telemetry.value.isPlaying) playbackService?.play()
         }
     }
     
@@ -1533,10 +1533,10 @@ class BinauralViewModel @Inject constructor(
     }
 
     private fun updateAudioConfig() {
-        // Во время переключения пресета с фейдом конфиг применит сама корутина playPreset;
-        // досрочное применение здесь вызвало бы скачок частот в хвосте fade-out
-        if (isPresetSwitchInProgress) return
-
+        // Намеренно без guard'а на «переключение пресета идёт»: смены настроек во
+        // время воспроизведения — это тоже кроссфейд (updateConfig -> beginHandoff),
+        // а не мгновенная подмена частот в звучащем потоке. Дубликаты отсекает сам
+        // менеджер (updateConfig сравнивает конфиг и настройки расслабления).
         val state = _uiState.value
         
         // Используем настройки из редактируемого пресета если редактируется активный
@@ -1759,6 +1759,9 @@ class BinauralViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        // Иначе шина держала бы мёртвый ViewModel до конца жизни процесса
+        debugCommandExecutor?.let { DebugCommandBus.detach(it) }
+        debugCommandExecutor = null
         // Зануляем callback, чтобы сервис не держал ссылку на уничтоженный ViewModel
         playbackService?.onPresetSwitch = null
         try {

@@ -52,6 +52,12 @@ class BinauralStreamManager(private val context: Context) {
         private const val MAX_BUFFER_INTERVAL_MS = 600_000
         /** Как часто подтверждаем удержание CPU во время воспроизведения. */
         private const val WAKE_LOCK_RENEW_MS = 5 * 60 * 1000L
+        /**
+         * Сколько максимум ждём освобождения старого трека, прежде чем начать
+         * новый хэндофф (см. [orphanReleasing]). Защита от залипания автомата,
+         * если колбэк релиза не придёт.
+         */
+        private const val ORPHAN_WAIT_MAX_MS = 2000L
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -98,6 +104,28 @@ class BinauralStreamManager(private val context: Context) {
     private var state = ManagerState.IDLE
     private var current: BinauralStreamImpl? = null
     private var next: BinauralStreamImpl? = null
+
+    /**
+     * Старый CURRENT, уже сменяемый повышенным NEXT, но ещё НЕ отпустивший
+     * AudioTrack. Именно он ломает инвариант «в кроссфейде звучат ровно два
+     * потока» — на этот инвариант рассчитаны и EQUAL_POWER (sin²+cos²=1),
+     * и предел кольца [BinauralStreamImpl] в 2 МБ.
+     *
+     * Замер на 23049PCD8G (смена пресета каждые 300 мс): треки накапливались,
+     * потому что повышение NEXT происходит в момент ТИШИНЫ старого (≈310 мс),
+     * а трек отпускается позже. Кучи клиента AudioFlinger (7 МБ при кольце
+     * 2 МБ) хватает ровно на три; четвёртый падал:
+     *   AF::TrackBase(123): not enough memory for AudioTrack size=2097384
+     *   createTrack_l() initCheck failed -12
+     *   beginHandoff: prepare NEXT spec#8 не удался — старый продолжает играть
+     * Поэтому пока [orphanReleasing] жив, новый хэндофф НЕ начинается: спека
+     * ждёт в очереди (побеждает новейшая) и стартует из [onStreamReleased].
+     * Итог при любом темпе переключений — максимум CURRENT + NEXT + один
+     * догорающий, то есть ровно то, что влезает в кучу AudioFlinger.
+     */
+    private var orphanReleasing: BinauralStreamImpl? = null
+    private var orphanSinceMs = 0L
+
     private val queue = PlaybackQueue()
     private var serialSeq = 0L
     private var fadeTarget = FadeTarget.STOP
@@ -340,6 +368,7 @@ class BinauralStreamManager(private val context: Context) {
         actor.post {
             queue.clear()
             discardNext()
+            orphanReleasing = null          // менеджер всё равно утилизируется
             current?.stop(onFullyStopped = { /* утилизация */ })
             current = null; currentRef.set(null)
             resetSession()
@@ -415,12 +444,62 @@ class BinauralStreamManager(private val context: Context) {
     private var pendingPlaySpec: PlaybackSpec? = null
 
     /**
+     * true — третий живой AudioTrack не влезет в кучу клиента AudioFlinger,
+     * новый хэндофф начинать рано (см. [orphanReleasing]).
+     *
+     * Самоочистка двойная: по факту [StreamLifecycle.RELEASED] и по таймауту
+     * [ORPHAN_WAIT_MAX_MS]. Второе — не «на всякий случай», а защита от
+     * залипания: если колбэк релиза по какой-то причине не придёт, автомат
+     * обязан продолжить работу, даже ценой лишнего трека.
+     */
+    private fun handoffBlocked(): Boolean {
+        val o = orphanReleasing ?: return false
+        if (o.lifecycle == StreamLifecycle.RELEASED) {
+            orphanReleasing = null
+            return false
+        }
+        if (System.currentTimeMillis() - orphanSinceMs > ORPHAN_WAIT_MAX_MS) {
+            StreamLogger.w(TAG, "handoffBlocked: старый spec#${o.spec.serial} " +
+                "(lc=${o.lifecycle}) не освободился за ${ORPHAN_WAIT_MAX_MS}мс — не ждём")
+            orphanReleasing = null
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Разыграть очередь хэндоффов, когда больше ничто не мешает. Вызывается и
+     * сразу после повышения NEXT (обычно — «не сейчас»), и из [onStreamReleased],
+     * когда старый трек наконец отпущен.
+     */
+    private fun drainQueuedHandoff() {
+        if (handoffBlocked()) return
+        if (!isActiveState()) return
+        val spec = queue.peek() ?: return
+        // Уже играем ровно это — очередь просто устарела.
+        if (current?.spec?.audioEquals(spec) == true) {
+            queue.poll()
+            return
+        }
+        if (state == ManagerState.HANDOFF) rearmNextIfStale() else beginHandoff()
+    }
+
+    /**
      * HANDOFF-КРОССФЕЙД: NEXT готовится и СТАРТУЕТ (фейд-ин) параллельно с фейд-аутом
      * CURRENT. «Дырки» тишины нет: окно перекрытия = длительность фейда.
      * Ошибка подготовки/старта NEXT — НЕ повод трогать старый поток.
      */
     private fun beginHandoff() {
         val spec = queue.peek() ?: return
+        // Третий живой AudioTrack не влезет в кучу клиента AudioFlinger
+        // (см. [orphanReleasing]) — спека остаётся в очереди, а стартует она
+        // из onStreamReleased(). Побеждает новейшая, промежуточные пресеты не
+        // теряются: просто последний из серии приходит на смену первому.
+        if (handoffBlocked()) {
+            StreamLogger.d(TAG, "beginHandoff отложен: spec#${spec.serial} ждёт освобождения " +
+                "старого трека spec#${orphanReleasing?.spec?.serial}")
+            return
+        }
         // ФИКС 3. Захватываем живые координаты CURRENT ДО его fade-out — точку на
         // кривой и пройденное время. NEXT стартует ровно отсюда => бесшовный
         // кроссфейд без скачка фазы/частоты и без сброса часов сессии.
@@ -562,6 +641,14 @@ class BinauralStreamManager(private val context: Context) {
      * (раннее повышение при шторме, discard при стопе/паузе) не трогает автомат.
      */
     private fun onStreamReleased(s: BinauralStreamImpl) {
+        // Освободился слот под третий AudioTrack — разыгрываем отложенный хэндофф.
+        if (s === orphanReleasing) {
+            orphanReleasing = null
+            StreamLogger.d(TAG, "onStreamReleased: старый spec#${s.spec.serial} освобождён — " +
+                "разыгрываем отложенный хэндофф")
+            drainQueuedHandoff()
+            return
+        }
         if (s !== current) {
             StreamLogger.d(TAG, "onStreamReleased: orphan spec#${s.spec.serial} — игнор")
             return
@@ -575,10 +662,15 @@ class BinauralStreamManager(private val context: Context) {
      */
     private fun promoteNextToCurrent() {
         val n = next ?: return
+        val outgoing = current
         StreamLogger.d(TAG, "promoteNextToCurrent: spec#${n.spec.serial} — кроссфейд завершён")
         next = null
         current = n
         currentRef.set(n)
+        // Старый поток уже в тишине, но трек отпустит только после выхода
+        // писателя — всё это время он занимает слот в куче AudioFlinger.
+        orphanReleasing = outgoing
+        orphanSinceMs = System.currentTimeMillis()
         sessionSpec = n.spec
         // Сессионное время: NEXT несёт switchElapsedMs + фактическую длительность кроссфейда.
         accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
@@ -592,7 +684,9 @@ class BinauralStreamManager(private val context: Context) {
         if (tail != null && !tail.audioEquals(n.spec)) {
             StreamLogger.d(TAG, "promoteNextToCurrent: хвост очереди spec#${tail.serial} новее — новый хэндофф")
             queue.offer(tail)
-            beginHandoff()
+            // НЕ beginHandoff() напрямую: трек старого потока ([orphanReleasing])
+            // ещё не отпущен, и prepare NEXT провалился бы на создании AudioTrack.
+            drainQueuedHandoff()
         } else {
             resetContinuity()
         }
@@ -891,6 +985,14 @@ class BinauralStreamManager(private val context: Context) {
                 StreamLogger.d(TAG, "onResume: в FADE_OUT_PAUSE -> ждём PAUSED, затем resumeFromPaused")
                 pendingResume = true
             }
+            ManagerState.FADE_OUT_STOP -> {
+                // Зеркало onPlay(): пока старый поток гаснет в ноль, намерение
+                // играть надо запомнить, иначе нажатие «play» в этом окне
+                // молча терялось (else -> no-op) и воспроизведение «не
+                // возобновлялось 10-20 с». Старт разыграет onStreamFullyStopped.
+                StreamLogger.d(TAG, "onResume: во время FADE_OUT_STOP -> pendingPlaySpec")
+                pendingPlaySpec = buildSpec(SpecReason.PLAY)
+            }
             else -> { /* no-op */ }
         }
     }
@@ -999,6 +1101,13 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     private fun enrichForContinuity(spec: PlaybackSpec): PlaybackSpec {
+        // Отладочный скраб — ЯВНАЯ установка времени оператором, непрерывность
+        // её не перебивает. Порядок в prepare(): сначала nativeCustomizer
+        // (applyNativeDebug -> engine.debugScrub), ПОТОМ
+        // setCurveTime(spec.resumeCurveTimeSeconds) — то есть подставленное
+        // здесь текущее время CURRENT молча вернуло бы NEXT на старую позицию,
+        // и перемотка перестала бы работать.
+        if (debugScrubPending != null) return spec
         val tod = switchCurveTod ?: return spec
         return spec.copy(
             resumeCurveTimeSeconds = tod.toInt(),

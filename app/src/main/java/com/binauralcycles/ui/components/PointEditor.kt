@@ -121,7 +121,8 @@ private val FIELD_INNER_PADDING = 4.dp
  *        границы диапазона деление может ничего не сдвинуть, и тогда
  *        тактильный отклик только сбивал бы с толку.
  * @param onGestureEnd конец жеста — и после свайпа, и после тапа, и при
- *        отмене. Даёт вызывающему сбросить то, что жест накопил.
+ *        отмене. Здесь вызывающий применяет накопленное значение: деления
+ *        сами по себе наружу не уходят (см. [ValueSwipeBox]).
  */
 @Composable
 private fun Modifier.verticalValueSwipe(
@@ -221,32 +222,51 @@ private fun stepWithinGrid(gridValue: Float, current: Float, delta: Int): Float 
  * меняет значение «делениями», а обычный тап оставляет полю — оно само
  * открывает клавиатуру и ставит курсор, как стандартное текстовое поле.
  *
+ * Значение применяется к кривой ОДИН РАЗ НА ЖЕСТ — по отпускании пальца,
+ * а не на каждое деление. Раньше деление уходило сразу наверх, в точку, и
+ * перестраивало всю кривую: новый список точек, новая `FrequencyCurve`,
+ * кривые статического слоя графика и, если редактируется активный пресет,
+ * ещё и обновление нативного движка. Взмах на высоту экрана — это около
+ * тридцати делений, то есть тридцать полных перестроек ради одного итогового
+ * значения. Теперь деление меняет только текст в поле ([preview]) — дешёвую
+ * перекомпозицию самого окна — а к кривой ([commit]) уходит итог жеста,
+ * и только если он действительно отличается от исходного.
+ *
  * @param stepPx пикселей на одно деление
  * @param read текущее значение: набранное в поле, а если оно не число — из точки
  * @param shift значение на [delta] делений выше/ниже, приведённое к сетке
  *        и зажатое границами
- * @param write применение нового значения (уходит наверх, в точку)
+ * @param preview показать промежуточное значение: пишет его в поле, не трогая
+ *        кривую. Должно быть дешёвым — вызывается на каждое деление.
+ * @param commit применить итоговое значение к точке и кривой. Один вызов на
+ *        жест, и только если значение реально изменилось.
  */
 @Composable
 private fun ValueSwipeBox(
     stepPx: Float,
     read: () -> Float,
     shift: (current: Float, delta: Int) -> Float,
-    write: (Float) -> Unit,
+    preview: (Float) -> Unit,
+    commit: (Float) -> Unit,
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
     val readState = rememberUpdatedState(read)
     val shiftState = rememberUpdatedState(shift)
-    val writeState = rememberUpdatedState(write)
+    val previewState = rememberUpdatedState(preview)
+    val commitState = rememberUpdatedState(commit)
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
 
     // Значение, которым управляет текущий свайп. Держатель нужен потому, что
-    // за один кадр может прийти несколько делений, а результат [write] дойдёт
+    // за один кадр может прийти несколько делений, а результат [preview] дойдёт
     // до [read] только после перекомпозиции: без держателя все деления кадра
     // считались бы от одной точки и слились бы в одно.
     var swiped by remember { mutableStateOf<Float?>(null) }
+    // Значение, с которого жест начался. Без него наружу уходила бы лишняя
+    // перестройка кривой: если деления всё вернули на исходное (или сразу
+    // упёрлись в границу диапазона), применять нечего.
+    var gestureStart by remember { mutableStateOf<Float?>(null) }
 
     Box(
         modifier = modifier.verticalValueSwipe(
@@ -259,14 +279,25 @@ private fun ValueSwipeBox(
                     // задевает — фокус и клавиатура появляются только по нему.
                     keyboardController?.hide()
                     focusManager.clearFocus()
-                    readState.value()
+                    readState.value().also { gestureStart = it }
                 }
                 val next = shiftState.value(from, delta)
                 swiped = next
-                writeState.value(next)
+                previewState.value(next)
                 next != from
             },
-            onGestureEnd = { swiped = null }
+            // Отпускание пальца: итог жеста уходит к кривой. Сюда же попадают
+            // отмена жеста и честный тап — но при тапе [swiped] пуст, и
+            // применять нечего.
+            onGestureEnd = {
+                val start = gestureStart
+                val end = swiped
+                if (start != null && end != null && end != start) {
+                    commitState.value(end)
+                }
+                gestureStart = null
+                swiped = null
+            }
         )
     ) { content() }
 }
@@ -612,7 +643,13 @@ fun PointEditorPopup(
                             shift = { current, delta ->
                                 stepWithinGrid((round(current) + delta).coerceIn(0f, 23f), current, delta)
                             },
-                            write = { hours ->
+                            // Пока палец идёт, меняется только текст в поле;
+                            // к кривой значение уйдёт по отпускании.
+                            preview = { hours ->
+                                val text = hours.roundToInt().toString().padStart(2, '0')
+                                tempHours = TextFieldValue(text, selection = TextRange(text.length))
+                            },
+                            commit = { hours ->
                                 onTimeChange(LocalTime(hours.roundToInt(), currentMinutes()))
                             },
                         ) {
@@ -653,7 +690,13 @@ fun PointEditorPopup(
                                     delta
                                 )
                             },
-                            write = { minutes ->
+                            // Пока палец идёт, меняется только текст в поле;
+                            // к кривой значение уйдёт по отпускании.
+                            preview = { minutes ->
+                                val text = minutes.roundToInt().toString().padStart(2, '0')
+                                tempMinutes = TextFieldValue(text, selection = TextRange(text.length))
+                            },
+                            commit = { minutes ->
                                 onTimeChange(LocalTime(currentHours(), minutes.roundToInt()))
                             },
                         ) {
@@ -722,7 +765,10 @@ fun PointEditorPopup(
                                     delta
                                 )
                             },
-                            write = { onCarrierFrequencyChange(it) },
+                            // Пока палец идёт, меняется только текст в поле:
+                            // перестройка кривой — одна, по отпускании.
+                            preview = { tempCarrierFrequency = TextFieldValue(formatFrequency(it)) },
+                            commit = { onCarrierFrequencyChange(it) },
                         ) {
                             FrequencyField(
                                 modifier = Modifier.fillMaxWidth(),
@@ -787,7 +833,10 @@ fun PointEditorPopup(
                                     delta
                                 )
                             },
-                            write = { onBeatFrequencyChange(it) },
+                            // Пока палец идёт, меняется только текст в поле:
+                            // перестройка кривой — одна, по отпускании.
+                            preview = { tempBeatFrequency = TextFieldValue(formatFrequency(it)) },
+                            commit = { onBeatFrequencyChange(it) },
                         ) {
                             FrequencyField(
                                 modifier = Modifier.fillMaxWidth(),

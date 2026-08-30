@@ -115,25 +115,24 @@ enum class DragDirection {
 
 /**
  * Состояние перетаскивания точки
+ *
+ * Частоты биений здесь НАМЕРЕННО нет. Раньше жест сам обрезал beat под
+ * новую несущую и отправлял результат отдельным колбэком — получалось две
+ * правки подряд (несущая, затем биения), причём вторая ЗАТИРАЛА то, что
+ * пользователь задавал раньше: обрезанное у границы значение попадало в
+ * модель как «новое», и при отодвигании точки восстанавливать было нечего.
+ *
+ * Теперь жест сообщает только время и несущую, а частота биений целиком
+ * выводится в ViewModel из желаемого значения ([PointIntentMemory]).
  */
 private data class PointDragState(
     val direction: DragDirection = DragDirection.NONE,
     val startIndex: Int = -1,
     val startTime: LocalTime? = null,
     val startCarrier: Float = 0.0f,
-    val startBeat: Float = 0.0f,
     val currentTime: LocalTime? = null,
-    val currentCarrier: Float = 0.0f,
-    val currentBeat: Float = 0.0f
+    val currentCarrier: Float = 0.0f
 )
-
-/**
- * Вычисляет максимальную частоту биений для заданной несущей частоты
- * Формула: (carrierFrequency - 20) * 2 (гарантирует, что нижняя боковая частота останется >= 20 Гц)
- */
-private fun maxBeatForCarrier(carrierFrequency: Float): Float {
-    return ((carrierFrequency - MIN_AUDIBLE_FREQUENCY) * 2).coerceAtLeast(0.0f)
-}
 
 /**
  * Класс для хранения параметров графика
@@ -418,27 +417,22 @@ fun FrequencyGraph(
                                 // Оценка частоты биений по канальным кривым (как в движке):
                                 // beat = right − left — величина ЗНАКОВАЯ.
                                 //
-                                // Предел модуля — ГЕОМЕТРИЧЕСКИЙ (хранимый beatRange
-                                // не участвует: он задаёт только масштаб маркеров).
-                                // Границы графика учитываются, чтобы новая точка
-                                // не провалилась ниже минимума частот пресета —
-                                // ровно так же её клампит addEditingPoint.
+                                // Значение передаётся НЕОБРЕЗАННЫМ: обрезку под
+                                // геометрию и границы графика делает
+                                // addEditingPoint — там же единственная точка
+                                // истины по клампу. А необрезанное значение
+                                // уходит в память желаемых биений, поэтому
+                                // точка, появившаяся у самой границы, наберёт
+                                // свою пульсацию, когда её отодвинут от края.
                                 val interpolatedBeat = if (displayPoints.size >= 2) {
                                     val (leftFreq, rightFreq) = Interpolation.interpolateChannels(
                                         displayPoints, time, interpolationType, splineTension,
                                         presorted = true, weights = baseWeights
                                     )
-                                    FrequencyMath.clampBeat(
-                                        carrier,
-                                        kotlin.math.round(rightFreq - leftFreq),
-                                        carrierRange = carrierRange
-                                    )
+                                    kotlin.math.round(rightFreq - leftFreq)
                                 } else {
                                     // 0 или 1 точка: берём частоту биений единственной точки
-                                    displayPoints.firstOrNull()?.let {
-                                        FrequencyMath.clampBeat(
-                                            carrier, it.beatFrequency, carrierRange = carrierRange)
-                                    } ?: 0.0f
+                                    displayPoints.firstOrNull()?.beatFrequency ?: 0.0f
                                 }
                                 onAddPoint(time, carrier, interpolatedBeat)
                             },
@@ -516,35 +510,32 @@ fun FrequencyGraph(
                         graphHeightPx = heightPx,
                         primaryColor = primaryColor,
                         onPointSelected = onPointSelected,
-                        onDragStart = { index, time, carrier, beat ->
+                        onDragStart = { index, time, carrier ->
                             dragState = PointDragState(
                                 direction = DragDirection.NONE,
                                 startIndex = index,
                                 startTime = time,
                                 startCarrier = carrier,
-                                startBeat = beat,
                                 currentTime = time,
-                                currentCarrier = carrier,
-                                currentBeat = beat
+                                currentCarrier = carrier
                             )
                         },
-                        onDragUpdate = { index, newTime, newCarrier, newBeat, direction ->
+                        onDragUpdate = { _index, newTime, newCarrier, direction ->
                             dragState = dragState.copy(
                                 direction = direction,
                                 currentTime = newTime,
-                                currentCarrier = newCarrier,
-                                currentBeat = newBeat
+                                currentCarrier = newCarrier
                             )
                         },
-                        onDragEnd = { index, newTime, newCarrier, newBeat, direction ->
+                        onDragEnd = { index, newTime, newCarrier, direction ->
+                            // Частота биений здесь НЕ передаётся: её выводит
+                            // ViewModel из желаемого значения точки. Отдельный
+                            // колбэк записал бы в неё обрезанное у границы
+                            // значение и уничтожил бы то, что надо восстановить.
                             if (direction == DragDirection.HORIZONTAL) {
                                 onPointTimeChanged(index, newTime)
                             } else if (direction == DragDirection.VERTICAL) {
                                 onPointCarrierChanged(index, newCarrier)
-                                // Если частота биения была скорректирована
-                                if (newBeat != dragState.startBeat) {
-                                    onPointBeatChanged(index, newBeat)
-                                }
                             }
                             dragState = PointDragState()
                         }
@@ -1268,31 +1259,6 @@ private fun buildDashedBaseCurvePath(
     return carrierPath
 }
 
-/**
- * Вычисляет максимальную частоту биений для верхней границы (2000 Гц).
- * Формула: carrier + beat/2 <= MAX_FREQUENCY => beat <= 2 * (MAX_FREQUENCY - carrier)
- */
-private fun maxBeatForUpperLimit(carrierFrequency: Float): Float {
-    return ((MAX_FREQUENCY - carrierFrequency) * 2).coerceAtLeast(0.0f)
-}
-
-/**
- * Вычисляет скорректированную частоту биения для заданной несущей частоты.
- * Учитывает обе границы: нижнюю (20 Гц) и верхнюю (2000 Гц).
- *
- * ЗНАК СОХРАНЯЕТСЯ: клампится только МОДУЛЬ (beat = right − left — величина
- * знаковая; при смене знака боковые частоты просто меняются местами, поэтому
- * ограничение симметрично):
- *   |beat| <= 2 * (carrier − 20 Гц)    — нижняя боковая >= 20 Гц;
- *   |beat| <= 2 * (2000 Гц − carrier)  — верхняя боковая <= 2000 Гц.
- */
-fun adjustBeatForCarrier(carrier: Float, currentBeat: Float): Float {
-    val maxBeatForLower = maxBeatForCarrier(carrier)  // для нижней границы (20 Гц)
-    val maxBeatForUpper = maxBeatForUpperLimit(carrier)  // для верхней границы (2000 Гц)
-    val maxBeat = minOf(maxBeatForLower, maxBeatForUpper).coerceAtLeast(0.0f)
-    return currentBeat.coerceIn(-maxBeat, maxBeat)
-}
-
 @Composable
 fun DraggablePoint(
     xPx: Float,
@@ -1308,9 +1274,11 @@ fun DraggablePoint(
     graphHeightPx: Int,
     primaryColor: Color,
     onPointSelected: (Int) -> Unit,
-    onDragStart: (Int, LocalTime, Float, Float) -> Unit,
-    onDragUpdate: (Int, LocalTime, Float, Float, DragDirection) -> Unit,
-    onDragEnd: (Int, LocalTime, Float, Float, DragDirection) -> Unit
+    // Частота биений в колбэках жеста отсутствует: её рассчитывает ViewModel
+    // из желаемого значения точки (см. [PointDragState]).
+    onDragStart: (Int, LocalTime, Float) -> Unit,
+    onDragUpdate: (Int, LocalTime, Float, DragDirection) -> Unit,
+    onDragEnd: (Int, LocalTime, Float, DragDirection) -> Unit
 ) {
     val density = LocalDensity.current
     
@@ -1320,7 +1288,6 @@ fun DraggablePoint(
     var hasDirectionDetermined by remember { mutableStateOf(false) }
     var startSeconds by remember { mutableStateOf(0) }
     var startCarrier by remember { mutableStateOf(0.0f) }
-    var startBeat by remember { mutableStateOf(0.0f) }
     
     val pointSize = if (isSelected) POINT_MARKER_SELECTED_SIZE else POINT_MARKER_SIZE
     val halfSizePx = with(density) { (pointSize / 2).roundToPx() }
@@ -1332,7 +1299,7 @@ fun DraggablePoint(
             .background(if (isSelected) primaryColor else primaryColor.copy(alpha = 0.7f), CircleShape)
             .border(2.dp, Color.White, CircleShape)
             .clickable { onPointSelected(originalIndex) }
-            .pointerInput(originalIndex, point.time, point.carrierFrequency, point.beatFrequency) {
+            .pointerInput(originalIndex, point.time, point.carrierFrequency) {
                 detectDragGestures(
                     onDragStart = { _ ->
                         totalDragX = 0f; totalDragY = 0f
@@ -1340,14 +1307,12 @@ fun DraggablePoint(
                         hasDirectionDetermined = false
                         startSeconds = point.time.toSecondOfDay()
                         startCarrier = point.carrierFrequency
-                        startBeat = point.beatFrequency
-                        onDragStart(originalIndex, point.time, point.carrierFrequency, point.beatFrequency)
+                        onDragStart(originalIndex, point.time, point.carrierFrequency)
                     },
                     onDragEnd = {
                         val newTime = calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat())
                         val newCarrier = calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat())
-                        val adjustedBeat = adjustBeatForCarrier(newCarrier, startBeat)
-                        onDragEnd(originalIndex, newTime, newCarrier, adjustedBeat, currentDragDirection)
+                        onDragEnd(originalIndex, newTime, newCarrier, currentDragDirection)
                         totalDragX = 0f; totalDragY = 0f
                         currentDragDirection = DragDirection.NONE
                         hasDirectionDetermined = false
@@ -1364,11 +1329,10 @@ fun DraggablePoint(
 
                         val newTime = calculateTimeFromDrag(startSeconds, totalDragX, minTimeSeconds, maxTimeSeconds, graphWidthPx.toFloat())
                         val newCarrier = calculateCarrierFromDrag(startCarrier, totalDragY, carrierRange, graphHeightPx.toFloat())
-                        val adjustedBeat = adjustBeatForCarrier(newCarrier, startBeat)
                         when (currentDragDirection) {
-                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, newTime, startCarrier, startBeat, DragDirection.HORIZONTAL)
-                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, newCarrier, adjustedBeat, DragDirection.VERTICAL)
-                            DragDirection.NONE -> onDragUpdate(originalIndex, newTime, newCarrier, adjustedBeat, DragDirection.NONE)
+                            DragDirection.HORIZONTAL -> onDragUpdate(originalIndex, newTime, startCarrier, DragDirection.HORIZONTAL)
+                            DragDirection.VERTICAL -> onDragUpdate(originalIndex, point.time, newCarrier, DragDirection.VERTICAL)
+                            DragDirection.NONE -> onDragUpdate(originalIndex, newTime, newCarrier, DragDirection.NONE)
                         }
                     }
                 )

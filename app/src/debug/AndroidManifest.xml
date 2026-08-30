@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        Только debug-сборка: adb-командный интерфейс для проверки
+        работоспособности. Манифест из source set `debug` сливается в итоговый
+        манифест исключительно для debug-варианта, поэтому в release ни класса
+        приёмника, ни записи о нём не будет.
+
+        exported="true" обязателен: `adb shell am broadcast` приходит извне
+        приложения. В release этот вектор отсутствует целиком.
+    -->
+    <application>
+        <receiver
+            android:name="com.binauralcycles.debug.DebugCommandReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.binauralcycles.debug.COMMAND" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

@@ -37,7 +37,47 @@ class BinauralStreamImpl(
         private const val FADE_GUARD_MS = 60L
         /** Байт в кадре: стерео × ENCODING_PCM_FLOAT. */
         private const val frameBytes = 2 * 4
+        /**
+         * Внутренний буфер (кольцо) AudioTrack — сколько PCM может лежать в треке
+         * впереди слышимой позиции.
+         *
+         * Ограничен сверху и по времени, и по байтам (см. [MAX_TRACK_BUFFER_BYTES]):
+         * кроссфейд держит ДВА живых трека (CURRENT+NEXT), а разделяемая память
+         * треков выделяется из одной кучи клиента в AudioFlinger (MemoryDealer).
+         * На части устройств она ~7 МБ: при 10 с на 48 кГц кольцо весит 3.84 МБ,
+         * и второй трек просто не создаётся —
+         * `createTrack_l() initCheck failed -12` (NO_MEMORY).
+         */
         private const val TRACK_BUFFER_MS = 10000         // внутренний буфер AudioTrack
+        /**
+         * Потолок кольца в байтах — на КАЖДЫЙ поток, а не на все сразу.
+         *
+         * Откуда число. Разделяемая память треков выделяется из ОДНОЙ кучи
+         * клиента в AudioFlinger (`dumpsys media.audio_flinger` → Clients:
+         * heap_size, типовое значение 7 MiB). Кроссфейд держит ДВА живых трека,
+         * и оба обязаны влезть в эту кучу — иначе второй трек не создаётся
+         * вовсе.
+         *
+         * Замер на устройстве (POCO 23049PCD8G, Android 13, 48 кГц): запрос
+         * кольца 3 MiB = 393216 кадров оборачивается аллокацией 4 MiB —
+         *
+         *     E AF::TrackBase: TrackBase(58): not enough memory for AudioTrack
+         *                     size=4194536
+         *     E AudioFlinger: createTrack_l() initCheck failed -12
+         *
+         * Итог при потолке 3 МБ: beginHandoff гарантированно проваливался на
+         * prepare() NEXT — переключение пресета не происходило вообще, старый
+         * поток продолжал играть. 2 MiB на поток → двое влезают с запасом
+         * (проверено на устройстве: оба трека создаются).
+         *
+         * Побочный эффект: на 48 кГц кольцо ~5.5 с вместо 10 с (на 22.05 кГц
+         * потолок не работает — 10 с = 1.76 МБ, меньше предела). Чанк записи
+         * подстраивается сам: writerLoop() считает его от ФАКТИЧЕСКОГО размера
+         * кольца минус [MIN_WRITE_MARGIN_MS], то есть запас до underrun
+         * сохраняется, а частота пробуждений писателя растёт (~800/час вместо
+         * ~500/час). minBuffer — нижняя граница HAL, её не роняем.
+         */
+        private const val MAX_TRACK_BUFFER_BYTES = 2L * 1024 * 1024
         /**
          * Гранулярность записи — и она же определяет, как часто просыпается
          * писатель. write(WRITE_BLOCKING) возвращается, только когда в кольце
@@ -66,8 +106,29 @@ class BinauralStreamImpl(
          * (GC, конкуренция за CPU, смена частоты) — то есть это и есть запас
          * до underrun: `buffer - chunk`. Держим его явно, чтобы фактический
          * размер буфера, урезанный HAL, не съел запас молча.
+         *
+         * 1000 мс — историческая величина (при кольце 3000 мс и чанке 2000 мс
+         * запас был ровно таким). Её задача — перекрыть задержку пробуждения
+         * писателя, а не держать полсекунды про запас: при урезанном по
+         * [MAX_TRACK_BUFFER_BYTES] кольце лишние 1000 мс напрямую вычитаются из
+         * чанка и тем самым удваивают число пробуждений.
          */
-        private const val MIN_WRITE_MARGIN_MS = 2000
+        private const val MIN_WRITE_MARGIN_MS = 1000
+
+        /**
+         * Длина стартового пакета в секундах. Именно столько (768 КБ при 48 кГц,
+         * стерео float) выделяет prepare() — а не весь bufferIntervalMs.
+         * Полный интервал доращивает писатель. См. комментарий в prepare().
+         */
+        private const val STARTUP_PACKET_SECONDS = 2
+
+        /**
+         * Сколько раз писатель вправе пытаться дорастить пакет до полного
+         * интервала. Ограничение обязательно: каждая попытка — это
+         * allocateDirect на сотни мегабайт с уполовиниванием, и без счётчика
+         * неудачная попытка повторялась бы на каждом витке цикла вечно.
+         */
+        private const val MAX_GROW_ATTEMPTS = 3
         /**
          * Опрос парковки писателя на паузе. wait() с таймаутом, а не вечное
          * ожидание: пропущенный notify не превращается в зависший поток —
@@ -102,18 +163,64 @@ class BinauralStreamImpl(
         private val maxBufferBytes: Long
             get() = if (android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
                 256L * 1024 * 1024 else 96L * 1024 * 1024
+
         /**
-         * Сколько ждём выхода писателя перед уничтожением нативного движка.
-         * ОБЯЗАН покрывать один полный чанк записи (WRITE_CHUNK_MS), иначе
-         * таймаут наступит, пока писатель штатно стоит в track.write(), и
-         * владение движком передастся ему без необходимости.
+         * Реальный потолок ОДНОГО пакетного буфера — от КУЧИ, а не от «сколько
+         * в устройстве вообще бывает памяти».
+         *
+         * Пакет — `ByteBuffer.allocateDirect`, а на Android он выделяется как
+         * non-movable `byte[]` НА ЯВА-КУЧЕ (libcore → `VMRuntime
+         * .newNonMovableArray`). Значит он конкурирует за кучу и с приложением,
+         * и — главное — САМ С СОБОЙ: во время кроссфейда живут CURRENT и NEXT,
+         * а при быстрой смене пресетов ещё и догорающий старый поток.
+         *
+         * Замер на 23049PCD8G (лог от 22:31:24): `bufferGenerationMinutes=10`
+         * давал цель 600 с = 230 МБ на поток. Два-три потока доращивали пакет
+         * одновременно, `allocateDirect` уполовинивал 230→115→57.6→28.8→…, и
+         * КАЖДАЯ неудачная попытка сама поднимала GC. Итог — ART/Xiaomi сторож:
+         *   kill process: ... reason: memory leaks occurred.
+         *   current heap memory: 268314168
+         *
+         * Правило: на поток — не больше 1/8 кучи, но не больше
+         * [PACKET_MAX_BYTES]. На 256 МБ это 32 МБ ≈ 87 с при 48 кГц: интервал
+         * генерации при больших `bufferGenerationMinutes` станет короче
+         * (писатель просыпается чаще), зато процесс живёт. Цена — десятки
+         * миллисекунд CPU раз в полторы минуты вместо вылета.
+         */
+        private const val PACKET_HEAP_DIVISOR = 8
+
+        private const val PACKET_MAX_BYTES = 32L * 1024 * 1024
+        private const val PACKET_MIN_BYTES = 4L * 1024 * 1024
+
+        /**
+         * Сколько потоков одновременно держат пакет в куче в худший момент
+         * (CURRENT + NEXT + не успевший отпуститься старый). Запас нужен не
+         * «на всякий случай»: если его не требовать, сама ПОПЫТКА аллокации
+         * уводит кучу в OOM-уполовинивание и сторож убивает процесс.
+         */
+        private const val GROW_HEADROOM_STREAMS = 3L
+        /**
+         * Дедлайн опроса выхода писателя в finalizeStop(): сколько максимум
+         * держим утилизацию потока, прежде чем отдать её releaseInternal().
+         * Покрывает один полный чанк записи (WRITE_CHUNK_MS) — иначе таймаут
+         * наступил бы, пока писатель штатно стоит в track.write().
+         *
+         * Опрос, а не await: нить актёра НЕ блокируется, на ней висят таймеры
+         * фейдов и onStreamFullyStopped.
          */
         private const val WRITER_EXIT_WAIT_MS = WRITE_CHUNK_MS + 1500L
         /**
          * Короткая грейс-фаза в releaseInternal(): сколько даём писателю на
-         * выход ПОСЛЕ того, как трек уже снят и write() разблокирован.
-         * Полный WRITER_EXIT_WAIT_MS (3.5 с) блокировать нить актёра нельзя —
-         * на ней висят все таймеры фейдов менеджера.
+         * выход ПОСЛЕ того, как трек уже снят (pause() разблокировал
+         * write()) — писателю нужно лишь дойти до проверки lifecycle или
+         * вернуться из отладочной генерации.
+         *
+         * Это предел БЛОКИРУЮЩЕГО ожидания на нити актёра, поэтому он короткий
+         * [WRITER_EXIT_WAIT_MS] (9.5 с) здесь ждать нельзя: пока актёр стоит,
+         * не исполняются ни повышение NEXT, ни старт следующего потока —
+         * ровно оттуда и росли многосекундные провалы при переключении.
+         * Не вышел за грейс — движок остаётся писателю (он освободит его в
+         * своём finally, см. engineOwnedByWriter), утилизация идёт дальше.
          */
         private const val WRITER_HANDOFF_GRACE_MS = 250L
     }
@@ -138,11 +245,38 @@ class BinauralStreamImpl(
 
     private var nativeEngine: NativeAudioEngine? = null
     private var audioTrack: AudioTrack? = null
-    private var directBuffer: ByteBuffer? = null
+    /**
+     * Пакетный буфер генерации. Volatile: его подменяет НИТЬ ПИСАТЕЛЯ
+     * ([maybeGrowPacketBuffer]), а читает и обнуляет нить управления
+     * ([releaseInternal]) — без volatile релиз мог бы обнулить свежий буфер
+     * и тот утек бы.
+     */
+    @Volatile private var directBuffer: ByteBuffer? = null
     private var writerThread: HandlerThread? = null
     private var writerHandler: Handler? = null
     private var volumeShaper: VolumeShaper? = null
-    private var samplesPerChannel = 0
+    /** Ёмкость текущего буфера в сэмплах на канал. Растёт от стартовой к целевой. */
+    @Volatile private var samplesPerChannel = 0
+    /**
+     * Целевая ёмкость пакета по настройке bufferIntervalMs (с капами).
+     * Достигается НЕ сразу: prepare() берёт только стартовый пакет, а до
+     * полного интервала буфер доращивает писатель уже под звук.
+     */
+    private var targetSamplesPerChannel = 0
+    private var packetBufferGrown = false
+    private var growAttempts = 0
+    /**
+     * Отложенный рост уже logged? Писатель доходит сюда КАЖДЫЙ пакет (раз в 2 с
+     * на стартовом размере), поэтому без флага две строки в секунду захламили
+     * бы файловый лог потока и утопили в нём всё остальное.
+     */
+    private var growDeferredLogged = false
+    /**
+     * Сколько неудачных попыток (OutOfMemoryError) понадобилось [allocateDirect]
+     * перед успехом. Только для диагностики: каждый провал — это реальные
+     * потраченные миллисекунды на актёрской нити во время кроссфейда.
+     */
+    private var directAllocateAttempts = 0
     private var audioTrackBufferSize = 0
     private var preparedPacketBytes = 0
     private val writerExitLatch = CountDownLatch(1)
@@ -252,51 +386,72 @@ class BinauralStreamImpl(
             //    Трек создан, но НЕ запущен — поток ещё беззвучен.
             createAudioTrack(rate)
 
-            // 4. Буферы с теми же капами, что и в старом движке.
+            // 4. Целевая ёмкость пакета — с теми же капами, что и в старом движке.
             val maxSamplesByMinutes = rate.toLong() * 60 * MAX_BUFFER_MINUTES
             val maxSamplesByBytes = maxBufferBytes / 8L
+            val maxSamplesByPacket = packetBudgetBytes() / 8L
             val requestedSamples = rate.toLong() * bufferIntervalMs / 1000L
-            samplesPerChannel = minOf(
+            val targetSamples = minOf(
                 requestedSamples,
                 maxSamplesByMinutes,
-                maxSamplesByBytes
+                maxSamplesByBytes,
+                maxSamplesByPacket
             ).toInt()
+            targetSamplesPerChannel = targetSamples
             // Потолок по байтам — это предел устройства (см. maxBufferBytes),
             // а не рабочий предел. Дефолтный 600 с влезает целиком при любом SR
             // (максимум 230 МБ на HIGH); урезается только то, что физически не
             // держится (напр. 3600 с @44.1 кГц = 1.27 ГБ/поток). Усечение
             // не молчит: пишем запрошенный и реальный интервал в лог.
-            if (samplesPerChannel < requestedSamples) {
+            if (targetSamples < requestedSamples) {
                 StreamLogger.w(TAG, "prepare spec#${spec.serial}: buffer interval clamped " +
-                    "by device RAM limit ${maxBufferBytes / (1024 * 1024)}MB: " +
-                    "requested ${bufferIntervalMs}ms -> effective ${samplesPerChannel * 1000L / rate}ms @ ${rate}Hz")
+                    "(device RAM ${maxBufferBytes / (1024 * 1024)}MB, packet budget " +
+                    "${packetBudgetBytes() / (1024 * 1024)}MB on heap " +
+                    "${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB): " +
+                    "requested ${bufferIntervalMs}ms -> effective ${targetSamples * 1000L / rate}ms @ ${rate}Hz")
             }
-            directBuffer = allocateDirect(samplesPerChannel * 2 * 4, rate)
+
+            // 5. Стартовый буфер — ТОЛЬКО под первый пакет, НЕ под весь интервал.
+            //    Причина не скорость, а ПАМЯТЬ. Полный интервал 600 с — это 230 МБ
+            //    на поток; allocateDirect их не даёт и уполовинивает до ~29 МБ,
+            //    но при БЫСТРОЙ смене пресетов одновременно живёт несколько
+            //    потоков, и эти буферы складываются. Замер на устройстве
+            //    (23049PCD8G): куча 223/256 МБ, каждый хэндофф добавлял 28.8 МБ,
+            //    два подряд её переполняли — GC-трэш (15 сборок за 600 мс, каждая
+            //    освобождает 16-48 КБ) и сторож Xiaomi убивал процесс:
+            //      kill process: ... reason: memory leaks occurred.
+            //      current heap memory: 263993728
+            //    Стартовый пакет — 768 КБ при 48 кГц, то есть в 37 раз меньше.
+            //    До полного интервала буфер доращивает ПИСАТЕЛЬ уже под звук
+            //    (см. maybeGrowPacketBuffer): к тому моменту поток один, старые
+            //    уже отпущены и память есть. Интервал генерации (а значит и
+            //    частота пробуждений писателя) в установившемся режиме
+            //    сохраняется — батарейная оптимизация не пострадала.
+            val startupSamples = minOf(targetSamples, rate * STARTUP_PACKET_SECONDS)
+            directBuffer = allocateDirect(startupSamples * 2 * 4, rate)
                 ?: throw OutOfMemoryError("direct buffer unavailable")
             // Реальная ёмкость может оказаться меньше запрошенной: при OOM
             // allocateDirect() делит размер пополам. Урезаем длину пакета по
             // факту — иначе JNI вернёт 0 («buffer too small») и звук встанет.
             val capacitySamples = directBuffer!!.capacity() / 8
-            if (capacitySamples in 1 until samplesPerChannel) {
-                samplesPerChannel = capacitySamples
-                StreamLogger.w(TAG, "prepare spec#${spec.serial}: allocateDirect halved to " +
-                    "${capacitySamples * 1000L / rate}s @ ${rate}Hz (requested " +
-                    "${requestedSamples * 1000L / rate}s) — недостаточно RAM")
+            samplesPerChannel = maxOf(1, minOf(startupSamples, capacitySamples))
+            if (capacitySamples < startupSamples) {
+                // Единицы — МИЛЛИСЕКУНДЫ: samples*1000/rate, а не samples/rate.
+                // Раньше здесь стояло «...${...}s», из-за чего реальное 75 с
+                // читалось как 75000 с и диагноз уезжал в космос.
+                StreamLogger.w(TAG, "prepare spec#${spec.serial}: allocateDirect урезал буфер до " +
+                    "${capacitySamples * 1000L / rate}мс @ ${rate}Hz (запрошено " +
+                    "${requestedSamples * 1000L / rate}мс, провалов аллокации: " +
+                    "$directAllocateAttempts) — недостаточно RAM")
             }
-            // Запас по времени: если буфер урезан OOM ниже внутреннего буфера
-            // трека, писатель не успеет подпитывать трек — это гарантированный
-            // underrun. Лучше упасть на prepare(), чем щёлкать весь сеанс.
-            val minSafeSamples = rate * TRACK_BUFFER_MS / 1000
-            if (samplesPerChannel < minSafeSamples) {
-                throw OutOfMemoryError(
-                    "buffer ${samplesPerChannel} samples < track buffer $minSafeSamples " +
-                        "(rate=$rate) — underrun неизбежен"
-                )
-            }
+            // Запас по времени (буфер не меньше внутреннего буфера трека)
+            // проверяется НЕ здесь, а при доращивании: стартовый пакет заведомо
+            // меньше TRACK_BUFFER_MS, и требовать обратное значит опять просить
+            // десятки мегабайт на prepare(). См. maybeGrowPacketBuffer().
 
-            // 5. Первый пакет — КОРОТКИЙ (до 2 с): подготовка быстрая и не блокирует
+            // 6. Первый пакет — КОРОТКИЙ (до 2 с): подготовка быстрая и не блокирует
             // актёр надолго; полный интервал сгенерирует писатель, пока трек уже играет.
-            val prepareSamples = minOf(samplesPerChannel, rate * 2)
+            val prepareSamples = minOf(samplesPerChannel, rate * STARTUP_PACKET_SECONDS)
             val buf = directBuffer!!
             buf.clear()
             val generated = engine.generateBufferDirect(buf, prepareSamples)
@@ -318,7 +473,12 @@ class BinauralStreamImpl(
         val minBuffer = AudioTrack.getMinBufferSize(rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_FLOAT)
         // Long на всём пути: rate * 8 байт/кадр * TRACK_BUFFER_MS(10 с) = 3.5e9 —
         // в Int уже не влезает (на 3 с влезало, на 10 — нет).
-        val size = maxOf(minBuffer.toLong(), rate.toLong() * 2 * 4 * TRACK_BUFFER_MS / 1000).toInt()
+        //
+        // Потолок в байтах режет только старшие SR: два живых трека (кроссфейд)
+        // обязаны влезть в одну кучу клиента AudioFlinger, иначе второй трек не
+        // создаётся (-12 NO_MEMORY). minBuffer — нижняя граница HAL, её не роняем.
+        val requested = maxOf(minBuffer.toLong(), rate.toLong() * frameBytes * TRACK_BUFFER_MS / 1000)
+        val size = maxOf(minBuffer.toLong(), minOf(requested, MAX_TRACK_BUFFER_BYTES)).toInt()
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -356,13 +516,98 @@ class BinauralStreamImpl(
         track?.setVolume(userVolume)   // база; VolumeShaper — множитель поверх
     }
 
+    /**
+     * Дорастить пакетный буфер от стартового до [targetSamplesPerChannel].
+     *
+     * ТОЛЬКО с нити писателя, перед генерацией. prepare() берёт лишь стартовый
+     * пакет ([STARTUP_PACKET_SECONDS]) — иначе быстрая смена пресетов держит в
+     * памяти несколько буферов полного интервала одновременно и переполняет
+     * кучу (замер и цифры — в комментарии к prepare()). Здесь поток уже звучит,
+     * он один, старые отпущены — память под полный интервал находится.
+     *
+     * Публикуем буфер, только если поток ещё PLAYING: releaseInternal()
+     * обнуляет [directBuffer], и буфер, опубликованный после релиза, утёк бы.
+     * Порядок в releaseInternal() это допускает: stop() переводит lifecycle в
+     * STOPPING ещё до обнуления, поэтому проверка надёжна.
+     */
+    private fun maybeGrowPacketBuffer(rate: Int) {
+        if (packetBufferGrown) return
+        val target = targetSamplesPerChannel
+        if (target <= samplesPerChannel) {
+            packetBufferGrown = true          // стартовый и есть целевой
+            return
+        }
+        if (growAttempts >= MAX_GROW_ATTEMPTS) return
+        // Поток уже уходит (фейд-аут/стоп) — полный интервал ему не нужен:
+        // это экономит десятки мегабайт на каждом прерванном хэндоффе.
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING || fadeMode == FadeMode.OUT) return
+
+        // Запас на [GROW_HEADROOM_STREAMS] потоков. Без этой проверки сама
+        // ПОПЫТКА аллокации и есть вылет: allocateDirect уполовинивает запрос,
+        // каждый OOM поднимает GC, куча уходит в потолок, и сторож убивает
+        // процесс («memory leaks occurred»). Неудачу здесь НЕ считаем как
+        // попытку ([growAttempts] не растёт): память освободится — дорастим
+        // на следующем пакете.
+        val neededBytes = target.toLong() * 8
+        val rt = Runtime.getRuntime()
+        val freeBytes = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
+        if (neededBytes * GROW_HEADROOM_STREAMS > freeBytes) {
+            if (!growDeferredLogged) {
+                growDeferredLogged = true
+                StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: отложено — " +
+                    "нужно ${neededBytes * GROW_HEADROOM_STREAMS / (1024 * 1024)}МБ " +
+                    "($GROW_HEADROOM_STREAMS потока по ${neededBytes / (1024 * 1024)}МБ), " +
+                    "свободно ${freeBytes / (1024 * 1024)}МБ")
+            }
+            return
+        }
+        growAttempts++
+        val grown = allocateDirect(target * 2 * 4, rate) ?: return
+        // Между аллокацией и публикацией мог успеть пройти releaseInternal().
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+            StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: поток утилизирован " +
+                "до публикации — буфер не опубликован (не течёт)")
+            return
+        }
+        val capacitySamples = grown.capacity() / 8
+        val minSafeSamples = rate * TRACK_BUFFER_MS / 1000
+        if (capacitySamples < minSafeSamples) {
+            // Меньше внутреннего буфера трека — не публикуем: писатель не успевал
+            // бы подпитывать трек (гарантированный underrun). Остаёмся на
+            // стартовом пакете: просыпаемся чаще, но звучим без щелчков.
+            packetBufferGrown = true
+            StreamLogger.w(TAG, "growPacketBuffer spec#${spec.serial}: дорастить не удалось " +
+                "(${capacitySamples * 1000L / rate}мс < ${TRACK_BUFFER_MS}мс) — остаёмся на " +
+                "стартовом пакете ${samplesPerChannel * 1000L / rate}мс")
+            return
+        }
+        directBuffer = grown
+        samplesPerChannel = capacitySamples
+        packetBufferGrown = true
+        StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: буфер доращен до " +
+            "${capacitySamples * 1000L / rate}мс (цель ${target * 1000L / rate}мс, " +
+            "провалов аллокации $directAllocateAttempts)")
+    }
+
+    /**
+     * Сколько байт можно отдать под пакет ОДНОГО потока. См. [PACKET_MAX_BYTES]:
+     * прямой буфер живёт на Java-куче, поэтому предел считаем от её размера,
+     * а не от объёма RAM в устройстве.
+     */
+    private fun packetBudgetBytes(): Long {
+        val heap = Runtime.getRuntime().maxMemory()
+        return (heap / PACKET_HEAP_DIVISOR).coerceIn(PACKET_MIN_BYTES, PACKET_MAX_BYTES)
+    }
+
     private fun allocateDirect(sizeBytes: Int, rateHz: Int): ByteBuffer? {
         val minSize = maxOf(audioTrackBufferSize, rateHz * 2 * 4)
         var size = sizeBytes
+        directAllocateAttempts = 0
         while (true) {
             try {
                 return ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
             } catch (e: OutOfMemoryError) {
+                directAllocateAttempts++
                 if (size <= minSize) return null
                 size = maxOf(minSize, size / 2)
             }
@@ -857,11 +1102,21 @@ class BinauralStreamImpl(
         for (i in 0..n) {
             val p = i.toFloat() / n
             times[i] = p
+            // Кламп ОБЯЗАТЕЛЕН, а не «на всякий случай»: cos(π/2) в одинарной
+            // точности равен -4.37e-8, а не ровно 0. VolumeShaper принимает
+            // кривую только целиком и только из [0,1] — одна отрицательная
+            // точка роняет createVolumeShaper с
+            //   "volumes for linear scale must be between 0.f and 1.f"
+            // (на устройстве: check index 15 — последняя точка затухания).
+            // Раньше это молча уводило equal-power кроссфейд на аварийную
+            // линейную рампу, то есть на провал ~3 дБ в середине перекрытия.
+            // Погрешность 4e-8 не влияет ни на слух, ни на энергию
+            // (sin²+cos²=1 сохраняется), поэтому клампим, а не округляем.
             vols[i] = if (rampUp) {
                 t * kotlin.math.sin(p * (Math.PI.toFloat() / 2f))
             } else {
                 f * kotlin.math.cos(p * (Math.PI.toFloat() / 2f))
-            }
+            }.coerceIn(0f, 1f)
         }
         return times to vols
     }
@@ -896,6 +1151,22 @@ class BinauralStreamImpl(
         paused = false
         wakeWriter()
 
+        // Снятие трека — ДО ожидания писателя, а не после.
+        //
+        // pause() прерывает заблокированный write(WRITE_BLOCKING)
+        // (mProxy->interrupt): писатель возвращается из write() немедленно, а не
+        // доигрывает остаток WRITE_CHUNK_MS (до 8 с). Порядок критичен: при
+        // прежнем порядке (await -> pause/stop/release) латч дёргался только по
+        // остатку чанка, и releaseInternal растягивался на 8-9.5 с, удерживая на
+        // нити актёра и onStreamFullyStopped, и старт следующего потока — ровно
+        // та самая «пауза» при переключении пресета. Попутно это освобождает
+        // разделяемую память трека в AudioFlinger до создания следующего: без
+        // этого на 48 кГц второй трек не создавался (createTrack_l -12).
+        //
+        // Неслышно: к этому моменту громкость уже в нуле (setVolume(0) в
+        // finalizeStop, база и множитель шейпера), остаток кольца не нужен.
+        try { audioTrack?.pause() } catch (_: Exception) {}
+
         // ФИКС №1 (старый краш, SIGABRT destroyed mutex): движок разрешено
         // уничтожать только после выхода писателя.
         //
@@ -908,8 +1179,15 @@ class BinauralStreamImpl(
         // потоком внутри движка → use-after-free.
         var engineOwnedByWriter = false
         if (writerStarted && writerExitLatch.count > 0L) {
+            // Грейс-фаза, а не полный WRITER_EXIT_WAIT_MS: трек уже снят
+            // (pause() выше разблокировал write()), поэтому писателю нужно
+            // только дойти до проверки lifecycle или вернуться из генерации
+            // пакета. Блокировать нить актёра на секунды нельзя — на ней висят
+            // таймеры фейдов, повышение NEXT и старт следующего потока.
+            // Нормальный путь сюда вообще не заходит: finalizeStop() опрашивает
+            // латч заранее и зовёт releaseInternal уже по нулевому счётчику.
             try {
-                writerExitLatch.await(WRITER_EXIT_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                writerExitLatch.await(WRITER_HANDOFF_GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }
@@ -918,15 +1196,14 @@ class BinauralStreamImpl(
                 // выходе (pause/stop/release трека ниже разблокируют write()).
                 engineOwnedByWriter = true
                 StreamLogger.w(TAG, "releaseInternal spec#${spec.serial}: писатель не вышел " +
-                    "за ${WRITER_EXIT_WAIT_MS}мс — движок освобождает сам писатель " +
+                    "за ${WRITER_HANDOFF_GRACE_MS}мс — движок освобождает сам писатель " +
                     "(consumed=$writerConsumedEngine)")
             }
         }
 
         closeShaper()
-        // pause/stop/release трека разблокируют писателя, если он застрял
-        // в track.write(WRITE_BLOCKING) — он получит ошибку записи и выйдет.
-        try { audioTrack?.pause() } catch (_: Exception) {}
+        // pause() уже выполнен выше (до await) — именно он разблокировал писателя.
+        // stop()/release() снимают трек окончательно; оба идемпотентны.
         try { audioTrack?.stop() } catch (_: Exception) {}
         try { audioTrack?.release() } catch (_: Exception) {}
         audioTrack = null
@@ -1020,6 +1297,11 @@ class BinauralStreamImpl(
                         continue
                     }
                     if (offset >= packetBytes) {
+                        // Дорастить буфер до полного интервала генерации. Здесь,
+                        // а не в prepare(): на prepare() это десятки мегабайт на
+                        // каждый поток, а при быстрой смене пресетов потоков
+                        // несколько — куча переполнялась и процесс убивался.
+                        maybeGrowPacketBuffer(spec.sampleRate.value)
                         val buf = directBuffer ?: break
                         buf.clear()
                         val generated = engine.generateBufferDirect(buf, samplesPerChannel)
@@ -1038,9 +1320,21 @@ class BinauralStreamImpl(
                     buf.limit(offset + chunk)
                     val written = track.write(buf, chunk, AudioTrack.WRITE_BLOCKING)
                     if (written < 0) {
-                        // track.pause() прерывает заблокированный write()
-                        // (mProxy->interrupt): это НЕ ошибка и НЕ потеря данных —
-                        // кадры, не принятые треком, остаются в пакете по offset.
+                        // Плановая утилизация: releaseInternal() снимает трек
+                        // (pause()) ДО ожидания писателя, и заблокированный
+                        // write() возвращается с ошибкой. Это штатный выход, а не
+                        // отказ трека — иначе любой stop во время чанка уводил бы
+                        // автомат в handleRuntimeError и рвал воспроизведение.
+                        // Проверка идёт ПЕРВОЙ: lifecycle уже STOPPING/RELEASED.
+                        if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+                            StreamLogger.d(TAG, "writerLoop spec#${spec.serial}: write прерван утилизацией " +
+                                "(lc=${lifecycleRef.get()}, written=$written)")
+                            break
+                        }
+                        // Мягкая пауза: track.pause() прерывает заблокированный
+                        // write() (mProxy->interrupt): это НЕ ошибка и НЕ потеря
+                        // данных — кадры, не принятые треком, остаются в пакете
+                        // по offset.
                         if (paused) {
                             StreamLogger.d(TAG, "writerLoop spec#${spec.serial}: write прерван паузой " +
                                 "(пакет сохранён, offset=$offset/$packetBytes)")
