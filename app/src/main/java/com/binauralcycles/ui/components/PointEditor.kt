@@ -233,6 +233,10 @@ private fun DrawScope.drawPopupArrow(color: Color) {
  * @param arrowOffsetX где внутри окна стоит уголок, в ПИКСЕЛЯХ от левого края
  *        (считается по центру уголка). Задаётся вызывающим: окно прижимается
  *        к краям графика, а уголок всё равно должен смотреть на точку.
+ *        ФУНКЦИЯ, а не готовое число: во время переезда к другой точке
+ *        значение меняется каждый кадр, и считается оно на фазе раскладки —
+ *        так уголок едет вместе с окном, а содержимое окна при этом не
+ *        перекомпонуется ни разу.
  * @param pointIndex индекс редактируемой точки — НЕ сама точка. Нужен как ключ
  *        [DisposableEffect]: точка пересоздаётся на каждое изменение значений,
  *        а индекс меняется только при переходе к другой точке. Благодаря этому
@@ -245,7 +249,7 @@ fun PointEditorPopup(
     pointIndex: Int,
     carrierRange: FrequencyRange,
     autoExpandGraphRange: Boolean,
-    arrowOffsetX: Float,
+    arrowOffsetX: () -> Float,
     onCarrierFrequencyChange: (Float) -> Unit,
     onBeatFrequencyChange: (Float) -> Unit,
     onTimeChange: (LocalTime) -> Unit,
@@ -542,7 +546,7 @@ fun PointEditorPopup(
         val height = body.height + arrow.height
         // Уголок не должен выходить за боковые стенки окна.
         val arrowHalf = arrow.width / 2
-        val arrowX = (arrowOffsetX.roundToInt() - arrowHalf)
+        val arrowX = (arrowOffsetX().roundToInt() - arrowHalf)
             .coerceIn(0, (width - arrow.width).coerceAtLeast(0))
         layout(width, height) {
             // Окно всегда ПОД точкой: уголок сверху смотрит вверх, на точку.

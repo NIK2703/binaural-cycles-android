@@ -1,6 +1,9 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
@@ -31,6 +34,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,6 +51,8 @@ import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binauralcycles.R
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
@@ -73,6 +79,29 @@ private val POINT_MARKER_SELECTED_SIZE = 30.dp
 
 // Вынос оси Y влево за область графика (метки торчат наружу).
 private val Y_AXIS_LABEL_OFFSET_X = (-8).dp
+
+// Анимация контекстного окна точки. Появление — слайд СНИЗУ ВВЕРХ,
+// скрытие — слайд СВЕРХУ ВНИЗ (окно всегда стоит под точкой, поэтому
+// уезжает туда, откуда приехало).
+private const val POPUP_ENTER_MS = 220
+private const val POPUP_EXIT_MS = 160
+
+// Переезд окна от одной выбранной точки к другой. Чуть медленнее
+// появления: на большом расстоянии короткий тween читается как рывок.
+private const val POPUP_MOVE_MS = 260
+
+/** На сколько пикселей окно сдвинуто вниз в начале появления и в конце скрытия. */
+private val POPUP_SLIDE_DISTANCE = 24.dp
+
+/**
+ * Привязка контекстного окна к точке графика: индекс точки и её положение
+ * в пикселях области графика.
+ *
+ * Индекс нужен внутри, потому что пока окно доигрывает анимацию скрытия,
+ * выделение уже снято (`selectedPointIndex == null`), а колбэки окна всё
+ * ещё должны относиться к своей точке.
+ */
+private data class PopupAnchor(val index: Int, val x: Float, val y: Float)
 
 /**
  * Направление перетаскивания
@@ -630,44 +659,151 @@ fun FrequencyGraph(
             } else {
                 -1
             }
-            if (selectedPointIndex != null && selectedDisplayIndex >= 0) {
-                val selectedPoint = displayPoints[selectedDisplayIndex]
-                val anchorXPx = graphParams.timeToX(selectedPoint.time)
-                val anchorYPx = graphParams.carrierToY(selectedPoint.carrierFrequency)
+            val popupVisible = selectedPointIndex != null && selectedDisplayIndex >= 0
 
-                // Размер окна известен только после первой раскладки,
-                // поэтому до измерения оно ставится невидимым: иначе на
-                // один кадр мелькнуло бы в точке, а не под ней.
-                var popupSize by remember { mutableStateOf(IntSize.Zero) }
-                val gapPx = with(density) { POINT_POPUP_ANCHOR_GAP.roundToPx() }
-                // Вынос за боковые границы области графика: у крайних
-                // точек окно иначе упиралось бы в край, и до края экрана
-                // оставалось бы 32 dp (16 карточки + 16 экрана).
-                val overhangPx = with(density) {
-                    (POINT_POPUP_OUTER_PADDING - POINT_POPUP_SCREEN_MARGIN).roundToPx()
+            // Точка и её привязка, переживающие снятие выделения: выделение
+            // снимается мгновенно, а окно ещё [POPUP_EXIT_MS] миллисекунд
+            // уезжает вниз — и ему нужны и содержимое, и позиция. Обычный
+            // remember с ключом здесь не годится: при null он бы вернул null,
+            // и уезжающее окно осталось бы пустым.
+            val popupPoint = rememberLastNotNull(
+                if (popupVisible) displayPoints[selectedDisplayIndex] else null
+            )
+            val popupAnchorNow: PopupAnchor? = run {
+                val index = selectedPointIndex ?: return@run null
+                if (!popupVisible) return@run null
+                val point = displayPoints[selectedDisplayIndex]
+                PopupAnchor(
+                    index = index,
+                    x = graphParams.timeToX(point.time),
+                    y = graphParams.carrierToY(point.carrierFrequency)
+                )
+            }
+            val popupAnchor = rememberLastNotNull(popupAnchorNow)
+
+            // Жизнь окна: в дереве оно остаётся и после снятия выделения —
+            // пока не доиграет анимацию скрытия. Иначе уезжающее окно
+            // исчезало бы рывком, не доехав до конца.
+            var popupAlive by remember { mutableStateOf(false) }
+            // Окно уже поставлено под точку — дальше смена точки это ПЕРЕЕЗД,
+            // а не новая постановка. Сбрасывается, когда окно убрано из
+            // дерева: иначе следующее окно приезжало бы издалека вместо того,
+            // чтобы сразу встать под свою точку.
+            var popupPlaced by remember { mutableStateOf(false) }
+
+            val popupProgress = remember { Animatable(0f) }
+            val popupAnchorX = remember { Animatable(0f) }
+            val popupAnchorY = remember { Animatable(0f) }
+
+            // Появление и скрытие. Ключ — САМ ФАКТ выбора точки, а не её
+            // индекс: при переходе на другую точку окно не переоткрывается,
+            // а просто едет к новому месту.
+            LaunchedEffect(popupVisible) {
+                if (popupVisible) {
+                    popupAlive = true
+                    popupProgress.animateTo(
+                        1f, tween(POPUP_ENTER_MS, easing = FastOutSlowInEasing)
+                    )
+                } else {
+                    popupProgress.animateTo(
+                        0f, tween(POPUP_EXIT_MS, easing = FastOutLinearInEasing)
+                    )
+                    popupAlive = false
+                    popupPlaced = false
                 }
+            }
 
-                // Окно всегда ПОД точкой — без переворота вверх.
+            // Переезд к точке. К первой точке окно встаёт мгновенно (иначе
+            // приезжало бы из левого верхнего угла области графика), между
+            // выбранными точками — плавно.
+            LaunchedEffect(popupAnchor, popupVisible) {
+                val anchor = popupAnchor ?: return@LaunchedEffect
+                if (!popupVisible) return@LaunchedEffect
+                if (!popupPlaced) {
+                    popupAnchorX.snapTo(anchor.x)
+                    popupAnchorY.snapTo(anchor.y)
+                    popupPlaced = true
+                } else {
+                    // По обеим осям одновременно и одним спеком: иначе окно
+                    // шло бы зигзагом, доезжая по X и по Y в разное время.
+                    coroutineScope {
+                        launch {
+                            popupAnchorX.animateTo(
+                                anchor.x, tween(POPUP_MOVE_MS, easing = FastOutSlowInEasing)
+                            )
+                        }
+                        launch {
+                            popupAnchorY.animateTo(
+                                anchor.y, tween(POPUP_MOVE_MS, easing = FastOutSlowInEasing)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Размер окна известен только после первой раскладки.
+            var popupSize by remember { mutableStateOf(IntSize.Zero) }
+            val gapPx = with(density) { POINT_POPUP_ANCHOR_GAP.roundToPx() }
+            // Вынос за боковые границы области графика: у крайних
+            // точек окно иначе упиралось бы в край, и до края экрана
+            // оставалось бы 32 dp (16 карточки + 16 экрана).
+            val overhangPx = with(density) {
+                (POINT_POPUP_OUTER_PADDING - POINT_POPUP_SCREEN_MARGIN).roundToPx()
+            }
+            val popupSlidePx = with(density) { POPUP_SLIDE_DISTANCE.roundToPx() }.toFloat()
+
+            // Левый край окна по положению точки: центр окна идёт за точкой,
+            // а у крайних точек окно выносится за границы области графика.
+            // Окно всегда ПОД точкой — без переворота вверх.
+            fun popupLeftPx(anchorX: Float, popupWidth: Int): Float {
                 val minLeftPx = -overhangPx.toFloat()
-                val maxLeftPx = (widthPx - popupSize.width).toFloat() + overhangPx
-                val leftPx = (anchorXPx - popupSize.width / 2f)
+                val maxLeftPx = (widthPx - popupWidth).toFloat() + overhangPx
+                return (anchorX - popupWidth / 2f)
                     .coerceIn(minLeftPx, maxLeftPx.coerceAtLeast(minLeftPx))
-                val topPx = anchorYPx + gapPx
+            }
 
-                SideEffect {
-                    popupRect = if (popupSize == IntSize.Zero) null else Rect(
+            // Границы окна в координатах области графика: касание по самому
+            // окну не должно его закрывать. Считаются по КОНЕЧНОМУ положению
+            // окна, а не по анимационному: попасть пальцем в окно посреди
+            // двухсотмиллисекундной анимации всё равно не выйдет.
+            SideEffect {
+                val anchor = popupAnchorNow
+                popupRect = if (anchor == null || popupSize == IntSize.Zero) null else {
+                    val leftPx = popupLeftPx(anchor.x, popupSize.width)
+                    val topPx = anchor.y + gapPx
+                    Rect(
                         left = leftPx,
                         top = topPx,
                         right = leftPx + popupSize.width,
                         bottom = topPx + popupSize.height
                     )
                 }
+            }
 
+            // Окно на экране, пока выбрана точка ИЛИ пока доигрывает
+            // анимацию скрытия.
+            val shownPoint = popupPoint
+            val shownAnchor = popupAnchor
+            if ((popupVisible || popupAlive) && shownPoint != null && shownAnchor != null) {
+                val anchorIndex = shownAnchor.index
                 Box(
                     modifier = Modifier
-                        .offset { IntOffset(leftPx.roundToInt(), topPx.roundToInt()) }
+                        // Положение читается на фазе раскладки, поэтому
+                        // переезд не перекомпонуется ни разу.
+                        .offset {
+                            IntOffset(
+                                popupLeftPx(popupAnchorX.value, popupSize.width).roundToInt(),
+                                (popupAnchorY.value + gapPx).roundToInt()
+                            )
+                        }
+                        // Слайд: при появлении окно приезжает снизу вверх,
+                        // при скрытии уезжает вниз. Слой, а не модификатор
+                        // композиции: кадры анимации не трогают композицию.
+                        .graphicsLayer {
+                            alpha = popupProgress.value
+                            translationY = (1f - popupProgress.value) * popupSlidePx
+                        }
                         .onSizeChanged { popupSize = it }
-                        .then(if (popupSize == IntSize.Zero) Modifier.alpha(0f) else Modifier)
                         // Касания по самому окну не должны уходить на график
                         // и закрывать его: съедаем их, без ripple.
                         .clickable(
@@ -677,20 +813,25 @@ fun FrequencyGraph(
                         )
                 ) {
                     PointEditorPopup(
-                        point = selectedPoint,
-                        pointIndex = selectedPointIndex,
+                        point = shownPoint,
+                        pointIndex = anchorIndex,
                         carrierRange = carrierRange,
                         autoExpandGraphRange = autoExpandGraphRange,
-                        arrowOffsetX = anchorXPx - leftPx,
-                        onCarrierFrequencyChange = { onPointCarrierChanged(selectedPointIndex, it) },
-                        onBeatFrequencyChange = { onPointBeatChanged(selectedPointIndex, it) },
-                        onTimeChange = { onPointTimeChanged(selectedPointIndex, it) },
-                        onRemove = { onRemovePoint(selectedPointIndex) }
+                        // Уголок смотрит на точку, поэтому его смещение внутри
+                        // окна считается на фазе раскладки — по тому же
+                        // анимационному положению, что и само окно. Значение,
+                        // а не состояние: иначе каждый кадр переезда
+                        // перекомпоновывал бы всё окно.
+                        arrowOffsetX = {
+                            val x = popupAnchorX.value
+                            x - popupLeftPx(x, popupSize.width)
+                        },
+                        onCarrierFrequencyChange = { onPointCarrierChanged(anchorIndex, it) },
+                        onBeatFrequencyChange = { onPointBeatChanged(anchorIndex, it) },
+                        onTimeChange = { onPointTimeChanged(anchorIndex, it) },
+                        onRemove = { onRemovePoint(anchorIndex) }
                     )
                 }
-            } else {
-                // Окна нет — нечего и защищать от касаний.
-                SideEffect { popupRect = null }
             }
         }
         
@@ -740,6 +881,25 @@ fun FrequencyGraph(
 }
 
 private typealias DrawScope = androidx.compose.ui.graphics.drawscope.DrawScope
+
+/**
+ * Последнее НЕНУЛЕВОЕ значение.
+ *
+ * Обычный `remember(value)` здесь не годится: как только ключ становится
+ * null, он возвращает null. Контекстному окну точки это ломает анимацию
+ * скрытия — выделение снимается сразу, а окно ещё живёт в дереве и всё это
+ * время должно показывать свою точку и стоять на своём месте.
+ *
+ * Запись в состояние прямо в композиции — тот же приём, что использует
+ * сам Compose в `rememberUpdatedState`: значение сходится (равное не
+ * инвалидирует чтение), поэтому бесконечной перекомпозиции не возникает.
+ */
+@Composable
+private fun <T : Any> rememberLastNotNull(value: T?): T? {
+    val holder = remember { mutableStateOf<T?>(null) }
+    if (value != null) holder.value = value
+    return holder.value
+}
 
 /**
  * Геометрия статичного слоя графика: сетка и кривые зависят ТОЛЬКО от точек
