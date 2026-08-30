@@ -100,6 +100,15 @@ class NativeAudioEngine {
     private external fun nativeSetPlaybackStartTime(handle: Long, startTimeMs: Long)
     private external fun nativeSetCurveTime(handle: Long, timeSeconds: Int)
 
+    // === Слышимая позиция кривой (мягкая пауза / возобновление) ===
+    private external fun nativeGetAudibleTimeSeconds(
+        handle: Long,
+        playedFrames: Long,
+        generatedFrames: Long
+    ): Float
+    private external fun nativeFreezeUiTimelineAt(handle: Long, seconds: Float)
+    private external fun nativeResumeUiTimelineFrom(handle: Long, seconds: Float)
+
     // FloatArray версия (с копированием) - для обратной совместимости
     private external fun nativeGenerateBuffer(handle: Long, buffer: FloatArray, samplesPerChannel: Int): Boolean
 
@@ -344,6 +353,51 @@ class NativeAudioEngine {
             if (hh == 0L) return
             nativeSetCurveTime(hh, timeSeconds)
         }
+    }
+
+    /**
+     * СЛЫШИМАЯ позиция кривой (секунды суток): фронтир генерации минус ещё не
+     * проигранный остаток.
+     *
+     * Две оси времени расходятся на длину пакета: нативный таймлайн
+     * продвигается в момент генерации сразу на весь пакет (до 60 мин), а звук
+     * отстаёт на недописанный хвост + латентность буфера AudioTrack. Пауза
+     * обязана опираться на ЭТУ величину, а не на UI-экстраполяцию (та
+     * ограничена концом пакета и обновляется только по опросу).
+     *
+     * @param playedFrames    кадры, реально отданные микшером
+     *                        (AudioTrack.playbackHeadPosition)
+     * @param generatedFrames кадры, сгенерированные этим движком с начала потока
+     */
+    fun getAudibleTimeSeconds(playedFrames: Long, generatedFrames: Long): Float {
+        if (nativeUnavailable()) return 0f
+        val hh = h()
+        if (hh == 0L) return 0f
+        return nativeGetAudibleTimeSeconds(hh, playedFrames, generatedFrames)
+    }
+
+    /**
+     * Заморозить UI-указатель графика на слышимой позиции (пауза): указатель
+     * стоит ровно там, где остановился звук, и не ползёт по wall-clock к
+     * фронтиру генерации, сколько бы пауза ни длилась.
+     */
+    fun freezeUiTimelineAt(seconds: Float) {
+        if (nativeUnavailable()) return
+        val hh = h()
+        if (hh == 0L) return
+        nativeFreezeUiTimelineAt(hh, seconds)
+    }
+
+    /**
+     * Снять заморозку (возобновление): указатель продолжает с той же слышимой
+     * позиции и идёт по wall-clock, но не выбегает за фронтир уже
+     * сгенерированного аудио.
+     */
+    fun resumeUiTimelineFrom(seconds: Float) {
+        if (nativeUnavailable()) return
+        val hh = h()
+        if (hh == 0L) return
+        nativeResumeUiTimelineFrom(hh, seconds)
     }
 
     /**

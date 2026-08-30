@@ -42,12 +42,58 @@ interface BinauralStream {
     /** Разворот рампы: идущий fade-out превращается в fade-in с текущего значения. */
     fun reverseFadeToPlaying(onFullyStarted: () -> Unit): Boolean
 
+    /**
+     * МЯГКАЯ ПАУЗА: рампа 0 → тишина, затем track.pause().
+     *
+     * В отличие от [stop] ресурсы СОХРАНЯЮТСЯ: AudioTrack, нативный движок
+     * (фазы, положение на кривой) и уже сгенерированный пакет вместе со
+     * смещением недописанного остатка. Пауза — это заморозка, а не
+     * утилизация: возобновление продолжает звук ровно с того же сэмпла.
+     *
+     * @param onPaused вызывается ОДИН раз, когда поток гарантированно тих и
+     *        трек остановлен. Ресурсы остаются живы до [stop]/[abort].
+     */
+    fun pause(onPaused: () -> Unit, shape: FadeShape = FadeShape.LINEAR): Boolean
+
+    /**
+     * Возобновление после [pause]: track.play() + рампа 0→1, запись
+     * продолжается с сохранённого смещения — без перегенерации и без сдвига
+     * позиции на кривой.
+     */
+    fun resume(onFullyStarted: () -> Unit, shape: FadeShape = FadeShape.LINEAR): Boolean
+
     /** Мгновенное освобождение НИКОГДА не звучавшего потока (бесшумно). */
     fun abort()
 
     fun setVolume(volume: Float)
     fun getElapsedSeconds(): Int
     fun getCurrentTimeOfDay(): Int
+
+    /**
+     * Точная СЛЫШИМАЯ позиция кривой (секунды суток): по позиции головы
+     * воспроизведения, а не по UI-экстраполяции. Место, где звук остановился
+     * в момент паузы и откуда он продолжится при возобновлении.
+     */
+    fun getAudibleTimeOfDaySeconds(): Int
+
+    /**
+     * Переякорить часы сессии (elapsed). Возобновление после паузы обязано
+     * сдвинуть якорь: нативный elapsed считается по wall-clock и иначе
+     * включил бы в себя всю длительность паузы.
+     */
+    fun setPlaybackStartTime(anchorMs: Long)
+
+    /** Поток стоит на мягкой паузе (звук заморожен, ресурсы живы). */
+    val isPaused: Boolean
+
+    /**
+     * Поток звучит, но рампа fade-in ещё не завершена.
+     *
+     * Для менеджера это запрет на повышение NEXT: кроссфейд EQUAL_POWER
+     * корректен ровно для двух звучащих потоков, третьего он не учитывает.
+     */
+    val isFadingIn: Boolean
+
     fun isChannelsSwapped(): Boolean
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>?
 }

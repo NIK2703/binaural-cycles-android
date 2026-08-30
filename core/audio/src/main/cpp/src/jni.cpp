@@ -244,6 +244,57 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetCurveTime(
 }
 
 /**
+ * Слышимая позиция кривой: фронтир генерации минус ещё не проигранный остаток.
+ * Единственная точка, где ось AudioTrack (кадры) встречается с осью кривой
+ * (секунды суток) — по ней пауза фиксирует место возобновления.
+ */
+JNIEXPORT jfloat JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetAudibleTimeSeconds(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong playedFrames,
+    jlong generatedFrames
+) {
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0.0f;
+    return static_cast<jfloat>(
+        engine->computeAudibleTimeSeconds(playedFrames, generatedFrames));
+}
+
+/**
+ * Заморозить UI-указатель графика на слышимой позиции (пауза).
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeFreezeUiTimelineAt(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jfloat seconds
+) {
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->freezeUiTimelineAt(static_cast<float>(seconds));
+    }
+}
+
+/**
+ * Снять заморозку UI-указателя (возобновление): продолжение с той же позиции.
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeResumeUiTimelineFrom(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jfloat seconds
+) {
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->resumeUiTimelineFrom(static_cast<float>(seconds));
+    }
+}
+
+/**
  * Генерация буфера аудио (FloatArray версия - с копированием)
  * @deprecated Используйте nativeGenerateBufferDirect для zero-copy
  */

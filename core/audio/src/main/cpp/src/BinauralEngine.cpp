@@ -406,6 +406,17 @@ void BinauralEngine::setCurveTimeSeconds(float timeSeconds) {
     m_curveTimeSeconds.store(t, std::memory_order_relaxed);
     m_baseTimeSeconds.store(static_cast<int32_t>(t), std::memory_order_relaxed);
     m_totalBufferTimeSeconds.store(0.0f, std::memory_order_relaxed);
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    // В виртуальном режиме носитель времени — НЕ m_curveTimeSeconds, а
+    // (m_virtualBaseTimeSeconds + total * scale). Без пересадки базиса
+    // computePlaybackTimeSeconds() вернул бы СТАРЫЙ base (total только что
+    // обнулили) — и возобновление/скраб откатывалось к точке включения
+    // виртуального времени, а не к точке продолжения.
+    if (m_virtualClock.isEnabled()) {
+        m_virtualBaseTimeSeconds.store(t, std::memory_order_relaxed);
+        LOGD("setCurveTimeSeconds(%.3f): virtual base пересажен", t);
+    }
+#endif
     // UI-указатель на позицию продолжения (иначе экстраполяция от старого якоря)
     anchorUiTimeline(t, t);
 }
@@ -814,9 +825,10 @@ float BinauralEngine::computeUiTimeSeconds() {
     const float scale = 1.0f;
 #endif
 
-    // Не играем — UI замирает на последнем показанном времени кривой
-    // (при soft-pause генерация продолжается и m_isPlaying остаётся true,
-    // поэтому UI продолжает двигаться вместе с аудио-таймлайном).
+    // Не играем — UI замирает на последнем показанном времени кривой.
+    // ВАЖНО: при мягкой паузе m_isPlaying остаётся true (движок жив, просто
+    // трек остановлен), поэтому замирание обеспечивает НЕ этот флаг, а нулевой
+    // span якоря: freezeUiTimelineAt(t, t) обнуляет экстраполяцию по wall-clock.
     if (!m_isPlaying.load(std::memory_order_relaxed)) {
         return m_uiLastUiTimeSec.load(std::memory_order_relaxed);
     }
@@ -842,6 +854,48 @@ float BinauralEngine::computeUiTimeSeconds() {
     const float t = normalizeTimeOfDay(start + elapsed);
     m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
     return t;
+}
+
+// ============ Слышимая позиция кривой (пауза / возобновление) ============
+
+float BinauralEngine::computeAudibleTimeSeconds(int64_t playedFrames, int64_t generatedFrames) const {
+    // Множитель виртуального времени: в debug-режиме секунда аудио продвигает
+    // кривую на scale секунд, и «недослушанный» остаток тоже масштабируется.
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float scale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
+#else
+    const float scale = 1.0f;
+#endif
+
+    const int rate = m_generator.getSampleRate();
+    if (rate <= 0) return computePlaybackTimeSeconds();
+
+    // Вычитание в int64: при 60-минутном пакете это ~1.7e8 кадров — float
+    // на такой величине теряет точность, а разность обязана быть точной.
+    int64_t unplayed = generatedFrames - playedFrames;
+    if (unplayed < 0) unplayed = 0;      // защита от гонки счётчиков
+
+    const float behindSeconds =
+        static_cast<float>(unplayed) / static_cast<float>(rate) * scale;
+    return normalizeTimeOfDay(computePlaybackTimeSeconds() - behindSeconds);
+}
+
+void BinauralEngine::freezeUiTimelineAt(float seconds) {
+    const float t = normalizeTimeOfDay(seconds);
+    // Span = 0: computeUiTimeSeconds() обнуляет экстраполяцию по wall-clock,
+    // поэтому указатель графика замирает на слышимой позиции на всю паузу.
+    anchorUiTimeline(t, t);
+    m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
+    LOGD("freezeUiTimelineAt: %.3f", t);
+}
+
+void BinauralEngine::resumeUiTimelineFrom(float seconds) {
+    const float t = normalizeTimeOfDay(seconds);
+    // Конец диапазона — фронтир сгенерированного аудио: указатель не должен
+    // выбегать за уже готовые сэмплы.
+    anchorUiTimeline(t, computePlaybackTimeSeconds());
+    m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
+    LOGD("resumeUiTimelineFrom: %.3f", t);
 }
 
 void BinauralEngine::setVirtualTimeEnabled(bool enabled) {

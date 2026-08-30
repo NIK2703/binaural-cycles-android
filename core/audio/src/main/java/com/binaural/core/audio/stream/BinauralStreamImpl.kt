@@ -47,9 +47,27 @@ class BinauralStreamImpl(
          * гарантирована без риска underrun.
          */
         private const val WRITE_CHUNK_MS = 2000           // гранулярность записи/реакции
+        /**
+         * Опрос парковки писателя на паузе. wait() с таймаутом, а не вечное
+         * ожидание: пропущенный notify не превращается в зависший поток —
+         * writer сам проверит паузу и выход из цикла не позже чем через это
+         * время. 200 мс — компромисс: просыпаний почти нет, реакция на
+         * stop()/release() из паузы — не дольше одного тика.
+         */
+        private const val PARK_POLL_MS = 200L
+        private const val SECONDS_PER_DAY = 86400
         private const val MAX_BUFFER_MINUTES = 60
-        // Синхронно с BinauralAudioEngine.MAX_BUFFER_BYTES
-        private const val MAX_BUFFER_BYTES = 1024 * 1024 * 1024
+        /**
+         * Потолок размера direct-буфера. Был 1 ГБ — то есть потолок фактически
+         * не работал: при bufferIntervalMs = 10 мин на 44.1 кГц один поток
+         * забирал 212 МБ нативной памяти, а при живых CURRENT + NEXT
+         * в кроссфейде — 424 МБ. На фоне (активити уничтожена, куча зажата
+         * системой) это прямой путь в OutOfMemoryError внутри prepare() и
+         * в падение воспроизведения. Реальная потребность: WRITE_CHUNK_MS = 2 с,
+         * так что
+         * 64 МБ = 6,7 мин стерео float при 44.1 кГц — запас более чем десятикратный.
+         */
+        private const val MAX_BUFFER_BYTES = 64 * 1024 * 1024
         /**
          * Сколько ждём выхода писателя перед уничтожением нативного движка.
          * ОБЯЗАН покрывать один полный чанк записи (WRITE_CHUNK_MS), иначе
@@ -57,6 +75,13 @@ class BinauralStreamImpl(
          * владение движком передастся ему без необходимости.
          */
         private const val WRITER_EXIT_WAIT_MS = WRITE_CHUNK_MS + 1500L
+        /**
+         * Короткая грейс-фаза в releaseInternal(): сколько даём писателю на
+         * выход ПОСЛЕ того, как трек уже снят и write() разблокирован.
+         * Полный WRITER_EXIT_WAIT_MS (3.5 с) блокировать нить актёра нельзя —
+         * на ней висят все таймеры фейдов менеджера.
+         */
+        private const val WRITER_HANDOFF_GRACE_MS = 250L
     }
 
     private val lifecycleRef = AtomicReference(StreamLifecycle.CREATED)
@@ -64,6 +89,18 @@ class BinauralStreamImpl(
 
     @Volatile private var fadeMode = FadeMode.NONE
     @Volatile private var userVolume = spec.volume
+
+    /**
+     * Поток звучит, но рампа fade-in ещё НЕ завершена.
+     *
+     * Менеджеру важно: повышать NEXT в этом состоянии нельзя. EQUAL_POWER
+     * (sin²+cos²=1) корректен ровно для ДВУХ одновременно звучащих потоков;
+     * повышение посреди fade-in даёт ТРИ живых трека — суммарная энергия
+     * уезжает, и вместо кроссфейда слышен провал/щелчок. Повышение обязано
+     * дождаться onSilent от CURRENT.
+     */
+    override val isFadingIn: Boolean
+        get() = lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN
 
     private var nativeEngine: NativeAudioEngine? = null
     private var audioTrack: AudioTrack? = null
@@ -89,6 +126,26 @@ class BinauralStreamImpl(
 
     /** Runnable завершения фейда: хранится, чтобы "разворот рампы" мог его отменить. */
     @Volatile private var fadeCompletion: Runnable? = null
+
+    // -------------------------------------------------- мягкая пауза (состояние)
+    /**
+     * true — поток заморожен: трек на паузе, писатель припаркован, пакет и
+     * смещение в [directBuffer] сохранены. Ресурсы НЕ освобождены.
+     * Пишется только нитью актёра, читается писателем.
+     */
+    @Volatile private var paused = false
+    override val isPaused: Boolean get() = paused
+
+    /**
+     * Кадры на канал, сгенерированные этим движком с начала потока.
+     * Пара к AudioTrack.playbackHeadPosition даёт слышимую позицию кривой:
+     * сколько сэмплов «впереди звука» — столько и отнимаем от фронтира.
+     * Пишет писатель (и prepare() до его старта), читает актёр.
+     */
+    @Volatile private var generatedFrames = 0L
+
+    /** Монитор парковки писателя: parkWriter/wakeWriter. */
+    private val parkLock = Object()
 
     /** Колбэк «поток тих» (рампа в нуле, ДО релиза) — точка повышения NEXT при кроссфейде. */
     @Volatile private var pendingOnSilent: (() -> Unit)? = null
@@ -150,7 +207,18 @@ class BinauralStreamImpl(
             }
             nativeEngine = engine
 
-            // 3. Буферы с теми же капами, что и в старом движке.
+            // 3. AudioTrack создаётся ДО буфера — ПОРЯДОК ВАЖЕН.
+            //    allocateDirect() держит нижний предел OOM-уполовинивания как
+            //    maxOf(audioTrackBufferSize, rate*2*4), а audioTrackBufferSize
+            //    заполняется именно внутри createAudioTrack(). При обратном
+            //    порядке предел равнялся НУЛЮ: на устройстве с нехваткой памяти
+            //    буфер схлопывался до 1 с аудио при 3-секундном внутреннем
+            //    буфере трека — писатель физически не успевал подпитывать трек,
+            //    и каждый такой просадкой давался underrun (щелчок).
+            //    Трек создан, но НЕ запущен — поток ещё беззвучен.
+            createAudioTrack(rate)
+
+            // 4. Буферы с теми же капами, что и в старом движке.
             val maxSamplesByMinutes = rate.toLong() * 60 * MAX_BUFFER_MINUTES
             val maxSamplesByBytes = MAX_BUFFER_BYTES / 8L
             samplesPerChannel = minOf(
@@ -167,9 +235,16 @@ class BinauralStreamImpl(
             if (capacitySamples in 1 until samplesPerChannel) {
                 samplesPerChannel = capacitySamples
             }
-
-            // 4. AudioTrack создан, но НЕ запущен — поток ещё беззвучен.
-            createAudioTrack(rate)
+            // Запас по времени: если буфер урезан OOM ниже внутреннего буфера
+            // трека, писатель не успеет подпитывать трек — это гарантированный
+            // underrun. Лучше упасть на prepare(), чем щёлкать весь сеанс.
+            val minSafeSamples = rate * TRACK_BUFFER_MS / 1000
+            if (samplesPerChannel < minSafeSamples) {
+                throw OutOfMemoryError(
+                    "buffer ${samplesPerChannel} samples < track buffer $minSafeSamples " +
+                        "(rate=$rate) — underrun неизбежен"
+                )
+            }
 
             // 5. Первый пакет — КОРОТКИЙ (до 2 с): подготовка быстрая и не блокирует
             // актёр надолго; полный интервал сгенерирует писатель, пока трек уже играет.
@@ -179,6 +254,7 @@ class BinauralStreamImpl(
             val generated = engine.generateBufferDirect(buf, prepareSamples)
             if (generated <= 0) throw IllegalStateException("first packet generation failed")
             preparedPacketBytes = generated * 2 * 4
+            generatedFrames = generated.toLong()
             StreamLogger.d(TAG, "prepare OK spec#${spec.serial} firstPacketBytes=$preparedPacketBytes")
             true
         } catch (t: Throwable) {
@@ -313,6 +389,17 @@ class BinauralStreamImpl(
             StreamLogger.d(TAG, "stop spec#${spec.serial}: fade-out уже идёт (идемпотентно)")
             return     // идемпотентность
         }
+        if (paused) {
+            // МЯГКАЯ ПАУЗА: трек уже остановлен, громкость в нуле, шейпер снят —
+            // рампа не нужна (шейпер на приостановленном треке и не пошёл бы).
+            // Утилизируем сразу, не растягивая stop на длительность фейда.
+            StreamLogger.d(TAG, "stop spec#${spec.serial}: на мягкой паузе — утилизация без рампы")
+            fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+            fadeMode = FadeMode.OUT
+            pendingOnSilent = onSilent
+            finalizeStop(onFullyStopped)
+            return
+        }
         fadeMode = FadeMode.OUT
         pendingOnSilent = onSilent
         fadeCompletion?.let { controlHandler.removeCallbacks(it) }   // снять фейд-ин, если был
@@ -393,6 +480,154 @@ class BinauralStreamImpl(
         return true
     }
 
+    // ------------------------------------------------------------------ мягкая пауза
+
+    override fun pause(onPaused: () -> Unit, shape: FadeShape): Boolean {
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+            StreamLogger.w(TAG, "pause spec#${spec.serial}: не PLAYING (lc=${lifecycleRef.get()})")
+            return false
+        }
+        if (paused) {
+            StreamLogger.d(TAG, "pause spec#${spec.serial}: уже на паузе (идемпотентно)")
+            return true
+        }
+        StreamLogger.d(TAG, "pause spec#${spec.serial}: мягкая пауза, буфер сохраняется (fadeMode=$fadeMode)")
+
+        // Идущий фейд (например кроссфейд переключения) перехватываем: его
+        // финалом была утилизация, теперь — заморозка. Отменять рампу НЕЛЬЗЯ:
+        // пауза посреди громкого участка дала бы щелчок.
+        fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+        fadeCompletion = null
+
+        if (fadeMode != FadeMode.OUT) {
+            fadeMode = FadeMode.OUT
+            val cur = currentMultiplier()
+            val dur = if (cur <= 0.001f) 0L else (fadeOutMs * cur).toLong().coerceAtLeast(40L)
+            if (dur > 0) {
+                applyShaper(from = cur, to = 0f, durationMs = dur, shape = shape)
+            } else {
+                // Уже в нуле: гасим базу и снимаем шейпер (тишина без рампы).
+                try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
+                closeShaper()
+            }
+        }
+        val completion = Runnable { finalizePause(onPaused) }
+        fadeCompletion = completion
+        controlHandler.postDelayed(completion, fadeOutMs + FADE_GUARD_MS)
+        return true
+    }
+
+    /**
+     * Финал мягкой паузы. ПОРЯДОК КРИТИЧЕН:
+     *   1) флаг парковки ДО pause() трека;
+     *   2) pause() трека — прерывает заблокированный write() (mProxy->interrupt),
+     *      поэтому писатель гарантированно выйдет из записи с сохранённым
+     *      смещением, а недописанный остаток пакета НЕ теряется;
+     *   3) тишина фиксируется базой 0 + снятым шейпером;
+     *   4) указатель графика замирает на слышимой позиции.
+     * Ресурсы остаются живы: буфер, движок, трек, фазы.
+     */
+    private fun finalizePause(onPaused: () -> Unit) {
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+            StreamLogger.d(TAG, "finalizePause spec#${spec.serial}: поток уже не PLAYING — resources released")
+            onPaused()
+            return
+        }
+        paused = true
+        try { audioTrack?.pause() } catch (e: Exception) {
+            StreamLogger.e(TAG, "finalizePause spec#${spec.serial}: pause failed: ${e.message}")
+        }
+        wakeWriter()
+
+        // База в нуль ДО закрытия шейпера: во внутреннем буфере трека ещё до
+        // 3 с полноамплитудного PCM, и закрытие вернуло бы их на полную.
+        try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
+        closeShaper()
+        fadeMode = FadeMode.NONE
+        fadeCompletion = null
+
+        // Слышимая позиция — по голове воспроизведения, а не по UI-часам:
+        // пауза любой длительности не сдвинет ни график, ни точку возобновления.
+        val audible = audibleCurveSeconds()
+        audible?.let { nativeEngine?.freezeUiTimelineAt(it) }
+
+        StreamLogger.d(TAG, "finalizePause spec#${spec.serial}: ЗАМОРОЖЕН audible=$audible " +
+            "generatedFrames=$generatedFrames head=${audioTrack?.playbackHeadPosition}")
+        onPaused()
+    }
+
+    override fun resume(onFullyStarted: () -> Unit, shape: FadeShape): Boolean {
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+            StreamLogger.w(TAG, "resume spec#${spec.serial}: не PLAYING (lc=${lifecycleRef.get()})")
+            return false
+        }
+        if (!paused) {
+            StreamLogger.w(TAG, "resume spec#${spec.serial}: не на паузе — нечего возобновлять")
+            return false
+        }
+        fadeCompletion?.let { controlHandler.removeCallbacks(it) }
+        fadeMode = FadeMode.IN
+
+        // Позиция графика размораживается ДО play(): указатель продолжает ровно
+        // с замороженной слышимой точки и идёт по wall-clock до фронтира пакета.
+        val audible = audibleCurveSeconds()
+        audible?.let { nativeEngine?.resumeUiTimelineFrom(it) }
+
+        // Порядок как при старте (фикс RC-1): рампа → play → писатель. Первый
+        // кадр после play() уходит под нулевым множителем — сохранённый
+        // полноамплитудный остаток не даёт щелчка.
+        applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = shape)
+        try {
+            audioTrack?.play()
+        } catch (e: Exception) {
+            StreamLogger.e(TAG, "resume spec#${spec.serial}: play failed: ${e.message}")
+            fadeMode = FadeMode.NONE
+            return false
+        }
+        paused = false
+        wakeWriter()
+
+        StreamLogger.d(TAG, "resume spec#${spec.serial}: ПРОДОЛЖЕН с audible=$audible " +
+            "generatedFrames=$generatedFrames")
+        val completion = Runnable {
+            if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
+                closeShaper()
+                fadeMode = FadeMode.NONE
+                onFullyStarted()
+            }
+        }
+        fadeCompletion = completion
+        controlHandler.postDelayed(completion, fadeInMs + FADE_GUARD_MS)
+        return true
+    }
+
+    /**
+     * Слышимая позиция кривой (секунды суток) по позиции головы воспроизведения.
+     *
+     * Это мост между осью AudioTrack (кадры) и осью кривой (секунды суток).
+     * UI-экстраполяция для этой цели не годится: она ограничена концом
+     * сгенерированного пакета и обновляется только по опросу, поэтому на
+     * паузе (когда опрос остановлен) даёт устаревшее значение.
+     */
+    private fun audibleCurveSeconds(): Float? {
+        val eng = nativeEngine ?: return null
+        val track = audioTrack ?: return null
+        val head = try { track.playbackHeadPosition } catch (_: Exception) { -1 }
+        if (head < 0) return null
+        return eng.getAudibleTimeSeconds(head.toLong(), generatedFrames)
+    }
+
+    override fun getAudibleTimeOfDaySeconds(): Int {
+        val audible = audibleCurveSeconds()?.toInt() ?: getCurrentTimeOfDay()
+        // Нативная сторона уже нормализовала время в [0, 86400); страхуем
+        // диапазон на случай гонки счётчиков кадров.
+        return ((audible % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY
+    }
+
+    override fun setPlaybackStartTime(anchorMs: Long) {
+        nativeEngine?.setPlaybackStartTime(anchorMs)
+    }
+
     // ------------------------------------------------------------------ volume / shaper
 
     override fun setVolume(volume: Float) {
@@ -428,6 +663,12 @@ class BinauralStreamImpl(
             audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
             return 0L
         }
+        // Координаты аварийной рампы. Заполняются по ходу основного пути, чтобы
+        // fallback (см. catch) стартовал ровно с той же базы и той же пары
+        // значений — иначе аварийный путь сделал бы скачок там, где основной
+        // путь его старательно избежал.
+        var fbFrom = from.coerceIn(0f, 1f)
+        var fbTo = to.coerceIn(0f, 1f)
         return try {
             val old = volumeShaper
             if (old != null) {
@@ -452,6 +693,8 @@ class BinauralStreamImpl(
                     if (fromC > 0.001f) (envVols[i] / fromC).coerceAtLeast(0f)
                     else envVols[i].coerceAtLeast(0f)
                 }
+                fbFrom = shaperVols[0]
+                fbTo = shaperVols[shaperVols.size - 1]
 
                 val cfg = VolumeShaper.Configuration.Builder()
                     .setDuration(durationMs)
@@ -473,17 +716,65 @@ class BinauralStreamImpl(
             }
             durationMs
         } catch (e: Exception) {
+            // ФИКС. Раньше любая ошибка шейпера означала мгновенный
+            // audioTrack.setVolume(to > 0 ? userVolume : 0) — то есть СКАЧОК
+            // громкости посреди кроссфейда, тот самый щелчок, который слышен
+            // как «прерывание». Теперь сначала пробуем минимальную 2-точечную
+            // линейную рампу: её обязана принимать любая реализация с API 26,
+            // и она сохраняет непрерывность (терпим только форму, не разрыв).
+            // Жёсткая установка громкости — последний резерв.
             Log.e(TAG, "VolumeShaper failed: ${e.message}")
-            StreamLogger.e(TAG, "VolumeShaper failed: ${e.message}")
-            audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
-            0L
+            StreamLogger.e(TAG, "VolumeShaper failed: ${e.message} (from=$from to=$to shape=$shape)")
+            if (tryLinearFallback(fbFrom, fbTo, durationMs)) {
+                StreamLogger.w(TAG, "VolumeShaper: аварийная линейная рампа ${fbFrom}->${fbTo} за ${durationMs}мс")
+                durationMs
+            } else {
+                Log.e(TAG, "VolumeShaper: fallback тоже отказал — жёсткая установка громкости")
+                StreamLogger.e(TAG, "VolumeShaper: fallback отказал — жёсткая установка громкости (скачок неизбежен)")
+                audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
+                0L
+            }
+        }
+    }
+
+    /**
+     * Аварийная рампа: 2-точечная ЛИНЕЙНАЯ кривая на УЖЕ установленной базе.
+     *
+     * Значения [fbFrom]/[fbTo] берутся из системы координат шейпера, который
+     * не удалось создать, — поэтому базу НЕ трогаем: эффективная громкость
+     * остаётся непрерывной, меняется только форма (sin/cos → прямая).
+     */
+    private fun tryLinearFallback(fbFrom: Float, fbTo: Float, durationMs: Long): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false
+        if (durationMs <= 0L) return false
+        return try {
+            closeShaper()
+            val cfg = VolumeShaper.Configuration.Builder()
+                .setDuration(durationMs)
+                .setCurve(
+                    floatArrayOf(0f, 1f),
+                    floatArrayOf(fbFrom.coerceIn(0f, 1f), fbTo.coerceIn(0f, 1f))
+                )
+                .setInterpolatorType(VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR)
+                .build()
+            volumeShaper = audioTrack?.createVolumeShaper(cfg)
+            volumeShaper?.apply(VolumeShaper.Operation.PLAY)
+            volumeShaper != null
+        } catch (e: Exception) {
+            StreamLogger.e(TAG, "VolumeShaper linear fallback failed: ${e.message}")
+            false
         }
     }
 
     /**
      * Кривые огибающей. EQUAL_POWER: нарастание = sin(p·π/2), затухание = cos(p·π/2);
-     * sin²+cos² = 1 — постоянная энергия в окне кроссфейда двух потоков. 17 точек
-     * достаточно: между ними VolumeShaper интерполирует линейно (~15 мс при 250 мс).
+     * sin²+cos² = 1 — постоянная энергия в окне кроссфейда двух потоков.
+     *
+     * n = 15, то есть 16 точек: это потолок, который AudioFlinger принимает без
+     * отказа на всех известных реализациях (17 точек уже упиралось в лимит и
+     * бросало из createVolumeShaper — отказ означал мгновенный setVolume, то
+     * есть щелчок посреди кроссфейда). Между соседними точками шейпер
+     * интерполирует линейно (~17 мс при 250 мс) — на слух неотличимо.
      */
     private fun buildCurve(from: Float, to: Float, shape: FadeShape): Pair<FloatArray, FloatArray> {
         val f = from.coerceIn(0f, 1f)
@@ -491,7 +782,7 @@ class BinauralStreamImpl(
         if (shape == FadeShape.LINEAR) {
             return floatArrayOf(0f, 1f) to floatArrayOf(f, t)
         }
-        val n = 16
+        val n = 15
         val times = FloatArray(n + 1)
         val vols = FloatArray(n + 1)
         val rampUp = t > f
@@ -530,7 +821,12 @@ class BinauralStreamImpl(
     }
 
     private fun releaseInternal() {
-        StreamLogger.d(TAG, "releaseInternal spec#${spec.serial} lc=${lifecycleRef.get()}")
+        StreamLogger.d(TAG, "releaseInternal spec#${spec.serial} lc=${lifecycleRef.get()} paused=$paused")
+
+        // Писатель мог быть припаркован паузой: без побудки он не заметит ни
+        // смены lifecycle, ни освобождения трека и провисит до первого polling.
+        paused = false
+        wakeWriter()
 
         // ФИКС №1 (старый краш, SIGABRT destroyed mutex): движок разрешено
         // уничтожать только после выхода писателя.
@@ -589,6 +885,26 @@ class BinauralStreamImpl(
 
     // ------------------------------------------------------------------ writer
 
+    /**
+     * Припарковать писателя на паузе. Ожидание с таймаутом: даже пропущенный
+     * notify не подвесит поток — он сам проверит паузу и выход из цикла.
+     */
+    private fun parkWriter() {
+        synchronized(parkLock) {
+            if (!paused || lifecycleRef.get() != StreamLifecycle.PLAYING) return
+            try {
+                parkLock.wait(PARK_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
+    /** Разбудить писателя (снятие паузы, stop, release). */
+    private fun wakeWriter() {
+        synchronized(parkLock) { parkLock.notifyAll() }
+    }
+
     private fun writerLoop() {
         StreamLogger.d(TAG, "writerLoop start spec#${spec.serial} sr=${spec.sampleRate.value} intervalMs=$bufferIntervalMs")
         // ВНЕШНИЙ finally гарантирует взвод латча ЛЮБЫМ путём выхода
@@ -603,6 +919,19 @@ class BinauralStreamImpl(
                 // со смещения, чтобы не дублировать и не оставлять трек без данных.
                 var offset = if (preparedPrefilled) preparedPacketBytes else 0
                 while (lifecycleRef.get() == StreamLifecycle.PLAYING) {
+                    // ПАУЗА: парковка ДО генерации и ДО записи.
+                    //   * генерация запрещена — она продвинула бы фронтир кривой
+                    //     вперёд относительно звучащего участка (и пакет, ради
+                    //     которого всё затевалось, пришлось бы выбросить);
+                    //   * запись в приостановленный трек заблокировала бы
+                    //     WRITE_BLOCKING до снятия паузы.
+                    // packetBytes/offset — локальные, поэтому остаток пакета и
+                    // смещение в нём переживают паузу целиком: возобновление
+                    // дописывает ровно тот же буфер с того же места.
+                    if (paused) {
+                        parkWriter()
+                        continue
+                    }
                     if (offset >= packetBytes) {
                         val buf = directBuffer ?: break
                         buf.clear()
@@ -614,6 +943,7 @@ class BinauralStreamImpl(
                         }
                         packetBytes = generated * 2 * 4
                         offset = 0
+                        generatedFrames += generated.toLong()
                     }
                     val buf = directBuffer ?: break
                     val chunk = minOf(
@@ -625,6 +955,14 @@ class BinauralStreamImpl(
                     buf.limit(offset + chunk)
                     val written = track.write(buf, chunk, AudioTrack.WRITE_BLOCKING)
                     if (written < 0) {
+                        // track.pause() прерывает заблокированный write()
+                        // (mProxy->interrupt): это НЕ ошибка и НЕ потеря данных —
+                        // кадры, не принятые треком, остаются в пакете по offset.
+                        if (paused) {
+                            StreamLogger.d(TAG, "writerLoop spec#${spec.serial}: write прерван паузой " +
+                                "(пакет сохранён, offset=$offset/$packetBytes)")
+                            continue
+                        }
                         StreamLogger.e(TAG, "writerLoop spec#${spec.serial}: write failed=$written")
                         onRuntimeError(this, "write failed: $written")
                         break

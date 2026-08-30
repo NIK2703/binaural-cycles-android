@@ -16,6 +16,7 @@
 #include "Config.h"
 #include "AudioGenerator.h"
 #include "BufferPackagePlanner.h"
+#include "BinauralEngine.h"
 
 namespace binaural {
 namespace test {
@@ -4637,5 +4638,169 @@ TEST(TrendSwapTest, TrendPoints_PeaksVsTroughs_NextSelectedCrossing) {
     EXPECT_NEAR(bothMs, 298809, 50);          // BOTH на ближайшем экстремуме == пик
     EXPECT_EQ(troughsMs, kTrendMaxSolidMs);   // впадина далеко -> кап переоценки
 }
+} // namespace test
+} // namespace binaural
+
+// ============================================================================
+// СЛЫШИМАЯ ПОЗИЦИЯ КРИВОЙ (мягкая пауза / возобновление)
+// ============================================================================
+
+namespace binaural {
+namespace test {
+
+// В проекте две оси времени:
+//   * фронтир генерации — m_curveTimeSeconds, уходит вперёд на ВЕСЬ пакет
+//     (до 60 минут) сразу в момент generateAudioBuffer();
+//   * слышимое время — то, что микшер реально отдал в динамик
+//     (AudioTrack.playbackHeadPosition).
+// Мост между ними — computeAudibleTimeSeconds(playedFrames, generatedFrames).
+// Без него пауза возвращала позицию UI-часов (wall-clock экстраполяция,
+// обновляемая опросом) — то есть место на графике, где звук ещё не звучал.
+
+class AudibleTimeTest : public ::testing::Test {
+protected:
+    static constexpr int SAMPLE_RATE = 44100;
+    // 01:00:00 — далеко от полуночи, поэтому normalizeTimeOfDay() в тестах не
+    // срабатывает и арифметика остаётся линейной.
+    static constexpr float START_TOD = 3600.0f;
+    static constexpr float TOLERANCE = 0.02f;
+
+    BinauralEngine engine;
+
+    void SetUp() override {
+        engine.setSampleRate(SAMPLE_RATE);
+    }
+
+    /** Движок, поставленный ровно в START_TOD и играющий. */
+    BinauralEngine& startedEngine() {
+        engine.setConfig(createTestConfig(200.0f, 10.0f, false));
+        engine.setCurveTimeSeconds(START_TOD);
+        engine.setPlaying(true, /*preserveTimeline=*/true);
+        return engine;
+    }
+
+    /** Сгенерировать пакет длительностью seconds, вернуть число кадров в нём. */
+    int generatePackage(BinauralEngine& eng, float seconds) {
+        const int frames = static_cast<int>(seconds * SAMPLE_RATE);
+        std::vector<float> buffer(static_cast<size_t>(frames) * 2);
+        return eng.generateAudioBuffer(buffer.data(), frames);
+    }
+
+    /**
+     * Ожидаемый фронтир генерации. computePlaybackTimeSeconds() приватный,
+     * поэтому эталон считается НЕЗАВИСИМО: стартовая точка плюс длительность
+     * сгенерированного аудио в секундах.
+     */
+    static float frontierOf(int64_t generatedFrames) {
+        return START_TOD + static_cast<float>(generatedFrames) / SAMPLE_RATE;
+    }
+};
+
+TEST_F(AudibleTimeTest, NothingPlayedYet_AudibleStandsAtPackageStart) {
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 1.0f);
+    ASSERT_GT(generated, 0);
+
+    // Голова стоит в нуле: сгенерированное аудио ещё не звучало.
+    const float audible = eng.computeAudibleTimeSeconds(0, generated);
+    EXPECT_NEAR(audible, START_TOD, TOLERANCE);
+}
+
+TEST_F(AudibleTimeTest, FullyPlayed_AudibleEqualsGenerationFrontier) {
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 1.0f);
+    ASSERT_GT(generated, 0);
+
+    // Фронтир ушёл вперёд ровно на длительность сгенерированного пакета.
+    const float frontier = frontierOf(generated);
+
+    const float audible = eng.computeAudibleTimeSeconds(generated, generated);
+    EXPECT_NEAR(audible, frontier, TOLERANCE);
+}
+
+TEST_F(AudibleTimeTest, HalfPlayed_AudibleLagsByExactlyUnplayedFrames) {
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 2.0f);
+    ASSERT_GT(generated, 0);
+
+    const float frontier = frontierOf(generated);
+    const int64_t played = generated / 2;
+
+    const float audible = eng.computeAudibleTimeSeconds(played, generated);
+    const float expected =
+        frontier - static_cast<float>(generated - played) / SAMPLE_RATE;
+
+    EXPECT_NEAR(audible, expected, TOLERANCE);
+    // И ровно посередине пакета: из 2 с проиграна 1 с.
+    EXPECT_NEAR(audible, START_TOD + 1.0f, TOLERANCE);
+}
+
+TEST_F(AudibleTimeTest, LongPackage_AudibleStaysAtPlayedOffset) {
+    // Реальный сценарий: писатель сгенерировал огромный пакет (до 60 минут),
+    // фронтир уехал вперёд, а микшер проиграл из него считанные секунды.
+    // Счётчики — десятки миллионов кадров, поэтому разность обязана
+    // считаться в int64: float держит целые числа точно лишь до ~1.7e7.
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 600.0f); // 10 минут ≈ 2.6e7 кадров
+    ASSERT_GT(generated, 0);
+    ASSERT_GT(generated, 16777216); // 2^24 — предел точности float
+
+    const float frontier = frontierOf(generated);
+    EXPECT_NEAR(frontier, START_TOD + 600.0f, 0.5f);
+
+    // Проиграна только первая минута — слышимая позиция обязана быть там,
+    // а не на фронтире генерации.
+    const int64_t played = 60 * SAMPLE_RATE;
+    const float audible = eng.computeAudibleTimeSeconds(played, generated);
+
+    EXPECT_NEAR(audible, START_TOD + 60.0f, 0.05f);
+}
+
+TEST_F(AudibleTimeTest, HeadOvertakesFrontier_ClampedToFrontier) {
+    // Гонка счётчиков (голова успела вперёд фронтира) не должна отматывать
+    // позицию назад через полночь: остаток прижимается к нулю.
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 1.0f);
+    ASSERT_GT(generated, 0);
+
+    const float frontier = frontierOf(generated);
+    const float audible =
+        eng.computeAudibleTimeSeconds(generated + SAMPLE_RATE, generated);
+
+    EXPECT_NEAR(audible, frontier, TOLERANCE);
+}
+
+TEST_F(AudibleTimeTest, FreezeUiTimeline_HoldsAudiblePosition) {
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 2.0f);
+    ASSERT_GT(generated, 0);
+
+    const float audible = eng.computeAudibleTimeSeconds(generated / 2, generated);
+    eng.freezeUiTimelineAt(audible);
+
+    // Span замороженного таймлайна нулевой: сколько ни жди, указатель стоит
+    // там, где остановился звук, а не уезжает к фронтиру генерации.
+    EXPECT_NEAR(eng.computeUiTimeSeconds(), audible, TOLERANCE);
+}
+
+TEST_F(AudibleTimeTest, ResumeUiTimeline_ContinuesFromAudiblePosition) {
+    BinauralEngine& eng = startedEngine();
+    const int generated = generatePackage(eng, 2.0f);
+    ASSERT_GT(generated, 0);
+
+    const float audible = eng.computeAudibleTimeSeconds(generated / 2, generated);
+    eng.freezeUiTimelineAt(audible);
+    eng.resumeUiTimelineFrom(audible);
+
+    const float frontier = frontierOf(generated);
+    const float ui = eng.computeUiTimeSeconds();
+
+    // Указатель продолжает с замороженной точки и НЕ выбегает за фронтир
+    // уже сгенерированного аудио.
+    EXPECT_GE(ui, audible - TOLERANCE);
+    EXPECT_LE(ui, frontier + TOLERANCE);
+    EXPECT_NEAR(ui, audible, 0.25f); // сразу после снятия заморозки
+}
+
 } // namespace test
 } // namespace binaural

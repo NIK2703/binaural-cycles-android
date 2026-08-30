@@ -39,6 +39,8 @@ class BinauralStreamManager(private val context: Context) {
         private const val TAG = "BinauralStreamMgr"
         private const val WAKE_LOCK_TAG = "BinauralBeats:StreamManager"
         private const val POWER_SAVE_MULTIPLIER = 3
+        /** Как часто подтверждаем удержание CPU во время воспроизведения. */
+        private const val WAKE_LOCK_RENEW_MS = 5 * 60 * 1000L
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -61,7 +63,12 @@ class BinauralStreamManager(private val context: Context) {
     private var debugRunning = true
     private var debugScrubPending: Int? = null
 
-    // ---------------- Runtime (только актёр) ----------------
+    // ---------------- Runtime (только актёр; чтение из других потоков — см. отметки) ----------------
+    /**
+     * Состояние автомата. @Volatile: [updateCurrentFrequencies] читает его из
+     * потока опроса UI, чтобы заморозить часы сессии на паузе.
+     */
+    @Volatile
     private var state = ManagerState.IDLE
     private var current: BinauralStreamImpl? = null
     private var next: BinauralStreamImpl? = null
@@ -69,6 +76,14 @@ class BinauralStreamManager(private val context: Context) {
     private var serialSeq = 0L
     private var fadeTarget = FadeTarget.STOP
     private var pendingResume = false
+
+    /**
+     * За время паузы успели смениться настройки (конфиг, частота дискретизации,
+     * debug-время, громкость не в счёт). Живой замороженный поток им не
+     * соответствует: возобновление пойдёт через пересоздание потока с той же
+     * слышимой позиции, а не через мягкое продолжение.
+     */
+    private var pausedSpecDirty = false
 
     // Сессия для resume
     private var sessionSpec: PlaybackSpec? = null
@@ -118,8 +133,18 @@ class BinauralStreamManager(private val context: Context) {
 
     // ================================================================== ФАСАД
 
+    /**
+     * Дедупликация настроек.
+     *
+     * Без неё каждый повторный пуш того же конфига (а их при рестарте Activity
+     * прилетает 3–4 штуки: из onServiceConnected и из коллекторов DataStore)
+     * рождает отдельный `PlaybackSpec` с новым serial и — если состояние уже не
+     * RUNNING — отдельный кроссфейд. Четыре полных пересборки потока за секунду
+     * = четыре AudioTrack, четыре direct-буфера и слышимый щелчок.
+     */
     fun updateConfig(config: BinauralConfig, relaxationSettings: RelaxationModeSettings = RelaxationModeSettings()) {
         actor.post {
+            if (this.config == config && this.relaxation == relaxationSettings) return@post
             this.config = config
             this.relaxation = relaxationSettings
             _currentConfig.value = config
@@ -128,12 +153,18 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     fun updateRelaxationModeSettings(settings: RelaxationModeSettings) {
-        actor.post { relaxation = settings; onSpecChanged(SpecReason.SETTINGS) }
+        actor.post {
+            if (relaxation == settings) return@post
+            relaxation = settings
+            onSpecChanged(SpecReason.SETTINGS)
+        }
     }
 
     fun updateFrequencyCurve(curve: FrequencyCurve) {
         actor.post {
-            config = config.copy(frequencyCurve = curve)
+            val merged = config.copy(frequencyCurve = curve)
+            if (merged == config) return@post
+            config = merged
             _currentConfig.value = config
             onSpecChanged(SpecReason.SETTINGS)
         }
@@ -149,8 +180,18 @@ class BinauralStreamManager(private val context: Context) {
     fun setVolume(volume: Float) {
         val v = volume.coerceIn(0f, 1f)
         StreamLogger.d(TAG, "setVolume $volume -> $v")
-        actor.post { this.volume = v; current?.setVolume(v) }  // live, без handoff
+        actor.post {
+            // Повторная установка того же значения — не только лишний binder-вызов:
+            // при рестарте Activity ViewModel пушит дефолт 0.7f поверх реальной
+            // громкости, и это слышимый скачок уровня.
+            if (kotlin.math.abs(this.volume - v) < 0.0001f) return@post
+            this.volume = v
+            current?.setVolume(v)   // live, без handoff
+        }
     }
+
+    /** Текущая громкость менеджера (для сверки перед пушем из UI-слоя). */
+    fun getVolume(): Float = volume
 
     fun setSampleRate(rate: SampleRate) {
         StreamLogger.d(TAG, "setSampleRate -> $rate")
@@ -165,6 +206,10 @@ class BinauralStreamManager(private val context: Context) {
     fun setFrequencyUpdateInterval(intervalMs: Int) {
         val clamped = intervalMs.coerceIn(1000, 60 * 60 * 1000)
         actor.post {
+            // Повтор того же значения обязан быть пустым: иначе режим
+            // энергосбережения (applyPowerSaveMode утром/вечером) каждый раз
+            // перебивался бы пушем из ViewModel.
+            if (bufferIntervalMs == clamped && lastUserIntervalMs == clamped) return@post
             if (!debugVirtualTime) lastUserIntervalMs = clamped
             bufferIntervalMs = clamped   // применится к следующему потоку
         }
@@ -207,7 +252,14 @@ class BinauralStreamManager(private val context: Context) {
                 _currentCarrierFrequency.value = it.second
             }
             _currentTimeOfDaySeconds.value = s.getCurrentTimeOfDay()
-            _elapsedSeconds.value = s.getElapsedSeconds()
+            // Часы сессии на паузе стоят: нативный elapsed считается по
+            // wall-clock и иначе включил бы в себя всю длительность паузы.
+            // (При возобновлении якорь переставляется — см. resumePausedStream.)
+            _elapsedSeconds.value = if (state == ManagerState.PAUSED) {
+                pausedElapsedSeconds
+            } else {
+                s.getElapsedSeconds()
+            }
             val swapped = s.isChannelsSwapped()
             if (_isChannelsSwapped.value != swapped) _isChannelsSwapped.value = swapped
         } else {
@@ -291,7 +343,16 @@ class BinauralStreamManager(private val context: Context) {
     /** Любое изменение настроек: маршрутизация по состояниям. */
     private fun onSpecChanged(reason: SpecReason) {
         when (state) {
-            ManagerState.IDLE, ManagerState.PAUSED -> sessionSpec = buildSpec(reason)
+            ManagerState.IDLE -> sessionSpec = buildSpec(reason)
+            ManagerState.PAUSED -> {
+                // PAUSED держит живой замороженный поток, звучащий по СТАРОЙ
+                // спеке. Настройки применяются только при возобновлении, поэтому
+                // помечаем замороженный поток «грязным» — иначе мягкое
+                // возобновление молча проигнорировало бы новую спеку.
+                val spec = buildSpec(reason)
+                sessionSpec = spec
+                if (current?.spec?.audioEquals(spec) != true) pausedSpecDirty = true
+            }
             ManagerState.FADE_OUT_PAUSE, ManagerState.FADE_OUT_STOP -> queue.offer(buildSpec(reason))
             else -> requestHandoff(buildSpec(reason))
         }
@@ -381,6 +442,22 @@ class BinauralStreamManager(private val context: Context) {
         if (n != null && n.spec.audioEquals(spec)) return
 
         if (n != null && n.lifecycle == StreamLifecycle.PLAYING) {
+            // ФИКС Щ1. Промоушен потока, который ещё в fade-in, — это щелчок.
+            // Повышенный NEXT тут же получает fade-out от нового beginHandoff(),
+            // а applyShaper() в ветке «замена активного шейпера» между
+            // setVolume(base) и apply(PLAY) даёт эффективную громкость
+            // userVolume·fromC² — провал втрое при fromC≈0.3. Формально
+            // EQUAL_POWER тоже перестаёт быть корректным: он рассчитан ровно
+            // на два потока, а звучать начинают три.
+            //
+            // Правильно — дождаться конца fade-in: спека уже лежит в очереди
+            // (latest-wins), и её разберёт promoteNextToCurrent(), когда
+            // CURRENT дойдёт до тишины (onStreamSilent) и повысит NEXT.
+            if (n.isFadingIn) {
+                StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} ещё в fade-in — " +
+                    "повышение отложено до тишины CURRENT; spec#${spec.serial} ждёт в очереди")
+                return
+            }
             StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} играет — повышаем и новый хэндофф к spec#${spec.serial}")
             promoteNextToCurrent()   // сама поднимет хвост очереди и вызовет beginHandoff
             return
@@ -533,16 +610,20 @@ class BinauralStreamManager(private val context: Context) {
         currentRef.set(null)
         when (fadeTarget) {
             FadeTarget.PAUSE -> {
-                // Handoff (если шёл) прерван паузой — это не продолжение сегмента.
+                // Сюда попадаем, только если мягкая пауза не состоялась (поток
+                // ушёл в утилизацию): позиция переносится в snapped-значениях,
+                // а возобновление пойдёт через новый поток.
                 pendingHandoff = false
                 resetContinuity()
                 accumulatedMs += System.currentTimeMillis() - segmentStartWallMs
-                queue.poll()?.let { sessionSpec = it } // настройки, прилетевшие во время фейда
+                // Настройки, прилетевшие во время фейда: живой поток (если он
+                // ещё есть) им не соответствует — возобновление пересоберёт его.
+                queue.poll()?.let { sessionSpec = it; pausedSpecDirty = true }
                 setState(ManagerState.PAUSED)
                 StreamLogger.d(TAG, "onStreamFullyStopped: PAUSE -> накоплено accumulatedMs=$accumulatedMs")
                 if (pendingResume) {
                     pendingResume = false
-                    resumeFromPaused()
+                    onResumeFromPaused()
                 }
             }
 
@@ -661,7 +742,12 @@ class BinauralStreamManager(private val context: Context) {
                 retargetFade(FadeTarget.STOP) // идемпотентно: цель уже STOP
             }
             ManagerState.PAUSED -> {
-                resetSession()
+                // PAUSED держит ЖИВОЙ замороженный поток (AudioTrack + нативный
+                // движок + посчитанный пакет). Раньше его не существовало —
+                // релиз происходил внутри fade-out. Теперь освобождать надо явно.
+                queue.clear()
+                discardPausedCurrent()
+                resetSession()          // в т.ч. pausedSpecDirty = false
                 setState(ManagerState.IDLE)
                 updateWakeLock()
             }
@@ -674,15 +760,16 @@ class BinauralStreamManager(private val context: Context) {
         when (state) {
             ManagerState.RUNNING, ManagerState.FADE_IN -> {
                 capturePauseMetrics()
-                fadeOutCurrent(FadeTarget.PAUSE)
+                pauseCurrentSoftly()
             }
             ManagerState.HANDOFF -> {
                 capturePauseMetrics()
                 pendingHandoff = false
                 resetContinuity()
                 discardNext()
-                // Новейший спека из очереди станет sessionSpec по завершении фейда
-                retargetFade(FadeTarget.PAUSE)
+                // CURRENT уже гаснет кроссфейдом — pause() перехватывает рампу:
+                // финалом становится заморозка, а не утилизация.
+                pauseCurrentSoftly()
             }
             ManagerState.FADE_OUT_STOP -> {
                 capturePauseMetrics()
@@ -702,11 +789,67 @@ class BinauralStreamManager(private val context: Context) {
         }
     }
 
+    /**
+     * МЯГКАЯ ПАУЗА. Звук гасится рампой, после чего трек уходит в pause() —
+     * но НЕ в утилизацию: AudioTrack, нативный движок (фазы, своп, положение
+     * на кривой) и уже сгенерированный пакет остаются живы. Раньше пауза
+     * уничтожала поток целиком, выбрасывая до 60 минут посчитанного PCM и
+     * пересоздавая движок на возобновлении.
+     */
+    private fun pauseCurrentSoftly() {
+        val s = current
+        if (s == null) {
+            StreamLogger.d(TAG, "pauseCurrentSoftly: current==null — сразу PAUSED")
+            onPausedFully()
+            return
+        }
+        retargetFade(FadeTarget.PAUSE)      // _isPlaying=false, state=FADE_OUT_PAUSE
+        if (!s.pause(onPaused = ::onPausedFully)) {
+            // Поток уже утилизируется — мягкая пауза невозможна, прежний путь.
+            StreamLogger.w(TAG, "pauseCurrentSoftly: мягкая пауза недоступна spec#${s.spec.serial} — утилизация")
+            fadeOutCurrent(FadeTarget.PAUSE)
+        }
+    }
+
+    /**
+     * Мягкая пауза состоялась: поток заморожен, но ЖИВ и ждёт возобновления.
+     */
+    private fun onPausedFully() {
+        if (fadeTarget != FadeTarget.PAUSE) {
+            StreamLogger.d(TAG, "onPausedFully: цель уже $fadeTarget — игнор (поток утилизирован)")
+            return
+        }
+        accumulatedMs += System.currentTimeMillis() - segmentStartWallMs
+        // Настройки, прилетевшие за время фейда: замороженный поток звучит по
+        // старой спеке, поэтому возобновление пересоберёт его с той же позиции.
+        val queued = queue.poll()
+        val live = current
+        if (queued != null) {
+            sessionSpec = queued
+            if (live?.spec?.audioEquals(queued) != true) pausedSpecDirty = true
+        }
+        // Позиция снималась в capturePauseMetrics() ДО фейд-аута: за время рампы
+        // трек доигрывал, поэтому переснимаем по факту заморозки — иначе путь
+        // через пересборку потока отстал бы на длительность фейда.
+        live?.let {
+            pausedElapsedSeconds = it.getElapsedSeconds()
+            pausedTimeOfDay = it.getAudibleTimeOfDaySeconds()
+        }
+        setState(ManagerState.PAUSED)
+        StreamLogger.d(TAG, "onPausedFully: PAUSED, поток жив spec#${live?.spec?.serial} " +
+            "(accumulatedMs=$accumulatedMs, dirty=$pausedSpecDirty)")
+        updateWakeLock()
+        if (pendingResume) {
+            pendingResume = false
+            onResumeFromPaused()
+        }
+    }
+
     private fun onResume() {
-        StreamLogger.d(TAG, "onResume state=${state.name}")
+        StreamLogger.d(TAG, "onResume state=${state.name} pausedSpecDirty=$pausedSpecDirty")
         when (state) {
             ManagerState.IDLE -> onPlay()   // ещё не играли — старт (play() сам обработает IDLE)
-            ManagerState.PAUSED -> resumeFromPaused()
+            ManagerState.PAUSED -> onResumeFromPaused()
             ManagerState.FADE_OUT_PAUSE -> {
                 // ФИКС 2. Разворот рампы (reverseFadeToPlaying) САМ вызывает щелчок —
                 // это тот же разрыв непрерывности громкости. Не делаем разворот: ждём,
@@ -719,7 +862,69 @@ class BinauralStreamManager(private val context: Context) {
         }
     }
 
+    /**
+     * Возобновление из PAUSED: мягкое (тот же поток и тот же пакет) либо —
+     * если за паузу менялись настройки — через новый поток с той же позиции.
+     */
+    private fun onResumeFromPaused() {
+        if (pausedSpecDirty) {
+            StreamLogger.d(TAG, "onResumeFromPaused: настройки менялись на паузе — новый поток")
+            resumeFromPaused()
+        } else {
+            resumePausedStream()
+        }
+    }
+
+    /**
+     * Мягкое возобновление: тот же поток продолжает с сохранённого сэмпла.
+     * Пакет не перегенерируется, позиция на кривой не двигается, фазы не
+     * сбрасываются — звук продолжается ровно там, где был остановлен.
+     */
+    private fun resumePausedStream() {
+        val s = current
+        if (s == null || !s.isPaused) {
+            StreamLogger.w(TAG, "resumePausedStream: поток непригоден (null=${s == null}) — пересоздание")
+            resumeFromPaused()
+            return
+        }
+        StreamLogger.d(TAG, "resumePausedStream: spec#${s.spec.serial} — мягкое продолжение (буфер сохранён)")
+        // Часы сессии: нативный elapsed идёт по wall-clock, поэтому якорь
+        // переставляется — иначе в elapsed попала бы вся длительность паузы.
+        s.setPlaybackStartTime(System.currentTimeMillis() - accumulatedMs)
+        segmentStartWallMs = System.currentTimeMillis()
+        setState(ManagerState.FADE_IN)
+        _isPlaying.value = true
+        updateWakeLock()
+        s.setVolume(volume)
+        if (!s.resume(onFullyStarted = {
+                if (state == ManagerState.FADE_IN) setState(ManagerState.RUNNING)
+            })
+        ) {
+            // Трек не поддался (например, HAL отобрал устройство) — продолжаем
+            // новым потоком с той же слышимой позиции.
+            StreamLogger.e(TAG, "resumePausedStream: возобновление не удалось — пересоздание")
+            discardPausedCurrent()
+            resumeFromPaused()
+        }
+    }
+
+    /**
+     * Отцепить и тихо утилизировать замороженный поток. Он уже в нуле по
+     * громкости и стоит на паузе — освобождение бесшумно.
+     */
+    private fun discardPausedCurrent() {
+        val s = current ?: return
+        current = null
+        currentRef.set(null)
+        StreamLogger.d(TAG, "discardPausedCurrent: spec#${s.spec.serial} paused=${s.isPaused}")
+        s.stop(onFullyStopped = { /* состояние решают вызывающие */ })
+    }
+
     private fun resumeFromPaused() {
+        // Замороженный поток (если есть) звучит по старой спеке — утилизируем
+        // его до запуска нового, иначе он останется висеть без владельца.
+        discardPausedCurrent()
+        pausedSpecDirty = false
         val base = queue.poll() ?: sessionSpec ?: return
         val spec = base.copy(
             volume = volume,
@@ -728,6 +933,8 @@ class BinauralStreamManager(private val context: Context) {
             resumeElapsedMs = accumulatedMs,
             // ФИКС 3. Возобновляем с того же времени суток по кривой — частота и
             // фаза продолжаются без скачка (как при сквозном переключении).
+            // pausedTimeOfDay — СЛЫШИМАЯ позиция (по голове воспроизведения),
+            // а не значение UI-часов: точка продолжения совпадает с графиком.
             resumeCurveTimeSeconds = pausedTimeOfDay
         )
         sessionSpec = spec
@@ -737,7 +944,9 @@ class BinauralStreamManager(private val context: Context) {
     private fun capturePauseMetrics() {
         current?.let {
             pausedElapsedSeconds = it.getElapsedSeconds()
-            pausedTimeOfDay = it.getCurrentTimeOfDay()
+            // СЛЫШИМАЯ позиция: точка возобновления обязана совпасть с тем
+            // местом графика, где звук реально остановился.
+            pausedTimeOfDay = it.getAudibleTimeOfDaySeconds()
         }
     }
 
@@ -872,8 +1081,13 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.e(TAG, "handleRuntimeError: $message (stream spec#${stream.spec.serial}, isCurrent=${current === stream}, isNext=${next === stream})")
         Log.e(TAG, "runtime error: $message")
         if (next === stream) {
-            next = null
-            stream.abort()
+            // ФИКС З1. abort() гасит только неигравший поток (CREATED/PREPARED/FAILED).
+            // PLAYING-поток от abort() не гас, а ссылка next на него уже занулена:
+            // его AudioTrack и direct-буфер оставались живы навсегда, и погасить
+            // их было некому — поток уже не current и не next. Чем дольше живёт
+            // процесс, тем больше таких зомби (и тем громче симптом «после долгой
+            // работы»). discardNext() гасит играющий NEXT фейдом, остальные — тихо.
+            discardNext()
             listener?.onError("next stream error: $message")
             return
         }
@@ -903,25 +1117,66 @@ class BinauralStreamManager(private val context: Context) {
     private val wakeLockLock = Any()
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
 
+    /**
+     * Периодическое подтверждение удержания CPU.
+     *
+     * Даже без TTL лок теоретически может снять кто-то ещё (или сам PowerManager
+     * при смене профиля). Переспрашиваем раз в 5 минут, пока играем, — цена
+     * пустая: если `isHeld`, вызов ничего не делает.
+     */
+    private val wakeLockRenew = object : Runnable {
+        override fun run() {
+            if (!wakeLockNeeded()) {
+                releaseWakeLock()
+                return
+            }
+            acquireWakeLock()
+            actor.postDelayed(this, WAKE_LOCK_RENEW_MS)
+        }
+    }
+
+    private fun wakeLockNeeded() = isActiveState() ||
+        state == ManagerState.FADE_OUT_PAUSE ||
+        state == ManagerState.FADE_OUT_STOP
+
     private fun updateWakeLock() {
-        val needed = state == ManagerState.RUNNING ||
-            state == ManagerState.FADE_IN ||
-            state == ManagerState.HANDOFF ||
-            state == ManagerState.FADE_OUT_PAUSE ||
-            state == ManagerState.FADE_OUT_STOP
-        if (needed) acquireWakeLock() else releaseWakeLock()
+        // Снимаем хвост предыдущего подтверждения: перепланирование должно
+        // оставаться идемпотентным, иначе за долгую сессию копий набежит десятки.
+        actor.removeCallbacks(wakeLockRenew)
+        if (wakeLockNeeded()) {
+            acquireWakeLock()
+            actor.postDelayed(wakeLockRenew, WAKE_LOCK_RENEW_MS)
+        } else {
+            releaseWakeLock()
+        }
     }
 
     private fun acquireWakeLock() = synchronized(wakeLockLock) {
         try {
             if (wakeLock == null) {
                 val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+                    // Счётчик ссылок нам не нужен: acquire/release идемпотентны.
+                    setReferenceCounted(false)
+                }
             }
-            // TTL обязан покрыть запись пакета целиком (до 60 мин)
-            val ttlMs = maxOf(10 * 60 * 1000L, bufferIntervalMs.toLong() + 120_000L)
+            // НИКАКОГО TTL.
+            //
+            // Раньше здесь было acquire(ttlMs) с TTL = maxOf(10 мин,
+            // bufferIntervalMs + 120 с). WakeLock.acquire(timeout) —
+            // САМОРАСПУСКАЮЩИЙСЯ лок: по истечении TTL система его снимает.
+            // При этом updateWakeLock() вызывается только на переходах
+            // состояния, а пока менеджер стоит в RUNNING, переходов нет —
+            // и условие `if (wakeLock?.isHeld != true)` повторно лок не брало.
+            //
+            // Итог: через 12 минут после начала воспроизведения CPU оставался
+            // без удержания. Запас до underrun — около секунды
+            // (TRACK_BUFFER_MS 3000 минус WRITE_CHUNK_MS 2000), поэтому в Doze
+            // или при экономии заряда писатель не успевал подлить трек: PCM
+            // рвался на произвольном отсчёте — щелчок, а если сработёт
+            // onRuntimeError — полный обрыв воспроизведения.
             if (wakeLock?.isHeld != true) {
-                wakeLock?.acquire(ttlMs)
+                wakeLock?.acquire()
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to acquire WakeLock", e)
@@ -948,6 +1203,7 @@ class BinauralStreamManager(private val context: Context) {
         segmentStartWallMs = 0L
         pausedElapsedSeconds = 0
         pausedTimeOfDay = 0
+        pausedSpecDirty = false
         pendingResume = false
         pendingPlaySpec = null
         pendingHandoff = false
