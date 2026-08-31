@@ -104,6 +104,7 @@ class NativeAudioEngine {
     private external fun nativeSetCurveTime(handle: Long, timeSeconds: Int)
 
     // === Слышимая позиция кривой (мягкая пауза / возобновление) ===
+    private external fun nativeGetCurveTimeSeconds(handle: Long): Float
     private external fun nativeGetAudibleTimeSeconds(
         handle: Long,
         playedFrames: Long,
@@ -376,6 +377,27 @@ class NativeAudioEngine {
             if (hh == 0L) return
             nativeSetCurveTime(hh, timeSeconds)
         }
+    }
+
+    /**
+     * ФРОНТИР ГЕНЕРАЦИИ (секунды суток): конец последнего сгенерированного
+     * пакета.
+     *
+     * НЕ то же, что [getCurrentTimeOfDay]: тот отдаёт UI-время — плавную
+     * экстраполяцию по wall-clock внутри уже сгенерированного диапазона, а
+     * этот метод — реальный край посчитанного аудио. Окно актуальности
+     * замороженного пакета = [слышимое время, фронтир], и правая граница
+     * доступна только здесь.
+     *
+     * Используется решателем возобновления: пакет не устарел, пока текущий
+     * момент суток не вышел за фронтир (см.
+     * docs/analysis_resume_from_0_position.md).
+     */
+    fun getCurveTimeSeconds(): Float {
+        if (nativeUnavailable()) return 0f
+        val hh = h()
+        if (hh == 0L) return 0f
+        return nativeGetCurveTimeSeconds(hh)
     }
 
     /**

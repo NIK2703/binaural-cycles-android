@@ -110,7 +110,7 @@
     
     <!-- App Settings -->
     <string name="buffer_generation_minutes">Buffer generation interval</string>
-    <string name="buffer_generation_description">How far ahead audio is generated. The available length depends on the sample rate: a minute of audio costs more the higher the rate, so 48 kHz offers up to 10 minutes and 8 kHz up to an hour. The cap is derived from device memory, so any offered length fits in full; the longer it is, the less often the engine recomputes the package.</string>
+    <string name="buffer_generation_description">How many minutes of audio buffer is generated ahead. Larger interval reduces the frequency of CPU wake-ups and saves battery</string>
     <string name="update_interval">Frequency update interval</string>
     <string name="update_interval_description">How often playback frequencies are recalculated</string>
     <string name="audio_quality">Sample rate</string>

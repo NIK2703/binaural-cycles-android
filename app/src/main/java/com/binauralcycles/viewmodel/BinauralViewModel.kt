@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
 import android.os.IBinder
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.binauralcycles.R
@@ -156,8 +157,26 @@ internal fun buildPlaybackConfig(
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
-    private val preferencesRepository: BinauralPreferencesRepository
+    private val preferencesRepository: BinauralPreferencesRepository,
+    private val savedStateHandle: SavedStateHandle
 ) : ViewModel() {
+
+    private companion object {
+        /**
+         * Ключ цели редактирования в [SavedStateHandle].
+         *
+         * При пересоздании ViewModel (сворачивание приложения, блокировка/
+         * разблокировка экрана, смерть процесса) [editingFrequencyCurve]
+         * теряется, а `LaunchedEffect` экрана вызывает `startEditingPreset`,
+         * который на ещё пустом списке `presets` (грузится асинхронно) отрабатывает
+         * впустую и больше не перезапускается — виджет графика пропадает. Цель
+         * редактирования, сохранённая здесь, переживает пересоздание, и сессия
+         * восстанавливается, как только пресеты догрузятся (см. [maybeRestoreEditingSession]).
+         */
+        private const val KEY_EDITING_TARGET = "editing_target"
+        /** Специальное значение цели: создаётся новый пресет (presetId отсутствует). */
+        private const val EDITING_TARGET_NEW = "NEW"
+    }
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
@@ -384,6 +403,11 @@ class BinauralViewModel @Inject constructor(
                 // возможного срабатывания updateAudioConfig() activePreset
                 // уже лежал в _uiState.
                 onSettingLoaded(Setting.PRESETS)
+
+                // Восстанавливаем сессию редактирования, если ViewModel была
+                // пересоздана (сворачивание/блокировка/смерть процесса), а
+                // editingFrequencyCurve потерялся и график пропал с экрана.
+                maybeRestoreEditingSession()
             }
         }
         
@@ -679,6 +703,9 @@ class BinauralViewModel @Inject constructor(
      * Начать редактирование существующего пресета
      */
     fun startEditingPreset(presetId: String) {
+        // Запоминаем цель редактирования: переживёт пересоздание ViewModel и
+        // позволит восстановить сессию, когда пресеты догрузятся.
+        savedStateHandle[KEY_EDITING_TARGET] = presetId
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val isActivePreset = _uiState.value.activePreset?.id == presetId
         
@@ -704,12 +731,15 @@ class BinauralViewModel @Inject constructor(
         if (isActivePreset) {
             playbackService?.updateFrequencyCurve(preset.frequencyCurve)
         }
+        // Цель отработана — для восстановления больше не нужна.
+        savedStateHandle.remove<String>(KEY_EDITING_TARGET)
     }
     
     /**
      * Начать создание нового пресета
      */
     fun startNewPreset() {
+        savedStateHandle[KEY_EDITING_TARGET] = EDITING_TARGET_NEW
         val defaultCurve = FrequencyCurve.defaultCurve()
         _uiState.update { 
             it.copy(
@@ -726,6 +756,8 @@ class BinauralViewModel @Inject constructor(
         pointIntent.seedFrom(defaultCurve.points)
         // Не обновляем кривую в сервисе при создании нового пресета
         // Воспроизведение продолжает использовать активный пресет
+        // Цель отработана — для восстановления больше не нужна.
+        savedStateHandle.remove<String>(KEY_EDITING_TARGET)
     }
     
     /**
@@ -734,6 +766,7 @@ class BinauralViewModel @Inject constructor(
     fun cancelEditing() {
         val activePreset = _uiState.value.activePreset
         pointIntent.clear()
+        savedStateHandle.remove<String>(KEY_EDITING_TARGET)
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
@@ -776,6 +809,7 @@ class BinauralViewModel @Inject constructor(
             )
         }
         // Не восстанавливаем кривую в сервисе - новые данные загрузятся через Flow
+        savedStateHandle.remove<String>(KEY_EDITING_TARGET)
     }
     
     /**
@@ -785,6 +819,46 @@ class BinauralViewModel @Inject constructor(
     fun finishEditingWithoutClear() {
         // Ничего не делаем - состояние очистится при следующем редактировании
         // или при входе в другой экран редактирования через startEditingPreset/startNewPreset
+    }
+
+    /**
+     * Восстанавливает сессию редактирования после пересоздания ViewModel
+     * (сворачивание приложения, блокировка/разблокировка экрана, смерть
+     * процесса). В этих случаях [editingFrequencyCurve] теряется, а
+     * [startEditingPreset]/[startNewPreset], вызванные из `LaunchedEffect`
+     * экрана, могут отработать впустую, пока пресеты ещё не догрузились из
+     * хранилища (список пуст → пресет не найден → ранний выход). Цель
+     * редактирования сохранена в [SavedStateHandle], поэтому здесь, как только
+     * список пресетов появляется, сессия пересоздаётся и виджет графика
+     * редактирования снова показывается.
+     *
+     * Вызывается из коллектора `getPresets()` — то есть срабатывает каждый раз,
+     * когда пресеты (пере)загружаются, в том числе сразу после пересоздания
+     * ViewModel.
+     */
+    private fun maybeRestoreEditingSession() {
+        val target = savedStateHandle.get<String>(KEY_EDITING_TARGET) ?: return
+        // Сессия уже восстановлена (или редактирование активно) — цель больше не нужна.
+        if (_uiState.value.editingFrequencyCurve != null) {
+            savedStateHandle.remove<String>(KEY_EDITING_TARGET)
+            return
+        }
+        if (target == EDITING_TARGET_NEW) {
+            startNewPreset()
+            savedStateHandle.remove<String>(KEY_EDITING_TARGET)
+            return
+        }
+        // Существующий пресет: если список уже непустой, а пресета в нём нет —
+        // значит, он удалён, сессия невозможна, сдаёмся.
+        val presets = _uiState.value.presets
+        if (presets.isNotEmpty() && presets.none { it.id == target }) {
+            savedStateHandle.remove<String>(KEY_EDITING_TARGET)
+            return
+        }
+        startEditingPreset(target)
+        if (_uiState.value.editingFrequencyCurve != null) {
+            savedStateHandle.remove<String>(KEY_EDITING_TARGET)
+        }
     }
     
     /**
@@ -882,10 +956,26 @@ class BinauralViewModel @Inject constructor(
         }
 
         val state = _uiState.value
-        
+
         if (_telemetry.value.isPlaying) {
-            // Плавная остановка с затуханием
-            playbackService?.stopWithFade()
+            // ПЛАВНАЯ ПАУЗА (soft-pause), а НЕ полная остановка.
+            //
+            // stopWithFade() утилизирует поток: следующий старт пересоздаёт
+            // его заново (сотни миллисекунд тишины на подготовку). Мягкая
+            // пауза лишь замораживает живой трек — звук снимается рампой, а
+            // ресурсы, фазы и уже посчитанный PCM остаются.
+            //
+            // СЕМАНТИКА (важно): пауза НЕ «сохраняет место в треке», как у
+            // музыкального плеера. СУТЬ ПРИЛОЖЕНИЯ — звук для ТЕКУЩЕГО момента
+            // суток, поэтому возобновление играет ритм для «сейчас»:
+            // замороженный пакет переиспользуется (с пропуском устаревшей
+            // головы), только если текущий момент ещё внутри сгенерированного
+            // окна, иначе поток пересобирается с якорем на now — см.
+            // docs/analysis_resume_from_0_position.md.
+            //
+            // Полный стоп остаётся за уведомлением/headset-разрывом/сменой
+            // пресета.
+            playbackService?.pauseWithFade()
         } else {
             // Если есть активный пресет - обновляем конфиг и продолжаем воспроизведение
             if (state.activePreset != null) {

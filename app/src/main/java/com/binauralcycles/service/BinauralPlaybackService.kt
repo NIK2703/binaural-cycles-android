@@ -1194,6 +1194,25 @@ class BinauralPlaybackService : Service() {
      * (отладочный командный интерфейс). null, пока движок не создан.
      */
     fun managerState(): ManagerState? = audioEngine?.managerState?.value
+
+    /** СЛЫШИМАЯ позиция кривой (секунды суток) — для диагностики (debug-CLI `audible`). */
+    fun audibleTimeOfDaySeconds(): Int = audioEngine?.getAudibleTimeOfDaySeconds() ?: 0
+
+    /**
+     * СЛЫШИМАЯ позиция БЕЗ компенсации пропуска — РЕАЛЬНОЕ то, что звучит
+     * сейчас (debug-CLI `audibleraw`). Отличается от [audibleTimeOfDaySeconds]
+     * на величину переходной задержки кольца трека после мягкого возобновления.
+     */
+    fun audibleTimeOfDaySecondsRaw(): Int = audioEngine?.getAudibleTimeOfDaySecondsRaw() ?: 0
+
+    /** Последний снимок решателя возобновления (debug-CLI `resumesnap`). */
+    fun resumeAccuracyReport(): String? = audioEngine?.getResumeAccuracyReport()
+
+    /**
+     * ФРОНТИР ГЕНЕРАЦИИ (секунды суток) — для диагностики (debug-CLI `audible`):
+     * конец уже посчитанного аудио, правая граница окна актуальности пакета.
+     */
+    fun frontierTimeOfDaySeconds(): Int = audioEngine?.getFrontierTimeOfDaySeconds() ?: 0
     
     fun setCurrentPresetName(name: String?) {
         _currentPresetName.value = name

@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
+import com.binaural.core.ui.theme.LocalAccentColors
 import com.binauralcycles.ui.components.MiniFrequencyGraph
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
@@ -90,6 +91,10 @@ fun PresetListScreen(
             )
         },
         floatingActionButton = {
+            // Кнопка создания — единственный элемент, который НЕ приглушён:
+            // акцент берётся из схемы до обесцвечивания, поэтому на сером фоне
+            // списка она читается как цветовое пятно, а не сливается с карточками.
+            val accent = LocalAccentColors.current
             FloatingActionButton(
                 onClick = {
                     if (canNavigate()) {
@@ -97,7 +102,8 @@ fun PresetListScreen(
                         onCreatePreset()
                     }
                 },
-                containerColor = MaterialTheme.colorScheme.primaryContainer
+                containerColor = accent.container,
+                contentColor = accent.content
             ) {
                 Icon(Icons.Default.Add, contentDescription = stringResource(R.string.add_preset))
             }

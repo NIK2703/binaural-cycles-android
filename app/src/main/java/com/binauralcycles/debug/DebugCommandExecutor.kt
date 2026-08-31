@@ -89,6 +89,9 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "resume" -> resume()
             "toggle" -> togglePlayback()
             "state" -> managerState()
+            "audible" -> audibleTime()
+            "audibleraw" -> audibleRawTime()
+            "resumesnap" -> resumeSnapshot()
             "preset" -> selectPreset(arg)
             "next" -> stepPreset(+1)
             "prev" -> stepPreset(-1)
@@ -158,6 +161,72 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
     private fun managerState(): String {
         val s = service ?: return "Сервис не запущен"
         return "state=${s.managerState()} playing=${BinauralPlaybackService.isPlaying.value}"
+    }
+
+    /** СЛЫШИМАЯ позиция кривой (секунды суток) — для проверки, что пауза/продолжение
+     *  не сбрасывают отметку времени в 0:00, и что возобновление играет ритм
+     *  для ТЕКУЩЕГО момента суток (см. docs/analysis_resume_from_0_position.md).
+     *
+     *  Печатает три величины:
+     *    audible  — где звук реально остановился (левая граница окна);
+     *    frontier — конец уже сгенерированного аудио (правая граница окна);
+     *    now      — реальный текущий момент суток.
+     *  После возобновления audible (через R секунд кольца трека) и now обязаны
+     *  сойтись — именно это и есть суть приложения. */
+    private fun audibleTime(): String {
+        val s = service ?: return "Сервис не запущен"
+        val audible = s.audibleTimeOfDaySeconds()
+        val frontier = s.frontierTimeOfDaySeconds()
+        val now = runCatching {
+            // java.time: текущее локальное время с дробной долей секунды
+            // (minSdk 26 — приложение уже на нём).
+            val nowLdt = java.time.LocalDateTime.now()
+            nowLdt.toLocalTime().toSecondOfDay().toDouble() +
+                nowLdt.toLocalTime().nano / 1_000_000_000.0
+        }.getOrElse { 0.0 }
+        return "audible=${audible}s (${LocalTime.fromSecondOfDay(audible.coerceIn(0, 86399))}) " +
+            "frontier=${frontier}s now=${"%05.2f".format(now)}s"
+    }
+
+    /**
+     * СЛЫШИМАЯ позиция БЕЗ компенсации пропуска — РЕАЛЬНОЕ то, что звучит сейчас.
+     *
+     * Отличается от `audible` ровно на переходную задержку кольца трека. На
+     * нестареющем пути возобновления (пакет переиспользуется с пропуском Δ·rate
+     * кадров) `audible` сразу равен `now` (компенсация skippedFrames), а эта
+     * команда показывает подлинную слышимую позицию, которая отстаёт от `now`
+     * на Δ (длительность паузы) до тех пор, пока замороженное кольцо трека не
+     * доиграет свой хвост. Разница `now − audibleraw` и есть измерение точности
+     * привязки к текущему моменту суток (см. docs/analysis_resume_from_0_position.md).
+     */
+    private fun audibleRawTime(): String {
+        val s = service ?: return "Сервис не запущен"
+        val raw = s.audibleTimeOfDaySecondsRaw()
+        val frontier = s.frontierTimeOfDaySeconds()
+        val now = runCatching {
+            val nowLdt = java.time.LocalDateTime.now()
+            nowLdt.toLocalTime().toSecondOfDay().toDouble() +
+                nowLdt.toLocalTime().nano / 1_000_000_000.0
+        }.getOrElse { 0.0 }
+        // Нормализованная разница круглых суток: сколько слышимая отстаёт от now.
+        val d = now - raw
+        val lag = if (d < 0) d + 86400.0 else d
+        return "audibleraw=${raw}s (${LocalTime.fromSecondOfDay(raw.coerceIn(0, 86399))}) " +
+            "frontier=${frontier}s now=${"%05.2f".format(now)}s " +
+            "lag(now-raw)=${"%.2f".format(lag)}s"
+    }
+
+    /**
+     * Снимок решателя последнего возобновления из PAUSED: какой путь выбран
+     * (SOFT — мягкое продолжение нестареющего пакета, или REBUILD_* —
+     * пересборка), окно актуальности lead = F0 − A0, Δ паузы, пропущенные
+     * кадры и точность квантования. Без аргументов печатает последний снимок;
+     * после каждого pause→resume снимок обновляется.
+     */
+    private fun resumeSnapshot(): String {
+        val s = service ?: return "Сервис не запущен"
+        return s.resumeAccuracyReport()
+            ?: "Нет снимка — сделайте pause, затем resume, и повторите `resumesnap`"
     }
 
     private fun togglePlayback(): String =

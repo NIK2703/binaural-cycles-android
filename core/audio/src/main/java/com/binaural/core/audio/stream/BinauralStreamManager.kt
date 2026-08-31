@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.PowerManager
 import android.util.Log
+import com.binaural.core.audio.BuildConfig
 import com.binaural.core.audio.engine.NativeAudioEngine
 
 import com.binaural.core.audio.model.SampleRate
@@ -182,7 +183,51 @@ class BinauralStreamManager(private val context: Context) {
     private var accumulatedMs = 0L
     private var segmentStartWallMs = 0L
     private var pausedElapsedSeconds = 0
+    /**
+     * СЛЫШИМАЯ позиция кривой на момент заморозки (A0), целые секунды.
+     * Только для диагностики и как запасной ответ UI-геттера, когда живого
+     * потока уже нет; точкой возобновления она НЕ является (см. ниже).
+     */
     private var pausedTimeOfDay = 0
+
+    /**
+     * Точные координаты замороженного пакета на кривой времени суток.
+     *
+     *   A0 = [pausedAudibleSeconds] — где звук реально остановился (голова
+     *        трека минус недописанный хвост);
+     *   F0 = [pausedFrontierSeconds] — фронтир генерации, конец уже
+     *        посчитанного аудио.
+     *
+     * Обе сняты в момент заморозки и обе НЕ двигаются, пока поток на паузе:
+     * генерация стоит (писатель припаркован), голова трека стоит.
+     *
+     * Зачем обе. СУТЬ ПРИЛОЖЕНИЯ — звук для ТЕКУЩЕГО момента суток, поэтому
+     * «продолжить с A0» само по себе НЕПРАВИЛЬНО (это была ошибка прошлого
+     * фикса). Правильный вопрос другой: успело ли сгенерированное аудио
+     * устареть? Пока `now` внутри [A0, F0], звук для него уже посчитан —
+     * пакет переиспользуется с пропуском головы; вышел за F0 — пакет
+     * пересобирается. Разница A0/F0 и есть окно актуальности.
+     *
+     * Дробные секунды, а не целые: целые округляют A0 вниз и дают лишний
+     * кадр пропуска на каждом возобновлении.
+     */
+    private var pausedAudibleSeconds = 0f
+    private var pausedFrontierSeconds = 0f
+
+    /**
+     * Диагностика точности возобновления (только debug-сборка).
+     *
+     * После каждого возобновления из PAUSED сюда ложится развёрнутый снимок
+     * решателя: какое `now` взял резолвер, окно актуальности пакета
+     * (lead = F0 − A0), Δ паузы, сколько кадров выброшено и КАКОЙ путь
+     * выбран — мягкое продолжение (SOFT) или пересборка (REBUILD). Читается
+     * debug-CLI `resumesnap`. Позволяет отделить точность «привязки к сейчас»
+     * (она задаётся пропуском Δ·rate кадров) от переходной задержки кольца
+     * трека, которую прячет компенсированный `audible` (см.
+     * docs/analysis_resume_from_0_position.md, разбор точности).
+     */
+    @Volatile
+    private var lastResumeAccuracy: String? = null
 
     // Непрерывность при сквозном переключении сегментов: точка кривой времени
     // (секунды суток), с которой стартует СЛЕДУЮЩИЙ поток, и пройденное
@@ -404,6 +449,40 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>? = currentRef.get()?.getFrequenciesAtCurrentTime()
+
+    /**
+     * ФРОНТИР ГЕНЕРАЦИИ (секунды суток) живого потока: конец уже посчитанного
+     * аудио. Правая граница окна [audible, frontier], внутри которого
+     * замороженный пакет ещё актуален. Только для диагностики (debug-CLI).
+     */
+    fun getFrontierTimeOfDaySeconds(): Int = currentRef.get()?.frontierCurveSeconds()?.toInt() ?: 0
+
+    /**
+     * СЛЫШИМАЯ позиция кривой (секунды суток) живого потока, либо замороженная
+     * слышимая точка на паузе.
+     *
+     * ТОЛЬКО диагностика (debug-CLI `audible`). Точкой возобновления это
+     * значение НЕ является: возобновление играет ритм для текущего момента
+     * суток (см. docs/analysis_resume_from_0_position.md).
+     */
+    fun getAudibleTimeOfDaySeconds(): Int = currentRef.get()?.getAudibleTimeOfDaySeconds()
+        ?: if (pausedTimeOfDay > 0) pausedTimeOfDay else 0
+
+    /**
+     * СЛЫШИМАЯ позиция кривой БЕЗ компенсации пропуска — РЕАЛЬНОЕ то, что
+     * звучит в динамике прямо сейчас (см. [BinauralStreamImpl.audibleCurveSecondsRaw]).
+     * Отличается от [getAudibleTimeOfDaySeconds] на величину переходной задержки
+     * кольца трека после мягкого возобновления: на нестареющем пути первая на
+     * Δ (длительность паузы) отстаёт от `now`, вторая — уже `now`.
+     */
+    fun getAudibleTimeOfDaySecondsRaw(): Int {
+        val raw = currentRef.get()?.audibleCurveSecondsRaw() ?: return 0
+        val v = raw.toInt()
+        return ((v % 86400) + 86400) % 86400
+    }
+
+    /** Последний снимок решателя возобновления (debug-CLI `resumesnap`). */
+    fun getResumeAccuracyReport(): String? = lastResumeAccuracy
 
     // ---------------- Debug virtual time ----------------
 
@@ -661,8 +740,14 @@ class BinauralStreamManager(private val context: Context) {
                     else -> playSpec
                 }
                 if (finalSpec != null) {
-                    // play(), пришедший во время фейд-аута: старт строго после него
-                    StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> play пришёл во время фейда, старт spec#${finalSpec.serial}")
+                    // play(), пришедший во время фейд-аута: старт строго после него.
+                    //
+                    // Никакой подстановки saved-позиции: прерванный стоп — это
+                    // тот же свежий старт, звук обязан соответствовать текущему
+                    // моменту суток. Якорь поставит prepare()
+                    // (resumeCurveTimeSeconds = -1 → engine.getCurrentTimeOfDay()).
+                    StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> play пришёл во время фейда, " +
+                        "свежий старт spec#${finalSpec.serial} от текущего времени суток")
                     sessionSpec = finalSpec
                     launchSpec(finalSpec)
                 } else {
@@ -741,6 +826,11 @@ class BinauralStreamManager(private val context: Context) {
             ManagerState.RUNNING, ManagerState.FADE_IN -> {
                 queue.clear()
                 pendingPlaySpec = null
+                // Никакого capturePauseMetrics(): жёсткий стоп не возобновляется
+                // из PAUSED, а следующий старт (в т.ч. play, пришедший во время
+                // фейд-аута) якорится на текущий момент суток сам — см.
+                // docs/analysis_resume_from_0_position.md. Снимок позиции нужен
+                // только мягкой паузе: там он задаёт окно актуальности пакета.
                 fadeOutCurrent(FadeTarget.STOP)
             }
             ManagerState.HANDOFF -> {
@@ -856,15 +946,14 @@ class BinauralStreamManager(private val context: Context) {
             if (live?.spec?.audioEquals(queued) != true) pausedSpecDirty = true
         }
         // Позиция снималась в capturePauseMetrics() ДО фейд-аута: за время рампы
-        // трек доигрывал, поэтому переснимаем по факту заморозки — иначе путь
-        // через пересборку потока отстал бы на длительность фейда.
-        live?.let {
-            pausedElapsedSeconds = it.getElapsedSeconds()
-            pausedTimeOfDay = it.getAudibleTimeOfDaySeconds()
-        }
+        // трек доигрывал, поэтому переснимаем по факту заморозки — иначе окно
+        // актуальности [A0, F0] было бы сдвинуто назад на длительность фейда.
+        capturePauseMetrics()
         setState(ManagerState.PAUSED)
         StreamLogger.d(TAG, "onPausedFully: PAUSED, поток жив spec#${live?.spec?.serial} " +
-            "(accumulatedMs=$accumulatedMs, dirty=$pausedSpecDirty)")
+            "(A0=$pausedAudibleSeconds F0=$pausedFrontierSeconds, " +
+            "окно=${normalizeTimeOfDay(pausedFrontierSeconds - pausedAudibleSeconds)}s, " +
+            "accumulatedMs=$accumulatedMs, dirty=$pausedSpecDirty)")
         updateWakeLock()
         if (pendingResume) {
             pendingResume = false
@@ -898,8 +987,19 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     /**
-     * Возобновление из PAUSED: мягкое (тот же поток и тот же пакет) либо —
-     * если за паузу менялись настройки — через новый поток с той же позиции.
+     * Возобновление из PAUSED.
+     *
+     * СУТЬ ПРИЛОЖЕНИЯ: возобновление играет ритм для ТЕКУЩЕГО момента суток,
+     * а не «продолжает с запомненной отметки». Но из этого НЕ следует, что
+     * замороженный пакет надо выбрасывать при любой паузе: он устаревает
+     * только когда текущий момент выходит за фронтир генерации.
+     *
+     * Три ветки:
+     *  - настройки менялись на паузе → пересборка потока (звучал бы старый
+     *    конфиг);
+     *  - `now` внутри [A0, F0] → мягкое продолжение того же потока с
+     *    пропуском Δ = now − A0 кадров из пакета;
+     *  - `now` за F0 → пакет устарел, пересборка потока.
      */
     private fun onResumeFromPaused() {
         if (resumeInFlight) {
@@ -910,26 +1010,132 @@ class BinauralStreamManager(private val context: Context) {
             return
         }
         if (pausedSpecDirty) {
+            captureResumeAccuracy("REBUILD_DIRTY", null, null, null)
             StreamLogger.d(TAG, "onResumeFromPaused: настройки менялись на паузе — новый поток")
             resumeFromPaused()
+            return
+        }
+        val s = current
+        if (s == null || !s.isPaused) {
+            // Замороженного потока нет — мягкое продолжение невозможно.
+            captureResumeAccuracy("REBUILD_NO_STREAM", null, null, null)
+            StreamLogger.d(TAG, "onResumeFromPaused: нет замороженного потока — пересборка")
+            resumeFromPaused()
+            return
+        }
+        // A0/F0 заморожены (пока поток на паузе генерация стоит и голова трека
+        // стоит), поэтому сравнивать можно в любой момент. Если их вообще не
+        // снимали (пауза без живого трека), окна нет — пересборка надёжнее,
+        // чем пропуск по нулям.
+        val a0 = pausedAudibleSeconds
+        val f0 = pausedFrontierSeconds
+        if (f0 <= 0f) {
+            captureResumeAccuracy("REBUILD_NO_FRONTIER", null, null, null)
+            StreamLogger.d(TAG, "onResumeFromPaused: фронтир не снят — пересборка")
+            resumeFromPaused()
+            return
+        }
+        val now = targetTimeOfDaySeconds()
+        val delta = normalizeTimeOfDay(now - a0)
+        val window = normalizeTimeOfDay(f0 - a0)
+        if (delta <= window) {
+            captureResumeAccuracy(
+                "SOFT", delta, window,
+                (delta * sampleRate.value).toLong()
+            )
+            StreamLogger.d(TAG, "onResumeFromPaused: пакет актуален (now=$now A0=$a0 F0=$f0, " +
+                "Δ=${delta}s из окна ${window}s) — мягкое продолжение с пропуском")
+            resumePausedStream(skipSeconds = delta)
         } else {
-            resumePausedStream()
+            captureResumeAccuracy("REBUILD_STALE", delta, window, null)
+            StreamLogger.d(TAG, "onResumeFromPaused: пакет устарел (now=$now A0=$a0 F0=$f0, " +
+                "Δ=${delta}s > окна ${window}s) — пересборка потока")
+            resumeFromPaused()
         }
     }
 
     /**
-     * Мягкое возобновление: тот же поток продолжает с сохранённого сэмпла.
-     * Пакет не перегенерируется, позиция на кривой не двигается, фазы не
-     * сбрасываются — звук продолжается ровно там, где был остановлен.
+     * Снять снимок решателя возобновления для debug-CLI `resumesnap`.
+     *
+     * Только debug-сборка ([BuildConfig.DEBUG]): в release поле никто не читает,
+     * а R8 вырезает и вызов, и тело. Фиксирует, КАКОЙ путь выбрал резолвер и
+     * с какими числами — это и есть материал для оценки точности привязки к
+     * текущему моменту (см. docs/analysis_resume_from_0_position.md).
+     *
+     * @param resolution  SOFT — мягкое продолжение нестареющего пакета;
+     *                    REBUILD_* — пересборка (устарел / грязная спека / нет
+     *                    потока / не снят фронтир).
+     * @param delta       Δ = now − A0 (длительность паузы, сек), либо null.
+     * @param windowSec   окно актуальности lead = F0 − A0 (сек), либо null.
+     * @param skipFrames  сколько кадров выброшено пропуском Δ·rate, либо null.
      */
-    private fun resumePausedStream() {
+    private fun captureResumeAccuracy(
+        resolution: String,
+        delta: Float?,
+        windowSec: Float?,
+        skipFrames: Long?
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val now = targetTimeOfDaySeconds()
+        val sr = sampleRate.value
+        lastResumeAccuracy = buildString {
+            append("resolution=$resolution\n")
+            append("now=${"%05.2f".format(now)}s\n")
+            append("A0=$pausedAudibleSeconds F0=$pausedFrontierSeconds\n")
+            if (delta != null && windowSec != null) {
+                append("Δ(pause)=$delta window(lead)=$windowSec\n")
+                // Точность пропуска: квантование кадра даёт ошибку ≤ 1/SR.
+                val frameErr = 1.0f / sr
+                append("skipFrames=$skipFrames (${"%.1f".format(delta * sr)} ожидалось)\n")
+                append("quantizationError≤${"%.3f".format(frameErr)}s @${sr}Гц\n")
+                // Переходная задержка до сходимости = длина замороженного кольца
+                // трека = lead (window). За это время СЛЫШИМАЯ (raw) отстаёт от
+                // now ровно на Δ, затем сходится. Компенсированный `audible`
+                // уже равен now и эту задержку прячет.
+                append("transientLagUntilConverge≈${windowSec}s (raw audible lags now by Δ=$delta)\n")
+            } else {
+                append("Δ/окно: — (пересборка, звук стартует с текущего момента суток)\n")
+            }
+            append("at=${System.currentTimeMillis()}")
+        }
+    }
+
+    /**
+     * Текущий момент суток, к которому обязан быть привязан звук.
+     *
+     * В debug-виртуальном времени носитель времени — сам движок (часы идут с
+     * масштабом и могут быть перемотаны), поэтому настенные часы там не
+     * источник истины; в обычном режиме это [realTimeOfDaySeconds].
+     */
+    private fun targetTimeOfDaySeconds(): Float {
+        if (!debugVirtualTime) return realTimeOfDaySeconds()
+        val virtual = current?.virtualTimeOfDaySeconds() ?: 0f
+        return if (virtual > 0f) virtual else realTimeOfDaySeconds()
+    }
+
+    /**
+     * Мягкое возобновление: тот же поток и тот же пакет, но с пропуском
+     * устаревшей головы.
+     *
+     * Пакет не перегенерируется, фазы не сбрасываются. Единственное, что
+     * меняется, — смещение чтения: писатель выбрасывает первые
+     * [skipSeconds]·rate кадров, потому что они соответствуют уже прошедшему
+     * времени суток. Слышимый звук догоняет текущий момент через R секунд
+     * (кольцо трека доигрывает старый хвост) — на 24-часовой кривой дрейф
+     * частоты за это время пренебрежим.
+     *
+     * @param skipSeconds Δ = now − A0; 0 — пакет не успел устареть, продолжаем
+     *        ровно с того же сэмпла.
+     */
+    private fun resumePausedStream(skipSeconds: Float) {
         val s = current
         if (s == null || !s.isPaused) {
             StreamLogger.w(TAG, "resumePausedStream: поток непригоден (null=${s == null}) — пересоздание")
             resumeFromPaused()
             return
         }
-        StreamLogger.d(TAG, "resumePausedStream: spec#${s.spec.serial} — мягкое продолжение (буфер сохранён)")
+        StreamLogger.d(TAG, "resumePausedStream: spec#${s.spec.serial} — мягкое продолжение " +
+            "(буфер сохранён, пропуск ${skipSeconds}s)")
         // Часы сессии: нативный elapsed идёт по wall-clock, поэтому якорь
         // переставляется — иначе в elapsed попала бы вся длительность паузы.
         s.setPlaybackStartTime(System.currentTimeMillis() - accumulatedMs)
@@ -938,12 +1144,18 @@ class BinauralStreamManager(private val context: Context) {
         _isPlaying.value = true
         updateWakeLock()
         s.setVolume(volume)
-        if (!s.resume(onFullyStarted = {
+        // Якорь UI — текущий момент суток, а не слышимая позиция по голове
+        // трека: та ещё R секунд показывает старую точку, пока кольцо доигрывает
+        // остаток. Ставим ДО старта записи, чтобы индикатор не мигнул назад.
+        if (skipSeconds > 0f) {
+            s.reanchorUiTimeline(targetTimeOfDaySeconds())
+        }
+        if (!s.resume(skipSeconds = skipSeconds, onFullyStarted = {
                 if (state == ManagerState.FADE_IN) setState(ManagerState.RUNNING)
             })
         ) {
-            // Трек не поддался (например, HAL отобрал устройство) — продолжаем
-            // новым потоком с той же слышимой позиции.
+            // Трек не поддался (например, HAL отобрал устройство) — поднимаем
+            // новый поток. Позицию он возьмёт сам: текущий момент суток.
             StreamLogger.e(TAG, "resumePausedStream: возобновление не удалось — пересоздание")
             // Тот же инвариант: сначала полный релиз (пакет + трек), потом новый
             // поток. Здесь current может быть уже null — тогда колбэк сработает
@@ -987,12 +1199,17 @@ class BinauralStreamManager(private val context: Context) {
                 volume = volume,
                 reason = SpecReason.RESUME,
                 resumeAnchorMs = System.currentTimeMillis() - accumulatedMs,
-                resumeElapsedMs = accumulatedMs,
-                // ФИКС 3. Возобновляем с того же времени суток по кривой — частота и
-                // фаза продолжаются без скачка (как при сквозном переключении).
-                // pausedTimeOfDay — СЛЫШИМАЯ позиция (по голове воспроизведения),
-                // а не значение UI-часов: точка продолжения совпадает с графиком.
-                resumeCurveTimeSeconds = pausedTimeOfDay
+                resumeElapsedMs = accumulatedMs
+                // resumeCurveTimeSeconds ОСТАЁТСЯ -1 — сознательно.
+                //
+                // СУТЬ ПРИЛОЖЕНИЯ: возобновление играет ритм для ТЕКУЩЕГО
+                // момента суток. Подставлять сюда pausedTimeOfDay (как делал
+                // предыдущий фикс) — значит превратить паузу в «перемотку
+                // назад»: после десятиминутной паузы звук продолжал бы с
+                // десятиминутной давности точки кривой. prepare() при
+                // resumeCurveTimeSeconds = -1 якорит кривую на now явно.
+                // Часы сессии при этом продолжаются (resumeElapsedMs =
+                // accumulatedMs): пауза в elapsed не идёт.
             )
             sessionSpec = spec
             launchSpec(spec)
@@ -1033,12 +1250,23 @@ class BinauralStreamManager(private val context: Context) {
         }
     }
 
+    /**
+     * Снять координаты замороженного пакета (A0/F0) и часы сессии.
+     *
+     * A0 и F0 — границы окна актуальности: пока текущий момент суток внутри
+     * [A0, F0], звук для него уже сгенерирован. Снимаются и ДО фейд-аута
+     * (здесь), и ПО ФАКТУ заморозки ([onPausedFully]) — за время рампы трек
+     * доигрывает, и снимок, сделанный до неё, отстал бы на длительность фейда.
+     */
     private fun capturePauseMetrics() {
         current?.let {
             pausedElapsedSeconds = it.getElapsedSeconds()
-            // СЛЫШИМАЯ позиция: точка возобновления обязана совпасть с тем
-            // местом графика, где звук реально остановился.
+            // СЛЫШИМАЯ позиция: где звук реально остановился (голова трека
+            // минус недописанный хвост), а не UI-часы и не фронтир генерации.
+            val audible = it.audibleCurveSeconds()
+            pausedAudibleSeconds = audible ?: pausedTimeOfDay.toFloat()
             pausedTimeOfDay = it.getAudibleTimeOfDaySeconds()
+            pausedFrontierSeconds = it.frontierCurveSeconds()
         }
     }
 
@@ -1308,11 +1536,14 @@ class BinauralStreamManager(private val context: Context) {
         segmentStartWallMs = 0L
         pausedElapsedSeconds = 0
         pausedTimeOfDay = 0
+        pausedAudibleSeconds = 0f
+        pausedFrontierSeconds = 0f
         pausedSpecDirty = false
         pendingResume = false
         pendingPlaySpec = null
         pendingHandoff = false
         resumeInFlight = false
+        lastResumeAccuracy = null
         resetContinuity()
     }
 }

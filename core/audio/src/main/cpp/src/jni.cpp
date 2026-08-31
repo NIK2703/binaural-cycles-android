@@ -291,6 +291,22 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetCurveTime(
 }
 
 /**
+ * Фронтир генерации: конец уже сгенерированного аудио (секунды суток).
+ * Вторая координата решателя «устарел ли замороженный пакет» (первая —
+ * computeAudibleTimeSeconds). Разница между ними = недослушанный хвост.
+ */
+JNIEXPORT jfloat JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeGetCurveTimeSeconds(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle
+) {
+    auto* engine = engineFromHandle(handle);
+    if (!engine) return 0.0f;
+    return static_cast<jfloat>(engine->getCurveTimeSeconds());
+}
+
+/**
  * Слышимая позиция кривой: фронтир генерации минус ещё не проигранный остаток.
  * Единственная точка, где ось AudioTrack (кадры) встречается с осью кривой
  * (секунды суток) — по ней пауза фиксирует место возобновления.

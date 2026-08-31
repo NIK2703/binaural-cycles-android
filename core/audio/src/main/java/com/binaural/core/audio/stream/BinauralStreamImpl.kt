@@ -152,6 +152,18 @@ class BinauralStreamImpl(
         private const val SECONDS_PER_DAY = 86400
 
         /**
+         * Сколько пакетов подряд писатель вправе «добирать» пропуск
+         * устаревшего PCM (см. [pendingSkipFrames]).
+         *
+         * Пропуск ограничен окном уже сгенерированного аудио (решатель
+         * возобновления пускает его, только когда `now` внутри [A0, F0]), то
+         * есть заведомо меньше одного полного пакета. Двух пакетов хватает с
+         * запасом; третий виток означал бы ошибку в расчёте Δ — тогда пропуск
+         * сбрасываем и логируем, а не крутимся вечно.
+         */
+        private const val MAX_SKIP_ROUNDS = 2
+
+        /**
          * Потолок пакета, подменяемый НА ХОДУ (debug-команда `packetmax`).
          *
          * Состояние живёт в [PacketMemoryBudget.setPacketMaxBytes], здесь
@@ -420,6 +432,26 @@ class BinauralStreamImpl(
      */
     @Volatile private var generatedFrames = 0L
 
+    /**
+     * Сколько кадров писатель обязан ВЫБРОСИТЬ из пакета при возобновлении.
+     *
+     * СУТЬ ПРИЛОЖЕНИЯ: звук обязан соответствовать ТЕКУЩЕМУ моменту суток.
+     * Замороженный пакет покрывает отрезок кривой [A0, F0]; за паузу реальное
+     * время ушло на Δ вперёд, и первые Δ·rate кадров пакета уже соответствуют
+     * прошлому — их надо выбросить, чтобы звук начался с `now`, а не с A0.
+     *
+     * Пишет нить управления ([resume]), читает писатель.
+     */
+    private val pendingSkipFrames = AtomicLong(0)
+
+    /**
+     * Накопленные выброшенные кадры (сколько PCM этого пакета мы прошли
+     * впустую). Участвуют в расчёте СЛЫШИМОЙ позиции: недоигранный остаток
+     * пакета уменьшается ровно на столько, сколько выкинуто, иначе audible
+     * отставал бы от продвинутого фронтира на величину пропуска.
+     */
+    private val skippedFrames = AtomicLong(0)
+
     /** Монитор парковки писателя: parkWriter/wakeWriter. */
     private val parkLock = Object()
 
@@ -459,11 +491,33 @@ class BinauralStreamImpl(
                 engine.setPhases(rl, rr)
             }
 
-            if (spec.resumeCurveTimeSeconds >= 0) {
-                // Продолжение (пауза/handoff): позиция кривой задаётся явно,
-                // иначе свежий движок генерировал бы с 00:00.
-                engine.setCurveTime(spec.resumeCurveTimeSeconds)
+            // СУТЬ ПРИЛОЖЕНИЯ: звук обязан соответствовать ТЕКУЩЕМУ моменту
+            // времени суток. Якорь кривой задаётся ЯВНО всегда — и тем самым
+            // переживает resetState() и play().
+            //
+            // Явная позиция (resumeCurveTimeSeconds >= 0) — только сквозной
+            // хэндофф (смена пресета/SR/настроек), где разрыв недопустим.
+            // Во всех остальных случаях (свежий старт, возобновление после
+            // паузы) якорь = текущее время суток: пауза НЕ сохраняет позицию,
+            // возобновление играет ритм для «сейчас».
+            //
+            // Раньше свежий старт полагался на play() без preserveTimeline,
+            // который и сам якорит m_curveTimeSeconds на realTimeOfDaySeconds().
+            // Но между resetState() и play() есть окно, где нативный таймлайн
+            // стоит на 0; если в это окно успевал пересоздать поток хэндофф
+            // (стоп→play), звук рождался с 00:00 — ровно тот баг, с которого
+            // начался разбор (docs/analysis_resume_from_0_position.md).
+            // engine.getCurrentTimeOfDay() на свежем движке отдаёт реальное
+            // локальное время либо virtual-базу — то же значение, что взял бы
+            // сам play(); дублирование безвредно, зато гонки нет.
+            val curveTod = if (spec.resumeCurveTimeSeconds >= 0) {
+                spec.resumeCurveTimeSeconds
+            } else {
+                engine.getCurrentTimeOfDay()
             }
+            StreamLogger.d(TAG, "prepare spec#${spec.serial}: якорь кривой=$curveTod " +
+                "(явный=${spec.resumeCurveTimeSeconds >= 0})")
+            engine.setCurveTime(curveTod)
             if (spec.resumeAnchorMs > 0) {
                 engine.setPlaybackStartTime(spec.resumeAnchorMs)
                 engine.play(preserveTimeline = true)     // не переякоряет таймлайн
@@ -476,7 +530,7 @@ class BinauralStreamImpl(
                 engine.setPlaybackStartTime(System.currentTimeMillis() - spec.resumeElapsedMs)
                 engine.play(preserveTimeline = true)
             } else {
-                engine.play()                            // свежий старт от 00:00
+                engine.play()   // якорь уже задан выше: текущее время суток
             }
             nativeEngine = engine
 
@@ -1063,7 +1117,7 @@ class BinauralStreamImpl(
         onPaused()
     }
 
-    override fun resume(onFullyStarted: () -> Unit, shape: FadeShape): Boolean {
+    override fun resume(onFullyStarted: () -> Unit, shape: FadeShape, skipSeconds: Float): Boolean {
         if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
             StreamLogger.w(TAG, "resume spec#${spec.serial}: не PLAYING (lc=${lifecycleRef.get()})")
             return false
@@ -1075,10 +1129,36 @@ class BinauralStreamImpl(
         cancelFadeCallbacks()
         fadeMode = FadeMode.IN
 
-        // Позиция графика размораживается ДО play(): указатель продолжает ровно
-        // с замороженной слышимой точки и идёт по wall-clock до фронтира пакета.
+        // ПРОПУСК УСТАРЕВШЕГО PCM ставится ДО play(): писатель проснётся уже с
+        // заданием выбросить первые Δ·rate кадров пакета. Кадры, а не секунды —
+        // ось пакета дискретна, и дробный остаток иначе копился бы на каждом
+        // возобновлении.
+        val skipFrames = if (skipSeconds > 0f) {
+            (skipSeconds * spec.sampleRate.value).toLong()
+        } else {
+            0L
+        }
+        if (skipFrames > 0L) {
+            pendingSkipFrames.set(skipFrames)
+            StreamLogger.d(TAG, "resume spec#${spec.serial}: пропуск $skipFrames кадров " +
+                "(${skipSeconds}s) — звук продолжится с текущего момента суток")
+        }
+
+        // Позиция графика размораживается ДО play().
+        //
+        // Без пропуска указатель продолжает ровно с замороженной слышимой точки
+        // (пауза была мгновенной — аудио не успело устареть).
+        //
+        // С пропуском якорь — текущий момент суток: слышимое время, посчитанное
+        // по голове трека, ещё R секунд показывает СТАРУЮ точку (кольцо трека
+        // доигрывает остаток), и переякоривать UI на него означало бы показать
+        // пользователю заведомо отставший указатель. Менеджер ставит якорь сам
+        // ([reanchorUiTimeline]) по тому же `now`, по которому считал Δ, — так
+        // индикатор и реальный звук сходятся сразу, а не через R секунд.
         val audible = audibleCurveSeconds()
-        audible?.let { nativeEngine?.resumeUiTimelineFrom(it) }
+        if (skipFrames == 0L) {
+            audible?.let { nativeEngine?.resumeUiTimelineFrom(it) }
+        }
 
         // Порядок как при старте (фикс RC-1): рампа → play → писатель. Первый
         // кадр после play() уходит под нулевым множителем — сохранённый
@@ -1094,8 +1174,8 @@ class BinauralStreamImpl(
         paused = false
         wakeWriter()
 
-        StreamLogger.d(TAG, "resume spec#${spec.serial}: ПРОДОЛЖЕН с audible=$audible " +
-            "generatedFrames=$generatedFrames")
+        StreamLogger.d(TAG, "resume spec#${spec.serial}: ПРОДОЛЖЕН audible=$audible " +
+            "пропускКадров=$skipFrames generatedFrames=$generatedFrames")
         val completion = Runnable {
             if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
                 closeShaper()
@@ -1109,20 +1189,80 @@ class BinauralStreamImpl(
     }
 
     /**
+     * Переякорить UI-указатель графика на заданную позицию кривой.
+     *
+     * Вызывается менеджером сразу после [resume] с ненулевым пропуском: звук
+     * (после того как кольцо трека доиграет старый хвост) продолжается с
+     * текущего момента суток, и индикатор обязан показывать ту же точку, а не
+     * слышимое время по голове трека, которое ещё R секунд отстаёт.
+     */
+    fun reanchorUiTimeline(seconds: Float) {
+        nativeEngine?.resumeUiTimelineFrom(seconds)
+    }
+
+    /**
      * Слышимая позиция кривой (секунды суток) по позиции головы воспроизведения.
      *
      * Это мост между осью AudioTrack (кадры) и осью кривой (секунды суток).
      * UI-экстраполяция для этой цели не годится: она ограничена концом
      * сгенерированного пакета и обновляется только по опросу, поэтому на
      * паузе (когда опрос остановлен) даёт устаревшее значение.
+     *
+     * Выброшенные при возобновлении кадры ([skippedFrames]) прибавляются к
+     * голове: они уже «проиграны» с точки зрения кривой (пройдены впустую),
+     * поэтому недоигранный остаток пакета уменьшается ровно на них. Без этого
+     * слышимая позиция отставала бы от продвинутого фронтира на весь пропуск.
      */
-    private fun audibleCurveSeconds(): Float? {
+    fun audibleCurveSeconds(): Float? {
+        val eng = nativeEngine ?: return null
+        val track = audioTrack ?: return null
+        val head = try { track.playbackHeadPosition } catch (_: Exception) { -1 }
+        if (head < 0) return null
+        return eng.getAudibleTimeSeconds(head.toLong() + skippedFrames.get(), generatedFrames)
+    }
+
+    /**
+     * ФРОНТИР ГЕНЕРАЦИИ (секунды суток): конец уже сгенерированного аудио.
+     *
+     * Правая граница окна актуальности замороженного пакета: пока текущий
+     * момент суток лежит внутри [audible, frontier], звук для него УЖЕ
+     * посчитан — его надо лишь дописать, выбросив устаревшую голову.
+     */
+    /**
+     * СЛЫШИМАЯ позиция кривой БЕЗ компенсации пропуска ([skippedFrames]).
+     *
+     * То же, что [audibleCurveSeconds], но НЕ прибавляет [skippedFrames] к
+     * голове. Это и есть РЕАЛЬНАЯ слышимая позиция — что прямо сейчас звучит
+     * в динамике, — в отличие от компенсированной, которая после пропуска
+     * мгновенно прыгает на `now` и поэтому СКРЫВАЕТ переходную задержку
+     * кольца трека. Нужна, чтобы измерять точность определения текущего
+     * момента при мягком возобновлении (см. docs/analysis_resume_from_0_position.md,
+     * разбор точности).
+     *
+     * На нестареющем пути (мягкое продолжение) после `resume(Δ)` компенсированная
+     * [audibleCurveSeconds] сразу равна `now`, а эта — отстаёт от `now` ровно на
+     * Δ (длительность паузы) на время доигрывания замороженного кольца трека,
+     * затем сходится. Разница между ними и есть точность «привязки к сейчас».
+     */
+    fun audibleCurveSecondsRaw(): Float? {
         val eng = nativeEngine ?: return null
         val track = audioTrack ?: return null
         val head = try { track.playbackHeadPosition } catch (_: Exception) { -1 }
         if (head < 0) return null
         return eng.getAudibleTimeSeconds(head.toLong(), generatedFrames)
     }
+
+    /** Накопленные выброшенные при возобновлении кадры — для диагностики точности. */
+    fun skippedFramesCount(): Long = skippedFrames.get()
+
+    fun frontierCurveSeconds(): Float = nativeEngine?.getCurveTimeSeconds() ?: 0f
+
+    /**
+     * Виртуальное время суток (только debug): носитель времени при включённых
+     * виртуальных часах — настенные часы там идут с масштабом и могут быть
+     * перемотаны. 0 — виртуальное время выключено либо release-сборка.
+     */
+    fun virtualTimeOfDaySeconds(): Float = nativeEngine?.debugGetVirtualTime()?.toFloat() ?: 0f
 
     override fun getAudibleTimeOfDaySeconds(): Int {
         val audible = audibleCurveSeconds()?.toInt() ?: getCurrentTimeOfDay()
@@ -1462,6 +1602,9 @@ class BinauralStreamImpl(
                 // ФИКС RC-1: если пакет уже записан в start() (прайминг), стартуем
                 // со смещения, чтобы не дублировать и не оставлять трек без данных.
                 var offset = if (preparedPrefilled) preparedPacketBytes else 0
+                // Счётчик пакетов, из которых добираем пропуск устаревшего PCM
+                // (защита от зацикливания — см. блок пропуска ниже).
+                var skipRounds = 0
 
                 // Верхняя граница чанка записи — инвариант подпитки.
                 // write(WRITE_BLOCKING) разблокируется, когда в кольце трека
@@ -1495,6 +1638,50 @@ class BinauralStreamImpl(
                         parkWriter()
                         continue
                     }
+                    // ПРОПУСК УСТАРЕВШЕГО PCM (возобновление после паузы).
+                    //
+                    // СУТЬ ПРИЛОЖЕНИЯ: звук обязан соответствовать ТЕКУЩЕМУ
+                    // моменту суток. Пакет считался от точки A0, где звук
+                    // встал на паузу; за паузу часы ушли на Δ, и первые
+                    // Δ·rate кадров пакета уже соответствуют прошлому.
+                    // Пересчитывать пакет ради этого незачем — аудио для
+                    // `now` в нём уже есть, нужно лишь пройти мимо головы.
+                    //
+                    // Здесь, а не в resume(): сдвигать [offset] вправе только
+                    // писатель (он единственный владелец пакета), а нить
+                    // управления лишь оставляет задание. Проверка стоит ДО
+                    // генерации, чтобы остаток, не поместившийся в текущий
+                    // пакет, добрался из следующего.
+                    val pending = pendingSkipFrames.get()
+                    if (pending > 0L) {
+                        val frame = frameBytes.toLong()
+                        val avail = ((packetBytes - offset) / frame).toLong()
+                        if (avail > 0) {
+                            val take = minOf(avail, pending)
+                            offset += (take * frame).toInt()
+                            skippedFrames.addAndGet(take)
+                            pendingSkipFrames.addAndGet(-take)
+                        }
+                        if (pendingSkipFrames.get() > 0L) {
+                            // Добираем из следующего пакета. Решатель
+                            // возобновления пускает пропуск, только когда Δ
+                            // внутри уже сгенерированного окна, то есть зазор
+                            // закрывается максимум за два пакета. Третий виток —
+                            // ошибка в расчёте Δ: сбрасываем и логируем, чтобы
+                            // писатель не крутился вечно.
+                            if (++skipRounds > MAX_SKIP_ROUNDS) {
+                                StreamLogger.e(TAG, "writerLoop spec#${spec.serial}: пропуск " +
+                                    "${pendingSkipFrames.get()} кадров не закрыт за " +
+                                    "$MAX_SKIP_ROUNDS пакета — сброс (звук продолжится с " +
+                                    "небольшим опережением)")
+                                pendingSkipFrames.set(0L)
+                            }
+                            continue
+                        }
+                        skipRounds = 0
+                        StreamLogger.d(TAG, "writerLoop spec#${spec.serial}: пропуск $pending " +
+                            "кадров применён (offset=$offset/$packetBytes)")
+                    }
                     if (offset >= packetBytes) {
                         // Дорастить буфер до полного интервала генерации. Здесь,
                         // а не в prepare(): на prepare() это десятки мегабайт на
@@ -1519,6 +1706,16 @@ class BinauralStreamImpl(
                         generatedFrames += generated.toLong()
                     }
                     val buf = directBuffer ?: break
+                    // Пауза прерывает track.write(WRITE_BLOCKING) посреди пакета и
+                    // оставляет буфер с позицией/лимитом под ту порцию, что писалась
+                    // в момент остановки, — лимит оказывается меньше текущего offset.
+                    // А возобновление сразу сдвигает offset на Δ·rate кадров пропуска,
+                    // и buf.position(offset) падал бы с IllegalArgumentException
+                    // ("Bad position …"), роняя весь процесс. Возвращаем буферу
+                    // полный вид (лимит = вместимость) перед повторной установкой
+                    // позиции — тот же инвариант, что держит ветка доращивания
+                    // (buf.clear() выше). Без этого SOFT-возобновление нежизнеспособно.
+                    buf.clear()
                     val chunk = minOf((packetBytes - offset).toLong(), maxChunkBytes).toInt()
                     buf.position(offset)
                     buf.limit(offset + chunk)
