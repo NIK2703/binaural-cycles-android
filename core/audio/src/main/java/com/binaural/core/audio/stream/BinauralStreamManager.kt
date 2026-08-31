@@ -41,24 +41,21 @@ class BinauralStreamManager(private val context: Context) {
         private const val WAKE_LOCK_TAG = "BinauralBeats:StreamManager"
         private const val POWER_SAVE_MULTIPLIER = 3
         /**
-         * Границы интервала генерации (длины пакета) — пользовательская
-         * настройка. Верхняя = 600 с (10 мин): это потолок, с которым буфер
-         * влезает целиком на любом SR (600 с @48 кГц = 230 МБ на поток <
-         * 256 МБ предела BinauralStreamImpl.maxBufferBytes на 64-бит). Выше —
-         * упирается в RSS-бюджет LMK и на мощном устройстве, поэтому слайдер
-         * не даёт выбрать больше. Нижняя — чтобы пакет покрывал хотя бы один
-         * WRITE_CHUNK_MS.
+         * Нижняя граница интервала генерации (длины пакета) — чтобы пакет
+         * покрывал хотя бы один WRITE_CHUNK_MS.
+         *
+         * Верхней КОНСТАНТЫ больше нет, и это осознанно. Раньше здесь стояло
+         * 600_000 мс — число, выведенное из «230 МБ влезает в 256 МБ». Но
+         * «влезает» зависит от частоты дискретизации: 8 байт на кадр × SR ×
+         * секунды. Одна и та же память — это 10 минут при 48 кГц и 60 минут
+         * при 8 кГц. Общая константа поэтому либо недодаёт на низких SR
+         * (там можно было бы втрое больше), либо вырождается в ограничение
+         * «для худшего SR». Теперь предел считается на устройстве от кучи:
+         * [PacketMemoryBudget.maxIntervalMsFor], и у каждой частоты он свой.
          */
         private const val MIN_BUFFER_INTERVAL_MS = 1_000
-        private const val MAX_BUFFER_INTERVAL_MS = 600_000
         /** Как часто подтверждаем удержание CPU во время воспроизведения. */
         private const val WAKE_LOCK_RENEW_MS = 5 * 60 * 1000L
-        /**
-         * Сколько максимум ждём освобождения старого трека, прежде чем начать
-         * новый хэндофф (см. [orphanReleasing]). Защита от залипания автомата,
-         * если колбэк релиза не придёт.
-         */
-        private const val ORPHAN_WAIT_MAX_MS = 2000L
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -75,29 +72,46 @@ class BinauralStreamManager(private val context: Context) {
     /**
      * Интервал генерации (= длина одного пакета, который нативный движок
      * считает за один JNI-вызов). Пользовательская настройка, дефолт 600 с
-     * (10 мин) — слайдер ограничен ровно этим значением.
+     * (10 мин).
      *
-     * История: до оптимизации здесь стояло 600_000 и кламп 1 ч, но длинный
+     * Дефолт 10 минут выбран потому, что он доступен на ЛЮБОЙ частоте
+     * дискретизации: 10 мин × 48 кГц × 8 байт = 230 МБ — это и есть худший
+     * случай, и он как раз укладывается в 86% кучи 256 МиБ. Переход на 8 кГц
+     * не меняет память, но развязывает руки слайдеру: там же 230 МБ — это уже
+     * час звука.
+     *
+     * История. До оптимизации здесь стояло 600_000 и кламп 1 ч, но длинный
      * пакет реально не экономил CPU (генерация ≈ 6.4 нс/кадр при любом
      * размере; CPU/час одинаков при 2 с и 190 с — 1.02 с), а платил 67 МБ
      * на поток (134 МБ в кроссфейде) + page-fault'ы + дорогую пересборку
-     * потока на каждом handoff. Поэтому рабочий потолок осознанно снижен до
-     * 600 с. Дефолт совпадает с MAX_BUFFER_INTERVAL_MS, поэтому не упирается
-     * в кламп и честно виден в UI.
+     * потока на каждом handoff.
      *
-     * НО: фраза, которая здесь была раньше («влезает в 256 МБ direct-буфера
-     * на любом SR, то есть без тихого усечения»), неверна. Реальный предел —
-     * не 256 МБ ([BinauralStreamImpl.maxBufferBytes]), а PACKET_MAX_BYTES:
-     * бюджет одного пакета = 1/8 кучи, ограниченный сверху 32 МБ. На 48 кГц
-     * это 32 МБ / 8 байт = 4.19 млн кадров = **87.4 с**, то есть дефолт
-     * 600 с молча урезается примерно в семь раз. Фактический пакет сегодня —
-     * 87.4 с / 33.55 МБ на поток, 41 генерация в час. Усечение безопасно
-     * (пакет — это только длина одного JNI-вызова, звук от неё не зависит),
-     * но называть настройку «честной» нельзя: слайдер показывает 600 с,
-     * движок живёт на 87.4.
+     * Главная беда прежней версии — тихое усечение. Реальный предел был не
+     * 256 МБ (ABI-константа), а константа в 32 МБ: на 48 кГц это 4.19 млн
+     * кадров = **87.4 с**, то есть 600 с из настроек молча превращались в
+     * 87.4. Пакет — это только длина одного JNI-вызова, звук от неё не
+     * зависит, поэтому усечение безопасно, но настройка лгала: слайдер
+     * показывал 600 с, движок жил на 87.4.
+     *
+     * Теперь предел один и один на всех — [PacketMemoryBudget
+     * .engineCeilingBytes]. Его спрашивают и слайдер (какие стопы показать),
+     * и [clampToRate], и [createStream], и prepare(). Поэтому усечения нет
+     * даже в двух случаях, где оно пряталось раньше: ручной `packetmax`
+     * двигает слайдер вместе с собой, а потолок, сузившийся после OOM,
+     * переподчиняет интервал на входе в следующий поток.
      */
     private var bufferIntervalMs = 600_000
     private var lastUserIntervalMs = 600_000
+
+    /**
+     * Верхний предел интервала генерации для ТЕКУЩЕЙ частоты, мс.
+     *
+     * Не константа: память на секунду звука proportional частоте
+     * (8 байт × SR), поэтому предел в секундах свой для каждого SR. Считается
+     * на устройстве от кучи — см. [PacketMemoryBudget].
+     */
+    private fun maxBufferIntervalMs(): Int =
+        PacketMemoryBudget.maxIntervalMsFor(sampleRate.value).coerceAtLeast(MIN_BUFFER_INTERVAL_MS)
 
     // Debug virtual time (применяется к каждому новому потоку)
     private var debugVirtualTime = false
@@ -112,34 +126,48 @@ class BinauralStreamManager(private val context: Context) {
      */
     @Volatile
     private var state = ManagerState.IDLE
-    private var current: BinauralStreamImpl? = null
-    private var next: BinauralStreamImpl? = null
-
     /**
-     * Старый CURRENT, уже сменяемый повышенным NEXT, но ещё НЕ отпустивший
-     * AudioTrack. Именно он ломает инвариант «в кроссфейде звучат ровно два
-     * потока» — на этот инвариант рассчитаны и EQUAL_POWER (sin²+cos²=1),
-     * и предел кольца [BinauralStreamImpl] в 2 МБ.
+     * ЕДИНСТВЕННЫЙ живой поток. Второй слот не существует — ни поля, ни
+     * состояния: загружено всегда не более одного потока.
      *
-     * Замер на 23049PCD8G (смена пресета каждые 300 мс): треки накапливались,
-     * потому что повышение NEXT происходит в момент ТИШИНЫ старого (≈310 мс),
-     * а трек отпускается позже. Кучи клиента AudioFlinger (7 МБ при кольце
-     * 2 МБ) хватает ровно на три; четвёртый падал:
-     *   AF::TrackBase(123): not enough memory for AudioTrack size=2097384
-     *   createTrack_l() initCheck failed -12
-     *   beginHandoff: prepare NEXT spec#8 не удался — старый продолжает играть
-     * Поэтому пока [orphanReleasing] жив, новый хэндофф НЕ начинается: спека
-     * ждёт в очереди (побеждает новейшая) и стартует из [onStreamReleased].
-     * Итог при любом темпе переключений — максимум CURRENT + NEXT + один
-     * догорающий, то есть ровно то, что влезает в кучу AudioFlinger.
+     * ИНВАРИАНТ (строже «не более двух»): новый поток создаётся только после
+     * того, как старый ПОЛНОСТЬЮ утилизирован ([onStreamFullyStopped], то есть
+     * после `releaseInternal()` — трек снят, движок уничтожен, пакет отдан).
+     * Между «старый утих» и «новый зазвучал» поэтому есть пауза: 60 мс
+     * стража шейпера ([BinauralStreamImpl] FADE_GUARD_MS) + выход писателя +
+     * `prepare()` нового потока. Это сознательная цена.
+     *
+     * Что это даёт по сравнению со схемой «NEXT готовится под прикрытием
+     * фейд-аута»:
+     *  - не нужна очередь осиротевших треков (orphan-гейт) и таймаут
+     *    ожидания их релиза: третьего трека не бывает в принципе, а на два
+     *    кучи клиента AudioFlinger (7 МБ при кольце 2 МБ) хватает всегда;
+     *  - при шторме смен промежуточные пресеты не материализуются ВОВСЕ:
+     *    очередь — один слот latest-wins, поэтому за серию A→B→C→D создаётся
+     *    ровно один поток (на D), а не по потоку на каждую смену;
+     *  - из автомата удалены повышение NEXT, дооснащение вооружённого NEXT и
+     *    утилизация «зомби» (потока без владельца) — классы отказов, из
+     *    которых и выросла оценка «шесть потоков по 33.5 МБ».
+     *
+     * Цена звука: разрыв ≈ 100–200 мс на каждой смене пресета (замер —
+     * позже). При шторме смен это пульсация, а не непрерывный звук —
+     * принято как допустимое.
      */
-    private var orphanReleasing: BinauralStreamImpl? = null
-    private var orphanSinceMs = 0L
+    private var current: BinauralStreamImpl? = null
 
     private val queue = PlaybackQueue()
     private var serialSeq = 0L
     private var fadeTarget = FadeTarget.STOP
     private var pendingResume = false
+
+    /**
+     * Возобновление уже в полёте: замороженный поток освобождается, и его пакет
+     * (до 95 с PCM) ещё в куче. Запуск нового потока отложен до полного релиза,
+     * иначе на ~150 мс возникали бы ДВА загруженных потока — ровно то, от чего
+     * избавляет инвариант одного потока. Повторное нажатие play в этом окне не
+     * должно породить второй поток: возобновление и так разыграется.
+     */
+    private var resumeInFlight = false
 
     /**
      * За время паузы успели смениться настройки (конфиг, частота дискретизации,
@@ -156,17 +184,24 @@ class BinauralStreamManager(private val context: Context) {
     private var pausedElapsedSeconds = 0
     private var pausedTimeOfDay = 0
 
-    // ФИКС 3. Непрерывность при сквозном переключении сегментов (бесшовный кроссфейд):
-    // точка кривой времени (секунды суток), с которой стартует NEXT, и пройденное
+    // Непрерывность при сквозном переключении сегментов: точка кривой времени
+    // (секунды суток), с которой стартует СЛЕДУЮЩИЙ поток, и пройденное
     // реальное время на момент переключения. Захватываются живыми из CURRENT в
-    // beginHandoff/rearmNextIfStale и передаются в NEXT через обогащённую спеку.
+    // beginHandoff (и перезахватываются в requestHandoff, если за время фейда
+    // прилетела спека новее) и уезжают в следующий поток обогащённой спекой.
+    //
+    // Это не «бесшовный кроссфейд» в прежнем смысле — разрыв звука есть, и он
+    // сознательный. Здесь решается другая задача: новый поток обязан
+    // продолжить кривую и часы сессии с того места, где их застал переключатель,
+    // а не начать сначала.
     private var switchCurveTod: Float? = null
     private var switchElapsedMs: Long = 0L
     private var switchLeftPhase: Float? = null
     private var switchRightPhase: Float? = null
     // Маркер: ближайший launchStream — это продолжение handoff'а (не сбрасывать якорь).
     private var pendingHandoff = false
-    // Wall-якорь начала хэндоффа: точный учёт сессионного времени при повышении NEXT.
+    // Wall-якорь начала хэндоффа: точный учёт сессионного времени при загрузке
+    // следующего потока (см. onStreamFullyStopped, FadeTarget.SWITCH).
     private var handoffStartWallMs = 0L
 
     // Снапшот для геттеров из других потоков
@@ -250,14 +285,10 @@ class BinauralStreamManager(private val context: Context) {
             // громкости, и это слышимый скачок уровня.
             if (kotlin.math.abs(this.volume - v) < 0.0001f) return@post
             this.volume = v
-            current?.setVolume(v)   // live, без handoff
-            // NEXT уже вооружён, но ЕЩЁ НЕ ЗВУЧИТ — громкость обязана дойти и до
-            // него. Иначе правка уровня внутри окна кроссфейда (~250 мс между
-            // beginHandoff и promoteNextToCurrent) досталась бы только уходящему
-            // потоку: он замолкает, а новый пресет зазвучит по-старому.
-            // Безопасно: на PREPARED-треке setVolume — это база, фейд-ин её
-            // перемножает (шейпер 0->1), звука до старта нет.
-            next?.setVolume(v)
+            // Живой поток — один, и это он. Громкость, выставленная во время
+            // хэндоффа, достаётся уходящему потоку и только ему; новый поток
+            // получит базу в launchStream() перед start().
+            current?.setVolume(v)
         }
     }
 
@@ -269,23 +300,45 @@ class BinauralStreamManager(private val context: Context) {
         actor.post {
             if (sampleRate == rate) return@post
             sampleRate = rate
+            // Предел длины пакета свой для каждой частоты (память на секунду
+            // звука proportional частоте), поэтому сохранённый интервал надо
+            // переподчинить новому пределу ДО пересборки движка: иначе на
+            // 48 кГц пришло бы значение, выбранное на 8 кГц, и пакет молча
+            // урезался бы в prepare(). Вниз, а не вверх — см. [clampToRate].
+            lastUserIntervalMs = clampToRate(lastUserIntervalMs)
+            if (!debugVirtualTime) bufferIntervalMs = lastUserIntervalMs
             onSpecChanged(SpecReason.SAMPLE_RATE)   // пересоздание движка через handoff
         }
     }
     fun getSampleRate(): SampleRate = sampleRate
 
+    /**
+     * Втянуть интервал в предел текущей частоты дискретизации.
+     *
+     * Округление ВНИЗ по лестнице слайдера, а не просто `coerceAtMost`:
+     * промежуточное значение вроде 1_800_000 мс при пределе 1_750_000
+     * отрезалось бы до 1_750_000 (29.2 мин) — число, которого нет на слайдере
+     * и которое пользователь не выбирал. По лестнице получится 25 минут —
+     * значение, которое можно показать и можно выбрать.
+     */
+    private fun clampToRate(intervalMs: Int): Int {
+        val maxMs = PacketMemoryBudget.maxIntervalMsFor(sampleRate.value)
+        val minutes = (intervalMs / 60_000).coerceAtMost(maxMs / 60_000)
+        return PacketMemoryBudget.coerceMinutes(sampleRate.value, minutes) * 60_000
+    }
+
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        // Верхний предел — MAX_BUFFER_INTERVAL_MS = 600 с (600_000 мс), а не
-        // 60 с, как здесь было написано. Это не «разумный расход памяти», а
-        // структурная граница. Замер
-        // (docs/hotpath_optimization_analysis_2026-08-30.md): длина пакета НЕ
-        // влияет на CPU/час (1.02 с при пакете и 2 с, и 190 с) и НЕ влияет на
-        // wakeups писателя (их задаёт WRITE_CHUNK_MS). Платит длинный пакет
-        // только памятью: 600 с @48 кГц = 230 МБ запроса, но PACKET_MAX_BYTES
-        // урезает его до 33.55 МБ (87.4 с) — см. комментарий к bufferIntervalMs.
-        // Держим предел здесь, чтобы никакое значение из UI не могло вернуть
-        // 67-мегабайтные буферы, на которых проект ловил OOM.
-        val clamped = intervalMs.coerceIn(MIN_BUFFER_INTERVAL_MS, MAX_BUFFER_INTERVAL_MS)
+        // Верхний предел считается от кучи и свой для каждой частоты
+        // ([maxBufferIntervalMs]) — общей константы больше нет. Держим предел
+        // здесь, чтобы никакое значение из UI не могло вернуть буферы, на
+        // которых проект ловил OOM.
+        //
+        // Справка, почему предел вообще нужен (docs/
+        // hotpath_optimization_analysis_2026-08-30.md): длина пакета НЕ влияет
+        // на CPU/час (1.02 с при пакете и 2 с, и 190 с) и НЕ влияет на wakeups
+        // писателя (их задаёт WRITE_CHUNK_MS). Платит длинный пакет только
+        // памятью — вот память его и ограничивает.
+        val clamped = intervalMs.coerceIn(MIN_BUFFER_INTERVAL_MS, maxBufferIntervalMs())
         actor.post {
             // Повтор того же значения обязан быть пустым: иначе режим
             // энергосбережения (applyPowerSaveMode утром/вечером) каждый раз
@@ -308,16 +361,16 @@ class BinauralStreamManager(private val context: Context) {
      * 60 минут = 3_600_000 мс.
      *
      * Правильная семантика: в энергосбережении буфер НЕ короче заданного
-     * пользователем (иначе смысл настройки теряется), но и не больше
-     * MAX_BUFFER_INTERVAL_MS — предела структурного, а не «разумного»:
-     * длина пакета не влияет ни на CPU, ни на wakeups, только на память.
+     * пользователем (иначе смысл настройки теряется), но и не больше предела
+     * для текущей частоты ([maxBufferIntervalMs]): длина пакета не влияет ни
+     * на CPU, ни на wakeups, только на память, а память и есть предел.
      */
     fun applyPowerSaveMode() {
         actor.post {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             bufferIntervalMs = if (pm.isPowerSaveMode) {
-                (lastUserIntervalMs * POWER_SAVE_MULTIPLIER)
-                    .coerceIn(lastUserIntervalMs, MAX_BUFFER_INTERVAL_MS)
+                clampToRate((lastUserIntervalMs * POWER_SAVE_MULTIPLIER))
+                    .coerceAtLeast(lastUserIntervalMs)
             } else {
                 lastUserIntervalMs
             }
@@ -387,8 +440,6 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "release()")
         actor.post {
             queue.clear()
-            discardNext()
-            orphanReleasing = null          // менеджер всё равно утилизируется
             current?.stop(onFullyStopped = { /* утилизация */ })
             current = null; currentRef.set(null)
             resetSession()
@@ -446,14 +497,28 @@ class BinauralStreamManager(private val context: Context) {
         if (state == ManagerState.RUNNING && cur != null && cur.spec.audioEquals(spec)) {
             cur.setVolume(spec.volume); return
         }
-        queue.offer(spec)                       // коалесценция: побеждает новейший
         when (state) {
-            ManagerState.HANDOFF -> rearmNextIfStale()
-            ManagerState.RUNNING, ManagerState.FADE_IN -> beginHandoff()
-            // ...начало requestHandoff() уже написано выше...
+            ManagerState.HANDOFF -> {
+                // Хэндофф уже идёт: старый поток гаснет, новый ещё НЕ создан.
+                //
+                // Здесь нечего перевооружать — достаточно обновить единственный
+                // слот очереди (latest-wins) и ПЕРЕЗАХВАТИТЬ непрерывность:
+                // CURRENT с момента начала фейда ушёл вперёд по кривой, и если
+                // оставить enrichment от начала хэндоффа, новый поток стартовал
+                // бы с позиции, отставшей на длительность фейда плюс релиз.
+                captureContinuity()
+                queue.offer(enrichForContinuity(spec))
+                StreamLogger.d(TAG, "requestHandoff: HANDOFF уже идёт — spec#${spec.serial} " +
+                    "заменяет ожидающую спеку, поток будет создан после релиза старого")
+            }
+            ManagerState.RUNNING, ManagerState.FADE_IN -> {
+                queue.offer(spec)               // коалесценция: побеждает новейший
+                beginHandoff()
+            }
             ManagerState.PREPARING -> {
                 // PREPARING — транзиентное синхронное состояние на актёре;
                 // спека уже в очереди, её разберёт автомат по завершении подготовки.
+                queue.offer(spec)
             }
             else -> { /* недостижимо: onSpecChanged маршрутизирует иначе */ }
         }
@@ -464,184 +529,49 @@ class BinauralStreamManager(private val context: Context) {
     private var pendingPlaySpec: PlaybackSpec? = null
 
     /**
-     * true — третий живой AudioTrack не влезет в кучу клиента AudioFlinger,
-     * новый хэндофф начинать рано (см. [orphanReleasing]).
+     * ХЭНДОФФ ПРЕСЕТА: CURRENT уходит фейд-аутом, и ВСЁ. Новый поток здесь
+     * НЕ создаётся — он появится только в [onStreamFullyStopped], когда старый
+     * будет полностью утилизирован.
      *
-     * Самоочистка двойная: по факту [StreamLifecycle.RELEASED] и по таймауту
-     * [ORPHAN_WAIT_MAX_MS]. Второе — не «на всякий случай», а защита от
-     * залипания: если колбэк релиза по какой-то причине не придёт, автомат
-     * обязан продолжить работу, даже ценой лишнего трека.
-     */
-    private fun handoffBlocked(): Boolean {
-        val o = orphanReleasing ?: return false
-        if (o.lifecycle == StreamLifecycle.RELEASED) {
-            orphanReleasing = null
-            return false
-        }
-        if (System.currentTimeMillis() - orphanSinceMs > ORPHAN_WAIT_MAX_MS) {
-            StreamLogger.w(TAG, "handoffBlocked: старый spec#${o.spec.serial} " +
-                "(lc=${o.lifecycle}) не освободился за ${ORPHAN_WAIT_MAX_MS}мс — не ждём")
-            orphanReleasing = null
-            return false
-        }
-        return true
-    }
-
-    /**
-     * Разыграть очередь хэндоффов, когда больше ничто не мешает. Вызывается и
-     * сразу после повышения NEXT (обычно — «не сейчас»), и из [onStreamReleased],
-     * когда старый трек наконец отпущен.
-     */
-    private fun drainQueuedHandoff() {
-        if (handoffBlocked()) return
-        if (!isActiveState()) return
-        val spec = queue.peek() ?: return
-        // Уже играем ровно это — очередь просто устарела.
-        if (current?.spec?.audioEquals(spec) == true) {
-            queue.poll()
-            return
-        }
-        if (state == ManagerState.HANDOFF) rearmNextIfStale() else beginHandoff()
-    }
-
-    /**
-     * HANDOFF-КРОССФЕЙД: фейд-аут CURRENT стартует НЕМЕДЛЕННО (до всякой
-     * подготовки), NEXT готовится внутри окна фейд-аута и начинает фейд-ин
-     * ровно в момент тишины CURRENT — см. [onStreamSilent]/[promoteNextToCurrent].
+     * Так устроен инвариант «загружен не более одного потока»: во время фейда
+     * живёт ровно один AudioTrack, один нативный движок и один пакетный буфер.
+     * Следствия:
+     *  - не нужен orphan-гейт (ожидание, пока старый трек отпустит память
+     *    AudioFlinger): второго трека нет, третьего быть не может;
+     *  - шторм смен не создаёт промежуточных потоков вовсе — очередь один слот
+     *    latest-wins, и за серию A→B→C→D поднимется только D;
+     *  - невозможен «зомби» (поток без владельца): ссылка на живой поток одна.
      *
-     * Порядок строго последовательный (сначала гасим старое, потом поднимаем
-     * новое), но БЕЗ разрыва: переходы стыкуются в одном сообщении актёра.
+     * Цена — разрыв звука между «старый утих» и «новый зазвучал». Он складывается
+     * из трёх слагаемых: FADE_GUARD_MS (стража VolumeShaper, ~60 мс), выход
+     * писателя и releaseInternal(), prepare() нового потока.
      */
     private fun beginHandoff() {
         val spec = queue.peek() ?: return
-        // Третий живой AudioTrack не влезет в кучу клиента AudioFlinger
-        // (см. [orphanReleasing]) — спека остаётся в очереди, а стартует она
-        // из onStreamReleased(). Побеждает новейшая, промежуточные пресеты не
-        // теряются: просто последний из серии приходит на смену первому.
-        if (handoffBlocked()) {
-            StreamLogger.d(TAG, "beginHandoff отложен: spec#${spec.serial} ждёт освобождения " +
-                "старого трека spec#${orphanReleasing?.spec?.serial}")
-            return
-        }
         if (current == null) {
             // Гасить нечего — это не кроссфейд, а обычный запуск.
             StreamLogger.d(TAG, "beginHandoff: current==null — обычный запуск spec#${spec.serial}")
             launchSpec(queue.poll() ?: return)
             return
         }
-        // ФИКС 3. Захватываем живые координаты CURRENT ДО его fade-out — точку на
-        // кривой и пройденное время. NEXT стартует ровно отсюда => бесшовный
-        // кроссфейд без скачка фазы/частоты и без сброса часов сессии.
+        // Захватываем живые координаты CURRENT ДО его fade-out — точку на кривой,
+        // пройденное время и фазы несущих. Обогащённая спека уходит обратно в
+        // очередь: новый поток стартует ровно отсюда, без скачка частоты и без
+        // сброса часов сессии.
         captureContinuity()
         pendingHandoff = true
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
-        // Обогащённую спеку кладём обратно в очередь: если prepare() не успеет к
-        // моменту тишины CURRENT, спеку поднимет onStreamFullyStopped() — и она
-        // обязана нести continuity, иначе новый поток стартовал бы с нуля.
         queue.offer(enriched)
-        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: фейд-аут CURRENT стартует немедленно, " +
-            "фейд-ин NEXT — ровно в момент его тишины (curveTod=$switchCurveTod, " +
+        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: фейд-аут CURRENT, загрузка " +
+            "spec#${enriched.serial} — после полного релиза (curveTod=$switchCurveTod, " +
             "elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
 
-        // 1. ФЕЙД-АУТ ПЕРВЫМ, до всякой подготовки.
-        //
-        // Раньше первым готовился NEXT и только потом гасился CURRENT: реакция
-        // на нажатие откладывалась на prepare() (создание AudioTrack через
-        // binder + allocateDirect + генерация первого пакета — десятки
-        // миллисекунд на нити актёра, а актёр в это время не исполняет вообще
-        // ничего, включая сам фейд). Теперь звук уходит в тишину в первом же
-        // сообщении актёра.
-        //
-        // Порядок строго последовательный, а не параллельный: два бинауральных
-        // пресета с РАЗНЫМИ несущими и биениями, звучащие одновременно, дают
-        // биения между собой (разностная частота |f1-f2| попадает в слышимый
-        // диапазон и воспринимается как грязь/гул) — ровно поэтому
-        // перекрывающийся equal-power кроссфейд здесь звучит хуже, чем
-        // «догасить старое, поднять новое». Перекрытия нет, но и разрыва нет:
-        // фейд-ин стартует в том же сообщении актёра, где CURRENT дошёл до нуля.
+        // Фейд-аут — единственное, что происходит до момента тишины. Рампа
+        // EQUAL_POWER здесь не про «сумму энергий двух потоков» (второго нет),
+        // а про форму ухода в тишину: та же кривая, что и у стопа, но короче и
+        // без щелчка на стыке с будущим фейд-ином.
         fadeOutCurrent(FadeTarget.SWITCH)
-
-        // 2. NEXT готовится ПОД ПРИКРЫТИЕМ фейд-аута: 250 мс с большим запасом
-        //    хватает на prepare(). Если подготовка всё же не успела к моменту
-        //    тишины — спека не теряется, её поднимет onStreamFullyStopped().
-        // Промежуточный NEXT (если вдруг дожил) гасим ДО создания нового:
-        // иначе ссылка `next` перезаписалась бы, и старый поток остался бы без
-        // владельца — уже не current, уже не next, а значит его никто не
-        // утилизирует никогда.
-        discardArmedNext("beginHandoff")
-        val candidate = createStream(enriched)
-        if (!candidate.prepare()) {
-            StreamLogger.e(TAG, "beginHandoff: prepare NEXT spec#${spec.serial} не удался — " +
-                "фейд-аут уже идёт, спеку поднимет onStreamFullyStopped")
-            listener?.onError("stream prepare failed (spec#${spec.serial}); restarting")
-            pendingHandoff = false
-            return
-        }
-        next = candidate
-        // Громкость ДО start(): база нужна к первому кадру под множителем ~0.
-        candidate.setVolume(volume)
-        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: NEXT вооружён и ждёт тишины CURRENT")
-    }
-
-    /**
-     * Шторм настроек во время кроссфейда.
-     * - NEXT уже ЗВУЧИТ (защитная ветка): повышаем его досрочно до current,
-     *   хвост очереди разберёт [promoteNextToCurrent].
-     * - NEXT не звучит (вооружён/отсутствует) — тихая замена вооружённого
-     *   потока. Стартовать его здесь НЕЛЬЗЯ: фейд-ин обязан начаться ровно в
-     *   момент тишины CURRENT, иначе два пресета зазвучат одновременно
-     *   (см. комментарий про биения в [beginHandoff]). Стартует его
-     *   [promoteNextToCurrent] из [onStreamSilent].
-     */
-    private fun rearmNextIfStale() {
-        val spec = queue.peek() ?: return
-        val n = next
-        if (n != null && n.spec.audioEquals(spec)) return
-
-        if (n != null && n.lifecycle == StreamLifecycle.PLAYING) {
-            // ФИКС Щ1. Промоушен потока, который ещё в fade-in, — это щелчок.
-            // Повышенный NEXT тут же получает fade-out от нового beginHandoff(),
-            // а applyShaper() в ветке «замена активного шейпера» между
-            // setVolume(base) и apply(PLAY) даёт эффективную громкость
-            // userVolume·fromC² — провал втрое при fromC≈0.3.
-            //
-            // Правильно — дождаться конца fade-in: спека уже лежит в очереди
-            // (latest-wins), и её разберёт promoteNextToCurrent().
-            if (n.isFadingIn) {
-                StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} ещё в fade-in — " +
-                    "повышение отложено до конца фейд-ина; spec#${spec.serial} ждёт в очереди")
-                return
-            }
-            StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${n.spec.serial} играет — повышаем и новый хэндофф к spec#${spec.serial}")
-            promoteNextToCurrent()   // сама поднимет хвост очереди и вызовет beginHandoff
-            return
-        }
-
-        // NEXT отсутствует или ещё не звучал — тихая замена.
-        //
-        // Гейт осиротевшего потока обязателен и здесь, а не только в
-        // beginHandoff(): пока старый трек не отпущен, третий AudioTrack в кучу
-        // клиента AudioFlinger не влезет, и prepare() провалился бы на
-        // createTrack_l (-12 NO_MEMORY). Спека уже лежит в очереди
-        // (latest-wins) — её разберёт drainQueuedHandoff() по освобождении.
-        if (handoffBlocked()) {
-            StreamLogger.d(TAG, "rearmNextIfStale отложен: spec#${spec.serial} ждёт освобождения " +
-                "старого трека spec#${orphanReleasing?.spec?.serial}")
-            return
-        }
-        discardArmedNext("rearmNextIfStale")
-        // Непрерывность: координаты CURRENT (ещё жив) обновляем для нового NEXT.
-        captureContinuity()
-        val enriched = enrichForContinuity(spec)
-        val candidate = createStream(enriched)
-        if (!candidate.prepare()) {
-            StreamLogger.w(TAG, "rearmNextIfStale: prepare не удался; повтор по завершении фейда")
-            return
-        }
-        next = candidate
-        candidate.setVolume(volume)
-        StreamLogger.d(TAG, "rearmNextIfStale: NEXT spec#${spec.serial} вооружён и ждёт тишины CURRENT")
     }
 
     /** Сменить цель идущего/нового фейда И запустить фейд. */
@@ -656,196 +586,25 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "fadeOutCurrent target=$target spec#${s.spec.serial} lifecycle=${s.lifecycle}")
         val captured = s
         val crossfade = target == FadeTarget.SWITCH
-        // Колбэки исполняются на нити актёра (у потока controlHandler == actor).
-        // Идентичность (captured === current) отсекает «осиротевшие» потоки,
-        // чья судьба уже решена отдельно (раннее повышение при шторме, discard).
+        // Колбэк исполняется на нити актёра (у потока controlHandler == actor).
+        // Идентичность (captured === current) отсекает потоки, чья судьба уже
+        // решена отдельно (стоп/пауза во время фейда).
         captured.stop(
             onFullyStopped = { onStreamReleased(captured) },
-            onSilent = if (crossfade) ({ onStreamSilent(captured) }) else null,
             shape = if (crossfade) FadeShape.EQUAL_POWER else FadeShape.LINEAR
         )
     }
 
     /**
-     * CURRENT дошёл до нуля в кроссфейде: уже тих, релиз ещё может идти.
-     *
-     * Это и есть точка старта фейд-ина NEXT. Важно, что повышение и старт
-     * происходят В ТОМ ЖЕ сообщении актёра, в котором CURRENT сообщил о тишине:
-     * между окончанием фейд-аута и началом фейд-ина нет ни ожидания релиза
-     * старого трека, ни таймера — только длительность самого перехода.
-     */
-    private fun onStreamSilent(s: BinauralStreamImpl) {
-        if (s !== current) return   // осиротел (шторм/стоп) — его судьба решена отдельно
-        if (fadeTarget != FadeTarget.SWITCH || state != ManagerState.HANDOFF) return
-        val n = next ?: return
-        if (n.lifecycle != StreamLifecycle.PREPARED) return
-        promoteNextToCurrent()
-    }
-
-    /**
-     * Поток полностью освобождён. Фильтр идентичности: релиз осиротевшего потока
-     * (раннее повышение при шторме, discard при стопе/паузе) не трогает автомат.
+     * Поток полностью освобождён. Фильтр идентичности: релиз осиротевшего
+     * потока (стоп/пауза во время фейда, discard) не трогает автомат.
      */
     private fun onStreamReleased(s: BinauralStreamImpl) {
-        // Освободился слот под третий AudioTrack — разыгрываем отложенный хэндофф.
-        if (s === orphanReleasing) {
-            orphanReleasing = null
-            StreamLogger.d(TAG, "onStreamReleased: старый spec#${s.spec.serial} освобождён — " +
-                "разыгрываем отложенный хэндофф")
-            drainQueuedHandoff()
-            return
-        }
         if (s !== current) {
             StreamLogger.d(TAG, "onStreamReleased: orphan spec#${s.spec.serial} — игнор")
             return
         }
         onStreamFullyStopped()
-    }
-
-    /**
-     * Повышение NEXT — ровно в момент тишины CURRENT.
-     *
-     * Кроссфейд ПОСЛЕДОВАТЕЛЬНЫЙ: до этой точки звучал только CURRENT (фейд-аут),
-     * отсюда звучит только NEXT (фейд-ин). Перекрытия нет — два бинауральных
-     * пресета с разными несущими, sounding одновременно, порождают слышимые
-     * разностные биения. Разрыва тоже нет: [onStreamSilent] приходит из того же
-     * сообщения актёра, в котором CURRENT дошёл до нуля, и start() NEXT
-     * исполняется сразу за ним.
-     *
-     * Фикс 3 сохранён: NEXT несёт switchCurveTod/switchElapsedMs из обогащённой спеки.
-     */
-    private fun promoteNextToCurrent() {
-        val n = next ?: return
-        val outgoing = current
-        StreamLogger.d(TAG, "promoteNextToCurrent: spec#${n.spec.serial} — CURRENT в тишине, " +
-            "фейд-ин NEXT стартует без паузы")
-        next = null
-        current = n
-        currentRef.set(n)
-        // Старый поток уже в тишине, но трек отпустит только после выхода
-        // писателя — всё это время он занимает слот в куче AudioFlinger.
-        orphanReleasing = outgoing
-        orphanSinceMs = System.currentTimeMillis()
-        // ПАКЕТ старого потока отпускаем СРАЗУ, не дожидаясь утилизации.
-        //
-        // Здесь старый поток уже не слышен (эта точка — ровно конец его
-        // фейд-аута), а новый через мгновение дорастит свой пакет до полного
-        // интервала: писатель делает это на ПЕРВОЙ же итерации цикла, потому
-        // что start() праймит трек всем стартовым пакетом и offset уже равен
-        // packetBytes. Без этого сброса в куче одновременно висят ДВА полных
-        // пакета (33.55 МБ × 2 на 48 кГц), и именно они были тем пиком, из-за
-        // которого приходилось держать потолок пакета в 1/8 кучи.
-        //
-        // Трек и писатель старого потока продолжают жить до releaseInternal();
-        // отдан только PCM-пакет, который больше никому не нужен.
-        outgoing?.releasePacketBuffer()
-        StreamLogger.d(TAG, "promoteNextToCurrent: пакет spec#${outgoing?.spec?.serial} отдан " +
-            "до доращивания spec#${n.spec.serial}")
-        sessionSpec = n.spec
-        // Сессионное время: NEXT несёт switchElapsedMs + фактическую длительность кроссфейда.
-        accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
-        segmentStartWallMs = System.currentTimeMillis()
-        pendingHandoff = false
-        _isPlaying.value = true
-        updateWakeLock()
-
-        if (n.lifecycle == StreamLifecycle.PREPARED) {
-            // Штатный путь: NEXT молчит, стартуем его фейд-ин здесь же.
-            setState(ManagerState.FADE_IN)
-            if (!n.start(
-                    onFullyStarted = {
-                        StreamLogger.d(TAG, "promoteNextToCurrent: NEXT spec#${n.spec.serial} " +
-                            "фейд-ин завершён — кроссфейд окончен")
-                        if (state == ManagerState.FADE_IN) setState(ManagerState.RUNNING)
-                    },
-                    shape = FadeShape.EQUAL_POWER
-                )
-            ) {
-                StreamLogger.e(TAG, "promoteNextToCurrent: start NEXT spec#${n.spec.serial} не удался")
-                n.abort()
-                current = null
-                currentRef.set(null)
-                _isPlaying.value = false
-                setState(ManagerState.IDLE)
-                listener?.onError("next stream start failed")
-                updateWakeLock()
-                return
-            }
-        } else {
-            // Защитная ветка: NEXT уже звучит (промоушен из rearmNextIfStale).
-            setState(ManagerState.RUNNING)
-        }
-        // Хвост шторма: если за время кроссфейда прилетела спека новее — сразу новый хэндофф.
-        val tail = queue.poll()
-        if (tail != null && !tail.audioEquals(n.spec)) {
-            StreamLogger.d(TAG, "promoteNextToCurrent: хвост очереди spec#${tail.serial} новее — новый хэндофф")
-            queue.offer(tail)
-            // НЕ beginHandoff() напрямую: трек старого потока ([orphanReleasing])
-            // ещё не отпущен, и prepare NEXT провалился бы на создании AudioTrack.
-            drainQueuedHandoff()
-        } else {
-            resetContinuity()
-        }
-    }
-
-    /**
-     * Выбросить NEXT без щелчка: играющий — фейд-аут от текущего множителя
-     * (огибающая непрерывна), не играющий — тихий abort.
-     */
-    private fun discardNext() {
-        val n = next ?: return
-        next = null
-        pendingHandoff = false
-        when (n.lifecycle) {
-            StreamLifecycle.PLAYING -> {
-                StreamLogger.d(TAG, "discardNext: spec#${n.spec.serial} играет — fade-out и релиз")
-                n.stop(
-                    onFullyStopped = { /* релиз завершится независимо; состояние не трогаем */ },
-                    shape = FadeShape.EQUAL_POWER
-                )
-            }
-            StreamLifecycle.CREATED, StreamLifecycle.PREPARED, StreamLifecycle.FAILED -> n.abort()
-            else -> {} // STOPPING/RELEASED — уже уходит сам
-        }
-    }
-
-    /**
-     * Утилизировать вооружённый NEXT ДО создания нового потока.
-     *
-     * Порядок критичен именно для шторма смен пресетов: каждый новый пресет
-     * перевооружает NEXT, и если просто перезаписать ссылку `next`, старый
-     * поток остаётся без владельца — он уже не current, уже не next, и ни
-     * abort(), ни releaseInternal() его не найдут. Его AudioTrack и пакетный
-     * буфер висели бы до конца процесса, а таких «зомби» за серию смен
-     * набирается сколько угодно. Отсюда и была оценка «шесть потоков по
-     * 33.5 МБ в пике»: это не единовременный пик, а накопление.
-     *
-     * Очистка СИНХРОННА (abort() -> releaseInternal() без ожидания писателя,
-     * потому что неигравший поток его не запускал), поэтому к моменту
-     * `createStream()` следующего пресета старого потока уже нет — ровно это и
-     * требует инвариант «одновременно живёт не больше двух потоков».
-     */
-    private fun discardArmedNext(reason: String) {
-        val n = next ?: return
-        next = null
-        when (n.lifecycle) {
-            StreamLifecycle.CREATED, StreamLifecycle.PREPARED, StreamLifecycle.FAILED -> {
-                StreamLogger.d(TAG, "$reason: вооружённый NEXT spec#${n.spec.serial} " +
-                    "(lc=${n.lifecycle}) не звучал — тихий abort")
-                n.abort()   // релиз трека, буфера и движка — синхронно
-            }
-            else -> {
-                // Звучащий поток abort() не берёт, а владельца у него уже нет.
-                // Гасим фейдом — иначе он останется звучать навсегда.
-                StreamLogger.w(TAG, "$reason: NEXT spec#${n.spec.serial} ещё жив " +
-                    "(lc=${n.lifecycle}) — гасим фейдом")
-                pendingHandoff = false
-                n.stop(
-                    onFullyStopped = { /* владельца нет; состояние решают вызывающие */ },
-                    shape = FadeShape.EQUAL_POWER
-                )
-            }
-        }
     }
 
     /** Ретаргет уже идущего фейда без повторного stream.stop (он идемпотентен). */
@@ -914,19 +673,35 @@ class BinauralStreamManager(private val context: Context) {
             }
 
             FadeTarget.SWITCH -> {
-                // Сюда попадаем, только если кроссфейд не состоялся: NEXT не был
-                // подготовлен к моменту тишины CURRENT (prepare не удался или не
-                // успел) либо погиб в рантайме. current к этому моменту уже
-                // занулён выше, поэтому «повторить хэндофф против живого current»
-                // невозможно — поднимаем спеку обычным запуском.
+                // ШТАТНЫЙ ПУТЬ ХЭНДОФФА (а не аварийный, как раньше).
+                //
+                // Старый поток к этой точке ПОЛНОСТЬЮ утилизирован: трек снят,
+                // движок уничтожен, пакет отдан. current занулён выше, поэтому
+                // «повторить хэндофф против живого current» невозможно — и это
+                // ровно та гарантия, на которой держится инвариант «загружен не
+                // более одного потока»: createStream() ниже — единственный живой
+                // поток в процессе.
                 val spec = queue.poll()
                 if (spec == null) {
                     resetSession()
                     StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH без спек — IDLE")
                     setState(ManagerState.IDLE)
                 } else {
-                    StreamLogger.w(TAG, "onStreamFullyStopped: SWITCH без NEXT -> launchSpec spec#${spec.serial}")
+                    // Сессионное время: к моменту загрузки нового потока прошло
+                    // switchElapsedMs (захвачено на старом) плюс вся длительность
+                    // хэндоффа — фейд-аут, стража шейпера и релиз трека. Без
+                    // этой поправки часы сессии отставали бы на каждый переход.
+                    if (pendingHandoff) {
+                        accumulatedMs = switchElapsedMs +
+                            (System.currentTimeMillis() - handoffStartWallMs)
+                    }
+                    StreamLogger.d(TAG, "onStreamFullyStopped: SWITCH -> загрузка spec#${spec.serial} " +
+                        "(accumulatedMs=$accumulatedMs)")
                     launchSpec(spec)
+                    // Якорь отработан (уехал в обогащённую спеку): следующая
+                    // смена снимет его заново. Держать его дальше нельзя —
+                    // enrichForContinuity брал бы УСТАРЕВШУЮ точку кривой.
+                    resetContinuity()
                 }
             }
         }
@@ -964,19 +739,17 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "onStop state=${state.name}")
         when (state) {
             ManagerState.RUNNING, ManagerState.FADE_IN -> {
-                next?.abort(); next = null
                 queue.clear()
                 pendingPlaySpec = null
                 fadeOutCurrent(FadeTarget.STOP)
             }
             ManagerState.HANDOFF -> {
-                // Кроссфейд идёт: гасим ОБА потока без щелчков.
-                // Фейд CURRENT уже идёт — только ретаргет; NEXT гасим сами.
+                // Хэндофф идёт: фейд CURRENT уже запущен, второй поток ещё не
+                // создан — гасить нечего, только меняем цель рампы.
                 queue.clear()
                 pendingPlaySpec = null
                 pendingHandoff = false
                 resetContinuity()
-                discardNext()
                 retargetFade(FadeTarget.STOP)
             }
             ManagerState.FADE_OUT_PAUSE -> {
@@ -1019,9 +792,10 @@ class BinauralStreamManager(private val context: Context) {
                 capturePauseMetrics()
                 pendingHandoff = false
                 resetContinuity()
-                discardNext()
-                // CURRENT уже гаснет кроссфейдом — pause() перехватывает рампу:
-                // финалом становится заморозка, а не утилизация.
+                // CURRENT гаснет хэндоффом — pause() перехватывает рампу:
+                // финалом становится заморозка, а не утилизация. Второго потока
+                // нет, поэтому пауза во время смены пресета замораживает СТАРЫЙ
+                // поток, а возобновление пойдёт уже по queued-спеке.
                 pauseCurrentSoftly()
             }
             ManagerState.FADE_OUT_STOP -> {
@@ -1128,6 +902,13 @@ class BinauralStreamManager(private val context: Context) {
      * если за паузу менялись настройки — через новый поток с той же позиции.
      */
     private fun onResumeFromPaused() {
+        if (resumeInFlight) {
+            // Старый замороженный поток ещё отдаёт пакет. Возобновление уже
+            // заказано — повторный play ничего не меняет, но второй поток бы
+            // создал: колбэк релиза запустил бы spec ещё раз.
+            StreamLogger.d(TAG, "onResumeFromPaused: возобновление уже в полёте — игнор")
+            return
+        }
         if (pausedSpecDirty) {
             StreamLogger.d(TAG, "onResumeFromPaused: настройки менялись на паузе — новый поток")
             resumeFromPaused()
@@ -1164,42 +945,92 @@ class BinauralStreamManager(private val context: Context) {
             // Трек не поддался (например, HAL отобрал устройство) — продолжаем
             // новым потоком с той же слышимой позиции.
             StreamLogger.e(TAG, "resumePausedStream: возобновление не удалось — пересоздание")
-            discardPausedCurrent()
-            resumeFromPaused()
+            // Тот же инвариант: сначала полный релиз (пакет + трек), потом новый
+            // поток. Здесь current может быть уже null — тогда колбэк сработает
+            // синхронно на этой же нити актёра.
+            discardPausedCurrent { resumeFromPaused() }
         }
     }
 
     /**
      * Отцепить и тихо утилизировать замороженный поток. Он уже в нуле по
      * громкости и стоит на паузе — освобождение бесшумно.
+     *
+     * [afterRelease] исполняется на нити актёра ПОСЛЕ полного релиза: трек
+     * снят, движок уничтожен, пакет отдан куче. Всё, что аллоцирует второй
+     * пакет, обязано жить здесь — иначе инвариант одного загруженного потока
+     * нарушается на время релиза (~150 мс по замеру).
      */
-    private fun discardPausedCurrent() {
-        val s = current ?: return
+    private fun discardPausedCurrent(afterRelease: (() -> Unit)? = null) {
+        val s = current
+        if (s == null) {
+            afterRelease?.invoke()
+            return
+        }
         current = null
         currentRef.set(null)
         StreamLogger.d(TAG, "discardPausedCurrent: spec#${s.spec.serial} paused=${s.isPaused}")
-        s.stop(onFullyStopped = { /* состояние решают вызывающие */ })
+        s.stop(onFullyStopped = {
+            StreamLogger.d(TAG, "discardPausedCurrent: spec#${s.spec.serial} освобождён")
+            afterRelease?.invoke()
+        })
     }
 
     private fun resumeFromPaused() {
-        // Замороженный поток (если есть) звучит по старой спеке — утилизируем
-        // его до запуска нового, иначе он останется висеть без владельца.
-        discardPausedCurrent()
         pausedSpecDirty = false
         val base = queue.poll() ?: sessionSpec ?: return
-        val spec = base.copy(
-            volume = volume,
-            reason = SpecReason.RESUME,
-            resumeAnchorMs = System.currentTimeMillis() - accumulatedMs,
-            resumeElapsedMs = accumulatedMs,
-            // ФИКС 3. Возобновляем с того же времени суток по кривой — частота и
-            // фаза продолжаются без скачка (как при сквозном переключении).
-            // pausedTimeOfDay — СЛЫШИМАЯ позиция (по голове воспроизведения),
-            // а не значение UI-часов: точка продолжения совпадает с графиком.
-            resumeCurveTimeSeconds = pausedTimeOfDay
-        )
-        sessionSpec = spec
-        launchSpec(spec)
+        // Якорь снимается в момент РЕАЛЬНОГО старта: между вызовом и запуском
+        // лежит релиз замороженного потока. Снятый заранее якорь прибавил бы
+        // эти миллисекунды к сессионным часам.
+        val launch = {
+            val spec = base.copy(
+                volume = volume,
+                reason = SpecReason.RESUME,
+                resumeAnchorMs = System.currentTimeMillis() - accumulatedMs,
+                resumeElapsedMs = accumulatedMs,
+                // ФИКС 3. Возобновляем с того же времени суток по кривой — частота и
+                // фаза продолжаются без скачка (как при сквозном переключении).
+                // pausedTimeOfDay — СЛЫШИМАЯ позиция (по голове воспроизведения),
+                // а не значение UI-часов: точка продолжения совпадает с графиком.
+                resumeCurveTimeSeconds = pausedTimeOfDay
+            )
+            sessionSpec = spec
+            launchSpec(spec)
+        }
+        val doomed = current
+        if (doomed == null) {
+            // Замороженного потока нет (пауза без живого трека) — нечего ждать.
+            launch()
+            return
+        }
+        // Замороженный поток звучит по старой спеке И ЕЩЁ ДЕРЖИТ ПАКЕТ: новый
+        // поток создаём только после его полного релиза, иначе в куче на эти
+        // ~150 мс висели бы два пакета (замер до правки: launchSpec
+        // reason=RESUME загруженныхБуферов=1 — единственное место, где
+        // инвариант одного потока нарушался).
+        resumeInFlight = true
+        StreamLogger.d(TAG, "resumeFromPaused: spec#${base.serial} отложен до релиза " +
+            "замороженного spec#${doomed.spec.serial} " +
+            "(держателей пакета=${BinauralStreamImpl.livePacketHolders()})")
+        discardPausedCurrent {
+            resumeInFlight = false
+            if (state != ManagerState.PAUSED) {
+                // Пока пакет отдавался, пришёл stop: сессия уже сброшена,
+                // запускать нечего — иначе play пережил бы stop.
+                StreamLogger.d(TAG, "resumeFromPaused: state=$state — возобновление отменено")
+                return@discardPausedCurrent
+            }
+            if (pausedSpecDirty) {
+                // Пока пакет отдавался, пользователь успел сменить пресет:
+                // onSpecChanged положил свежую спеку в sessionSpec и поднял
+                // флаг. Запускать [base] — значит молча проиграть старое.
+                // Пересобираем спеку; current уже null, поэтому ждать нечего.
+                StreamLogger.d(TAG, "resumeFromPaused: настройки обновились за время релиза — пересборка")
+                resumeFromPaused()
+                return@discardPausedCurrent
+            }
+            launch()
+        }
     }
 
     private fun capturePauseMetrics() {
@@ -1253,24 +1084,22 @@ class BinauralStreamManager(private val context: Context) {
     // ================================================================== Запуск потоков
 
     /**
-     * Подготовить (если нет готового armed NEXT) и запустить спеку.
+     * Создать и запустить поток по спеке. Единственная точка, где поток вообще
+     * создаётся, — вызывается только когда [current] уже null (старый поток
+     * утилизирован), поэтому загружен всегда ровно один поток.
      */
     private fun launchSpec(spec: PlaybackSpec) {
-        StreamLogger.d(TAG, "launchSpec spec#${spec.serial} reason=${spec.reason} armedNext=${next?.spec?.serial} armedLifecycle=${next?.lifecycle}")
-        val armed = next
-        if (armed != null && armed.spec.audioEquals(spec) && armed.lifecycle == StreamLifecycle.PREPARED) {
-            StreamLogger.d(TAG, "launchSpec: переиспользуем armed NEXT spec#${spec.serial}")
-            next = null
-            launchStream(armed)
-            return
-        }
-        // Вооружённый NEXT не подошёл — утилизируем его ДО создания нового
-        // потока (тот же инвариант, что в discardArmedNext).
-        discardArmedNext("launchSpec")
+        StreamLogger.d(TAG, "launchSpec spec#${spec.serial} reason=${spec.reason} " +
+            "загруженныхБуферов=${BinauralStreamImpl.livePacketHolders()}")
         val candidate = createStream(spec)
         if (!candidate.prepare()) {
             // Ошибка подготовки: стабильное состояние + сессия сохранена для повторной попытки
             StreamLogger.e(TAG, "launchSpec: prepare spec#${spec.serial} не удался (retryable)")
+            // Якорь непрерывности больше некому отдать: поток не родился. Без
+            // сброса pendingHandoff висел бы до следующего launchStream и
+            // подменил accumulatedMs при следующей смене.
+            pendingHandoff = false
+            resetContinuity()
             _isPlaying.value = false
             sessionSpec = spec
             if (spec.reason == SpecReason.RESUME) {
@@ -1321,11 +1150,28 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     private fun createStream(spec: PlaybackSpec): BinauralStreamImpl {
+        // Потолок мог сузиться ПОСЛЕ того, как пользователь выбрал интервал:
+        // выученный после OOM или ручной `packetmax` из debug-команд. Слайдер
+        // увидит новые стопы только при следующей перекомпозиции, поэтому
+        // переподчиняем значение пределу здесь, на входе в поток — иначе
+        // prepare() молча урезал бы его, и настройка снова соврала бы.
+        //
+        // Виртуальное время не трогаем: там интервал намеренно 250 мс, ниже
+        // минимальной стопы слайдера, и кламп превратил бы его в 60 с.
+        val intervalMs = if (debugVirtualTime) bufferIntervalMs else {
+            val clamped = clampToRate(bufferIntervalMs)
+            if (clamped != bufferIntervalMs) {
+                StreamLogger.d(TAG, "createStream: интервал переподчинён потолку " +
+                    "$bufferIntervalMs -> $clamped мс")
+                bufferIntervalMs = clamped
+            }
+            clamped
+        }
         return BinauralStreamImpl(
             context = context,
             spec = spec,
             controlHandler = actor,
-            bufferIntervalMs = bufferIntervalMs,
+            bufferIntervalMs = intervalMs,
             nativeCustomizer = { engine -> applyNativeDebug(engine) },
             onRuntimeError = { stream, message -> actor.post { handleRuntimeError(stream, message) } }
         )
@@ -1347,22 +1193,12 @@ class BinauralStreamManager(private val context: Context) {
 
     /** Ошибка писателя (генерация/запись): гасим остаток с фейдом и уходим в IDLE (retryable). */
     private fun handleRuntimeError(stream: BinauralStreamImpl, message: String) {
-        StreamLogger.e(TAG, "handleRuntimeError: $message (stream spec#${stream.spec.serial}, isCurrent=${current === stream}, isNext=${next === stream})")
+        StreamLogger.e(TAG, "handleRuntimeError: $message (stream spec#${stream.spec.serial}, isCurrent=${current === stream})")
         Log.e(TAG, "runtime error: $message")
-        if (next === stream) {
-            // ФИКС З1. abort() гасит только неигравший поток (CREATED/PREPARED/FAILED).
-            // PLAYING-поток от abort() не гас, а ссылка next на него уже занулена:
-            // его AudioTrack и direct-буфер оставались живы навсегда, и погасить
-            // их было некому — поток уже не current и не next. Чем дольше живёт
-            // процесс, тем больше таких зомби (и тем громче симптом «после долгой
-            // работы»). discardNext() гасит играющий NEXT фейдом, остальные — тихо.
-            discardNext()
-            listener?.onError("next stream error: $message")
-            return
-        }
+        // Ссылка на живой поток одна ([current]), поэтому «потока без владельца»
+        // не бывает: ошибка не от current означает, что поток уже утилизирован.
         if (current !== stream) return
         capturePauseMetrics()
-        discardNext()
         queue.clear()
         pendingPlaySpec = null
         pendingResume = false
@@ -1476,6 +1312,7 @@ class BinauralStreamManager(private val context: Context) {
         pendingResume = false
         pendingPlaySpec = null
         pendingHandoff = false
+        resumeInFlight = false
         resetContinuity()
     }
 }

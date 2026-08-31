@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.binaural.core.audio.stream.BinauralStreamImpl
+import com.binaural.core.audio.stream.PacketMemoryBudget
 import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.ChannelSwapMode
@@ -112,6 +113,10 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "mem" -> memory()
             "gc" -> System.gc().let { "System.gc() выполнен — смотрите `mem`" }
             "packetmax" -> setPacketMax(arg)
+            "packetpct" -> setPacketPct(arg)
+            "packetgpct" -> setGlobalPct(arg)
+            "bufstat" -> PacketMemoryBudget.report()
+            "alloc" -> alloc(arg)
             "pkstat" -> packetStats()
             "pcreset" -> BinauralStreamImpl.resetPacketStats()
                 .let { "Пики счётчиков пакетной памяти обнулены — смотрите `pkstat`" }
@@ -556,7 +561,154 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         }
     }
 
+    /**
+     * Доля кучи под ОДИН пакет в процентах (0 = константа сборки, 86%).
+     *
+     * Нужна, чтобы искать предел на устройстве за одну установку: поднял
+     * `packetpct 100` и перебирай `packetmax`. В проде не используется —
+     * 86% подобраны замером (см. PacketMemoryBudget), а процент — предохранитель
+     * против устройств с неожиданно маленькой кучей.
+     */
+    private fun setPacketPct(arg: String): String {
+        val p = (arg.toIntOrNull()
+            ?: return "Формат: packetpct <10..95> | packetpct 0 (константа 86%)")
+            .coerceIn(0, 100)
+        PacketMemoryBudget.setHeapPercent(p)
+        return "Доля кучи под пакет: ${if (p == 0) "константа 86%" else "$p%"} " +
+            "(применится к следующей аллокации)\n" + PacketMemoryBudget.report()
+    }
+
+    /**
+     * Доля кучи под СУММУ пакетов всех потоков в процентах (0 = как packetpct).
+     *
+     * Без неё потолки выше бюджета проверять нельзя: бюджет урежет пакет
+     * раньше, чем сработает `packetmax`, и прогон покажет предел бюджета, а
+     * не аллокации.
+     */
+    private fun setGlobalPct(arg: String): String {
+        val p = (arg.toIntOrNull()
+            ?: return "Формат: packetgpct <10..95> | packetgpct 0 (как packetpct)")
+            .coerceIn(0, 100)
+        PacketMemoryBudget.setGlobalHeapPercent(p)
+        return "Доля кучи под сумму пакетов: ${if (p == 0) "как packetpct" else "$p%"} " +
+            "(применится к следующему доращиванию)\n" + PacketMemoryBudget.report()
+    }
+
     private fun packetStats(): String = BinauralStreamImpl.packetStats()
+
+    // ---- alloc: прямой тест аллокатора минуя стрим ----
+    //
+    // Нужен, чтобы отделить «ART не возвращает память от allocateDirect» от
+    // «мы её не отпускаем». Поток проверяет доращивание СВОИМ предохранителем
+    // (growPacketBuffer смотрит на свободное место и не пытается аллоцировать),
+    // поэтому по одному стриму нельзя понять, течёт память или просто не
+    // спрашивали. Здесь аллокация делается вслепую, как она и делалась бы
+    // без предохранителя.
+    private val heldBuffers = mutableListOf<java.nio.ByteBuffer>()
+    private val heldArrays = mutableListOf<ByteArray>()
+
+    private fun heapUsedMb(): Long {
+        val rt = Runtime.getRuntime()
+        return (rt.totalMemory() - rt.freeMemory()) / MB
+    }
+
+    private fun alloc(arg: String): String {
+        val p = arg.split(Regex("\\s+"))
+        when (p.getOrNull(0)?.lowercase(Locale.US)) {
+            "free" -> {
+                val n = heldBuffers.size
+                heldBuffers.clear()
+                System.gc()
+                return "Отпущено $n буферов, System.gc(): занято ${heapUsedMb()}МБ"
+            }
+            "list" -> return if (heldBuffers.isEmpty()) "Удержанных буферов нет"
+            else buildString {
+                append("Удержано ${heldBuffers.size}: ")
+                append(heldBuffers.joinToString { "${it.capacity() / MB}МБ" })
+                append("\nзанято ${heapUsedMb()}МБ")
+            }
+            "cycle" -> {
+                val times = p.getOrNull(1)?.toIntOrNull() ?: return "Формат: alloc cycle <повторов> <МБ>"
+                val mb = p.getOrNull(2)?.toLongOrNull() ?: return "Формат: alloc cycle <повторов> <МБ>"
+                return allocCycle(times.coerceIn(1, 20), mb.coerceIn(1, 512))
+            }
+            // Контроль к `cycle`: обычный byte[] на куче вместо прямого буфера.
+            // Если он возвращается, а прямой — нет, причина в DirectByteBuffer
+            // (Cleaner/неперемещаемый массив), а не в System.gc() вообще.
+            "hcycle" -> {
+                val times = p.getOrNull(1)?.toIntOrNull() ?: return "Формат: alloc hcycle <повторов> <МБ>"
+                val mb = p.getOrNull(2)?.toLongOrNull() ?: return "Формат: alloc hcycle <повторов> <МБ>"
+                return heapCycle(times.coerceIn(1, 20), mb.coerceIn(1, 512))
+            }
+            else -> {
+                val mb = p.getOrNull(0)?.toLongOrNull() ?: return "Формат: alloc <МБ> | alloc free | alloc list | alloc cycle <N> <МБ>"
+                val before = heapUsedMb()
+                return try {
+                    val b = java.nio.ByteBuffer.allocateDirect((mb * MB).toInt())
+                    heldBuffers.add(b)
+                    "allocateDirect($mb МБ) → capacity=${b.capacity() / MB}МБ, " +
+                        "занято $before → ${heapUsedMb()}МБ"
+                } catch (o: OutOfMemoryError) {
+                    "allocateDirect($mb МБ) → OutOfMemoryError, занято ${heapUsedMb()}МБ"
+                }
+            }
+        }
+    }
+
+    /** Выделить–отпустить N раз: возвращает ли ART память от прямого буфера. */
+    private fun allocCycle(times: Int, mb: Long): String {
+        heldBuffers.clear()
+        System.gc()
+        val base = heapUsedMb()
+        val sb = StringBuilder("цикл allocateDirect($mb МБ) x$times, база ${base}МБ\n")
+        for (i in 1..times) {
+            var got: Long
+            try {
+                val b = java.nio.ByteBuffer.allocateDirect((mb * MB).toInt())
+                got = b.capacity() / MB
+                // Записать в каждый байт: без этого ART может отдать виртуальную
+                // память, не замапив её, и замер окажется враньём.
+                for (off in 0 until b.capacity() step 4096) b.put(off, 1.toByte())
+            } catch (o: OutOfMemoryError) {
+                sb.append("  $i: OutOfMemoryError, занято ${heapUsedMb()}МБ\n")
+                break
+            }
+            val peak = heapUsedMb()
+            heldBuffers.clear()
+            // Две сборки с паузой: первая доставляет DirectByteBuffer в очередь
+            // фантомных ссылок, вторая — после того как Cleaner обнулил byte[].
+            System.gc()
+            try { Thread.sleep(200) } catch (_: InterruptedException) {}
+            System.gc()
+            sb.append("  $i: выделено ${got}МБ, пик ${peak}МБ → после возврата ${heapUsedMb()}МБ\n")
+        }
+        return sb.toString()
+    }
+
+    /** То же, что [allocCycle], но обычный byte[] на куче (контроль). */
+    private fun heapCycle(times: Int, mb: Long): String {
+        heldArrays.clear()
+        System.gc()
+        val base = heapUsedMb()
+        val sb = StringBuilder("цикл ByteArray($mb МБ) x$times, база ${base}МБ\n")
+        for (i in 1..times) {
+            val arr = try {
+                ByteArray((mb * MB).toInt())
+            } catch (o: OutOfMemoryError) {
+                sb.append("  $i: OutOfMemoryError, занято ${heapUsedMb()}МБ\n")
+                break
+            }
+            for (off in arr.indices step 4096) arr[off] = 1
+            heldArrays.add(arr)
+            val peak = heapUsedMb()
+            heldArrays.clear()
+            System.gc()
+            try { Thread.sleep(200) } catch (_: InterruptedException) {}
+            System.gc()
+            sb.append("  $i: выделено ${mb}МБ, пик ${peak}МБ → после возврата ${heapUsedMb()}МБ\n")
+        }
+        return sb.toString()
+    }
 
     /** Хвост файлового лога потока — он пишется только в debug-сборке. */
     private fun logTail(lines: Int): String {

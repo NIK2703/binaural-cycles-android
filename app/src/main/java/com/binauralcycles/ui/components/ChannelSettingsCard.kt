@@ -21,6 +21,7 @@ import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
+import com.binaural.core.audio.stream.PacketMemoryBudget
 import com.binauralcycles.R
 
 /**
@@ -441,17 +442,6 @@ fun ChannelSwapSettingsCard(
 }
 
 /**
- * Шкала интервала генерации буфера: от 1 до 10 минут (максимум 600 с).
- * 600 с — потолок по памяти: 600 с @48 кГц = 230 МБ на поток, и это
- * влезает целиком на любом устройстве (см. MAX_BUFFER_INTERVAL_MS и
- * BinauralStreamImpl.maxBufferBytes). Больше 600 с упирается в RSS-бюджет
- * LMK и на 64-битном устройстве, поэтому слайдер сознательно не даёт
- * выбрать больше — чтобы настройка всегда работала «как задумано», без
- * тихого усечения буфера.
- */
-private val BUFFER_MINUTE_STOPS = listOf(1, 2, 5, 10)
-
-/**
  * Блок настроек энергопотребления (интервал генерации буфера, частота дискретизации)
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -462,6 +452,31 @@ fun PowerSettingsCard(
     onSampleRateChange: (SampleRate) -> Unit,
     onBufferGenerationMinutesChange: (Int) -> Unit
 ) {
+    // Ревизия потолка: стопы зависят не только от частоты, но и от состояния,
+    // которое меняется на ходу (выученный после OOM потолок, ручной
+    // `packetmax`). Ключ по одной частоте кэшировал бы список на весь процесс,
+    // и после сужения потолка слайдер снова предлагал бы то, что движок
+    // урежет. Ревизия растёт только когда потолок действительно сменился.
+    val ceilingRevision by PacketMemoryBudget.ceilingRevisionFlow().collectAsState()
+    // Свой набор стоп на каждую частоту дискретизации: пакет — это сырые
+    // PCM_FLOAT, 8 байт на кадр, то есть память на секунду звука прямо
+    // proportional частоте. Один и тот же потолок (86% кучи минус резерв — см.
+    // PacketMemoryBudget) покупает 10 минут при 48 кГц и час при 8 кГц.
+    // Стопы, которые не влезают, отсекаются на устройстве — поэтому слайдер
+    // не может предложить длину, которую движок потом молча урежет.
+    val stops = remember(sampleRate, ceilingRevision) {
+        PacketMemoryBudget.sliderStopsMinutes(sampleRate.value)
+    }
+    // Значение из хранилища могло остаться от другой частоты (или от старой
+    // версии с другими стопами) — втягиваем в текущий набор округлением вниз.
+    val currentMinutes = remember(bufferGenerationMinutes, stops) {
+        PacketMemoryBudget.coerceMinutes(sampleRate.value, bufferGenerationMinutes)
+    }
+    LaunchedEffect(currentMinutes, bufferGenerationMinutes) {
+        if (currentMinutes != bufferGenerationMinutes) {
+            onBufferGenerationMinutesChange(currentMinutes)
+        }
+    }
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -480,8 +495,8 @@ fun PowerSettingsCard(
             Spacer(modifier = Modifier.height(8.dp))
             DiscreteSlider(
                 label = "",
-                value = bufferGenerationMinutes,
-                values = BUFFER_MINUTE_STOPS,  // От 1 минуты до 1 часа
+                value = currentMinutes,
+                values = stops,
                 formatValue = { mins -> formatBufferInterval(mins) },
                 onValueChange = onBufferGenerationMinutesChange,
                 modifier = Modifier.fillMaxWidth()

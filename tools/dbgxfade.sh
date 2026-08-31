@@ -17,15 +17,31 @@ ACTION=com.binauralcycles.debug.COMMAND
 LOG=/sdcard/Android/data/com.binauralcycles.debug/files/Download/binaural_stream.log
 
 cmd() {
-    "$ADB" shell am broadcast -a "$ACTION" -p "$PKG" --es cmd "'$1'" 2>&1 |
+    # --include-stopped-packages: поднять процесс после установки или
+    # force-stop, когда пакет числится «остановленным» и система исключает его
+    # из broadcast'ов. Активити при этом не запускается.
+    "$ADB" shell am broadcast -a "$ACTION" -p "$PKG" --include-stopped-packages \
+        --es cmd "'$1'" 2>&1 |
         sed -n '/Broadcast completed/,$p' | sed 's/^Broadcast completed: result=0, data="//; s/"$//'
 }
 logsize() { "$ADB" shell stat -c '%s' "$LOG" 2>/dev/null | tr -d '\r'; }
 
 # Все маркеры, по которым потом считаются тайминги
-MARKERS='beginHandoff|fadeOutCurrent|fade-out\(|fade-in|promoteNextToCurrent|start spec|prepare |releaseInternal|writerLoop exit|onStreamReleased|onStreamFullyStopped|createAudioTrack|VolumeShaper|RC1|growPacketBuffer|handoffBlocked|finalizePause|discardNext|rearmNextIfStale|launchSpec|launchStream|switch #'
+MARKERS='beginHandoff|requestHandoff|fadeOutCurrent|fade-out\(|fade-in|start spec|prepare |releaseInternal|writerLoop exit|onStreamReleased|onStreamFullyStopped|createAudioTrack|VolumeShaper|RC1|growPacketBuffer|launchSpec|launchStream|discardPausedCurrent|resumeFromPaused|onResumeFromPaused|switch #'
 
-echo "=== состояние до эксперимента ==="
+# Холодный старт процесса: иначе прогон наследует runtime-override'ы от
+# прошлых экспериментов (packetdiv/packetgdiv/packetmax/buffer живут в
+# companion-объекте до перезапуска) и проверяет не дефолтную конфигурацию,
+# а случайную. --include-stopped-packages поднимает процесс без активити.
+"$ADB" shell am force-stop "$PKG" >/dev/null 2>&1
+sleep 1
+for _ in 1 2 3 4 5; do
+    [ -n "$("$ADB" shell pidof "$PKG" | tr -d '\r')" ] && break
+    cmd "status" >/dev/null
+    sleep 2
+done
+
+echo "=== состояние до эксперимента (PID=$("$ADB" shell pidof "$PKG" | tr -d '\r')) ==="
 cmd "status" | head -3
 echo
 
@@ -120,7 +136,30 @@ run_phase_j() {
     step "J2" "preset 3" 10
 }
 
-PHASES=${PHASES:-${1:-"a b c d e f g h i j"}}
+# ФАЗА K — инвариант «загружен не более одного потока» на пути
+# пауза -> смена пресета -> возобновление. Именно здесь замороженный поток
+# ещё держит пакет, а автомат уже хочет создать новый; до правки launchSpec
+# логировал тут «загруженныхБуферов=1».
+# Проверка после прогона: ни одного launchSpec с загруженныхБуферов!=0.
+run_phase_k() {
+    echo "############ ФАЗА K: шторм пауза -> смена пресета -> resume ############"
+    step "K0" "preset 1" 4
+    echo "--- K1..K4: пауза успевает дойти до PAUSED, затем смена и resume ---"
+    for i in 1 2 3 4; do
+        step "K$i.a pause"  "pause" 0.5
+        step "K$i.b preset" "preset $(( (i % 3) + 1 ))" 0.15
+        step "K$i.c resume" "resume" 0.8
+    done
+    echo "--- K5..K8: resume прилетает ПОСРЕДИ фейда паузы (FADE_OUT_PAUSE) ---"
+    for i in 5 6 7 8; do
+        step "K$i.a pause"  "pause" 0.12
+        step "K$i.b preset" "preset $(( (i % 3) + 1 ))" 0
+        step "K$i.c resume" "resume" 1.2
+    done
+    step "K9"  "state" 1
+}
+
+PHASES=${PHASES:-${1:-"a b c d e f g h i j k"}}
 
 for p in $PHASES; do
     case "$p" in
@@ -134,6 +173,7 @@ for p in $PHASES; do
         h|H) run_phase_h ;;
         i|I) run_phase_i ;;
         j|J) run_phase_j ;;
+        k|K) run_phase_k ;;
         *) echo "нет такой фазы: $p" ;;
     esac
     echo

@@ -28,16 +28,13 @@ interface BinauralStream {
 
     /**
      * Рампа до 0, затем полная утилизация. Идемпотентен.
-     * @param onSilent вызывается ОДИН раз в момент, когда рампа дошла до нуля:
-     *        поток уже гарантированно тих, но релиз ещё может идти. Точка
-     *        «повышения» NEXT при кроссфейде.
-     * @param onFullyStopped вызывается после полного освобождения ресурсов.
+     *
+     * @param onFullyStopped вызывается после полного освобождения ресурсов:
+     *        трек снят, движок уничтожен, пакет отдан. До этого момента поток
+     *        остаётся ЕДИНСТВЕННЫМ загруженным — менеджер не создаёт следующий
+     *        поток, пока не пришёл этот колбэк.
      */
-    fun stop(
-        onFullyStopped: () -> Unit,
-        onSilent: (() -> Unit)? = null,
-        shape: FadeShape = FadeShape.LINEAR
-    )
+    fun stop(onFullyStopped: () -> Unit, shape: FadeShape = FadeShape.LINEAR)
 
     /** Разворот рампы: идущий fade-out превращается в fade-in с текущего значения. */
     fun reverseFadeToPlaying(onFullyStarted: () -> Unit): Boolean
@@ -85,14 +82,6 @@ interface BinauralStream {
 
     /** Поток стоит на мягкой паузе (звук заморожен, ресурсы живы). */
     val isPaused: Boolean
-
-    /**
-     * Поток звучит, но рампа fade-in ещё не завершена.
-     *
-     * Для менеджера это запрет на повышение NEXT: кроссфейд EQUAL_POWER
-     * корректен ровно для двух звучащих потоков, третьего он не учитывает.
-     */
-    val isFadingIn: Boolean
 
     fun isChannelsSwapped(): Boolean
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>?

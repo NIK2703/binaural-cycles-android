@@ -150,128 +150,45 @@ class BinauralStreamImpl(
          */
         private const val PARK_POLL_MS = 200L
         private const val SECONDS_PER_DAY = 86400
-        private const val MAX_BUFFER_MINUTES = 60
-        /**
-         * Потолок размера direct-буфера НА ПОТОК (native-память, вне Java-heap,
-         * но в пределах RSS-бюджета LMK).
-         *
-         * Буфер — сырые PCM_FLOAT: 8 байт/кадр × SR × interval. Это НЕ сжатие —
-         * уменьшить нельзя, не поменяв формат. Отсюда пределы:
-         *   600 с @48 кГц = 230 МБ/поток  — влезает на любом 64-битном устройстве;
-         *   3600 с @48 кГц = 1.38 ГБ/поток (2.76 ГБ в кроссфейде CURRENT+NEXT) —
-         *     физически невозможно: LMK убьёт процесс ещё до этого, а на 32-bit
-         *     ABI allocateDirect не выделит смежные 1+ ГБ из-за узкого VA.
-         * Поэтому потолок — не «жадность», а гарантия, что настройка bufferInterval
-         * не уронит воспроизведение: он честно ограничивает то, что устройство
-         * реально может держать, а реальное значение пишется в лог (см. prepare()).
-         *
-         * Выбор числа: 256 МБ на 64-бит — это ~11 мин при 48 кГц на ПОТОК, то есть
-         * дефолтный 600 с (10 мин) честно влезает целиком при ЛЮБОМ SR, а
-         * усекается только 3600 с (где физика не пускает). На 32-bit VA узок —
-         * 96 МБ, иначе allocateDirect падает с OOM ещё до 200 МБ. При желании
-         * поднять предел (например, до 512 МБ) — имейте в виду фоновый RSS-бюджет
-         * LMK: часы воспроизведения с выключенным экраном не прощают лишней памяти.
-         */
-        private val maxBufferBytes: Long
-            get() = if (android.os.Build.SUPPORTED_64_BIT_ABIS.isNotEmpty())
-                256L * 1024 * 1024 else 96L * 1024 * 1024
-
-        /**
-         * Реальный потолок ОДНОГО пакетного буфера — от КУЧИ, а не от «сколько
-         * в устройстве вообще бывает памяти».
-         *
-         * Пакет — `ByteBuffer.allocateDirect`, а на Android он выделяется как
-         * non-movable `byte[]` НА ЯВА-КУЧЕ (libcore → `VMRuntime
-         * .newNonMovableArray`). Значит он конкурирует за кучу и с приложением,
-         * и — главное — САМ С СОБОЙ: во время кроссфейда живут CURRENT и NEXT,
-         * а при быстрой смене пресетов ещё и догорающий старый поток.
-         *
-         * Замер на 23049PCD8G (лог от 22:31:24): `bufferGenerationMinutes=10`
-         * давал цель 600 с = 230 МБ на поток. Два-три потока доращивали пакет
-         * одновременно, `allocateDirect` уполовинивал 230→115→57.6→28.8→…, и
-         * КАЖДАЯ неудачная попытка сама поднимала GC. Итог — ART/Xiaomi сторож:
-         *   kill process: ... reason: memory leaks occurred.
-         *   current heap memory: 268314168
-         *
-         * Правило: на поток — не больше [PACKET_HEAP_DIVISOR]-й доли кучи, но не
-         * больше действующего потолка [packetMaxBytesEffective]. Делитель
-         * подобран замером (см. docs/packet_max_bytes_limit_2026-08-31.md);
-         * исторически здесь была 1/8 (32 МБ на куче 256 МБ ≈ 87 с при 48 кГц).
-         */
-        private const val PACKET_HEAP_DIVISOR = 4
-
-        private const val PACKET_MAX_BYTES = 32L * 1024 * 1024
-        private const val PACKET_MIN_BYTES = 4L * 1024 * 1024
 
         /**
          * Потолок пакета, подменяемый НА ХОДУ (debug-команда `packetmax`).
-         * 0 — работать от константы [PACKET_MAX_BYTES].
          *
-         * Нужен, чтобы искать предел аллокации на устройстве за одну установку:
-         * без него каждый шаг перебора требовал бы пересборки и установки.
-         */
-        @Volatile
-        private var packetMaxBytesOverride = 0L
-
-        /**
-         * Задать потолок пакета в байтах; 0 — вернуться к константе.
-         * Значение клампится в [PACKET_MIN_BYTES]..[maxBufferBytes].
+         * Состояние живёт в [PacketMemoryBudget.setPacketMaxBytes], здесь
+         * только делегация — чтобы debug-команда не знала о бюджете. Почему
+         * состояние там: ручной потолок обязан двигать и слайдер, иначе он
+         * урезает выбранную пользователем стопу молча.
          */
         @JvmStatic
-        fun setPacketMaxBytes(bytes: Long) {
-            packetMaxBytesOverride = if (bytes <= 0L) 0L
-            else bytes.coerceIn(PACKET_MIN_BYTES, maxBufferBytes)
-        }
+        fun setPacketMaxBytes(bytes: Long) = PacketMemoryBudget.setPacketMaxBytes(bytes)
 
-        /** Действующий потолок пакета: override или константа. */
+        /** Действующий ручной потолок пакета: override или «потолка нет». */
         @JvmStatic
-        fun packetMaxBytesEffective(): Long {
-            val o = packetMaxBytesOverride
-            return if (o > 0L) o else PACKET_MAX_BYTES
-        }
-
-        /**
-         * Сколько потоков одновременно держат пакет в куче в худший момент.
-         *
-         * РОВНО ДВА, и это ИНВАРИАНТ менеджера, а не «запас на всякий случай»:
-         *   * CURRENT — звучит;
-         *   * NEXT — вооружён, но молчит и живёт на стартовом пакете;
-         *   * осиротевший CURRENT — уже в тишине, и его пакет сбрасывается
-         *     ДО повышения NEXT ([releasePacketBuffer]), поэтому в момент,
-         *     когда новый поток доращивает свой буфер, старого в куче нет.
-         *
-         * Если запас не требовать, сама ПОПЫТКА аллокации уводит кучу в
-         * OOM-уполовинивание и сторож убивает процесс.
-         */
-        private const val GROW_HEADROOM_STREAMS = 2L
+        fun packetMaxBytesEffective(): Long = PacketMemoryBudget.packetMaxBytesEffective()
 
         /**
          * Какая доля кучи в СУММЕ отдана под пакеты всех живых потоков.
          *
-         * Раньше здесь стояла константа 96 МБ — «ровно три полных буфера по
-         * 32 МБ», то есть число, привязанное к тогдашнему потолку пакета.
-         * Теперь потолок меняется на ходу ([setPacketMaxBytes]), поэтому бюджет
-         * считается от кучи: иначе, подняв потолок пакета, можно было бы обойти
-         * бюджет и вернуть ту же ловушку, от которой он ставился.
+         * Считается как процент кучи в [PacketMemoryBudget.globalBudgetBytes],
+         * а не как константа в мегабайтах: раньше здесь стояло 96 МБ («ровно
+         * три полных буфера по 32 МБ») — число, привязанное к тогдашнему
+         * потолку пакета. Подняв потолок, такой бюджет можно было обойти и
+         * вернуть ту же ловушку, от которой он ставился.
          *
-         * Это ВТОРАЯ линия обороны. Первая — инвариант двух потоков плюс
-         * [GROW_HEADROOM_STREAMS]: пока они не нарушены, сумма не превышает
-         * двух пакетов и бюджет не срабатывает никогда. Он ловит только
-         * поломку инварианта (например, писатель застрял и старый поток не
-         * успел отдать буфер до роста следующего).
+         * Это ВТОРАЯ линия обороны. Первая — инвариант одного потока: новый
+         * поток создаётся только после полной утилизации старого
+         * (см. BinauralStreamManager.beginHandoff), поэтому двух живых пакетов
+         * не существует вовсе (два — лишь на время копирования при доращивании).
+         * Бюджет срабатывает только при поломке инварианта (например, писатель
+         * застрял и старый поток не успел отдать буфер до роста следующего).
          *
          * Стоимость отказа дорастить — малая: поток остаётся на стартовом
          * пакете ([STARTUP_PACKET_SECONDS]) и генерирует чаще. CPU/час от длины
          * пакета НЕ зависит (замер: 1.02 с/час и при 2 с, и при 190 с), так что
          * платим только числом вызовов планировщика, а не процессором.
          */
-        private const val GLOBAL_PACKET_BUDGET_DIVISOR = 2L
-
-        /** Действующий суммарный бюджет пакетов всех потоков, байт. */
         @JvmStatic
-        fun globalPacketBudgetBytes(): Long =
-            (Runtime.getRuntime().maxMemory() / GLOBAL_PACKET_BUDGET_DIVISOR)
-                .coerceAtMost(maxBufferBytes)
+        fun globalPacketBudgetBytes(): Long = PacketMemoryBudget.globalBudgetBytes()
 
         /** Сколько байт пакетных буферов учтено за всеми потоками сейчас. */
         private val packetsBudgetUsed = java.util.concurrent.atomic.AtomicLong(0)
@@ -293,6 +210,14 @@ class BinauralStreamImpl(
         private val oomHalvings = java.util.concurrent.atomic.AtomicInteger(0)
 
         /**
+         * Сколько раз доращивание ОТЛОЖЕНО предохранителем (резерв или общий
+         * бюджет). Отдельный счётчик, потому что отказ молчаливый: поток просто
+         * остаётся на стартовом пакете, звук не рвётся, и заметить деградацию
+         * можно только по нему. Ненулевой значение — повод смотреть `packetmax`.
+         */
+        private val growDeferredTotal = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
          * Дедлайн опроса выхода писателя в finalizeStop(): сколько максимум
          * держим утилизацию потока, прежде чем отдать её releaseInternal().
          * Покрывает один полный чанк записи (WRITE_CHUNK_MS) — иначе таймаут
@@ -310,7 +235,7 @@ class BinauralStreamImpl(
          *
          * Это предел БЛОКИРУЮЩЕГО ожидания на нити актёра, поэтому он короткий
          * [WRITER_EXIT_WAIT_MS] (9.5 с) здесь ждать нельзя: пока актёр стоит,
-         * не исполняются ни повышение NEXT, ни старт следующего потока —
+         * не исполняется ни один таймер фейда и не стартует следующий поток —
          * ровно оттуда и росли многосекундные провалы при переключении.
          * Не вышел за грейс — движок остаётся писателю (он освободит его в
          * своём finally, см. engineOwnedByWriter), утилизация идёт дальше.
@@ -320,27 +245,39 @@ class BinauralStreamImpl(
         /**
          * Диагностика пакетной памяти — для debug-команды `pkstat`.
          *
-         * Главные цифры: `holders peak` (прямая проверка инварианта «не больше
-         * двух потоков с пакетом») и `oomHalvings` (сколько раз allocateDirect
+         * Главные цифры: `holders peak` (прямая проверка инварианта «с пакетом
+         * не больше одного потока») и `oomHalvings` (сколько раз allocateDirect
          * делил запрос пополам — при правильно найденном пределе ноль).
          */
         @JvmStatic
         fun packetStats(): String {
             val rt = Runtime.getRuntime()
             val mb = 1024L * 1024L
-            val override = packetMaxBytesOverride
+            val pct = PacketMemoryBudget.heapPercentEffective()
+            val gpct = PacketMemoryBudget.globalHeapPercentEffective()
             return buildString {
-                append("packetMax=${packetMaxBytesEffective() / mb}МБ (const ${PACKET_MAX_BYTES / mb}МБ, " +
-                    "override ${if (override > 0L) "${override / mb}МБ" else "нет"})\n")
-                append("perStreamCap=${(rt.maxMemory() / PACKET_HEAP_DIVISOR)
-                    .coerceIn(PACKET_MIN_BYTES, packetMaxBytesEffective()) / mb}МБ " +
-                    "(heap ${rt.maxMemory() / mb}МБ / $PACKET_HEAP_DIVISOR)\n")
-                append("holders=${livePacketHolders.get()} peak=${peakPacketHolders.get()} (инвариант: <=2)\n")
-                append("budget=${packetsBudgetUsed.get() / mb}МБ peak=${peakPacketsBudgetUsed.get() / mb}МБ " +
-                    "limit=${globalPacketBudgetBytes() / mb}МБ\n")
-                append("oomHalvings=${oomHalvings.get()} headroom=${GROW_HEADROOM_STREAMS}")
+                append("heap=${rt.maxMemory() / mb}МБ доля=${pct}% " +
+                    "резервПриложению=${PacketMemoryBudget.appReserveBytes() / mb}МБ\n")
+                // ЕДИНАЯ цифра потолка — та же, по которой считает слайдер.
+                append("perStreamCap=${packetBudgetBytes() / mb}МБ " +
+                    "(abi=${PacketMemoryBudget.ABI_CAP_BYTES / mb}МБ)\n")
+                append("holders=${livePacketHolders.get()} peak=${peakPacketHolders.get()} (инвариант: <=1)\n")
+                append("budget=${packetsBudgetUsed.get() / mb}МБ " +
+                    "peak=${peakPacketsBudgetUsed.get() / mb}МБ " +
+                    "limit=${globalPacketBudgetBytes() / mb}МБ (общий ${gpct}%)\n")
+                append("oomHalvings=${oomHalvings.get()} " +
+                    "отказовРоста=${growDeferredTotal.get()}\n")
+                // Вложенные кавычки внутри шаблона Kotlin не разбирает —
+                // значение считаем отдельно.
+                val learned = PacketMemoryBudget.adaptiveCeilingBytes()
+                val learnedText = if (learned == Long.MAX_VALUE) "нет" else "${learned / mb}МБ"
+                append("выученныйПотолок=$learnedText")
             }
         }
+
+        /** Сколько потоков прямо сейчас держат пакетный буфер (инвариант: 0 или 1). */
+        @JvmStatic
+        fun livePacketHolders(): Int = livePacketHolders.get()
 
         /** Обнулить накопленные пики — чтобы замерять каждый прогон с чистого листа. */
         @JvmStatic
@@ -348,7 +285,40 @@ class BinauralStreamImpl(
             peakPacketsBudgetUsed.set(packetsBudgetUsed.get())
             peakPacketHolders.set(livePacketHolders.get())
             oomHalvings.set(0)
+            growDeferredTotal.set(0)
+            PacketMemoryBudget.resetAdaptiveCeiling()
         }
+
+        /**
+         * Сколько байт можно отдать под пакет ОДНОГО потока.
+         *
+         * Прямой буфер — `ByteBuffer.allocateDirect`, а на Android он
+         * выделяется как non-movable `byte[]` НА ЯВА-КУЧЕ (libcore →
+         * `VMRuntime.newNonMovableArray`), то есть конкурирует за кучу и с
+         * приложением, и САМ С СОБОЙ: во время кроссфейда живут CURRENT и
+         * NEXT, а при быстрой смене пресетов ещё и догорающий старый поток.
+         * Поэтому предел считаем от кучи, а не от объёма RAM в устройстве.
+         *
+         * Вся арифметика — процент кучи, резерв приложению, ABI-потолок,
+         * выученный после OOM, ручной `packetmax` — собрана ровно в одном
+         * месте, в [PacketMemoryBudget.engineCeilingBytes], и этот класс её не
+         * дублирует. Слайдер и prepare() обязаны спрашивать одну и ту же
+         * цифру: иначе слайдер предлагает стопу, которую движок молча урежет.
+         *
+         * История, из-за которой предел вообще понадобился. На 23049PCD8G
+         * `bufferGenerationMinutes=10` давал цель 600 с = 230 МБ на поток.
+         * Два-три потока доращивали пакет одновременно, `allocateDirect`
+         * уполовинивал 230→115→57.6→28.8, и КАЖДАЯ неудачная попытка сама
+         * поднимала GC. Итог — ART/Xiaomi сторож:
+         *   kill process: ... reason: memory leaks occurred.
+         *   current heap memory: 268314168
+         * До процента здесь стоял делитель кучи: 1/8 (32 МБ ≈ 87 с при 48 кГц),
+         * потом 1/4 (64 МБ ≈ 174 с). Делитель — плохая единица: он не
+         * выражается в секундах звука и потому не объясняет слайдеру, сколько
+         * можно. Процент выражается, и он же подобран замером.
+         */
+        @JvmStatic
+        private fun packetBudgetBytes(): Long = PacketMemoryBudget.engineCeilingBytes()
     }
 
     private val lifecycleRef = AtomicReference(StreamLifecycle.CREATED)
@@ -356,18 +326,6 @@ class BinauralStreamImpl(
 
     @Volatile private var fadeMode = FadeMode.NONE
     @Volatile private var userVolume = spec.volume
-
-    /**
-     * Поток звучит, но рампа fade-in ещё НЕ завершена.
-     *
-     * Менеджеру важно: повышать NEXT в этом состоянии нельзя. EQUAL_POWER
-     * (sin²+cos²=1) корректен ровно для ДВУХ одновременно звучащих потоков;
-     * повышение посреди fade-in даёт ТРИ живых трека — суммарная энергия
-     * уезжает, и вместо кроссфейда слышен провал/щелчок. Повышение обязано
-     * дождаться onSilent от CURRENT.
-     */
-    override val isFadingIn: Boolean
-        get() = lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN
 
     private var nativeEngine: NativeAudioEngine? = null
     private var audioTrack: AudioTrack? = null
@@ -428,25 +386,21 @@ class BinauralStreamImpl(
     @Volatile private var fadeCompletion: Runnable? = null
 
     /**
-     * Отложенный колбэк «поток тих» — РОВНО в конце рампы fade-out, на
-     * [FADE_GUARD_MS] раньше [fadeCompletion].
+     * Утилизация (setVolume(0) + pause + release) отложена на [FADE_GUARD_MS]
+     * после конца рампы: VolumeShaper стартует не мгновенно, а на следующем
+     * цикле микшера, поэтому в момент «рампа дошла до нуля» множитель ещё
+     * ≈0.31. Снять трек там — значит оборвать звук на 31 % громкости, щелчком.
      *
-     * Разделённые точки обязательны: менеджер стартует фейд-ин NEXT именно в
-     * момент тишины, а утилизация старого трека (setVolume(0) + pause +
-     * release) идёт с гарантийным запасом — рампа VolumeShaper начинается не
-     * мгновенно, а на следующем цикле микшера. Если бы фейд-ин ждал
-     * [fadeCompletion], между пресетами зияла бы дыра в [FADE_GUARD_MS] мс
-     * тишины; если бы утилизация не ждала вовсе — обрыв рампы на ненулевой
-     * громкости дал бы щелчок.
+     * Раньше здесь же висел второй колбэк ровно в конце рампы («точка
+     * тишины») — из него менеджер повышал заранее подготовленный NEXT и
+     * получал бесшовный кроссфейд. В схеме «загружен не более одного потока»
+     * поднимать нечего: следующий поток создаётся только ПОСЛЕ [fadeCompletion],
+     * и [FADE_GUARD_MS] — это ровно та величина, на которую разрыв звука
+     * длиннее самой рампы.
      */
-    @Volatile private var silentCompletion: Runnable? = null
-
-    /** Снять оба отложенных колбэка фейда (завершение и точку тишины). */
     private fun cancelFadeCallbacks() {
         fadeCompletion?.let { controlHandler.removeCallbacks(it) }
         fadeCompletion = null
-        silentCompletion?.let { controlHandler.removeCallbacks(it) }
-        silentCompletion = null
     }
 
     // -------------------------------------------------- мягкая пауза (состояние)
@@ -468,9 +422,6 @@ class BinauralStreamImpl(
 
     /** Монитор парковки писателя: parkWriter/wakeWriter. */
     private val parkLock = Object()
-
-    /** Колбэк «поток тих» (рампа в нуле, ДО релиза) — точка повышения NEXT при кроссфейде. */
-    @Volatile private var pendingOnSilent: (() -> Unit)? = null
 
     // ------------------------------------------------------------------ prepare
 
@@ -540,28 +491,39 @@ class BinauralStreamImpl(
             //    Трек создан, но НЕ запущен — поток ещё беззвучен.
             createAudioTrack(rate)
 
-            // 4. Целевая ёмкость пакета — с теми же капами, что и в старом движке.
-            val maxSamplesByMinutes = rate.toLong() * 60 * MAX_BUFFER_MINUTES
-            val maxSamplesByBytes = maxBufferBytes / 8L
-            val maxSamplesByPacket = packetBudgetBytes() / 8L
+            // 4. Целевая ёмкость пакета.
+            //
+            //    Потолок берётся ровно из одного места — [PacketMemoryBudget.
+            //    engineCeilingBytes] — то есть ИЗ ТОЙ ЖЕ цифры, по которой
+            //    слайдер строил стопы и по которой менеджер клампил интервал.
+            //    Раньше здесь стояли ещё два потолка, о которых слайдер не знал
+            //    (ABI-константа и выученный после OOM), и на устройствах с
+            //    кучей ≥ 341 МБ они молча урезали выбранную длину: 40 мин
+            //    @16 кГц превращались в 35, 15 мин @48 кГц — в 11.6. Теперь
+            //    усечение возможно только по запрошенному интервалу, и оно
+            //    По-прежнему не молчит.
+            val ceilingSamples = packetBudgetBytes() / PacketMemoryBudget.BYTES_PER_FRAME
+            // Структурный предел длительности (не память, а здравый смысл:
+            // пакет длиннее часа — это час, в течение которого правка графика
+            // дойдёт до звука только на следующей генерации).
+            val maxSamplesBySeconds = rate.toLong() * PacketMemoryBudget.MAX_SECONDS
             val requestedSamples = rate.toLong() * bufferIntervalMs / 1000L
             val targetSamples = minOf(
                 requestedSamples,
-                maxSamplesByMinutes,
-                maxSamplesByBytes,
-                maxSamplesByPacket
+                maxSamplesBySeconds,
+                ceilingSamples
             ).toInt()
             targetSamplesPerChannel = targetSamples
-            // Потолок по байтам — это предел устройства (см. maxBufferBytes),
-            // а не рабочий предел. Дефолтный 600 с влезает целиком при любом SR
-            // (максимум 230 МБ на HIGH); урезается только то, что физически не
-            // держится (напр. 3600 с @44.1 кГц = 1.27 ГБ/поток). Усечение
-            // не молчит: пишем запрошенный и реальный интервал в лог.
+            // Потолок — это предел устройства, а не рабочий предел. Дефолтный
+            // 600 с влезает целиком при любом SR (максимум 230 МБ на HIGH);
+            // урезается только то, что физически не держится (напр. 3600 с
+            // @44.1 кГц = 1.27 ГБ/поток). Усечение не молчит: пишем
+            // запрошенный и реальный интервал в лог.
             if (targetSamples < requestedSamples) {
                 StreamLogger.w(TAG, "prepare spec#${spec.serial}: buffer interval clamped " +
-                    "(device RAM ${maxBufferBytes / (1024 * 1024)}MB, packet budget " +
-                    "${packetBudgetBytes() / (1024 * 1024)}MB on heap " +
-                    "${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB): " +
+                    "(ceiling ${packetBudgetBytes() / (1024 * 1024)}MB " +
+                    "[abi=${PacketMemoryBudget.ABI_CAP_BYTES / (1024 * 1024)}MB] " +
+                    "on heap ${Runtime.getRuntime().maxMemory() / (1024 * 1024)}MB): " +
                     "requested ${bufferIntervalMs}ms -> effective ${targetSamples * 1000L / rate}ms @ ${rate}Hz")
             }
 
@@ -699,39 +661,47 @@ class BinauralStreamImpl(
         // это экономит десятки мегабайт на каждом прерванном хэндоффе.
         if (lifecycleRef.get() != StreamLifecycle.PLAYING || fadeMode == FadeMode.OUT) return
 
-        // Запас на [GROW_HEADROOM_STREAMS] потоков. Без этой проверки сама
-        // ПОПЫТКА аллокации и есть вылет: allocateDirect уполовинивает запрос,
-        // каждый OOM поднимает GC, куча уходит в потолок, и сторож убивает
-        // процесс («memory leaks occurred»). Неудачу здесь НЕ считаем как
-        // попытку ([growAttempts] не растёт): память освободится — дорастим
-        // на следующем пакете.
+        // Предохранитель. НЕ смотрим на Runtime.freeMemory(), и вот почему.
+        //
+        // На ART крупные массивы живут в large object space и по System.gc()
+        // НЕ возвращаются: замер на 23049PCD8G — 6 циклов «выделить 32 МБ,
+        // отпустить, 2× System.gc() с паузой» дали 34→66→98→130 МБ и ни одного
+        // возврата, пока куча не упёрлась в потолок. Обычный byte[] ведёт себя
+        // так же, это не особенность allocateDirect. Итого «занято» завышено на
+        // десятки МБ уже НЕЖИВОГО мусора, и прежняя проверка
+        // (maxMemory − (total − free)) после шторма смен лгала: «нужно 64 МБ,
+        // свободно 50 МБ» при 200 МБ мусора. Рост откладывался НАВСЕГДА —
+        // поток не дорастал даже со стартовых 2 с, и писатель просыпался
+        // ~1800 раз/час вместо ~800. Предохранитель от OOM сам себя запирал.
+        //
+        // Считаем поэтому по СВОЕЙ бухгалтерии: сколько держат НАШИ потоки,
+        // известно точно, а крупные аллокации в приложении — только наши.
+        // Мусор ART вернёт под давлением аллокации; не сможет — allocateDirect
+        // уполовинит запрос сам (вторая линия обороны, она осталась).
+        //
+        // ЕДИНСТВЕННАЯ проверка — влазит ли нужное в общий бюджет сверх того,
+        // что держат другие потоки. Отдельного «резерва приложению» здесь нет,
+        // и это не упущение: резерв уже заложен в сам бюджет. Пакету отводится
+        // 86% кучи, остальные 14% (36 МБ на 256 МБ) — это и есть резерв на
+        // приложение. Раньше резерв отмерялся сверху (heap/8 = 32 МБ) и при
+        // пакете в 86% кучи складывался с ним: 220 + 32 = 252 из 256 МБ, то
+        // есть предохранитель молча запрещал ровно ту длину, которую сам же
+        // разрешил потолок. Один предел вместо двух — и противоречие снято.
         val neededBytes = target.toLong() * 8
-        val rt = Runtime.getRuntime()
-        val freeBytes = rt.maxMemory() - (rt.totalMemory() - rt.freeMemory())
-        if (neededBytes * GROW_HEADROOM_STREAMS > freeBytes) {
+        val heldByOthers = packetsBudgetUsed.get() - packetBudgetCommitted.get()
+        if (heldByOthers + neededBytes > globalPacketBudgetBytes()) {
             if (!growDeferredLogged) {
                 growDeferredLogged = true
+                growDeferredTotal.incrementAndGet()
                 StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: отложено — " +
-                    "нужно ${neededBytes * GROW_HEADROOM_STREAMS / (1024 * 1024)}МБ " +
-                    "($GROW_HEADROOM_STREAMS потока по ${neededBytes / (1024 * 1024)}МБ), " +
-                    "свободно ${freeBytes / (1024 * 1024)}МБ")
+                    "нужно ${neededBytes / (1024 * 1024)}МБ, чужие потоки держат " +
+                    "${heldByOthers / (1024 * 1024)}МБ, бюджет пакетов " +
+                    "${globalPacketBudgetBytes() / (1024 * 1024)}МБ")
             }
             return
         }
-        // Общий бюджет: считаем, сколько УЖЕ держат все потоки вместе, а не
-        // «влезло бы ещё три» ([GROW_HEADROOM_STREAMS] — предсказание, а не
-        // предел). Неудачу не считаем попыткой ([growAttempts] не растёт):
-        // отпустится чужой буфер — дорастим на следующем пакете.
-        if (!globalBudgetAllows(neededBytes)) {
-            if (!growDeferredLogged) {
-                growDeferredLogged = true
-                StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: отложено — общий бюджет " +
-                    "занят на ${packetsBudgetUsed.get() / (1024 * 1024)}/" +
-                    "${globalPacketBudgetBytes() / (1024 * 1024)}МБ, " +
-                    "этому потоку нужно ${neededBytes / (1024 * 1024)}МБ")
-            }
-            return
-        }
+        // Неудачу не считаем попыткой ([growAttempts] не растёт): отпустится
+        // чужой буфер — дорастим на следующем пакете.
         growAttempts++
         val grown = allocateDirect(target * 2 * 4, rate) ?: return
         // Между аллокацией и публикацией мог успеть пройти releaseInternal().
@@ -766,16 +736,6 @@ class BinauralStreamImpl(
     }
 
     /**
-     * Сколько байт можно отдать под пакет ОДНОГО потока. См. [PACKET_MAX_BYTES]:
-     * прямой буфер живёт на Java-куче, поэтому предел считаем от её размера,
-     * а не от объёма RAM в устройстве.
-     */
-    private fun packetBudgetBytes(): Long {
-        val heap = Runtime.getRuntime().maxMemory()
-        return (heap / PACKET_HEAP_DIVISOR).coerceIn(PACKET_MIN_BYTES, packetMaxBytesEffective())
-    }
-
-    /**
      * Записать в общий бюджет фактический объём буфера ЭТОГО потока.
      *
      * Считаем по ФАКТУ ([ByteBuffer.capacity]), а не по запросу: [allocateDirect]
@@ -784,6 +744,12 @@ class BinauralStreamImpl(
      *
      * Здесь же ведётся счётчик ЖИВЫХ держателей пакета — это и есть измеритель
      * инварианта «не больше двух потоков с пакетом одновременно».
+     *
+     * И здесь же отпускается храповик выученного потолка: как только под
+     * пакеты не занято ничего, предел можно перепроверить — но лишь в том
+     * случае, если прошлое опускание было вызвано конкуренцией потоков, а не
+     * абсолютным пределом устройства (см. [PacketMemoryBudget.
+     * releaseAdaptiveCeilingIfSafe]).
      */
     private fun commitPacketBudget(actualBytes: Long) {
         val prev = packetBudgetCommitted.getAndSet(actualBytes)
@@ -791,6 +757,7 @@ class BinauralStreamImpl(
         if (delta != 0L) {
             val used = packetsBudgetUsed.addAndGet(delta)
             peakPacketsBudgetUsed.getAndUpdate { p -> maxOf(p, used) }
+            if (used == 0L) PacketMemoryBudget.releaseAdaptiveCeilingIfSafe()
         }
         if (prev == 0L && actualBytes > 0L) {
             val n = livePacketHolders.incrementAndGet()
@@ -799,17 +766,6 @@ class BinauralStreamImpl(
             livePacketHolders.decrementAndGet()
         }
     }
-
-    /**
-     * Влезет ли [neededBytes] в общий бюджет сверх уже занятого этим потоком.
-     *
-     * Проверка и последующая аллокация — не одна атомарная операция (два
-     * счётчика), поэтому под одновременным штормом бюджет может проскочить на
-     * один буфер. Это допустимо: бюджет — мягкий предохранитель, а поведение
-     * в худшем случае такое же, как до его появления.
-     */
-    private fun globalBudgetAllows(neededBytes: Long): Boolean =
-        packetsBudgetUsed.get() - packetBudgetCommitted.get() + neededBytes <= globalPacketBudgetBytes()
 
     private fun allocateDirect(sizeBytes: Int, rateHz: Int): ByteBuffer? {
         val minSize = maxOf(audioTrackBufferSize, rateHz * 2 * 4)
@@ -824,42 +780,22 @@ class BinauralStreamImpl(
                 // каждый провал означает, что куча ушла в потолок и GC поднят
                 // принудительно, даже если в итоге буфер удалось получить.
                 oomHalvings.incrementAndGet()
+                // Запомнить потолок: `size` не дали, значит просить столько и
+                // больше бессмысленно, пока пакетов не останется вовсе.
+                //
+                // Второй аргумент — сколько пакетной памяти держат ДРУГИЕ
+                // потоки: по нему бюджет решает, был провал пределом
+                // устройства или конкуренцией. Своё уже закоммиченное
+                // вычитаем, иначе при доращивании единственного потока его же
+                // собственный стартовый пакет сойдёт за чужую память.
+                // См. [PacketMemoryBudget.noteAllocationFailure].
+                val otherHeld =
+                    (packetsBudgetUsed.get() - packetBudgetCommitted.get()).coerceAtLeast(0L)
+                PacketMemoryBudget.noteAllocationFailure(size.toLong(), otherHeld)
                 if (size <= minSize) return null
                 size = maxOf(minSize, size / 2)
             }
         }
-    }
-
-    /**
-     * Отдать ТОЛЬКО пакетный буфер — трек, движок и писатель остаются живы.
-     *
-     * Точка вызова: поток уже НЕСЛЫШЕН (фейд-аут дошёл до нуля, NEXT
-     * повышается), но утилизация ещё не завершена — писатель вправе провисеть
-     * в `track.write(WRITE_BLOCKING)` до одного чанка, а `releaseInternal()`
-     * ждёт его выхода. Пакет в этот момент — чистый балласт размером в десятки
-     * мегабайт, и держим мы его ровно тогда, когда новый поток аллоцирует
-     * свой. До сброса пик кучи был «два полных пакета», после — «один полный
-     * плюс стартовый», то есть вдвое ниже: именно это и развязывает руки
-     * для подъёма [PACKET_MAX_BYTES].
-     *
-     * Безопасность по отношению к писателю: он читает [directBuffer] в локальную
-     * переменную перед каждым использованием, поэтому обнуление поля не рвёт
-     * его посреди `generateBufferDirect`/`write` — он просто выйдет из цикла
-     * на следующей итерации (`directBuffer ?: break`). [samplesPerChannel]
-     * обнуляется ПОСЛЕ буфера и страхуется проверкой `<= 0` в writerLoop.
-     *
-     * Идемпотентно: повторный вызов ничего не меняет (бюджет уже возвращён).
-     */
-    fun releasePacketBuffer() {
-        if (packetBudgetCommitted.get() == 0L && directBuffer == null) return
-        StreamLogger.d(TAG, "releasePacketBuffer spec#${spec.serial}: пакет отдан " +
-            "(lc=${lifecycleRef.get()}, было ${packetBudgetCommitted.get() / (1024 * 1024)}МБ)")
-        directBuffer = null
-        samplesPerChannel = 0
-        // Больше не доращиваем: иначе следующий виток писателя мог бы
-        // аллоцировать полный интервал потоку, который уже утилизируется.
-        packetBufferGrown = true
-        commitPacketBudget(0)
     }
 
     // ------------------------------------------------------------------ start
@@ -926,20 +862,16 @@ class BinauralStreamImpl(
 
     // ------------------------------------------------------------------ stop
 
-    override fun stop(
-        onFullyStopped: () -> Unit,
-        onSilent: (() -> Unit)?,
-        shape: FadeShape
-    ) {
+    override fun stop(onFullyStopped: () -> Unit, shape: FadeShape) {
         when (lifecycleRef.get()) {
             StreamLifecycle.RELEASED, StreamLifecycle.FAILED -> {
-                StreamLogger.d(TAG, "stop spec#${spec.serial}: уже RELEASED/FAILED — мгновенные колбэки")
-                onSilent?.invoke(); onFullyStopped(); return
+                StreamLogger.d(TAG, "stop spec#${spec.serial}: уже RELEASED/FAILED — мгновенный колбэк")
+                onFullyStopped(); return
             }
             // Поток ещё НЕ звучал — утилизация бесшумна (кейс "остановлен в очереди").
             StreamLifecycle.CREATED, StreamLifecycle.PREPARED -> {
                 StreamLogger.d(TAG, "stop spec#${spec.serial}: не играл — тихий abort")
-                abort(); onSilent?.invoke(); onFullyStopped(); return
+                abort(); onFullyStopped(); return
             }
             StreamLifecycle.STOPPING -> { StreamLogger.d(TAG, "stop spec#${spec.serial}: уже STOPPING (идемпотентно)"); return }
             else -> {}
@@ -955,12 +887,10 @@ class BinauralStreamImpl(
             StreamLogger.d(TAG, "stop spec#${spec.serial}: на мягкой паузе — утилизация без рампы")
             cancelFadeCallbacks()
             fadeMode = FadeMode.OUT
-            pendingOnSilent = onSilent
             finalizeStop(onFullyStopped)
             return
         }
         fadeMode = FadeMode.OUT
-        pendingOnSilent = onSilent
         cancelFadeCallbacks()   // снять фейд-ин, если был
 
         // Текущее значение рампы: если остановили посреди fade-in — фейд-аут короткий.
@@ -974,25 +904,13 @@ class BinauralStreamImpl(
             try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
             closeShaper()
         }
-        // Точка тишины — ровно в конце рампы. Именно здесь менеджер стартует
-        // фейд-ин NEXT (см. [silentCompletion]): ждать ещё FADE_GUARD_MS значит
-        // вставить между пресетами 60 мс тишины.
-        if (onSilent != null && dur > 0L) {
-            val silent = Runnable {
-                if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.OUT) {
-                    silentCompletion = null
-                    StreamLogger.d(TAG, "stop spec#${spec.serial}: ТОЧКА ТИШИНЫ " +
-                        "(остаток рампы=${currentMultiplier()}) — менеджер стартует фейд-ин NEXT")
-                    val cb = pendingOnSilent
-                    pendingOnSilent = null
-                    try { cb?.invoke() } catch (t: Throwable) {
-                        Log.e(TAG, "onSilent failed: ${t.message}")
-                    }
-                }
-            }
-            silentCompletion = silent
-            controlHandler.postDelayed(silent, dur)
-        }
+        // Утилизация — через FADE_GUARD_MS после конца рампы, а не ровно в её
+        // конце: VolumeShaper отстаёт от расписания (~50 мс), и в «точке тишины»
+        // множитель ещё ≈0.31. Снимать трек там — это щелчок на 31 % громкости.
+        //
+        // РАЗРЫВ ЗВУКА при смене пресета начинается ровно здесь и длится до
+        // start() следующего потока: менеджер не создаёт новый поток, пока
+        // этот не утилизирован (инвариант «загружен не более одного потока»).
         val completion = Runnable { finalizeStop(onFullyStopped) }
         fadeCompletion = completion
         controlHandler.postDelayed(completion, dur + FADE_GUARD_MS)
@@ -1006,16 +924,6 @@ class BinauralStreamImpl(
         // финал звучит вспышкой — тот самый хлопок в конце пресета.
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
 
-        // Если точка тишины по какой-то причине не сработала (dur == 0, стоп с
-        // паузы, отменённый колбэк) — сообщаем менеджеру здесь, ДО перехода в
-        // STOPPING: это страховка повышения NEXT при кроссфейде, а не основной
-        // путь (основной — отдельный колбэк ровно в конце рампы, см. stop()).
-        pendingOnSilent?.let {
-            pendingOnSilent = null
-            StreamLogger.d(TAG, "finalizeStop spec#${spec.serial}: onSilent по страховке")
-            try { it() } catch (t: Throwable) { Log.e(TAG, "onSilent failed: ${t.message}") }
-        }
-
         if (!lifecycleRef.compareAndSet(StreamLifecycle.PLAYING, StreamLifecycle.STOPPING)) {
             onFullyStopped(); return
         }
@@ -1027,10 +935,9 @@ class BinauralStreamImpl(
         // доигрывает остаток чанка. WRITE_CHUNK_MS = 8000 мс, а write()
         // разблокируется лишь когда в кольце есть место под ВЕСЬ чанк, то есть
         // писатель может провисеть в нём до ~4.5 с (кольцо 2 МБ ≈ 5.5 с @48 кГц
-        // минус маржа 1 с). Всё это время трек живёт в AudioFlinger, а
-        // orphan-гейт менеджера ([handoffBlocked]) держит СЛЕДУЮЩИЙ хэндофф
-        // ровно на остаток чанка — отсюда и «случайная» задержка смены пресета
-        // (замер на устройстве: 1.7–4.9 с).
+        // минус маржа 1 с). Всё это время трек живёт в AudioFlinger, а менеджер
+        // не создаёт следующий поток до полного релиза — отсюда и «случайная»
+        // задержка смены пресета (замер на устройстве: 1.7–4.9 с).
         //
         // Неслышно: к этому моменту громкость уже в нуле (setVolume(0) выше,
         // плюс множитель шейпера), остаток кольца не нужен. pause() идемпотентен,

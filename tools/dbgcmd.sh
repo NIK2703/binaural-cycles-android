@@ -26,5 +26,11 @@ CMD="$*"
 
 # Внутренние кавычки обязательны: `adb shell` склеивает аргументы через пробел,
 # и команда из нескольких слов на устройстве развалилась бы на части.
-"$ADB" shell am broadcast -a "$ACTION" -p "$PKG" --es cmd "'$CMD'" 2>&1 |
+#
+# --include-stopped-packages нужен, чтобы поднять процесс ПОСЛЕ установки,
+# когда приложение ещё в «остановленном» состоянии: система по умолчанию
+# исключает такие пакеты из broadcast'ов. Активити при этом НЕ запускается —
+# отрабатывает только Application.onCreate, который и регистрирует приёмник.
+"$ADB" shell am broadcast -a "$ACTION" -p "$PKG" --include-stopped-packages \
+    --es cmd "'$CMD'" 2>&1 |
     sed -n '/Broadcast completed/,$p'

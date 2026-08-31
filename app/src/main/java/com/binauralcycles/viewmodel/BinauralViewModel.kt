@@ -27,6 +27,7 @@ import com.binaural.core.audio.model.NormalizationType
 import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
+import com.binaural.core.audio.stream.PacketMemoryBudget
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -339,10 +340,14 @@ class BinauralViewModel @Inject constructor(
         // Интервал генерации буфера (в минутах)
         viewModelScope.launch {
             preferencesRepository.getBufferGenerationMinutes().collect { minutes ->
-                // Максимум 10 мин (600 с): выше — упирается в RSS-бюджет LMK,
-                // и движку пришлось бы урезать буфер. Слайдер не даёт выбрать
-                // больше, здесь — страховка для значений из хранилища/старых версий.
-                val clamped = minutes.coerceIn(1, 10)
+                // Верхний предел зависит от частоты дискретизации: пакет —
+                // это сырые PCM_FLOAT (8 байт на кадр), и один бюджет кучи
+                // покупает разную длительность на разных SR. Больше 86% кучи
+                // отдавать нельзя (см. PacketMemoryBudget). Слайдер уже
+                // показывает только доступные стопы, здесь — страховка для
+                // значений из хранилища старых версий и смены частоты.
+                val rate = _uiState.value.sampleRate.value
+                val clamped = PacketMemoryBudget.coerceMinutes(rate, minutes)
                 _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
                 // Преобразуем минуты в миллисекунды для частоты обновления
                 // Большой буфер = реже обновления = лучше энергопотребление
@@ -1359,7 +1364,10 @@ class BinauralViewModel @Inject constructor(
      * Большой интервал = меньше пробуждений CPU = лучше энергопотребление
      */
     fun setBufferGenerationMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(1, 10)
+        // Верхний предел зависит от частоты (см. PacketMemoryBudget); округление
+        // ВНИЗ по лестнице слайдера, чтобы сохранялось ровно то, что видно в UI.
+        val rate = _uiState.value.sampleRate.value
+        val clampedMinutes = PacketMemoryBudget.coerceMinutes(rate, minutes)
         _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
         // Преобразуем минуты в миллисекунды
         playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)
