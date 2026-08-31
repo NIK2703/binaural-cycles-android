@@ -4802,5 +4802,179 @@ TEST_F(AudibleTimeTest, ResumeUiTimeline_ContinuesFromAudiblePosition) {
     EXPECT_NEAR(ui, audible, 0.25f); // сразу после снятия заморозки
 }
 
+// ============================================================================
+// PROPERTY: КАКОЕ УХО СЛЫШИТ БОЛЕЕ ВЫСОКИЙ ТОН (якорь раскладки)
+//
+// Инвариант, который обязан выполняться и в СТАРОМ (флаг + перестановка буфера),
+// и в НОВОМ (знак beat) коде:
+//   1) вне окна перестановки {fL(t), fR(t)} == {lower(t), upper(t)} (множество);
+//   2) фактическая раскладка = sign(beat_кривой) XOR паритет(число смен,
+//      уже выполненных генератором к моменту t);
+//   3) число смен за прогон == числу запланированных по channelSwapStateAt.
+//
+// Если после миграции этот тест падает — утверждение «перестановка буфера
+// тождественна смене знака beat» неверно, и идти дальше нельзя.
+// ============================================================================
+
+class EarLayoutProperty : public ::testing::Test {
+protected:
+    AudioGenerator generator;
+    BufferPackagePlanner planner;
+    static constexpr int SAMPLE_RATE = 44100;
+
+    void SetUp() override { generator.setSampleRate(SAMPLE_RATE); }
+
+    // Постоянная кривая carrier/beat, TIMER-свап, fade выключен (чтобы множество
+    // частот было ровно {lower,upper} везде вне ступеньки), нормализация NONE.
+    BinauralConfig makeConfig(float beat, int intervalSec, bool swapEnabled,
+                               bool fadeEnabled = false) {
+        BinauralConfig config;
+        FrequencyPoint p;
+        p.timeSeconds = 0;
+        p.carrierFrequency = 200.0f;
+        p.beatFrequency = beat;
+        config.curve.points.push_back(p);
+        config.curve.interpolationType = InterpolationType::LINEAR;
+        config.curve.updateCache();
+        config.volume = 1.0f;
+        config.normalizationType = NormalizationType::NONE;
+        config.channelSwapEnabled = swapEnabled;
+        config.channelSwapMode = ChannelSwapMode::TIMER;
+        config.channelSwapIntervalSec = intervalSec;
+        config.channelSwapFadeEnabled = fadeEnabled;   // false -> ступенька, без рампы
+        config.channelSwapFadeDurationMs = 1000;
+        config.channelSwapPauseDurationMs = 0;
+        return config;
+    }
+};
+
+TEST_F(EarLayoutProperty, SetOfEarFrequenciesEqualsCurveFrequencies) {
+    // beat > 0: lower = 196, upper = 204. Точки через 200 мс, пропускаем окна
+    // с RMS ниже порога (тишина ритуала в старом коде). Множество {196,204}.
+    BinauralConfig config = makeConfig(8.0f, 5, /*swapEnabled=*/true, /*fadeEnabled=*/false);
+    GeneratorState state;
+
+    const float durationSec = 30.0f;
+    const int requestedSamples = static_cast<int>(durationSec * SAMPLE_RATE);
+    std::vector<float> buffer(static_cast<size_t>(requestedSamples) * 2);
+
+    // План режется на сегменты, длительность каждого округляется до целого
+    // числа сэмплов, поэтому реально выходит на несколько сэмплов меньше
+    // запрошенного. Меряем по ФАКТУ — иначе якорь ловит арифметику, а не звук.
+    GenerateResult result = generator.generatePackage(
+        buffer.data(), planner.planPackage(requestedSamples * 1000 / SAMPLE_RATE,
+                                           config, state, 0.0f, 1.0f),
+        config, state, 0.0f, 0);
+    ASSERT_GT(result.samplesGenerated, requestedSamples - 64);
+    const int totalSamples = result.samplesGenerated;
+
+    const int win = SAMPLE_RATE / 5;   // 200 мс
+    const int windows = totalSamples / win;
+
+    // Проход 1: измерения по окнам.
+    struct WindowMeasure { float rmsL, rmsR, fL, fR; int leftHigher; };
+    std::vector<WindowMeasure> ws(static_cast<size_t>(windows));
+    for (int k = 0; k < windows; ++k) {
+        const int s = k * win;
+        float sumL = 0.0f, sumR = 0.0f;
+        for (int i = 0; i < win; ++i) {
+            const float l = buffer[(s + i) * 2];
+            const float r = buffer[(s + i) * 2 + 1];
+            sumL += l * l;
+            sumR += r * r;
+        }
+        ws[k].rmsL = std::sqrt(sumL / win);
+        ws[k].rmsR = std::sqrt(sumR / win);
+        ws[k].fL = measureFrequencyInWindow(buffer.data(), totalSamples, s, win, 0, SAMPLE_RATE);
+        ws[k].fR = measureFrequencyInWindow(buffer.data(), totalSamples, s, win, 1, SAMPLE_RATE);
+        ws[k].leftHigher = (ws[k].fL > ws[k].fR) ? 1 : 0;
+    }
+
+    // Проход 2: проверяем только окна со СТАБИЛЬНОЙ раскладкой — у которых
+    // раскладка совпадает с обоими соседями. Окно, накрывающее момент смены,
+    // содержит внутри переход 196↔204 в одном ухе (плюс провал амплитуды в
+    // старом коде), и его «средняя» частота заведомо не равна ни 196, ни 204.
+    // Правило не зависит от механизма смены — только от самого факта смены,
+    // поэтому якорь одинаково применим до и после миграции.
+    int checked = 0;
+    int mismatches = 0;
+    for (int k = 1; k + 1 < windows; ++k) {
+        if (ws[k].rmsL < 0.02f || ws[k].rmsR < 0.02f) continue;   // тишина
+        if (ws[k].leftHigher != ws[k - 1].leftHigher) continue;   // смена на/внутри окна
+        if (ws[k].leftHigher != ws[k + 1].leftHigher) continue;
+
+        const float mid = (ws[k].fL + ws[k].fR) * 0.5f;
+        const float spread = std::abs(ws[k].fL - ws[k].fR);
+        // несущая ~200, разнос ~8 -> |mid-200| < 3, spread ~ 8
+        if (std::abs(mid - 200.0f) > 3.0f) ++mismatches;
+        if (std::abs(spread - 8.0f) > 2.0f) ++mismatches;
+        ++checked;
+    }
+    EXPECT_GT(checked, 50) << "слишком мало окон со стабильной раскладкой";
+    EXPECT_EQ(mismatches, 0) << "множество частот ушей != {lower,upper}";
+}
+
+TEST_F(EarLayoutProperty, SwapCountMatchesSchedule) {
+    // 30 с, интервал 5 с -> ровно 6 смен по сетке TIMER.
+    BinauralConfig config = makeConfig(8.0f, 5, /*swapEnabled=*/true, /*fadeEnabled=*/false);
+    GeneratorState state;
+    const int requestedSamples = 30 * SAMPLE_RATE;
+    std::vector<float> buffer(static_cast<size_t>(requestedSamples) * 2);
+    GenerateResult result = generator.generatePackage(
+        buffer.data(), planner.planPackage(requestedSamples * 1000 / SAMPLE_RATE,
+                                           config, state, 0.0f, 1.0f),
+        config, state, 0.0f, 0);
+    ASSERT_GT(result.samplesGenerated, requestedSamples - 64);
+    const int totalSamples = result.samplesGenerated;
+
+    // Считаем смены раскладки по окнам: какая частота в КАЖДОМ ухе выше.
+    const int win = SAMPLE_RATE / 5;
+    int prevLeftHigher = -1;
+    int layoutFlips = 0;
+    int checked = 0;
+    for (int s = 0; s + win <= totalSamples; s += win) {
+        float sumL = 0.0f, sumR = 0.0f;
+        for (int i = 0; i < win; ++i) {
+            sumL += buffer[(s + i) * 2] * buffer[(s + i) * 2];
+            sumR += buffer[(s + i) * 2 + 1] * buffer[(s + i) * 2 + 1];
+        }
+        if (std::sqrt(sumL / win) < 0.02f || std::sqrt(sumR / win) < 0.02f) continue;
+        const float fL = measureFrequencyInWindow(buffer.data(), totalSamples, s, win, 0, SAMPLE_RATE);
+        const float fR = measureFrequencyInWindow(buffer.data(), totalSamples, s, win, 1, SAMPLE_RATE);
+        const int leftHigher = (fL > fR) ? 1 : 0;
+        if (prevLeftHigher >= 0 && leftHigher != prevLeftHigher) ++layoutFlips;
+        prevLeftHigher = leftHigher;
+        ++checked;
+    }
+    EXPECT_GT(checked, 50);
+    (void)checked;
+    // beat > 0 => изначально левое ухо НИЖЕ (left=lower). Каждая смена меняет
+    // это. За 30 с при интервале 5 с старт (t=0) даёт 6 смен. Допуск ±1 на
+    // граничное окно у первого/последнего перехода.
+    EXPECT_NEAR(layoutFlips, 6, 1) << "число смен != запланированному по расписанию";
+}
+
+TEST_F(EarLayoutProperty, NegativeBeatWithoutSwap_LayoutIsNatural) {
+    // Самое важное для жалобы пользователя: отрицательный beat при ВЫКЛЮЧЕННОМ
+    // свапе. Левое ухо ДОЛЖНО быть ВЫШЕ (left = carrier - beat/2 > right).
+    BinauralConfig config = makeConfig(-8.0f, 5, /*swapEnabled=*/false, /*fadeEnabled=*/false);
+    GeneratorState state;
+    const int totalSamples = 5 * SAMPLE_RATE;
+    std::vector<float> buffer(static_cast<size_t>(totalSamples) * 2);
+    GenerateResult result = generator.generatePackage(
+        buffer.data(), planner.planPackage(totalSamples * 1000 / SAMPLE_RATE,
+                                           config, state, 0.0f, 1.0f),
+        config, state, 0.0f, 0);
+    ASSERT_EQ(result.samplesGenerated, totalSamples);
+
+    const int win = SAMPLE_RATE / 2;
+    const float fL = measureFrequencyInWindow(buffer.data(), totalSamples, 0, win, 0, SAMPLE_RATE);
+    const float fR = measureFrequencyInWindow(buffer.data(), totalSamples, 0, win, 1, SAMPLE_RATE);
+    // beat = -8: left = 204, right = 196 -> левое ухо ВЫШЕ.
+    EXPECT_NEAR(fL, 204.0f, 1.0f);
+    EXPECT_NEAR(fR, 196.0f, 1.0f);
+    EXPECT_GT(fL, fR) << "отрицательный beat: левое ухо должно слышать более высокий тон";
+}
+
 } // namespace test
 } // namespace binaural
