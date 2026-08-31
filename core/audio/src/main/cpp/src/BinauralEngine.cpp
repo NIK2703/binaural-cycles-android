@@ -230,19 +230,8 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
     // Якорь UI-таймлайна (аналогично generateAudioBuffer).
     anchorUiTimeline(timeSeconds, timeSeconds + batchDurationSeconds * timeScale);
 
-    // E5: коррекция дрейфа swap-цикла (как в generateAudioBuffer): планировщик
-    // планировал packageDurationMs, реально сгенерировано samplesGenerated —
-    // вычитаем разницу из остатка фазы свопа, иначе ms-ось планировщика
-    // убегает от сэмпловой после серий коротких/нецелых пакетов.
-    {
-        const float plannedMs   = static_cast<float>(packageDurationMs);
-        const float generatedMs = 1000.0f * batchDurationSeconds;
-        const float deltaMs     = plannedMs - generatedMs;
-        if (deltaMs > 0.0f && m_state.phaseRemainingMs > 0) {
-            m_state.phaseRemainingMs -= static_cast<int64_t>(deltaMs + 0.5f);
-            if (m_state.phaseRemainingMs < 0) m_state.phaseRemainingMs = 0;
-        }
-    }
+    // ШАГ 3: коррекция дрейфа swap-цикла удалена — раскладка теперь чистая
+    // функция (конфиг, t), состояния фазы свопа больше нет.
 
     // E5: обновление s_lastPkgEnd для seam-диагностики — как в buffer-пути.
     s_lastPkgEnd.store(
@@ -260,13 +249,10 @@ int BinauralEngine::generateBatch(float* buffer, int maxSamplesPerChannel) {
         }
     }
     
-    // Уведомляем о перестановке каналов
-    if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
-        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d",
-             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0);
-        m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
-    }
-    
+    // ШАГ 3: уведомление о перестановке каналов удалено — раскладка теперь
+    // производная величина (знак currentBeatFreq), отдельного события нет.
+    // (EngineCallbacks::onChannelsSwapped убирается целиком на шаге 4.)
+
     // Контракт как у generateAudioBuffer: возвращаем РЕАЛЬНО сгенерированное
     // количество — вызывающая сторона обязана записать в AudioTrack ровно его
     return result.samplesGenerated;
@@ -292,42 +278,9 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
             // следующего пакета UI стоит на текущей позиции (пакет сгенерируется сразу).
             const float resumeTime = computePlaybackTimeSeconds();
 
-            // Коррекция расположения каналов при возобновлении:
-            // 1) выключенный swap не должен «залипать» в переставленном состоянии
-            //    (настройка менялась в паузе без рестарта воспроизведения);
-            // 2) TREND-режим выравнивает расположение по текущему тренду
-            //    (идемпотентно; TIMER не трогаем — его состоянием владеет фазовая машина).
-            {
-                BinauralConfig resumeCfg;
-                // unique_lock: защищаем и чтение m_config, и запись
-                // m_state.channelsSwapped (синхронно с isChannelsSwapped(),
-                // читающим поле под shared_lock из UI-потока).
-                std::unique_lock<std::shared_mutex> lock(m_configMutex);
-                resumeCfg = m_config;
-                if (!resumeCfg.channelSwapEnabled) {
-                    if (m_state.channelsSwapped) {
-                        LOGD("setPlaying(resume): swap disabled while paused -> force normal");
-                        m_state.channelsSwapped = false;
-                    }
-                } else if (resumeCfg.channelSwapMode == ChannelSwapMode::TREND &&
-                           resumeCfg.curve.hasFreqTables()) {
-                    // BOTH: реалайн по знаку тренда (прежнее поведение). Для
-                    // PEAKS/TROUGHS абсолютного эталона нет — фаза зависит от числа
-                    // пройденных суток (теряется при wrap позиции), поэтому держим
-                    // сохранённое состояние: тогглы на выбранных экстремумах иначе
-                    // сломаются.
-                    if (resumeCfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
-                        const bool aligned = trendDesiredSwapped(
-                            m_state.channelsSwapped,
-                            trendBeatDeltaAt(resumeCfg.curve, resumeTime));
-                        if (aligned != m_state.channelsSwapped) {
-                            LOGD("setPlaying(resume): TREND realign swapped %d -> %d",
-                                 m_state.channelsSwapped ? 1 : 0, aligned ? 1 : 0);
-                            m_state.channelsSwapped = aligned;
-                        }
-                    }
-                }
-            }
+            // ШАГ 3: коррекция расположения каналов при возобновлении удалена —
+            // раскладка каналов теперь чистая функция (знак beat от времени суток),
+            // m_state.channelsSwapped больше не источник истины.
 
             anchorUiTimeline(resumeTime, resumeTime);
             return;
@@ -336,7 +289,6 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // генератора, независимо от порядка вызовов на стороне Kotlin.
         // (resetState() в Kotlin делает то же самое — операция идемпотентна.)
         m_generator.resetState(m_state);
-        BufferPackagePlanner planner;
         m_state.lastSwapElapsedMs = 0;
         m_elapsedSeconds.store(0, std::memory_order_relaxed);
 
@@ -382,22 +334,9 @@ void BinauralEngine::setPlaying(bool playing, bool preserveTimeline) {
         // сгенерируется немедленно и расширит диапазон.
         const float freshStart = computePlaybackTimeSeconds();
 
-        // Старт воспроизведения: положение каналов и фаза цикла инициализируются
-        // по расписанию для текущего момента суток (initStateForStart): играем
-        // сразу в правильном расположении, свап — только в расписанное время.
-        {
-            BinauralConfig startCfg;
-            // unique_lock: чтение m_config + запись m_state (синхронно с
-            // isChannelsSwapped() из UI-потока под shared_lock).
-            std::unique_lock<std::shared_mutex> lock(m_configMutex);
-            startCfg = m_config;
-            planner.initStateForStart(startCfg, m_state, freshStart, timeScale);
-            LOGD("setPlaying(true): schedule init swap=%d (mode=%d, points=%d, pos=%.3f, solidMs=%lld)",
-                 m_state.channelsSwapped ? 1 : 0,
-                 static_cast<int>(startCfg.channelSwapMode),
-                 static_cast<int>(startCfg.channelSwapTrendPoints),
-                 freshStart, (long long)m_state.phaseRemainingMs);
-        }
+        // ШАГ 3: initStateForStart() удалён — раскладка каналов теперь
+        // производная величина (знак beat(t)), а не состояние генератора.
+        // Фаза цикла по-прежнему обнуляется resetState() выше.
 
         anchorUiTimeline(freshStart, freshStart);
     }
@@ -670,13 +609,9 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         }
     }
     
-    // Уведомляем о перестановке каналов (редкое событие)
-    if (result.channelsSwapped && m_callbacks.onChannelsSwapped) {
-        LOGD("ChannelSwap: elapsedMs=%lld, channelsSwapped=%d",
-             (long long)elapsedMs, m_state.channelsSwapped ? 1 : 0);
-        m_callbacks.onChannelsSwapped(m_state.channelsSwapped);
-    }
-    
+    // ШАГ 3: уведомление о перестановке каналов удалено — раскладка теперь
+    // производная величина (знак currentBeatFreq), отдельного события нет.
+
     // Обновляем время используя РЕАЛЬНОЕ количество сгенерированных сэмплов.
     // Только float — единая ось времени с генератором.
     const float actualDurationSeconds =
@@ -748,20 +683,9 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // графику между пакетами вместо ступеньки раз в интервал генерации.
     anchorUiTimeline(timeSeconds, timeSeconds + actualDurationSeconds * timeScale);
 
-    // Фикс 3 (Qwen): коррекция дрейфа swap-цикла. Планировщик двигал фазу на
-    // ЗАПЛАНИРОВАННЫЕ bufferDurationMs, а аудио продвинулось на ФАКТИЧЕСКИЕ
-    // samplesGenerated. При нецелосекундных сегментах цикл убегает вперёд.
-    {
-        const float plannedMs   = static_cast<float>(bufferDurationMs);
-        const float generatedMs = 1000.0f * static_cast<float>(result.samplesGenerated) /
-                                  static_cast<float>(sampleRate);
-        const float deltaMs     = plannedMs - generatedMs;
-        if (deltaMs > 0.0f && m_state.phaseRemainingMs > 0) {
-            m_state.phaseRemainingMs -= static_cast<int64_t>(deltaMs + 0.5f);
-            if (m_state.phaseRemainingMs < 0) m_state.phaseRemainingMs = 0;
-        }
-    }
-    
+    // ШАГ 3: коррекция дрейфа swap-цикла удалена — раскладка теперь чистая
+    // функция (конфиг, t), состояния фазы свопа больше нет.
+
     // Возвращаем РЕАЛЬНОЕ число сэмплов: вызывающая сторона обязана записать в
     // AudioTrack ровно его, иначе на стыке пакетов звучит мусорный "хвост"
     // (щелчок + резкая смена частот из прошлого пакета).

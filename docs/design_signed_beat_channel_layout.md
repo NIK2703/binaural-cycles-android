@@ -2,11 +2,14 @@
 
 Дата: 2026-08-31  
 Ветка: `feat/beat-frequency-trend-swap`  
-Статус: частично реализован — шаги 1–2 (маршрутизация частот; знак как
-расписание, перестановка буфера удалена) выполнены и покрыты тестами
-(115/115, включая property-якорь `EarLayoutProperty`); шаги 3–5
-(непрерывная рампа → удаление планировщика-ритуала → телеметрия/Kotlin →
-устройство) ещё в проекте.
+Статус: частично реализован — шаги 1–3 выполнены и покрыты тестами
+(`buffer_package_tests` 23/23 PASS, включая property-якорь `EarLayoutProperty` и
+новые ramp-тесты); шаги 4–5 (телеметрия/Kotlin-плумбинг → устройство) ещё
+в проекте. Шаг 3: планировщик вырожден в нарезку ≤100 мс SOLID, ритуал
+FADE_OUT/PAUSE/FADE_IN и фазовая машина генератора удалены, `layoutSignAt`
+стала непрерывной рампой `s(t)=s_до·cos(πu)`. Инертные заготовки
+(`BufferType::FADE_OUT/PAUSE/FADE_IN`, 8 полей свапа `GeneratorState`,
+`resetState`) оставлены до шага 4 ради зелёной сборки.
 
 ---
 
@@ -39,7 +42,7 @@
 | 0. Property-тест-якорь | `EarLayoutProperty` (3 теста) в `BufferPackageTest.cpp` — проверяет, что уши слышат ровно две частоты кривой и что число смен раскладки совпадает с расписанием. До миграции якорь падал на арифметике (`ASSERT_EQ(samplesGenerated, запрошенное)` ловил округление нарезов, а не звук) и на окнах, накрывающих момент смены (измерение по нулевым пересечениям ломалось на провале амплитуды). Обе ловушки устранены: меряем по факту, а окна со сменой исключаем по правилу «раскладка совпадает с обоими соседями». | ✅ готов, 115/115 PASS |
 | 1. `ChannelLayout.h` + роутинг частот | Единая точка истины `channelsAt()`, маршрутизация всех 24 чтений частот в 6 генераторах (скаляр/NEON/SSE × solid/fade), STEP-подсегментах, кусочках фейдов, `updatePhasesOverCurve` и телеметрии движка. Расписание смен вынесено из `BufferPackagePlanner.h` в `ChannelLayout.h`. Удалены два мёртвых дубля пути частот (`getChannelFrequenciesAt`, `getChannelFrequenciesAtTime`) и собственная копия интерполяции в `getFrequenciesAtCurrentTime` (без special-case для STEP — давала расхождение со звуком). | ✅ готов, коммит `37ec30b`, 115/115 PASS |
 | 2. Знак становится расписанием, буфер-свап удаляется | `layoutSignAt()` — ступенчатая функция от `channelSwapStateAt`; удалены параметр `swapActive` (10 ветвлений × 6 генераторов), 15 аргументов `state.channelsSwapped`, 3 flip-блока `swapAfterSegment`; выход буфера безусловен. `isChannelsSwapped()` — производная от знака `currentBeatFreq`. Якорь `EarLayoutProperty` остался PASS — главное утверждение док-а подтверждено. | ✅ готов, 115/115 PASS |
-| 3. Непрерывная рампа `s(t)` + удаление планировщика-ритуала | `s(t) = s_до·cos(πu)` вокруг ближайшего запланированного нуля; `planPackage` вырождается в нарезку на 100-мс SOLID; удаляются `SwapPhase`, `phaseRemainingMs`, `justStarted`, `trendCurvePosSec`, `lastNormInput`, `initStateForStart`, `generateFadeBuffer*`, `updatePhasesOverCurve`, коррекции дрейфа, релайн при resume. Тесты `TrendSwapTest` переписываются на проверку чистой функции. | ⬜ в проекте |
+| 3. Непрерывная рампа `s(t)` + удаление планировщика-ритуала | `layoutSignAt` → рампа `s(t)=s_до·cos(πu)` вокруг ближайшего `T*` (`W` берётся только из `channelSwapFadeDurationMs`/`channelSwapPauseDurationMs`; чистая ступенька ⇔ `fadeDurationMs=0`, а не `fadeEnabled=false`); `planPackage` вырожден в нарезку ≤100 мс SOLID (безусловно для всех); из генератора удалены `generateFadeBuffer*`, `updatePhasesOnly`, `updatePhasesOverCurve`, `FadeCurveTable`/таблица, 3 фазовых case-машины свёрнуты в `break;`; из движка удалены коррекции дрейфа ms-оси и resume-релайн `setPlaying`. Тесты ритуала выброшены, `TrendSwapTest` → чистые функции (`TimerParity`/`TrendParity`/`TrendBeatDeltaSign`/`NearestSwapTime`), добавлены `RampTest` (унисон и отсутствие провала громкости в `T*`). | ✅ готов, 23/23 PASS |
 | 4. Телеметрия и Kotlin-плумбинг без отдельного канала | `result.currentBeatFreq` = `правый − левый` после `channelsAt()`; цепочка `isChannelsSwapped` (jni → service → VM) удаляется. | ⬜ в проекте |
 | 5. Устройство (по стоящему правилу) | `dbgxfade.sh` (все фазы A–K), слуховая проверка, `:app:assembleDebug` + прогон на POCO. | ⬜ в проекте |
 

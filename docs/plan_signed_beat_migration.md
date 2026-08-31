@@ -17,7 +17,7 @@
 | 0 | Property-якорь `EarLayoutProperty` | готов |
 | 1 | `ChannelLayout.h` + роутинг частот через `channelsAt()` | готов (115/115, `37ec30b`) |
 | 2 | `s(t)` = расписание; удалить перестановку буфера | **готов**, 115/115 PASS |
-| 3 | Непрерывная рампа; выбросить ритуал планировщика | ожидает |
+| 3 | Непрерывная рампа; выбросить ритуал планировщика | **готов**, 23/23 PASS |
 | 4 | Телеметрия `right − left`; удалить цепочку `isChannelsSwapped` | ожидает |
 | 5 | Верификация на устройстве (POCO) | ожидает |
 
@@ -153,6 +153,48 @@ resume-релайн `setPlaying`, ритуалы `planPackage`, `result.channels
 - Все тесты PASS; ramp-тест PASS.
 - Слух (шаг 5): пульсация замедляется, встаёт в унисон и возрождается в
   обратную сторону БЕЗ провала громкости.
+
+### Что получилось по факту (выполнено)
+
+Рампа `s(t)` встала в `ChannelLayout.h` ровно как в дизайн-доке:
+`s(t) = s_до·cos(π·u)`, окно `W` центрируется на ближайшем `T*`
+(TIMER — арифметика, TREND — бинарный поиск по `trendCrossings`). **Важный
+нюанс:** `layoutSignAt` берёт `W` ТОЛЬКО из `channelSwapFadeDurationMs` /
+`channelSwapPauseDurationMs`; поле `channelSwapFadeEnabled` в расчёте `W` не
+участвует. Поэтому чистая ступенька достигается `fadeDurationMs = 0`, а не
+`fadeEnabled = false` — тесты это учитывают (`cfg.channelSwapFadeDurationMs = 0`).
+
+Планировщик `planPackage` вырожден в безусловную нарезку ≤100 мс SOLID
+(бывшая ветка «swap disabled» теперь единственная). Из `AudioGenerator`
+удалены `generateFadeBuffer*` (scalar/NEON/SSE), `updatePhasesOnly`,
+`updatePhasesOverCurve`, `struct FadeCurveTable` + `s_fadeCurveTable`; три
+фазовых `case`-машины в диспетчерах скаляр/NEON/SSE свёрнуты в `break;`
+(метки `BufferType::FADE_OUT/PAUSE/FADE_IN` оставлены, чтобы не ловить
+`-Wswitch` — см. ниже про инертные заготовки). Из `BinauralEngine.cpp`
+удалены коррекции дрейфа ms-оси и resume-релайн `setPlaying` (якорь кривой
+на текущее время суток теперь единственный).
+
+Тесты (`BufferPackageTest.cpp`) переписаны под Шаг 3: ритуальные
+`MultiSegment/MultiPackage/Transition/FrequencyJump/SolidFadeTransition/
+Diagnostic` выброшены; `TrendSwapTest` заменён чистыми функциональными
+`TimerParity` / `TrendParity` / `TrendBeatDeltaSign` / `NearestSwapTime_TIMER`;
+добавлены `RampTest.LayoutSignAt_UnisonAtTStar`, `RampTest.LayoutSignAt_CosineShape`,
+`RampTest.Audio_UnisonAndNoVolumeDipAtTStar` (в `T*` частоты сходятся в унисон,
+IPD непрерывна, несущая — постоянна, провала громкости нет). Якорь
+`EarLayoutProperty` остался PASS.
+
+**Отклонение от карты правок (инертные заготовки, сознательно оставлены
+до Шага 4 ради зелёной сборки):**
+- `BufferType::FADE_OUT / PAUSE / FADE_IN` — enum-значения и `break;` в
+  диспетчерах оставлены; планировщик их больше не эмитит.
+- 8 полей свапа `GeneratorState` (вкл. `channelsSwapped`) и `resetState`
+  генератора — оставлены: на них ещё ссылается планировщик/движок; уходят
+  вместе с цепочкой `isChannelsSwapped` на Шаге 4.
+- `result.channelsSwapped` / `result.fadePhaseCompleted` в `GenerateResult` —
+  оставлены как неиспользуемые поля (не `-Werror`); уходят на Шаге 4 вместе
+  с телеметрией.
+
+Слуховая проверка — за Шагом 5 (устройство).
 
 ---
 

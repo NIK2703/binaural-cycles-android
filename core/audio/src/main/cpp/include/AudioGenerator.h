@@ -226,60 +226,6 @@ private:
         float endRightAmp,
         GeneratorState& state
     );
-    
-    /**
-     * Генерация буфера с fade (скалярная версия)
-     * @return true если fade завершён
-     */
-    bool generateFadeBuffer(
-        float* buffer,
-        int samples,
-        float startLeftOmega,
-        float startRightOmega,
-        float endLeftOmega,
-        float endRightOmega,
-        float startLeftAmp,
-        float startRightAmp,
-        float endLeftAmp,
-        float endRightAmp,
-        int fadeStartOffset,
-        int fadeDuration,
-        bool fadingOut,
-        GeneratorState& state
-    );
-    
-    /**
-     * Обновление фаз без генерации звука (для паузы).
-     * Принимает start И end omega: фазы продвигаются по линейной рампе,
-     * как в SOLID-сегментах, иначе после паузы возникает фазовый скачок.
-     */
-    void updatePhasesOnly(
-        int samples,
-        float startLeftOmega,
-        float startRightOmega,
-        float endLeftOmega,
-        float endRightOmega,
-        GeneratorState& state
-    );
-
-    /**
-     * Продвижение фаз по КРИВОЙ на интервале без звука (PAUSE).
-     *
-     * Режет паузу на кусочки <=100 мс и на каждом берёт хорду между значениями
-     * кривой на границах — та же модель, что в FADE_OUT/FADE_IN после фикса
-     * 4384bd1 и в подсегментах SOLID. Одна хорда на всю паузу расходится с
-     * точным интегралом кривой на 8.7e-4 цикла уже на паузе 10 с и на
-     * 0.19 цикла на паузе 60 с; резка снижает это до ~1e-6 цикла.
-     * Для STEP-кривой кусочек дополнительно не перешагивает границу ступени.
-     */
-    void updatePhasesOverCurve(
-        const BinauralConfig& config,
-        int samples,
-        double currentTime,
-        float timeScale,
-        bool constantFreq,
-        GeneratorState& state
-    );
 
 #ifdef USE_NEON
     /**
@@ -299,25 +245,6 @@ private:
         GeneratorState& state
     );
     
-    /**
-     * NEON-оптимизированная генерация буфера с fade
-     */
-    bool generateFadeBufferNeon(
-        float* buffer,
-        int samples,
-        float startLeftOmega,
-        float startRightOmega,
-        float endLeftOmega,
-        float endRightOmega,
-        float startLeftAmp,
-        float startRightAmp,
-        float endLeftAmp,
-        float endRightAmp,
-        int fadeStartOffset,
-        int fadeDuration,
-        bool fadingOut,
-        GeneratorState& state
-    );
 #endif
 
 #ifdef USE_SSE
@@ -338,25 +265,6 @@ private:
         GeneratorState& state
     );
     
-    /**
-     * SSE-оптимизированная генерация буфера с fade
-     */
-    bool generateFadeBufferSse(
-        float* buffer,
-        int samples,
-        float startLeftOmega,
-        float startRightOmega,
-        float endLeftOmega,
-        float endRightOmega,
-        float startLeftAmp,
-        float startRightAmp,
-        float endLeftAmp,
-        float endRightAmp,
-        int fadeStartOffset,
-        int fadeDuration,
-        bool fadingOut,
-        GeneratorState& state
-    );
 #endif
 };
 
