@@ -265,7 +265,6 @@ void AudioGenerator::generateSolidBuffer(
     float startRightAmp,
     float endLeftAmp,
     float endRightAmp,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -284,60 +283,34 @@ void AudioGenerator::generateSolidBuffer(
     const float leftOmegaStep = (samples > 1) ? (endLeftOmega - startLeftOmega) / (samples - 1) : 0.0f;
     const float rightOmegaStep = (samples > 1) ? (endRightOmega - startRightOmega) / (samples - 1) : 0.0f;
 
-    if (swapActive) {
-        for (int i = 0; i < samples; ++i) {
-            // Вычисляем omega для текущего сэмпла
-            const float leftOmega = startLeftOmega + leftOmegaStep * i;
-            const float rightOmega = startRightOmega + rightOmegaStep * i;
+    // ШАГ 2 МИГРАЦИИ: раскладка вошла в сами частоты (channelsAt()), поэтому
+    // перестановки выходного буфера больше не существует — left всегда i*2,
+    // right всегда i*2+1, безусловно.
+    for (int i = 0; i < samples; ++i) {
+        // Вычисляем omega для текущего сэмпла
+        const float leftOmega = startLeftOmega + leftOmegaStep * i;
+        const float rightOmega = startRightOmega + rightOmegaStep * i;
 
-            const float leftSample = Wavetable::fastSin(state.leftPhase);
-            const float rightSample = Wavetable::fastSin(state.rightPhase);
+        const float leftSample = Wavetable::fastSin(state.leftPhase);
+        const float rightSample = Wavetable::fastSin(state.rightPhase);
 
-            state.leftPhase += leftOmega;
-            state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-            if (state.leftPhase < 0.0f) {
-                state.leftPhase += TWO_PI;
-            }
-
-            state.rightPhase += rightOmega;
-            state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-            if (state.rightPhase < 0.0f) {
-                state.rightPhase += TWO_PI;
-            }
-
-            buffer[i * 2] = rightSample * (baseVolumeFactor * rightNormAmp);
-            buffer[i * 2 + 1] = leftSample * (baseVolumeFactor * leftNormAmp);
-
-            leftNormAmp += ampStepLeft;
-            rightNormAmp += ampStepRight;
+        state.leftPhase += leftOmega;
+        state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
+        if (state.leftPhase < 0.0f) {
+            state.leftPhase += TWO_PI;
         }
-    } else {
-        for (int i = 0; i < samples; ++i) {
-            // Вычисляем omega для текущего сэмпла
-            const float leftOmega = startLeftOmega + leftOmegaStep * i;
-            const float rightOmega = startRightOmega + rightOmegaStep * i;
 
-            const float leftSample = Wavetable::fastSin(state.leftPhase);
-            const float rightSample = Wavetable::fastSin(state.rightPhase);
-
-            state.leftPhase += leftOmega;
-            state.leftPhase -= TWO_PI * static_cast<int>(state.leftPhase * ONE_OVER_TWO_PI);
-            if (state.leftPhase < 0.0f) {
-                state.leftPhase += TWO_PI;
-            }
-
-            state.rightPhase += rightOmega;
-            state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
-            if (state.rightPhase < 0.0f) {
-                state.rightPhase += TWO_PI;
-            }
-
-            buffer[i * 2] = leftSample * (baseVolumeFactor * leftNormAmp);
-            buffer[i * 2 + 1] = rightSample * (baseVolumeFactor * rightNormAmp);
-
-            leftNormAmp += ampStepLeft;
-            rightNormAmp += ampStepRight;
+        state.rightPhase += rightOmega;
+        state.rightPhase -= TWO_PI * static_cast<int>(state.rightPhase * ONE_OVER_TWO_PI);
+        if (state.rightPhase < 0.0f) {
+            state.rightPhase += TWO_PI;
         }
+
+        buffer[i * 2] = leftSample * (baseVolumeFactor * leftNormAmp);
+        buffer[i * 2 + 1] = rightSample * (baseVolumeFactor * rightNormAmp);
+
+        leftNormAmp += ampStepLeft;
+        rightNormAmp += ampStepRight;
     }
 }
 
@@ -355,7 +328,6 @@ bool AudioGenerator::generateFadeBuffer(
     int fadeStartOffset,
     int fadeDuration,
     bool fadingOut,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -409,13 +381,8 @@ bool AudioGenerator::generateFadeBuffer(
         const float leftAmp = baseAmp * leftAmplitude;
         const float rightAmp = baseAmp * rightAmplitude;
 
-        if (swapActive) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
-        }
+        buffer[i * 2] = leftSample * leftAmp;
+        buffer[i * 2 + 1] = rightSample * rightAmp;
 
         leftAmplitude += ampStepLeft;
         rightAmplitude += ampStepRight;
@@ -540,7 +507,6 @@ void AudioGenerator::generateSolidBufferNeon(
     float startRightAmp,
     float endLeftAmp,
     float endRightAmp,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -570,130 +536,67 @@ void AudioGenerator::generateSolidBufferNeon(
     int i = 0;
     const int neonEnd = samples - 3;
     
-    if (swapActive) {
-        for (; i < neonEnd; i += 4) {
-            // Правильный расчёт фаз с накоплением:
-            // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
-            float32x4_t vLeftPhases = vaddq_f32(
-                vdupq_n_f32(leftPhaseBase),
-                vaddq_f32(
-                    vmulq_f32(vdupq_n_f32(leftOmega), vIndices),
-                    vmulq_f32(vdupq_n_f32(leftOmegaStep), vPhaseAccum)
-                )
-            );
-            float32x4_t vRightPhases = vaddq_f32(
-                vdupq_n_f32(rightPhaseBase),
-                vaddq_f32(
-                    vmulq_f32(vdupq_n_f32(rightOmega), vIndices),
-                    vmulq_f32(vdupq_n_f32(rightOmegaStep), vPhaseAccum)
-                )
-            );
-            
-            float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
-                                 leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
-            float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
-                                 rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
-            
-            float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
-            float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
-            
-            float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
-            float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
-            
-            float32x4_t vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
-            float32x4_t vRightAmps = vmulq_f32(vBaseVol, vAmpR);
-            
-            #ifdef __ARM_FEATURE_FMA
-                vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
-                vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
-            #else
-                vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
-                vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
-            #endif
-            
-            // Сначала обновляем фазу с текущими значениями omega
-            // Дешёвая обмотка фазы: вместо floor через приведение к int
-            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
-            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
-            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
-            // Выход побитово совпадает с прежней формулой.
-            leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            
-            // Затем обновляем omega для следующей итерации
-            leftOmega += leftOmegaStep * 4;
-            rightOmega += rightOmegaStep * 4;
-            leftAmplitude += ampStepLeft * 4;
-            rightAmplitude += ampStepRight * 4;
-            
-            float32x4x2_t vInterleaved = {vRightSamples, vLeftSamples};
-            vst2q_f32(buffer + i * 2, vInterleaved);
-        }
-    } else {
-        for (; i < neonEnd; i += 4) {
-            // Правильный расчёт фаз с накоплением:
-            // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
-            float32x4_t vLeftPhases = vaddq_f32(
-                vdupq_n_f32(leftPhaseBase),
-                vaddq_f32(
-                    vmulq_f32(vdupq_n_f32(leftOmega), vIndices),
-                    vmulq_f32(vdupq_n_f32(leftOmegaStep), vPhaseAccum)
-                )
-            );
-            float32x4_t vRightPhases = vaddq_f32(
-                vdupq_n_f32(rightPhaseBase),
-                vaddq_f32(
-                    vmulq_f32(vdupq_n_f32(rightOmega), vIndices),
-                    vmulq_f32(vdupq_n_f32(rightOmegaStep), vPhaseAccum)
-                )
-            );
-            
-            float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
-                                 leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
-            float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
-                                 rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
-            
-            float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
-            float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
-            
-            float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
-            float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
-            
-            float32x4_t vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
-            float32x4_t vRightAmps = vmulq_f32(vBaseVol, vAmpR);
-            
-            #ifdef __ARM_FEATURE_FMA
-                vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
-                vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
-            #else
-                vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
-                vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
-            #endif
-            
-            // Дешёвая обмотка фазы: вместо floor через приведение к int
-            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
-            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
-            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
-            // Выход побитово совпадает с прежней формулой.
-            leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            
-            leftOmega += leftOmegaStep * 4;
-            rightOmega += rightOmegaStep * 4;
-            leftAmplitude += ampStepLeft * 4;
-            rightAmplitude += ampStepRight * 4;
-            
-            float32x4x2_t vInterleaved = {vLeftSamples, vRightSamples};
-            vst2q_f32(buffer + i * 2, vInterleaved);
-        }
+    // ШАГ 2 МИГРАЦИИ: раскладка вошла в сами частоты (channelsAt()) —
+    // интерлив безусловен: left всегда первый регистр, right всегда второй.
+    for (; i < neonEnd; i += 4) {
+        // Правильный расчёт фаз с накоплением:
+        // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
+        float32x4_t vLeftPhases = vaddq_f32(
+            vdupq_n_f32(leftPhaseBase),
+            vaddq_f32(
+                vmulq_f32(vdupq_n_f32(leftOmega), vIndices),
+                vmulq_f32(vdupq_n_f32(leftOmegaStep), vPhaseAccum)
+            )
+        );
+        float32x4_t vRightPhases = vaddq_f32(
+            vdupq_n_f32(rightPhaseBase),
+            vaddq_f32(
+                vmulq_f32(vdupq_n_f32(rightOmega), vIndices),
+                vmulq_f32(vdupq_n_f32(rightOmegaStep), vPhaseAccum)
+            )
+        );
+
+        float32x4_t vAmpL = {leftAmplitude, leftAmplitude + ampStepLeft,
+                             leftAmplitude + 2*ampStepLeft, leftAmplitude + 3*ampStepLeft};
+        float32x4_t vAmpR = {rightAmplitude, rightAmplitude + ampStepRight,
+                             rightAmplitude + 2*ampStepRight, rightAmplitude + 3*ampStepRight};
+
+        float32x4_t vLeftPhasesScaled = vmulq_f32(vLeftPhases, vScaleFactor);
+        float32x4_t vRightPhasesScaled = vmulq_f32(vRightPhases, vScaleFactor);
+
+        float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
+        float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
+
+        float32x4_t vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
+        float32x4_t vRightAmps = vmulq_f32(vBaseVol, vAmpR);
+
+        #ifdef __ARM_FEATURE_FMA
+            vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
+            vRightSamples = vfmaq_f32(vdupq_n_f32(0.0f), vRightSamples, vRightAmps);
+        #else
+            vLeftSamples = vmulq_f32(vLeftSamples, vLeftAmps);
+            vRightSamples = vmulq_f32(vRightSamples, vRightAmps);
+        #endif
+
+        // Дешёвая обмотка фазы: вместо floor через приведение к int
+        // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+        // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+        // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+        // Выход побитово совпадает с прежней формулой.
+        leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
+        if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+        if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+        rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
+        if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+        if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+
+        leftOmega += leftOmegaStep * 4;
+        rightOmega += rightOmegaStep * 4;
+        leftAmplitude += ampStepLeft * 4;
+        rightAmplitude += ampStepRight * 4;
+
+        float32x4x2_t vInterleaved = {vLeftSamples, vRightSamples};
+        vst2q_f32(buffer + i * 2, vInterleaved);
     }
     
     state.leftPhase = leftPhaseBase;
@@ -716,13 +619,8 @@ void AudioGenerator::generateSolidBufferNeon(
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
         
-        if (swapActive) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
-        }
+        buffer[i * 2] = leftSample * leftAmp;
+        buffer[i * 2 + 1] = rightSample * rightAmp;
         
         leftOmega += leftOmegaStep;
         rightOmega += rightOmegaStep;
@@ -745,7 +643,6 @@ bool AudioGenerator::generateFadeBufferNeon(
     int fadeStartOffset,
     int fadeDuration,
     bool fadingOut,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -872,13 +769,8 @@ bool AudioGenerator::generateFadeBufferNeon(
         
         for (int j = 0; j < 4; ++j) {
             const int idx = (i + j) * 2;
-            if (swapActive) {
-                buffer[idx] = rightResult[j];
-                buffer[idx + 1] = leftResult[j];
-            } else {
-                buffer[idx] = leftResult[j];
-                buffer[idx + 1] = rightResult[j];
-            }
+            buffer[idx] = leftResult[j];
+            buffer[idx + 1] = rightResult[j];
         }
     }
     
@@ -915,13 +807,8 @@ bool AudioGenerator::generateFadeBufferNeon(
         const float leftAmp = baseAmp * leftAmplitude;
         const float rightAmp = baseAmp * rightAmplitude;
         
-        if (swapActive) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
-        }
+        buffer[i * 2] = leftSample * leftAmp;
+        buffer[i * 2 + 1] = rightSample * rightAmp;
         
         leftOmega += leftOmegaStep;
         rightOmega += rightOmegaStep;
@@ -949,7 +836,6 @@ void AudioGenerator::generateSolidBufferSse(
     float startRightAmp,
     float endLeftAmp,
     float endRightAmp,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -979,131 +865,68 @@ void AudioGenerator::generateSolidBufferSse(
     int i = 0;
     const int sseEnd = samples - 3;
     
-    if (swapActive) {
-        for (; i < sseEnd; i += 4) {
-            // Правильный расчёт фаз с накоплением:
-            // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
-            __m128 vLeftPhases = _mm_add_ps(
-                _mm_set1_ps(leftPhaseBase),
-                _mm_add_ps(
-                    _mm_mul_ps(_mm_set1_ps(leftOmega), vIndices),
-                    _mm_mul_ps(_mm_set1_ps(leftOmegaStep), vPhaseAccum)
-                )
-            );
-            __m128 vRightPhases = _mm_add_ps(
-                _mm_set1_ps(rightPhaseBase),
-                _mm_add_ps(
-                    _mm_mul_ps(_mm_set1_ps(rightOmega), vIndices),
-                    _mm_mul_ps(_mm_set1_ps(rightOmegaStep), vPhaseAccum)
-                )
-            );
-            
-            __m128 vAmpL = _mm_set_ps(leftAmplitude + 3*ampStepLeft, leftAmplitude + 2*ampStepLeft,
-                                       leftAmplitude + ampStepLeft, leftAmplitude);
-            __m128 vAmpR = _mm_set_ps(rightAmplitude + 3*ampStepRight, rightAmplitude + 2*ampStepRight,
-                                       rightAmplitude + ampStepRight, rightAmplitude);
-            
-            __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
-            __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
-            
-            __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
-            __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
-            
-            __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
-            __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
-            
-            vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
-            vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
-            
-            // Дешёвая обмотка фазы: вместо floor через приведение к int
-            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
-            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
-            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
-            // Выход побитово совпадает с прежней формулой.
-            leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            
-            leftOmega += leftOmegaStep * 4;
-            rightOmega += rightOmegaStep * 4;
-            leftAmplitude += ampStepLeft * 4;
-            rightAmplitude += ampStepRight * 4;
-            
-            float leftResult[4] __attribute__((aligned(16)));
-            float rightResult[4] __attribute__((aligned(16)));
-            _mm_store_ps(leftResult, vLeftSamples);
-            _mm_store_ps(rightResult, vRightSamples);
-            
-            for (int j = 0; j < 4; ++j) {
-                buffer[(i + j) * 2] = rightResult[j];
-                buffer[(i + j) * 2 + 1] = leftResult[j];
-            }
-        }
-    } else {
-        for (; i < sseEnd; i += 4) {
-            // Правильный расчёт фаз с накоплением:
-            // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
-            __m128 vLeftPhases = _mm_add_ps(
-                _mm_set1_ps(leftPhaseBase),
-                _mm_add_ps(
-                    _mm_mul_ps(_mm_set1_ps(leftOmega), vIndices),
-                    _mm_mul_ps(_mm_set1_ps(leftOmegaStep), vPhaseAccum)
-                )
-            );
-            __m128 vRightPhases = _mm_add_ps(
-                _mm_set1_ps(rightPhaseBase),
-                _mm_add_ps(
-                    _mm_mul_ps(_mm_set1_ps(rightOmega), vIndices),
-                    _mm_mul_ps(_mm_set1_ps(rightOmegaStep), vPhaseAccum)
-                )
-            );
-            
-            __m128 vAmpL = _mm_set_ps(leftAmplitude + 3*ampStepLeft, leftAmplitude + 2*ampStepLeft,
-                                       leftAmplitude + ampStepLeft, leftAmplitude);
-            __m128 vAmpR = _mm_set_ps(rightAmplitude + 3*ampStepRight, rightAmplitude + 2*ampStepRight,
-                                       rightAmplitude + ampStepRight, rightAmplitude);
-            
-            __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
-            __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
-            
-            __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
-            __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
-            
-            __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
-            __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
-            
-            vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
-            vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
-            
-            // Дешёвая обмотка фазы: вместо floor через приведение к int
-            // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
-            // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
-            // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
-            // Выход побитово совпадает с прежней формулой.
-            leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
-            rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
-            
-            leftOmega += leftOmegaStep * 4;
-            rightOmega += rightOmegaStep * 4;
-            leftAmplitude += ampStepLeft * 4;
-            rightAmplitude += ampStepRight * 4;
-            
-            float leftResult[4] __attribute__((aligned(16)));
-            float rightResult[4] __attribute__((aligned(16)));
-            _mm_store_ps(leftResult, vLeftSamples);
-            _mm_store_ps(rightResult, vRightSamples);
-            
-            for (int j = 0; j < 4; ++j) {
-                buffer[(i + j) * 2] = leftResult[j];
-                buffer[(i + j) * 2 + 1] = rightResult[j];
-            }
+    // ШАГ 2 МИГРАЦИИ: раскладка вошла в сами частоты (channelsAt()) —
+    // store безусловен: left = (i+j)*2, right = (i+j)*2+1.
+    for (; i < sseEnd; i += 4) {
+        // Правильный расчёт фаз с накоплением:
+        // phase[i] = phaseBase + i*startOmega + omegaStep * i*(i-1)/2
+        __m128 vLeftPhases = _mm_add_ps(
+            _mm_set1_ps(leftPhaseBase),
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(leftOmega), vIndices),
+                _mm_mul_ps(_mm_set1_ps(leftOmegaStep), vPhaseAccum)
+            )
+        );
+        __m128 vRightPhases = _mm_add_ps(
+            _mm_set1_ps(rightPhaseBase),
+            _mm_add_ps(
+                _mm_mul_ps(_mm_set1_ps(rightOmega), vIndices),
+                _mm_mul_ps(_mm_set1_ps(rightOmegaStep), vPhaseAccum)
+            )
+        );
+
+        __m128 vAmpL = _mm_set_ps(leftAmplitude + 3*ampStepLeft, leftAmplitude + 2*ampStepLeft,
+                                   leftAmplitude + ampStepLeft, leftAmplitude);
+        __m128 vAmpR = _mm_set_ps(rightAmplitude + 3*ampStepRight, rightAmplitude + 2*ampStepRight,
+                                   rightAmplitude + ampStepRight, rightAmplitude);
+
+        __m128 vLeftPhasesScaled = _mm_mul_ps(vLeftPhases, vScaleFactor);
+        __m128 vRightPhasesScaled = _mm_mul_ps(vRightPhases, vScaleFactor);
+
+        __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
+        __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
+
+        __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
+        __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
+
+        vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
+        vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
+
+        // Дешёвая обмотка фазы: вместо floor через приведение к int
+        // (mul + cvt f2i + cvt i2f + mul + sub + compare) — два условных
+        // вычитания. Достаточно, т.к. прирост за 4 сэмпла < 4π на худшем
+        // сочетании SR/частоты движка (SR 8000, тон 2000 Гц => ровно 2π).
+        // Выход побитово совпадает с прежней формулой.
+        leftPhaseBase += leftOmega * 4 + leftOmegaStep * 6;
+        if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+        if (leftPhaseBase >= static_cast<float>(TWO_PI)) leftPhaseBase -= static_cast<float>(TWO_PI);
+        rightPhaseBase += rightOmega * 4 + rightOmegaStep * 6;
+        if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+        if (rightPhaseBase >= static_cast<float>(TWO_PI)) rightPhaseBase -= static_cast<float>(TWO_PI);
+
+        leftOmega += leftOmegaStep * 4;
+        rightOmega += rightOmegaStep * 4;
+        leftAmplitude += ampStepLeft * 4;
+        rightAmplitude += ampStepRight * 4;
+
+        float leftResult[4] __attribute__((aligned(16)));
+        float rightResult[4] __attribute__((aligned(16)));
+        _mm_store_ps(leftResult, vLeftSamples);
+        _mm_store_ps(rightResult, vRightSamples);
+
+        for (int j = 0; j < 4; ++j) {
+            buffer[(i + j) * 2] = leftResult[j];
+            buffer[(i + j) * 2 + 1] = rightResult[j];
         }
     }
     
@@ -1127,13 +950,8 @@ void AudioGenerator::generateSolidBufferSse(
         const float leftAmp = baseVolumeFactor * leftAmplitude;
         const float rightAmp = baseVolumeFactor * rightAmplitude;
         
-        if (swapActive) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
-        }
+        buffer[i * 2] = leftSample * leftAmp;
+        buffer[i * 2 + 1] = rightSample * rightAmp;
         
         leftOmega += leftOmegaStep;
         rightOmega += rightOmegaStep;
@@ -1156,7 +974,6 @@ bool AudioGenerator::generateFadeBufferSse(
     int fadeStartOffset,
     int fadeDuration,
     bool fadingOut,
-    bool swapActive,
     GeneratorState& state
 ) {
     constexpr float baseVolumeFactor = 0.5f;
@@ -1267,13 +1084,8 @@ bool AudioGenerator::generateFadeBufferSse(
         
         for (int j = 0; j < 4; ++j) {
             const int idx = (i + j) * 2;
-            if (swapActive) {
-                buffer[idx] = rightResult[j];
-                buffer[idx + 1] = leftResult[j];
-            } else {
-                buffer[idx] = leftResult[j];
-                buffer[idx + 1] = rightResult[j];
-            }
+            buffer[idx] = leftResult[j];
+            buffer[idx + 1] = rightResult[j];
         }
     }
     
@@ -1310,13 +1122,8 @@ bool AudioGenerator::generateFadeBufferSse(
         const float leftAmp = baseAmp * leftAmplitude;
         const float rightAmp = baseAmp * rightAmplitude;
         
-        if (swapActive) {
-            buffer[i * 2] = rightSample * rightAmp;
-            buffer[i * 2 + 1] = leftSample * leftAmp;
-        } else {
-            buffer[i * 2] = leftSample * leftAmp;
-            buffer[i * 2 + 1] = rightSample * rightAmp;
-        }
+        buffer[i * 2] = leftSample * leftAmp;
+        buffer[i * 2 + 1] = rightSample * rightAmp;
         
         leftOmega += leftOmegaStep;
         rightOmega += rightOmegaStep;
@@ -1338,7 +1145,10 @@ GenerateResult AudioGenerator::generatePackage(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs,
+    // elapsedMs после удаления flip-блоков не используется: единственный
+    // потребитель был LOGD в swapAfterSegment. Параметр остаётся в API до
+    // реструктуризации шага 3.
+    [[maybe_unused]] int64_t elapsedMs,
     float timeScale
 ) {
     GenerateResult result;
@@ -1450,7 +1260,6 @@ GenerateResult AudioGenerator::generatePackage(
                                 pieceLeftOmega, pieceRightOmega,
                                 pieceLeftAmp, pieceRightAmp,
                                 pieceLeftAmp, pieceRightAmp,
-                                state.channelsSwapped,
                                 state
                             );
                             pieceStart = pieceEnd;
@@ -1466,7 +1275,6 @@ GenerateResult AudioGenerator::generatePackage(
                         startLeftOmega, startRightOmega,
                         startLeftAmp, startRightAmp,
                         endLeftAmp, endRightAmp,
-                        state.channelsSwapped,
                         state
                     );
                     break;
@@ -1478,7 +1286,6 @@ GenerateResult AudioGenerator::generatePackage(
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    state.channelsSwapped,
                     state
                 );
                 break;
@@ -1550,7 +1357,6 @@ GenerateResult AudioGenerator::generatePackage(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         true,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -1642,7 +1448,6 @@ GenerateResult AudioGenerator::generatePackage(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         false,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -1661,22 +1466,6 @@ GenerateResult AudioGenerator::generatePackage(
                  static_cast<int>(segment.type),
                  state.leftPhase, state.rightPhase,
                  endLeftSample, endRightSample);
-        }
-        
-        if (segment.swapAfterSegment) {
-            state.channelsSwapped = !state.channelsSwapped;
-            result.channelsSwapped = true;
-            
-            // Ось расписания из фактических сэмплов — без дрейфа против аудио.
-            // Раньше это значение держали в переменной currentElapsedMs и
-            // пересчитывали на КАЖДОМ сегменте (int64 деление), хотя читается
-            // оно только здесь и только под LOGD. Теперь считается на месте:
-            // при выключенном LOGD аргументы макроса не вычисляются вовсе.
-            // currentSample здесь ЕЩЁ не продвинут => это начало сегмента,
-            // то есть ровно то же значение, что давал старый currentElapsedMs.
-            LOGD("PackageGen: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
-                 state.channelsSwapped ? 1 : 0);
         }
         
         currentSample += samples;
@@ -1702,7 +1491,10 @@ GenerateResult AudioGenerator::generatePackageNeon(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs,
+    // elapsedMs после удаления flip-блоков не используется: единственный
+    // потребитель был LOGD в swapAfterSegment. Параметр остаётся в API до
+    // реструктуризации шага 3.
+    [[maybe_unused]] int64_t elapsedMs,
     float timeScale
 ) {
     GenerateResult result;
@@ -1811,7 +1603,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                                 pieceLeftOmega, pieceRightOmega,
                                 pieceLeftAmp, pieceRightAmp,
                                 pieceLeftAmp, pieceRightAmp,
-                                state.channelsSwapped,
                                 state
                             );
                             pieceStart = pieceEnd;
@@ -1826,7 +1617,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                         startLeftOmega, startRightOmega,
                         startLeftAmp, startRightAmp,
                         endLeftAmp, endRightAmp,
-                        state.channelsSwapped,
                         state
                     );
                     break;
@@ -1838,7 +1628,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    state.channelsSwapped,
                     state
                 );
                 break;
@@ -1910,7 +1699,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         true,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -1999,7 +1787,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         false,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -2028,11 +1815,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
             float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * baseVolumeFactor * endLeftAmp;
             float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * baseVolumeFactor * endRightAmp;
 
-            // При активном свапе каналы в буфере меняются местами
-            if (state.channelsSwapped) {
-                std::swap(expectedFirstLeft, expectedFirstRight);
-            }
-
             // Логируем фазу ПОСЛЕ генерации сегмента
             LOG_SEG("SEG_END_NEON: type=%d, leftPhase=%.4f, rightPhase=%.4f, first=[%.4f, %.4f], last=[%.4f, %.4f], expectedFirst=[%.4f, %.4f]",
                  static_cast<int>(segment.type),
@@ -2040,18 +1822,6 @@ GenerateResult AudioGenerator::generatePackageNeon(
                  firstLeftSample, firstRightSample,
                  lastLeftSample, lastRightSample,
                  expectedFirstLeft, expectedFirstRight);
-        }
-        
-        if (segment.swapAfterSegment) {
-            state.channelsSwapped = !state.channelsSwapped;
-            result.channelsSwapped = true;
-            
-            // elapsedMs считается на месте, а не переменной на каждый сегмент:
-            // при выключенном LOGD аргументы макроса не вычисляются. Значение
-            // то же — начало сегмента (currentSample ещё не продвинут).
-            LOGD("PackageGenNeon: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
-                 state.channelsSwapped ? 1 : 0);
         }
         
         currentSample += samples;
@@ -2078,7 +1848,10 @@ GenerateResult AudioGenerator::generatePackageSse(
     const BinauralConfig& config,
     GeneratorState& state,
     float startTimeSeconds,
-    int64_t elapsedMs,
+    // elapsedMs после удаления flip-блоков не используется: единственный
+    // потребитель был LOGD в swapAfterSegment. Параметр остаётся в API до
+    // реструктуризации шага 3.
+    [[maybe_unused]] int64_t elapsedMs,
     float timeScale
 ) {
     GenerateResult result;
@@ -2179,7 +1952,6 @@ GenerateResult AudioGenerator::generatePackageSse(
                                 pieceLeftOmega, pieceRightOmega,
                                 pieceLeftAmp, pieceRightAmp,
                                 pieceLeftAmp, pieceRightAmp,
-                                state.channelsSwapped,
                                 state
                             );
                             pieceStart = pieceEnd;
@@ -2194,7 +1966,6 @@ GenerateResult AudioGenerator::generatePackageSse(
                         startLeftOmega, startRightOmega,
                         startLeftAmp, startRightAmp,
                         endLeftAmp, endRightAmp,
-                        state.channelsSwapped,
                         state
                     );
                     break;
@@ -2206,7 +1977,6 @@ GenerateResult AudioGenerator::generatePackageSse(
                     endLeftOmega, endRightOmega,
                     startLeftAmp, startRightAmp,
                     endLeftAmp, endRightAmp,
-                    state.channelsSwapped,
                     state
                 );
                 break;
@@ -2278,7 +2048,6 @@ GenerateResult AudioGenerator::generatePackageSse(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         true,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -2367,7 +2136,6 @@ GenerateResult AudioGenerator::generatePackageSse(
                         fadeOffsetSamples + gen,
                         fadeTotalSamples,
                         false,
-                        state.channelsSwapped,
                         state
                     )) {
                         result.fadePhaseCompleted = true;
@@ -2382,18 +2150,6 @@ GenerateResult AudioGenerator::generatePackageSse(
         LOG_SEG("SEG_END_SSE: type=%d, leftPhase=%.4f, rightPhase=%.4f",
              static_cast<int>(segment.type),
              state.leftPhase, state.rightPhase);
-        
-        if (segment.swapAfterSegment) {
-            state.channelsSwapped = !state.channelsSwapped;
-            result.channelsSwapped = true;
-            
-            // elapsedMs считается на месте, а не переменной на каждый сегмент:
-            // при выключенном LOGD аргументы макроса не вычисляются. Значение
-            // то же — начало сегмента (currentSample ещё не продвинут).
-            LOGD("PackageGenSse: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
-                 state.channelsSwapped ? 1 : 0);
-        }
         
         currentSample += samples;
         currentTime += static_cast<double>(durationSec) * timeScale;

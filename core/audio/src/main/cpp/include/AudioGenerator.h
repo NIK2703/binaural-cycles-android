@@ -224,7 +224,6 @@ private:
         float startRightAmp,
         float endLeftAmp,
         float endRightAmp,
-        bool swapActive,
         GeneratorState& state
     );
     
@@ -246,7 +245,6 @@ private:
         int fadeStartOffset,
         int fadeDuration,
         bool fadingOut,
-        bool swapActive,
         GeneratorState& state
     );
     
@@ -298,7 +296,6 @@ private:
         float startRightAmp,
         float endLeftAmp,
         float endRightAmp,
-        bool swapActive,
         GeneratorState& state
     );
     
@@ -319,7 +316,6 @@ private:
         int fadeStartOffset,
         int fadeDuration,
         bool fadingOut,
-        bool swapActive,
         GeneratorState& state
     );
 #endif
@@ -339,7 +335,6 @@ private:
         float startRightAmp,
         float endLeftAmp,
         float endRightAmp,
-        bool swapActive,
         GeneratorState& state
     );
     
@@ -360,7 +355,6 @@ private:
         int fadeStartOffset,
         int fadeDuration,
         bool fadingOut,
-        bool swapActive,
         GeneratorState& state
     );
 #endif

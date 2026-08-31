@@ -441,11 +441,13 @@ void BinauralEngine::resetState() {
 }
 
 bool BinauralEngine::isChannelsSwapped() const {
-    // Безвредный, но формальный data race: поле пишется аудио-потоком,
-    // читается UI-потоком. Берём под общий мьютекс конфига — дёшево и
-    // исключает предупреждения TSan / тиринг флага.
-    std::shared_lock<std::shared_mutex> lock(m_configMutex);
-    return m_state.channelsSwapped;
+    // ШАГ 2 МИГРАЦИИ: раскладка — производная величина. Отдельного состояния
+    // channelsSwapped у генератора больше нет: знак знаковой beat
+    // (right − left после channelsAt(), публикуемой как m_currentBeatFreq) —
+    // это и есть фактическая раскладка последнего сгенерированного звука.
+    // Атомарное чтение без блокировки; вся цепочка isChannelsSwapped
+    // удаляется на шаге 4 вместе с телеметрией.
+    return m_currentBeatFreq.load(std::memory_order_relaxed) < 0.0f;
 }
 std::pair<float, float> BinauralEngine::getCurrentPhases() const {
     // best-effort чтение живой фазы OLD (см. комментарий в заголовке):

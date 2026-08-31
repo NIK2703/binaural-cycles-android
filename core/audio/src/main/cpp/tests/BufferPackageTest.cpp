@@ -141,8 +141,70 @@ DetailedAnalysis analyzeBufferDetailed(const float* buffer, int startSample,
     result.leftPhaseAtEnd = std::asin(std::clamp(leftChannel[numSamples-1] * 2.0f, -1.0f, 1.0f));
     result.rightPhaseAtStart = std::asin(std::clamp(rightChannel[0] * 2.0f, -1.0f, 1.0f));
     result.rightPhaseAtEnd = std::asin(std::clamp(rightChannel[numSamples-1] * 2.0f, -1.0f, 1.0f));
-    
+
     return result;
+}
+
+// ============================================================================
+// ШАГ 2 МИГРАЦИИ: сравнение частот ушей, устойчивое к смене раскладки
+// ============================================================================
+//
+// Раскладка ушей теперь задаётся знаком beat, то есть входит в САМИ частоты.
+// Смена раскладки — больше не дискретное событие в выходном буфере, а проход
+// |beat| через ноль: внутри последнего 100-мс подсегмента перед T* частоты
+// идут навстречу друг другу, сходятся в унисон ровно в T* и расходятся в
+// противоположном направлении. Отсюда два правила для всех частотных проверок:
+//
+//   1) Поканальное сравнение («левый до» против «левый после») смысла не
+//      имеет: левый канал штатно уходит с lower на upper. Сравнивать надо
+//      МНОЖЕСТВО частот — отсортированную пару {lo, hi}. Это и есть свойство
+//      «уши слышат ровно две частоты кривой», а его порядок — раскладка.
+//
+//   2) Окно, накрывающее glide, измеряет СРЕДНЕЕ по окну: обе частоты
+//      сходятся к несущей и разброс пары схлопывается. Сравнивать такое окно
+//      нельзя — его пара не равна ни «до», ни «после» перехода. Такие окна
+//      пропускаются (правило схлопнутого разброса), а не ослабляют допуск.
+//
+// Правило пропуска ничего не маскирует: настоящий дефект (скачок несущей,
+// разрыв фазы, щелчок) разброс пары сохраняет, а не схлопывает.
+
+/** Пара частот ушей, отсортированная по возрастанию: {lo, hi}. */
+struct EarFreqPair {
+    float lo = 0.0f;
+    float hi = 0.0f;
+};
+
+/** Разброс пары (модуль эффективной beat в окне измерения). */
+inline float earPairSpread(const EarFreqPair& p) { return p.hi - p.lo; }
+
+inline EarFreqPair sortedEarPair(float leftFreq, float rightFreq) {
+    return leftFreq <= rightFreq ? EarFreqPair{leftFreq, rightFreq}
+                                 : EarFreqPair{rightFreq, leftFreq};
+}
+
+// Порог «схлопнутого» разброса: окно считается накрывающим glide, если его
+// разброс меньше этой доли от максимального разброса пары окон. 0.6 выбрано
+// по фактическим измерениям: окно, целиком лежащее внутри glide, даёт разброс
+// не больше половины полного (линейная рампа, среднее по окну), а окно вне
+// glide сохраняет разброс целиком.
+constexpr float kCollapsedSpreadRatio = 0.6f;
+
+/**
+ * Истинно, если одно из окон накрывает проход биений через ноль — то есть его
+ * разброс схлопнут относительно второго окна. Такую пару сравнивать нельзя.
+ */
+inline bool isUnisonGlideWindow(const EarFreqPair& before, const EarFreqPair& after) {
+    const float spreadMax = std::max(earPairSpread(before), earPairSpread(after));
+    if (spreadMax <= 0.0f) return false;  // биений нет вообще — сравнивать можно
+    return earPairSpread(before) < kCollapsedSpreadRatio * spreadMax ||
+           earPairSpread(after)  < kCollapsedSpreadRatio * spreadMax;
+}
+
+/** То же для проверки «сегмент против эталонного сегмента». */
+inline bool isCollapsedPair(const EarFreqPair& pair, const EarFreqPair& reference) {
+    const float spreadMax = std::max(earPairSpread(pair), earPairSpread(reference));
+    if (spreadMax <= 0.0f) return false;
+    return earPairSpread(pair) < kCollapsedSpreadRatio * spreadMax;
 }
 
 /**
@@ -553,15 +615,28 @@ TEST_F(TransitionTest, FullSwapCycleContinuity) {
         printf("  After:  L=%.2f Hz, R=%.2f Hz\n", after.leftFreq, after.rightFreq);
         printf("  Diff:   L=%.2f Hz, R=%.2f Hz\n",
                after.leftFreq - before.leftFreq, after.rightFreq - before.rightFreq);
-        
+
+        // ШАГ 2 МИГРАЦИИ: раскладка — знак beat, поэтому сравнивается
+        // МНОЖЕСТВО частот (отсортированная пара), а не канал: левый канал
+        // штатно уходит с lower на upper при проходе биений через ноль.
+        const EarFreqPair beforePair = sortedEarPair(before.leftFreq, before.rightFreq);
+        const EarFreqPair afterPair = sortedEarPair(after.leftFreq, after.rightFreq);
+
+        if (isUnisonGlideWindow(beforePair, afterPair)) {
+            printf("  (glide через унисон: разброс %.2f -> %.2f Гц — окно пропущено)\n",
+                   earPairSpread(beforePair), earPairSpread(afterPair));
+            sampleOffset += segSamples;
+            continue;
+        }
+
         // Проверяем, что частоты не скачут
         if (before.leftAmplitude > 0.01f && after.leftAmplitude > 0.01f) {
-            EXPECT_NEAR(before.leftFreq, after.leftFreq, 3.0f)
-                << "Left frequency jump at segment boundary " << i << " -> " << (i + 1);
-            EXPECT_NEAR(before.rightFreq, after.rightFreq, 3.0f)
-                << "Right frequency jump at segment boundary " << i << " -> " << (i + 1);
+            EXPECT_NEAR(beforePair.lo, afterPair.lo, 3.0f)
+                << "Low ear frequency jump at segment boundary " << i << " -> " << (i + 1);
+            EXPECT_NEAR(beforePair.hi, afterPair.hi, 3.0f)
+                << "High ear frequency jump at segment boundary " << i << " -> " << (i + 1);
         }
-        
+
         sampleOffset += segSamples;
     }
 }
@@ -1635,8 +1710,9 @@ TEST_F(ComprehensiveBufferTest, MultiSegmentBufferConsistency) {
 
     // Проверяем каждый сегмент
     int sampleOffset = 0;
-    std::vector<float> segmentFreqs;
-    bool channelsSwapped = false;
+    // ШАГ 2 МИГРАЦИИ: школярский учёт «каналы поменялись местами» исчез —
+    // раскладка выводится из знака beat. Сегменты сравниваются парами частот.
+    std::vector<EarFreqPair> segmentPairs;
 
     for (size_t i = 0; i < plan.segments.size(); ++i) {
         const auto& seg = plan.segments[i];
@@ -1652,28 +1728,32 @@ TEST_F(ComprehensiveBufferTest, MultiSegmentBufferConsistency) {
             buffer.data(), sampleOffset + segSamples / 2 - windowSize / 2,
             windowSize, SAMPLE_RATE);
 
-        // После swap каналы меняются местами
-        float leftFreq = channelsSwapped ? analysis.rightFreq : analysis.leftFreq;
-        segmentFreqs.push_back(leftFreq);
-        
-        printf("  Segment %zu (%d): L=%.2f Hz, R=%.2f Hz%s\n",
+        // ШАГ 2 МИГРАЦИИ: уши обязаны слышать одно и то же МНОЖЕСТВО частот;
+        // какое ухо выше — это и есть раскладка, она меняется по расписанию.
+        const EarFreqPair pair = sortedEarPair(analysis.leftFreq, analysis.rightFreq);
+        segmentPairs.push_back(pair);
+
+        printf("  Segment %zu (%d): L=%.2f Hz, R=%.2f Hz -> {%.2f, %.2f}\n",
                i, static_cast<int>(seg.type),
-               analysis.leftFreq, analysis.rightFreq,
-               channelsSwapped ? " (swapped)" : "");
+               analysis.leftFreq, analysis.rightFreq, pair.lo, pair.hi);
 
         sampleOffset += segSamples;
-        
-        // Обновляем состояние swap после сегмента
-        if (seg.swapAfterSegment) {
-            channelsSwapped = !channelsSwapped;
-        }
     }
 
-    // Все сегменты должны иметь одинаковую частоту с допуском 0.3 Гц (было 3.0f, ужесточено в 10 раз)
-    if (segmentFreqs.size() > 1) {
-        for (size_t i = 1; i < segmentFreqs.size(); ++i) {
-            EXPECT_NEAR(segmentFreqs[i], segmentFreqs[0], 3.0f)
-                << "Frequency mismatch between segments";
+    // Все сегменты должны нести одну и ту же пару частот (допуск 3.0 Гц).
+    // Сегмент-glide (последние 100 мс перед T* целиком накрывают проход через
+    // унисон) даёт схлопнутый разброс — он исключается, а не ослабляет допуск.
+    if (segmentPairs.size() > 1) {
+        for (size_t i = 1; i < segmentPairs.size(); ++i) {
+            if (isCollapsedPair(segmentPairs[i], segmentPairs[0])) {
+                printf("  skip segment %zu: glide через унисон (spread %.2f vs %.2f)\n",
+                       i, earPairSpread(segmentPairs[i]), earPairSpread(segmentPairs[0]));
+                continue;
+            }
+            EXPECT_NEAR(segmentPairs[i].lo, segmentPairs[0].lo, 3.0f)
+                << "Low ear frequency mismatch at segment " << i;
+            EXPECT_NEAR(segmentPairs[i].hi, segmentPairs[0].hi, 3.0f)
+                << "High ear frequency mismatch at segment " << i;
         }
     }
 }
@@ -1933,13 +2013,26 @@ TEST_F(FrequencyJumpDiagnosticTest, FullSwapCycle_DetailedDiagnostic) {
         if (seg.type != BufferType::PAUSE && nextSeg.type != BufferType::PAUSE) {
             int windowSamples = SAMPLE_RATE / 10;
             if (boundarySample >= windowSamples && boundarySample + windowSamples <= totalSamples) {
-                auto [leftJump, rightJump] = detectFrequencyJumpAtBoundary(
-                    buffer.data(), boundarySample, windowSamples);
-                
-                EXPECT_LT(std::abs(leftJump), 1.0f)
-                    << "Left frequency jump at segment " << i << " -> " << (i + 1);
-                EXPECT_LT(std::abs(rightJump), 1.0f)
-                    << "Right frequency jump at segment " << i << " -> " << (i + 1);
+                // ШАГ 2 МИГРАЦИИ: раскладка — знак beat, её смена — проход
+                // биений через ноль, поэтому поканальный скачок здесь ШТАТЕН
+                // (канал уходит с lower на upper). Сравнивается МНОЖЕСТВО
+                // частот ушей; окно, накрывающее glide, пропускается.
+                const EarFreqPair beforePair = sortedEarPair(
+                    measureInstantFrequency(buffer.data(), boundarySample - windowSamples, windowSamples, 0),
+                    measureInstantFrequency(buffer.data(), boundarySample - windowSamples, windowSamples, 1));
+                const EarFreqPair afterPair = sortedEarPair(
+                    measureInstantFrequency(buffer.data(), boundarySample, windowSamples, 0),
+                    measureInstantFrequency(buffer.data(), boundarySample, windowSamples, 1));
+
+                if (isUnisonGlideWindow(beforePair, afterPair)) {
+                    printf("  (glide через унисон на границе %zu->%zu: spread %.2f -> %.2f — пропуск)\n",
+                           i, i + 1, earPairSpread(beforePair), earPairSpread(afterPair));
+                } else {
+                    EXPECT_NEAR(beforePair.lo, afterPair.lo, 1.0f)
+                        << "Low ear frequency jump at segment " << i << " -> " << (i + 1);
+                    EXPECT_NEAR(beforePair.hi, afterPair.hi, 1.0f)
+                        << "High ear frequency jump at segment " << i << " -> " << (i + 1);
+                }
             }
         }
         
@@ -2936,8 +3029,20 @@ TEST_F(ExtremeFrequencyTest, SolidToFadeOutTransitionWithExtremeFreqs) {
            fadeStart.leftFreq - solidEnd.leftFreq,
            fadeStart.rightFreq - solidEnd.rightFreq);
 
-    EXPECT_NEAR(solidEnd.leftFreq, fadeStart.leftFreq, FREQ_TOLERANCE);
-    EXPECT_NEAR(solidEnd.rightFreq, fadeStart.rightFreq, FREQ_TOLERANCE);
+    // ШАГ 2 МИГРАЦИИ: граница SOLID -> FADE_OUT стоит ровно в T* (момент смены
+    // раскладки), поэтому окно «конец SOLID» — это весь glide к унисону: обе
+    // частоты в нём равны несущей. Сравнивается МНОЖЕСТВО частот ушей, а окно
+    // на glide (схлопнутый разброс) пропускается.
+    const EarFreqPair solidPair = sortedEarPair(solidEnd.leftFreq, solidEnd.rightFreq);
+    const EarFreqPair fadePair = sortedEarPair(fadeStart.leftFreq, fadeStart.rightFreq);
+    if (isUnisonGlideWindow(solidPair, fadePair)) {
+        printf("  (glide через унисон: spread %.2f -> %.2f — переход пропущен)\n",
+               earPairSpread(solidPair), earPairSpread(fadePair));
+        return;
+    }
+
+    EXPECT_NEAR(solidPair.lo, fadePair.lo, FREQ_TOLERANCE);
+    EXPECT_NEAR(solidPair.hi, fadePair.hi, FREQ_TOLERANCE);
 }
 
 TEST_F(ExtremeFrequencyTest, ContinuityAcrossPackagesWithExtremeFreqs) {
@@ -3077,7 +3182,16 @@ protected:
         DetailedAnalysis after = analyzeBufferDetailed(
             buffer.data(), boundarySample, windowSize, SAMPLE_RATE);
 
-        float freqDiff = std::abs(after.leftFreq - before.leftFreq);
+        // ШАГ 2 МИГРАЦИИ: смена раскладки — проход биений через ноль, поэтому
+        // «какое ухо ниже» меняется, а МНОЖЕСТВО частот — нет. Сравниваем
+        // отсортированную пару; окно, накрывающее glide, пропускается.
+        const EarFreqPair beforePair = sortedEarPair(before.leftFreq, before.rightFreq);
+        const EarFreqPair afterPair = sortedEarPair(after.leftFreq, after.rightFreq);
+        if (isUnisonGlideWindow(beforePair, afterPair)) {
+            return; // glide через унисон: частота в окне — несущая, а не частота уха
+        }
+
+        float freqDiff = std::abs(afterPair.lo - beforePair.lo);
         EXPECT_LT(freqDiff, FREQ_TOLERANCE)
             << "Frequency jump at boundary: " << freqDiff << " Hz";
     }
@@ -3513,6 +3627,17 @@ static bool runPackageSequenceScenario(const char* name,
         if (lowAmp) continue; // тишина (фейд/пауза) — частота не определена, это ОК
         std::sort(fB, fB + 2);
         std::sort(fA, fA + 2);
+
+        // ШАГ 2 МИГРАЦИИ: окно, накрывающее glide к унисону (100 мс перед T*),
+        // даёт схлопнутый разброс — его пара равна несущей, а не частотам ушей.
+        // Такое окно сравнение не выдерживает по определению: пропуск.
+        if (isUnisonGlideWindow(EarFreqPair{fB[0], fB[1]}, EarFreqPair{fA[0], fA[1]})) {
+            printf("[%s] skip unison-glide window at boundary sample=%d "
+                   "(spread %.2f -> %.2f)\n",
+                   name, b, fB[1] - fB[0], fA[1] - fA[0]);
+            continue;
+        }
+
         float dLow = std::fabs(fB[0] - fA[0]);
         float dHigh = std::fabs(fB[1] - fA[1]);
         if (dLow > 0.5f || dHigh > 0.5f) {
