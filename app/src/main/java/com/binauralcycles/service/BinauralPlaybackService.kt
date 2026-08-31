@@ -29,7 +29,7 @@ import com.binauralcycles.MainActivity
 import com.binauralcycles.R
 import com.binaural.core.audio.stream.BinauralStreamManager
 import com.binaural.core.audio.stream.ManagerState
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.RelaxationModeSettings
@@ -41,7 +41,8 @@ import kotlinx.coroutines.flow.collectLatest
 
 /**
  * Сервис для воспроизведения бинауральных ритмов в фоновом режиме.
- * Создаёт и управляет BinauralAudioEngine, который работает в отдельном потоке.
+ * Создаёт и управляет `BinauralStreamManager` (фасад над пулом потоков),
+ * который работает в отдельном потоке.
  */
 class BinauralPlaybackService : Service() {
 

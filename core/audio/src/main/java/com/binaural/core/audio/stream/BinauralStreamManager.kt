@@ -7,7 +7,7 @@ import android.os.PowerManager
 import android.util.Log
 import com.binaural.core.audio.engine.NativeAudioEngine
 
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
 import com.binaural.core.audio.model.RelaxationModeSettings
@@ -22,7 +22,8 @@ enum class ManagerState { IDLE, PREPARING, FADE_IN, RUNNING, HANDOFF, FADE_OUT_P
  * Единственный владелец состояния; все команды приходят сообщениями в его лупер,
  * поэтому гонки флагов (как в старом движке) отсутствуют структурно.
  *
- * Фасад намеренно повторяет API BinauralAudioEngine — сервис меняется одной строкой.
+ * Фасад намеренно повторяет API старого `BinauralAudioEngine` (удалён
+ * 2026-08-31 как мёртвый) — сервис меняется одной строкой.
  */
 class BinauralStreamManager(private val context: Context) {
 
@@ -81,10 +82,19 @@ class BinauralStreamManager(private val context: Context) {
      * размере; CPU/час одинаков при 2 с и 190 с — 1.02 с), а платил 67 МБ
      * на поток (134 МБ в кроссфейде) + page-fault'ы + дорогую пересборку
      * потока на каждом handoff. Поэтому рабочий потолок осознанно снижен до
-     * 600 с — ровно столько, сколько влезает в 256 МБ direct-буфера на
-     * любом SR (см. BinauralStreamImpl.maxBufferBytes), то есть настройка
-     * работает «как задумано», без тихого усечения. Дефолт совпадает с
-     * MAX_BUFFER_INTERVAL_MS, поэтому не упирается в кламп и честно виден в UI.
+     * 600 с. Дефолт совпадает с MAX_BUFFER_INTERVAL_MS, поэтому не упирается
+     * в кламп и честно виден в UI.
+     *
+     * НО: фраза, которая здесь была раньше («влезает в 256 МБ direct-буфера
+     * на любом SR, то есть без тихого усечения»), неверна. Реальный предел —
+     * не 256 МБ ([BinauralStreamImpl.maxBufferBytes]), а PACKET_MAX_BYTES:
+     * бюджет одного пакета = 1/8 кучи, ограниченный сверху 32 МБ. На 48 кГц
+     * это 32 МБ / 8 байт = 4.19 млн кадров = **87.4 с**, то есть дефолт
+     * 600 с молча урезается примерно в семь раз. Фактический пакет сегодня —
+     * 87.4 с / 33.55 МБ на поток, 41 генерация в час. Усечение безопасно
+     * (пакет — это только длина одного JNI-вызова, звук от неё не зависит),
+     * но называть настройку «честной» нельзя: слайдер показывает 600 с,
+     * движок живёт на 87.4.
      */
     private var bufferIntervalMs = 600_000
     private var lastUserIntervalMs = 600_000
@@ -265,11 +275,14 @@ class BinauralStreamManager(private val context: Context) {
     fun getSampleRate(): SampleRate = sampleRate
 
     fun setFrequencyUpdateInterval(intervalMs: Int) {
-        // Верхний предел 60 с — не «разумный расход памяти», а структурная
-        // граница. Замер (docs/hotpath_optimization_analysis_2026-08-30.md):
-        // длина пакета НЕ влияет на CPU/час (1.02 с при пакете и 2 с, и 190 с)
-        // и НЕ влияет на wakeups писателя (их задаёт WRITE_CHUNK_MS). Платит
-        // длинный пакет только памятью: 60 с @48 кГц = 23 МБ на поток.
+        // Верхний предел — MAX_BUFFER_INTERVAL_MS = 600 с (600_000 мс), а не
+        // 60 с, как здесь было написано. Это не «разумный расход памяти», а
+        // структурная граница. Замер
+        // (docs/hotpath_optimization_analysis_2026-08-30.md): длина пакета НЕ
+        // влияет на CPU/час (1.02 с при пакете и 2 с, и 190 с) и НЕ влияет на
+        // wakeups писателя (их задаёт WRITE_CHUNK_MS). Платит длинный пакет
+        // только памятью: 600 с @48 кГц = 230 МБ запроса, но PACKET_MAX_BYTES
+        // урезает его до 33.55 МБ (87.4 с) — см. комментарий к bufferIntervalMs.
         // Держим предел здесь, чтобы никакое значение из UI не могло вернуть
         // 67-мегабайтные буферы, на которых проект ловил OOM.
         val clamped = intervalMs.coerceIn(MIN_BUFFER_INTERVAL_MS, MAX_BUFFER_INTERVAL_MS)
@@ -552,6 +565,11 @@ class BinauralStreamManager(private val context: Context) {
         // 2. NEXT готовится ПОД ПРИКРЫТИЕМ фейд-аута: 250 мс с большим запасом
         //    хватает на prepare(). Если подготовка всё же не успела к моменту
         //    тишины — спека не теряется, её поднимет onStreamFullyStopped().
+        // Промежуточный NEXT (если вдруг дожил) гасим ДО создания нового:
+        // иначе ссылка `next` перезаписалась бы, и старый поток остался бы без
+        // владельца — уже не current, уже не next, а значит его никто не
+        // утилизирует никогда.
+        discardArmedNext("beginHandoff")
         val candidate = createStream(enriched)
         if (!candidate.prepare()) {
             StreamLogger.e(TAG, "beginHandoff: prepare NEXT spec#${spec.serial} не удался — " +
@@ -601,11 +619,18 @@ class BinauralStreamManager(private val context: Context) {
         }
 
         // NEXT отсутствует или ещё не звучал — тихая замена.
-        if (n != null) {
-            StreamLogger.d(TAG, "rearmNextIfStale: вооружённый NEXT (lc=${n.lifecycle}) устарел — тихая замена")
-            n.abort() // никогда не звучал — бесшумно
-            next = null
+        //
+        // Гейт осиротевшего потока обязателен и здесь, а не только в
+        // beginHandoff(): пока старый трек не отпущен, третий AudioTrack в кучу
+        // клиента AudioFlinger не влезет, и prepare() провалился бы на
+        // createTrack_l (-12 NO_MEMORY). Спека уже лежит в очереди
+        // (latest-wins) — её разберёт drainQueuedHandoff() по освобождении.
+        if (handoffBlocked()) {
+            StreamLogger.d(TAG, "rearmNextIfStale отложен: spec#${spec.serial} ждёт освобождения " +
+                "старого трека spec#${orphanReleasing?.spec?.serial}")
+            return
         }
+        discardArmedNext("rearmNextIfStale")
         // Непрерывность: координаты CURRENT (ещё жив) обновляем для нового NEXT.
         captureContinuity()
         val enriched = enrichForContinuity(spec)
@@ -701,6 +726,21 @@ class BinauralStreamManager(private val context: Context) {
         // писателя — всё это время он занимает слот в куче AudioFlinger.
         orphanReleasing = outgoing
         orphanSinceMs = System.currentTimeMillis()
+        // ПАКЕТ старого потока отпускаем СРАЗУ, не дожидаясь утилизации.
+        //
+        // Здесь старый поток уже не слышен (эта точка — ровно конец его
+        // фейд-аута), а новый через мгновение дорастит свой пакет до полного
+        // интервала: писатель делает это на ПЕРВОЙ же итерации цикла, потому
+        // что start() праймит трек всем стартовым пакетом и offset уже равен
+        // packetBytes. Без этого сброса в куче одновременно висят ДВА полных
+        // пакета (33.55 МБ × 2 на 48 кГц), и именно они были тем пиком, из-за
+        // которого приходилось держать потолок пакета в 1/8 кучи.
+        //
+        // Трек и писатель старого потока продолжают жить до releaseInternal();
+        // отдан только PCM-пакет, который больше никому не нужен.
+        outgoing?.releasePacketBuffer()
+        StreamLogger.d(TAG, "promoteNextToCurrent: пакет spec#${outgoing?.spec?.serial} отдан " +
+            "до доращивания spec#${n.spec.serial}")
         sessionSpec = n.spec
         // Сессионное время: NEXT несёт switchElapsedMs + фактическую длительность кроссфейда.
         accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
@@ -766,6 +806,45 @@ class BinauralStreamManager(private val context: Context) {
             }
             StreamLifecycle.CREATED, StreamLifecycle.PREPARED, StreamLifecycle.FAILED -> n.abort()
             else -> {} // STOPPING/RELEASED — уже уходит сам
+        }
+    }
+
+    /**
+     * Утилизировать вооружённый NEXT ДО создания нового потока.
+     *
+     * Порядок критичен именно для шторма смен пресетов: каждый новый пресет
+     * перевооружает NEXT, и если просто перезаписать ссылку `next`, старый
+     * поток остаётся без владельца — он уже не current, уже не next, и ни
+     * abort(), ни releaseInternal() его не найдут. Его AudioTrack и пакетный
+     * буфер висели бы до конца процесса, а таких «зомби» за серию смен
+     * набирается сколько угодно. Отсюда и была оценка «шесть потоков по
+     * 33.5 МБ в пике»: это не единовременный пик, а накопление.
+     *
+     * Очистка СИНХРОННА (abort() -> releaseInternal() без ожидания писателя,
+     * потому что неигравший поток его не запускал), поэтому к моменту
+     * `createStream()` следующего пресета старого потока уже нет — ровно это и
+     * требует инвариант «одновременно живёт не больше двух потоков».
+     */
+    private fun discardArmedNext(reason: String) {
+        val n = next ?: return
+        next = null
+        when (n.lifecycle) {
+            StreamLifecycle.CREATED, StreamLifecycle.PREPARED, StreamLifecycle.FAILED -> {
+                StreamLogger.d(TAG, "$reason: вооружённый NEXT spec#${n.spec.serial} " +
+                    "(lc=${n.lifecycle}) не звучал — тихий abort")
+                n.abort()   // релиз трека, буфера и движка — синхронно
+            }
+            else -> {
+                // Звучащий поток abort() не берёт, а владельца у него уже нет.
+                // Гасим фейдом — иначе он останется звучать навсегда.
+                StreamLogger.w(TAG, "$reason: NEXT spec#${n.spec.serial} ещё жив " +
+                    "(lc=${n.lifecycle}) — гасим фейдом")
+                pendingHandoff = false
+                n.stop(
+                    onFullyStopped = { /* владельца нет; состояние решают вызывающие */ },
+                    shape = FadeShape.EQUAL_POWER
+                )
+            }
         }
     }
 
@@ -1185,8 +1264,9 @@ class BinauralStreamManager(private val context: Context) {
             launchStream(armed)
             return
         }
-        armed?.abort()
-        next = null
+        // Вооружённый NEXT не подошёл — утилизируем его ДО создания нового
+        // потока (тот же инвариант, что в discardArmedNext).
+        discardArmedNext("launchSpec")
         val candidate = createStream(spec)
         if (!candidate.prepare()) {
             // Ошибка подготовки: стабильное состояние + сессия сохранена для повторной попытки

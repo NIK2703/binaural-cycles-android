@@ -58,6 +58,9 @@ internal val DEBUG_HELP = """
     import <json>            импортировать пресет из JSON
     mem                      память процесса
     gc                       System.gc()
+    pcreset                  обнулить пики счётчиков пакетной памяти
+    packetmax <МБ|0>         потолок ОДНОГО пакетного буфера на ходу (0 = константа)
+    pkstat                   счётчики пакетной памяти (живые буферы, пик, OOM)
     logtail [строк]          хвост лога потока (binaural_stream.log)
 """.trimIndent()
 

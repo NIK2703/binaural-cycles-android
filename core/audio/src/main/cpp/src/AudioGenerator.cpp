@@ -15,12 +15,15 @@
 // Логирование только в DEBUG сборках
 #ifdef AUDIO_TEST_BUILD
 #define LOGD(...) ((void)0)
+#define LOGD_ENABLED() false
 #elif defined(AUDIO_DEBUG) && defined(ANDROID)
 #include <android/log.h>
 #define LOG_TAG "AudioGenerator"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOGD_ENABLED() true
 #else
 #define LOGD(...) ((void)0)
+#define LOGD_ENABLED() false
 #endif
 
 // Логирование для отладки стыков буферов.
@@ -30,6 +33,7 @@
 // засоряют logcat сотнями тысяч строк в секунду (файл в сотни МБ).
 #ifdef AUDIO_TEST_BUILD
 #define LOG_SEG(...) ((void)0)
+#define SEG_LOG_ENABLED() false
 #elif defined(ANDROID)
 #include <android/log.h>
 #include <sys/system_properties.h>
@@ -41,9 +45,15 @@ inline bool segmentDebugLogEnabled() {
     return enabled;
 }
 #define LOG_SEG(...) do { if (segmentDebugLogEnabled()) __android_log_print(ANDROID_LOG_DEBUG, "SEGMENT_DEBUG", __VA_ARGS__); } while (0)
+// Гард для ВЫЧИСЛЕНИЙ, которые нужны только этой диагностике. Без него они
+// выполнялись на каждом сегменте (два чтения из буфера, fastSin, swap) даже
+// при выключенном логе — ради строки, которую никто не напечатает. Проверка
+// дешёвая: segmentDebugLogEnabled() читает один раз инициализированный static.
+#define SEG_LOG_ENABLED() segmentDebugLogEnabled()
 #else
 #include "../tests/android_stub.h"
 #define LOG_SEG(...) __android_log_print(ANDROID_LOG_DEBUG, "SEGMENT_DEBUG", __VA_ARGS__)
+#define SEG_LOG_ENABLED() true
 #endif
 
 namespace binaural {
@@ -103,14 +113,21 @@ struct FadeCurveTable {
 
 static const FadeCurveTable s_fadeCurveTable;
 
-// Границы (в сэмплах от начала сегмента) контрольных точек STEP-кривой внутри сегмента
-static std::vector<int> collectStepBoundaries(
+// Границы (в сэмплах от начала сегмента) контрольных точек STEP-кривой внутри сегмента.
+//
+// ВОЗВРАЩАЕТ ССЫЛКУ НА thread_local-буфер, а не новый vector: вызывается на
+// аудио-потоке для КАЖДОГО STEP-сегмента (сегмент ≤100 мс ⇒ десятки раз в
+// секунду аудио), и раньше каждый вызов аллокировал. Буфер переиспользуется,
+// поэтому вызывающий обязан потребить результат до следующего вызова — в
+// generatePackage* так и есть (один проход по кусочкам, без вложенных вызовов).
+static const std::vector<int>& collectStepBoundaries(
     const FrequencyCurve& curve,
     double startTimeSeconds,
     double secPerSample,
     int samples
 ) {
-    std::vector<int> bounds;
+    thread_local std::vector<int> bounds;
+    bounds.clear();
     if (samples <= 1 || !(secPerSample > 0.0)) {
         return bounds;
     }
@@ -560,7 +577,6 @@ void AudioGenerator::generateSolidBufferNeon(
     
     const float32x4_t vScaleFactor = vdupq_n_f32(scaleFactor);
     const float32x4_t vBaseVol = vdupq_n_f32(baseVolumeFactor);
-    // Индексы для расчёта фаз: phase[i] = phaseBase + i*omega + omegaStep * i*(i-1)/2
     const float32x4_t vIndices = {0.0f, 1.0f, 2.0f, 3.0f};
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
     const float32x4_t vPhaseAccum = {0.0f, 0.0f, 1.0f, 3.0f};
@@ -766,7 +782,10 @@ bool AudioGenerator::generateFadeBufferNeon(
     float rightAmplitude = startRightAmp;
     
     const float32x4_t vScaleFactor = vdupq_n_f32(scaleFactor);
-    const float32x4_t vBaseVol = vdupq_n_f32(baseVolumeFactor);
+    // vBaseVol здесь НЕ нужен: в fade-сегменте амплитуды идут через
+    // fadeMultiplier, а baseVolumeFactor уже учтён в startLeftAmp/startRightAmp.
+    // Переменная была мертва (предупреждение компилятора) — удалена.
+    // В generatePackageNeon НЕ трогать: там она реально участвует в vmulq_f32.
     // Индексы для расчёта фаз: phase[i] = phaseBase + i*omega + omegaStep * i*(i-1)/2
     const float32x4_t vIndices = {0.0f, 1.0f, 2.0f, 3.0f};
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
@@ -967,7 +986,6 @@ void AudioGenerator::generateSolidBufferSse(
     
     const __m128 vScaleFactor = _mm_set1_ps(scaleFactor);
     const __m128 vBaseVol = _mm_set1_ps(baseVolumeFactor);
-    // Индексы для расчёта фаз: phase[i] = phaseBase + i*omega + omegaStep * i*(i-1)/2
     const __m128 vIndices = _mm_set_ps(3.0f, 2.0f, 1.0f, 0.0f);
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
     const __m128 vPhaseAccum = _mm_set_ps(3.0f, 1.0f, 0.0f, 0.0f);
@@ -1175,7 +1193,10 @@ bool AudioGenerator::generateFadeBufferSse(
     float rightAmplitude = startRightAmp;
     
     const __m128 vScaleFactor = _mm_set1_ps(scaleFactor);
-    const __m128 vBaseVol = _mm_set1_ps(baseVolumeFactor);
+    // vBaseVol здесь НЕ нужен — см. комментарий в NEON-ветке: в fade-сегменте
+    // baseVolumeFactor уже учтён в стартовых амплитудах. Переменная была мертва
+    // (предупреждение компилятора) — удалена.
+    // В generatePackageSse НЕ трогать: там она реально участвует в _mm_mul_ps.
     // Индексы для расчёта фаз: phase[i] = phaseBase + i*omega + omegaStep * i*(i-1)/2
     const __m128 vIndices = _mm_set_ps(3.0f, 2.0f, 1.0f, 0.0f);
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
@@ -1349,8 +1370,7 @@ GenerateResult AudioGenerator::generatePackage(
     
     int currentSample = 0;
     double currentTime = static_cast<double>(startTimeSeconds);
-    int64_t currentElapsedMs = elapsedMs;
-    
+
     float lastLeftFreq = 0.0f;
     float lastRightFreq = 0.0f;
     
@@ -1362,19 +1382,20 @@ GenerateResult AudioGenerator::generatePackage(
         
         if (samples <= 0) continue;
         
-        // Сохраняем последние сэмплы предыдущего сегмента для отладки
-        float lastLeftSample = 0.0f;
-        float lastRightSample = 0.0f;
-        if (currentSample > 0) {
-            lastLeftSample = buffer[(currentSample - 1) * 2];
-            lastRightSample = buffer[(currentSample - 1) * 2 + 1];
+        // prevSample и фаза ДО генерации нужны только SEGMENT_DEBUG: вне
+        // логирования два чтения из буфера делать незачем (см. SEG_LOG_ENABLED).
+        if (SEG_LOG_ENABLED()) {
+            float lastLeftSample = 0.0f;
+            float lastRightSample = 0.0f;
+            if (currentSample > 0) {
+                lastLeftSample = buffer[(currentSample - 1) * 2];
+                lastRightSample = buffer[(currentSample - 1) * 2 + 1];
+            }
+            LOG_SEG("SEG_START: type=%d, samples=%d, leftPhase=%.4f, rightPhase=%.4f, prevSample=[%.4f, %.4f]",
+                 static_cast<int>(segment.type), samples,
+                 state.leftPhase, state.rightPhase,
+                 lastLeftSample, lastRightSample);
         }
-        
-        // Логируем фазу ДО генерации сегмента
-        LOG_SEG("SEG_START: type=%d, samples=%d, leftPhase=%.4f, rightPhase=%.4f, prevSample=[%.4f, %.4f]",
-             static_cast<int>(segment.type), samples,
-             state.leftPhase, state.rightPhase,
-             lastLeftSample, lastRightSample);
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
@@ -1422,7 +1443,7 @@ GenerateResult AudioGenerator::generatePackage(
                     config.curve.interpolationType == InterpolationType::STEP &&
                     config.curve.points.size() > 1) {
                     const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int> stepBounds = collectStepBoundaries(
+                    const std::vector<int>& stepBounds = collectStepBoundaries(
                         config.curve, currentTime, stepSecPerSample, samples);
                     if (!stepBounds.empty()) {
                         int pieceStart = 0;
@@ -1657,28 +1678,34 @@ GenerateResult AudioGenerator::generatePackage(
             }
         }
         
-        // Логируем последние сэмплы текущего сегмента
-        float endLeftSample = buffer[(currentSample + samples - 1) * 2];
-        float endRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
-        
-        // Логируем фазу ПОСЛЕ генерации сегмента
-        LOG_SEG("SEG_END: type=%d, leftPhase=%.4f, rightPhase=%.4f, lastSample=[%.4f, %.4f]",
-             static_cast<int>(segment.type),
-             state.leftPhase, state.rightPhase,
-             endLeftSample, endRightSample);
+        // lastSample и фаза ПОСЛЕ генерации — только для SEGMENT_DEBUG.
+        if (SEG_LOG_ENABLED()) {
+            const float endLeftSample = buffer[(currentSample + samples - 1) * 2];
+            const float endRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
+            LOG_SEG("SEG_END: type=%d, leftPhase=%.4f, rightPhase=%.4f, lastSample=[%.4f, %.4f]",
+                 static_cast<int>(segment.type),
+                 state.leftPhase, state.rightPhase,
+                 endLeftSample, endRightSample);
+        }
         
         if (segment.swapAfterSegment) {
             state.channelsSwapped = !state.channelsSwapped;
             result.channelsSwapped = true;
             
+            // Ось расписания из фактических сэмплов — без дрейфа против аудио.
+            // Раньше это значение держали в переменной currentElapsedMs и
+            // пересчитывали на КАЖДОМ сегменте (int64 деление), хотя читается
+            // оно только здесь и только под LOGD. Теперь считается на месте:
+            // при выключенном LOGD аргументы макроса не вычисляются вовсе.
+            // currentSample здесь ЕЩЁ не продвинут => это начало сегмента,
+            // то есть ровно то же значение, что давал старый currentElapsedMs.
             LOGD("PackageGen: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
+                 state.channelsSwapped ? 1 : 0);
         }
         
         currentSample += samples;
         currentTime += static_cast<double>(durationSec) * timeScale;
-        // Ось расписания из фактических сэмплов — без дрейфа против аудио
-        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;
@@ -1715,8 +1742,7 @@ GenerateResult AudioGenerator::generatePackageNeon(
     
     int currentSample = 0;
     double currentTime = static_cast<double>(startTimeSeconds);
-    int64_t currentElapsedMs = elapsedMs;
-    
+
     float lastLeftFreq = 0.0f;
     float lastRightFreq = 0.0f;
     
@@ -1786,7 +1812,7 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     config.curve.interpolationType == InterpolationType::STEP &&
                     config.curve.points.size() > 1) {
                     const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int> stepBounds = collectStepBoundaries(
+                    const std::vector<int>& stepBounds = collectStepBoundaries(
                         config.curve, currentTime, stepSecPerSample, samples);
                     if (!stepBounds.empty()) {
                         int pieceStart = 0;
@@ -2017,45 +2043,52 @@ GenerateResult AudioGenerator::generatePackageNeon(
             }
         }
         
-        // Логируем первый и последний сэмплы сегмента
-        float firstLeftSample = buffer[currentSample * 2];
-        float firstRightSample = buffer[currentSample * 2 + 1];
-        float lastLeftSample = buffer[(currentSample + samples - 1) * 2];
-        float lastRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
-        
-        // Вычисляем ожидаемый первый сэмпл СЛЕДУЮЩЕГО сегмента через фазу.
-        // Фикс (Qwen, P2): учитываем амплитуду (baseVolumeFactor × endAmp),
-        // иначе сравнение с фактическим first вводит в заблуждение:
-        // сырой sin(phase) больше реального сэмпла в 1/(0.5·amp) раз.
-        constexpr float baseVolumeFactor = 0.5f;
-        float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * baseVolumeFactor * endLeftAmp;
-        float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * baseVolumeFactor * endRightAmp;
+        // Всё это — только для SEGMENT_DEBUG: четыре чтения из буфера, два
+        // fastSin и swap на каждом сегменте ради одной строки. Вне логирования
+        // делать это незачем (см. SEG_LOG_ENABLED).
+        if (SEG_LOG_ENABLED()) {
+            // Логируем первый и последний сэмплы сегмента
+            const float firstLeftSample = buffer[currentSample * 2];
+            const float firstRightSample = buffer[currentSample * 2 + 1];
+            const float lastLeftSample = buffer[(currentSample + samples - 1) * 2];
+            const float lastRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
 
-        // При активном свапе каналы в буфере меняются местами
-        if (state.channelsSwapped) {
-            std::swap(expectedFirstLeft, expectedFirstRight);
+            // Вычисляем ожидаемый первый сэмпл СЛЕДУЮЩЕГО сегмента через фазу.
+            // Фикс (Qwen, P2): учитываем амплитуду (baseVolumeFactor × endAmp),
+            // иначе сравнение с фактическим first вводит в заблуждение:
+            // сырой sin(phase) больше реального сэмпла в 1/(0.5·amp) раз.
+            constexpr float baseVolumeFactor = 0.5f;
+            float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * baseVolumeFactor * endLeftAmp;
+            float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * baseVolumeFactor * endRightAmp;
+
+            // При активном свапе каналы в буфере меняются местами
+            if (state.channelsSwapped) {
+                std::swap(expectedFirstLeft, expectedFirstRight);
+            }
+
+            // Логируем фазу ПОСЛЕ генерации сегмента
+            LOG_SEG("SEG_END_NEON: type=%d, leftPhase=%.4f, rightPhase=%.4f, first=[%.4f, %.4f], last=[%.4f, %.4f], expectedFirst=[%.4f, %.4f]",
+                 static_cast<int>(segment.type),
+                 state.leftPhase, state.rightPhase,
+                 firstLeftSample, firstRightSample,
+                 lastLeftSample, lastRightSample,
+                 expectedFirstLeft, expectedFirstRight);
         }
-        
-        // Логируем фазу ПОСЛЕ генерации сегмента
-        LOG_SEG("SEG_END_NEON: type=%d, leftPhase=%.4f, rightPhase=%.4f, first=[%.4f, %.4f], last=[%.4f, %.4f], expectedFirst=[%.4f, %.4f]",
-             static_cast<int>(segment.type),
-             state.leftPhase, state.rightPhase,
-             firstLeftSample, firstRightSample,
-             lastLeftSample, lastRightSample,
-             expectedFirstLeft, expectedFirstRight);
         
         if (segment.swapAfterSegment) {
             state.channelsSwapped = !state.channelsSwapped;
             result.channelsSwapped = true;
             
+            // elapsedMs считается на месте, а не переменной на каждый сегмент:
+            // при выключенном LOGD аргументы макроса не вычисляются. Значение
+            // то же — начало сегмента (currentSample ещё не продвинут).
             LOGD("PackageGenNeon: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
+                 state.channelsSwapped ? 1 : 0);
         }
         
         currentSample += samples;
         currentTime += static_cast<double>(durationSec) * timeScale;
-        // Ось расписания из фактических сэмплов — без дрейфа против аудио
-        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;
@@ -2093,8 +2126,7 @@ GenerateResult AudioGenerator::generatePackageSse(
     
     int currentSample = 0;
     double currentTime = static_cast<double>(startTimeSeconds);
-    int64_t currentElapsedMs = elapsedMs;
-    
+
     float lastLeftFreq = 0.0f;
     float lastRightFreq = 0.0f;
     
@@ -2156,7 +2188,7 @@ GenerateResult AudioGenerator::generatePackageSse(
                     config.curve.interpolationType == InterpolationType::STEP &&
                     config.curve.points.size() > 1) {
                     const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int> stepBounds = collectStepBoundaries(
+                    const std::vector<int>& stepBounds = collectStepBoundaries(
                         config.curve, currentTime, stepSecPerSample, samples);
                     if (!stepBounds.empty()) {
                         int pieceStart = 0;
@@ -2396,14 +2428,16 @@ GenerateResult AudioGenerator::generatePackageSse(
             state.channelsSwapped = !state.channelsSwapped;
             result.channelsSwapped = true;
             
+            // elapsedMs считается на месте, а не переменной на каждый сегмент:
+            // при выключенном LOGD аргументы макроса не вычисляются. Значение
+            // то же — начало сегмента (currentSample ещё не продвинут).
             LOGD("PackageGenSse: swap at elapsedMs=%lld, channelsSwapped=%d",
-                 (long long)currentElapsedMs, state.channelsSwapped ? 1 : 0);
+                 (long long)(elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate),
+                 state.channelsSwapped ? 1 : 0);
         }
         
         currentSample += samples;
         currentTime += static_cast<double>(durationSec) * timeScale;
-        // Ось расписания из фактических сэмплов — без дрейфа против аудио
-        currentElapsedMs = elapsedMs + (static_cast<int64_t>(currentSample) * 1000) / m_sampleRate;
         
         lastLeftFreq = endLeftFreq;
         lastRightFreq = endRightFreq;

@@ -1,6 +1,6 @@
 package com.binaural.core.audio.stream
 
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.RelaxationModeSettings
 import java.util.concurrent.atomic.AtomicReference

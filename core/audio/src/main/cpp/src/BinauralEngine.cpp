@@ -46,8 +46,12 @@ inline bool pkgBoundaryLogEnabled() {
     return enabled;
 }
 #define PKG_LOG(...) do { if (pkgBoundaryLogEnabled()) __android_log_print(ANDROID_LOG_INFO, "PKG_BOUNDARY", __VA_ARGS__); } while (0)
+// Гард для вычислений, которые нужны ТОЛЬКО этой диагностике (lookup'ы кривой).
+// Без него они выполнялись на каждом пакете даже при выключенном логе.
+#define PKG_LOG_ENABLED() pkgBoundaryLogEnabled()
 #else
 #define PKG_LOG(...) ((void)0)
+#define PKG_LOG_ENABLED() false
 #endif
 
 namespace binaural {
@@ -573,7 +577,8 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     
     // Вычисляем точное время для интерполяции
     const int sampleRate = m_generator.getSampleRate();
-    const float bufferDurationSeconds = static_cast<float>(samplesPerChannel) / sampleRate;
+    // bufferDurationSeconds здесь больше нет: она нигде не читалась (диагностика
+    // PKG_BOUNDARY печатает m_totalBufferTimeSeconds, а не длину этого пакета).
     const int64_t bufferDurationMs = static_cast<int64_t>(samplesPerChannel) * 1000 / sampleRate;
     
     // Точное время для начала буфера (float для сохранения дробной части)
@@ -612,8 +617,10 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // Фикс (Qwen, P2): сохраняем prevEnd ДО генерации и обновления s_lastPkgEnd,
     // чтобы PKG_SEAM ниже считал dt относительно реального конца прошлого пакета
     // (иначе dt всегда равен -длительности пакета и вводит в заблуждение).
+    // prevEndForSeam читается ДО генерации, но нужен и блоку PKG_SEAM ниже
+    // (уже после неё): к тому моменту s_lastPkgEnd будет обновлён.
     const float prevEndForSeam = s_lastPkgEnd.load(std::memory_order_relaxed);
-    {
+    if (PKG_LOG_ENABLED()) {
         const float prevEnd = prevEndForSeam;
         FrequencyTableResult fS = config.curve.getChannelFrequenciesAt(timeSeconds);
         FrequencyTableResult fP;
@@ -702,7 +709,14 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     // === PKG_SEAM: сравнение последних сэмплов пакета N с первыми пакета N+1 ===
     // |dL|,|dR| < 0.02 → данные непрерывны (щелчок вносит AudioTrack/HAL);
     // > 0.05 → разрыв В ДАННЫХ: смотрим dF/dt/cfgVer.
-    if (result.samplesGenerated > 1) {
+    //
+    // Весь блок — включая обновление s_seam* — существует ТОЛЬКО ради этой
+    // диагностики (больше эти атомики никто не читает), поэтому при выключенном
+    // логе он целиком пропускается: lookup кривой и шесть store'ов на каждом
+    // пакете ради строки, которую никто не напечатает. Включённость логирования
+    // фиксируется в pkgBoundaryLogEnabled() один раз на процесс, так что
+    // поведение согласовано: диагностика либо работает полностью, либо нет.
+    if (PKG_LOG_ENABLED() && result.samplesGenerated > 1) {
         const float firstL = buffer[0];
         const float firstR = buffer[1];
         const float lastL  = buffer[(result.samplesGenerated - 1) * 2];

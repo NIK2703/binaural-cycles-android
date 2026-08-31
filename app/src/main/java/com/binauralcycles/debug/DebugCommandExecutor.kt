@@ -9,7 +9,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.stream.BinauralStreamImpl
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
@@ -110,6 +111,10 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "import" -> importPreset(arg)
             "mem" -> memory()
             "gc" -> System.gc().let { "System.gc() выполнен — смотрите `mem`" }
+            "packetmax" -> setPacketMax(arg)
+            "pkstat" -> packetStats()
+            "pcreset" -> BinauralStreamImpl.resetPacketStats()
+                .let { "Пики счётчиков пакетной памяти обнулены — смотрите `pkstat`" }
             "logtail" -> logTail(arg.toIntOrNull() ?: 40)
             else -> "Неизвестная команда: \"$cmd\". Отправьте \"help\"."
         }
@@ -524,9 +529,34 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             append("pss: total=${dmi.totalPss / 1024}MB dalvik=${dmi.dalvikPss / 1024}MB ")
             append("native=${dmi.nativePss / 1024}MB other=${dmi.otherPss / 1024}MB\n")
             append("system: avail=${mi.availMem / MB}MB lowMemory=${mi.lowMemory} ")
-            append("threshold=${mi.threshold / MB}MB")
+            append("threshold=${mi.threshold / MB}MB\n")
+            append(BinauralStreamImpl.packetStats().replace("\n", "\n"))
         }
     }
+
+    /**
+     * Потолок ОДНОГО пакетного буфера на ходу, в мегабайтах.
+     *
+     * Единственный способ искать предел аллокации без пересборки: перебор
+     * 32/48/64/… МБ под switch-штормом делается за одну установку. 0 — вернуть
+     * константу сборки. Применяется к СЛЕДУЮЩЕЙ аллокации: живые буферы не
+     * переаллоцируются, поэтому после смены предела разумен `switch` или
+     * `stop`+`play`.
+     */
+    private fun setPacketMax(arg: String): String {
+        val mb = (arg.toIntOrNull() ?: return "Формат: packetmax <МБ 4..256> | packetmax 0 (константа)")
+            .coerceIn(0, 256)
+        BinauralStreamImpl.setPacketMaxBytes(mb.toLong() * MB)
+        return if (mb == 0) {
+            "Потолок пакета: константа сборки (${BinauralStreamImpl.packetMaxBytesEffective() / MB} МБ)\n" +
+                BinauralStreamImpl.packetStats()
+        } else {
+            "Потолок пакета: $mb МБ (применится к следующей аллокации)\n" +
+                BinauralStreamImpl.packetStats()
+        }
+    }
+
+    private fun packetStats(): String = BinauralStreamImpl.packetStats()
 
     /** Хвост файлового лога потока — он пишется только в debug-сборке. */
     private fun logTail(lines: Int): String {

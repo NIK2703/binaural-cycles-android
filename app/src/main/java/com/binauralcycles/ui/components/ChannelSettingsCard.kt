@@ -12,7 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.ChannelSwapTrendPoints

@@ -14,6 +14,7 @@ import java.nio.ByteBuffer
 
 import java.nio.ByteOrder
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 class BinauralStreamImpl(
@@ -85,9 +86,20 @@ class BinauralStreamImpl(
          * `buffer - chunk`; в установившемся режиме период между записями
          * равен ровно длительности чанка:
          *
-         *     пробуждений в час = 3_600_000 / WRITE_CHUNK_MS
+         *     пробуждений в час = 3_600_000 / реальный_чанк
+         *     реальный_чанк = min(WRITE_CHUNK_MS, кольцо_трека − MIN_WRITE_MARGIN_MS)
          *
-         * Было 500 мс (7200/час) → 2000 мс (1800/час) → 8000 мс (450/час).
+         * Было 500 мс (7200/час) → 2000 мс (1800/час) → 8000 мс.
+         *
+         * ВАЖНО: формула «3_600_000 / 8000 = 450/час», которая здесь стояла,
+         * верна только если кольцо трека дотягивает до 9 с. На 48 кГц float
+         * оно НЕ дотягивает: MAX_TRACK_BUFFER_BYTES = 2 МиБ урезает запрошенные
+         * 10 с до 5.46 с, минус маржа 1 с ⇒ чанк 4.46 с ⇒ **807/час** (на
+         * 44.1 кГц — 728/час). Полные 450/час дают только SR <= 22050 Гц, где
+         * 10-секундное кольцо влезает в 2 МиБ целиком. Иными словами, выигрыш
+         * от 8-секундного чанка на максимальном SR реализуется лишь наполовину
+         * — и это структурное следствие предела кольца, а не баг.
+         *
          * Проверено замером: стоимость самой генерации от этого не зависит
          * (6.4 нс/кадр при любом размере пакета), так что это и есть основной
          * рычаг энергопотребления писателя — не DSP.
@@ -181,24 +193,105 @@ class BinauralStreamImpl(
          *   kill process: ... reason: memory leaks occurred.
          *   current heap memory: 268314168
          *
-         * Правило: на поток — не больше 1/8 кучи, но не больше
-         * [PACKET_MAX_BYTES]. На 256 МБ это 32 МБ ≈ 87 с при 48 кГц: интервал
-         * генерации при больших `bufferGenerationMinutes` станет короче
-         * (писатель просыпается чаще), зато процесс живёт. Цена — десятки
-         * миллисекунд CPU раз в полторы минуты вместо вылета.
+         * Правило: на поток — не больше [PACKET_HEAP_DIVISOR]-й доли кучи, но не
+         * больше действующего потолка [packetMaxBytesEffective]. Делитель
+         * подобран замером (см. docs/packet_max_bytes_limit_2026-08-31.md);
+         * исторически здесь была 1/8 (32 МБ на куче 256 МБ ≈ 87 с при 48 кГц).
          */
-        private const val PACKET_HEAP_DIVISOR = 8
+        private const val PACKET_HEAP_DIVISOR = 4
 
         private const val PACKET_MAX_BYTES = 32L * 1024 * 1024
         private const val PACKET_MIN_BYTES = 4L * 1024 * 1024
 
         /**
-         * Сколько потоков одновременно держат пакет в куче в худший момент
-         * (CURRENT + NEXT + не успевший отпуститься старый). Запас нужен не
-         * «на всякий случай»: если его не требовать, сама ПОПЫТКА аллокации
-         * уводит кучу в OOM-уполовинивание и сторож убивает процесс.
+         * Потолок пакета, подменяемый НА ХОДУ (debug-команда `packetmax`).
+         * 0 — работать от константы [PACKET_MAX_BYTES].
+         *
+         * Нужен, чтобы искать предел аллокации на устройстве за одну установку:
+         * без него каждый шаг перебора требовал бы пересборки и установки.
          */
-        private const val GROW_HEADROOM_STREAMS = 3L
+        @Volatile
+        private var packetMaxBytesOverride = 0L
+
+        /**
+         * Задать потолок пакета в байтах; 0 — вернуться к константе.
+         * Значение клампится в [PACKET_MIN_BYTES]..[maxBufferBytes].
+         */
+        @JvmStatic
+        fun setPacketMaxBytes(bytes: Long) {
+            packetMaxBytesOverride = if (bytes <= 0L) 0L
+            else bytes.coerceIn(PACKET_MIN_BYTES, maxBufferBytes)
+        }
+
+        /** Действующий потолок пакета: override или константа. */
+        @JvmStatic
+        fun packetMaxBytesEffective(): Long {
+            val o = packetMaxBytesOverride
+            return if (o > 0L) o else PACKET_MAX_BYTES
+        }
+
+        /**
+         * Сколько потоков одновременно держат пакет в куче в худший момент.
+         *
+         * РОВНО ДВА, и это ИНВАРИАНТ менеджера, а не «запас на всякий случай»:
+         *   * CURRENT — звучит;
+         *   * NEXT — вооружён, но молчит и живёт на стартовом пакете;
+         *   * осиротевший CURRENT — уже в тишине, и его пакет сбрасывается
+         *     ДО повышения NEXT ([releasePacketBuffer]), поэтому в момент,
+         *     когда новый поток доращивает свой буфер, старого в куче нет.
+         *
+         * Если запас не требовать, сама ПОПЫТКА аллокации уводит кучу в
+         * OOM-уполовинивание и сторож убивает процесс.
+         */
+        private const val GROW_HEADROOM_STREAMS = 2L
+
+        /**
+         * Какая доля кучи в СУММЕ отдана под пакеты всех живых потоков.
+         *
+         * Раньше здесь стояла константа 96 МБ — «ровно три полных буфера по
+         * 32 МБ», то есть число, привязанное к тогдашнему потолку пакета.
+         * Теперь потолок меняется на ходу ([setPacketMaxBytes]), поэтому бюджет
+         * считается от кучи: иначе, подняв потолок пакета, можно было бы обойти
+         * бюджет и вернуть ту же ловушку, от которой он ставился.
+         *
+         * Это ВТОРАЯ линия обороны. Первая — инвариант двух потоков плюс
+         * [GROW_HEADROOM_STREAMS]: пока они не нарушены, сумма не превышает
+         * двух пакетов и бюджет не срабатывает никогда. Он ловит только
+         * поломку инварианта (например, писатель застрял и старый поток не
+         * успел отдать буфер до роста следующего).
+         *
+         * Стоимость отказа дорастить — малая: поток остаётся на стартовом
+         * пакете ([STARTUP_PACKET_SECONDS]) и генерирует чаще. CPU/час от длины
+         * пакета НЕ зависит (замер: 1.02 с/час и при 2 с, и при 190 с), так что
+         * платим только числом вызовов планировщика, а не процессором.
+         */
+        private const val GLOBAL_PACKET_BUDGET_DIVISOR = 2L
+
+        /** Действующий суммарный бюджет пакетов всех потоков, байт. */
+        @JvmStatic
+        fun globalPacketBudgetBytes(): Long =
+            (Runtime.getRuntime().maxMemory() / GLOBAL_PACKET_BUDGET_DIVISOR)
+                .coerceAtMost(maxBufferBytes)
+
+        /** Сколько байт пакетных буферов учтено за всеми потоками сейчас. */
+        private val packetsBudgetUsed = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** Пик [packetsBudgetUsed] за время жизни процесса. */
+        private val peakPacketsBudgetUsed = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** Сколько потоков сейчас держат пакетный буфер (учёт — в [commitPacketBudget]). */
+        private val livePacketHolders = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /** Пик [livePacketHolders] — прямая проверка инварианта «не больше двух». */
+        private val peakPacketHolders = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
+         * Сколько раз [allocateDirect] поймал OutOfMemoryError и уполовинил
+         * запрос. Ноль — обязательное условие «предел найден»: каждый провал
+         * это не только потерянные миллисекунды, но и поднятый GC.
+         */
+        private val oomHalvings = java.util.concurrent.atomic.AtomicInteger(0)
+
         /**
          * Дедлайн опроса выхода писателя в finalizeStop(): сколько максимум
          * держим утилизацию потока, прежде чем отдать её releaseInternal().
@@ -223,6 +316,39 @@ class BinauralStreamImpl(
          * своём finally, см. engineOwnedByWriter), утилизация идёт дальше.
          */
         private const val WRITER_HANDOFF_GRACE_MS = 250L
+
+        /**
+         * Диагностика пакетной памяти — для debug-команды `pkstat`.
+         *
+         * Главные цифры: `holders peak` (прямая проверка инварианта «не больше
+         * двух потоков с пакетом») и `oomHalvings` (сколько раз allocateDirect
+         * делил запрос пополам — при правильно найденном пределе ноль).
+         */
+        @JvmStatic
+        fun packetStats(): String {
+            val rt = Runtime.getRuntime()
+            val mb = 1024L * 1024L
+            val override = packetMaxBytesOverride
+            return buildString {
+                append("packetMax=${packetMaxBytesEffective() / mb}МБ (const ${PACKET_MAX_BYTES / mb}МБ, " +
+                    "override ${if (override > 0L) "${override / mb}МБ" else "нет"})\n")
+                append("perStreamCap=${(rt.maxMemory() / PACKET_HEAP_DIVISOR)
+                    .coerceIn(PACKET_MIN_BYTES, packetMaxBytesEffective()) / mb}МБ " +
+                    "(heap ${rt.maxMemory() / mb}МБ / $PACKET_HEAP_DIVISOR)\n")
+                append("holders=${livePacketHolders.get()} peak=${peakPacketHolders.get()} (инвариант: <=2)\n")
+                append("budget=${packetsBudgetUsed.get() / mb}МБ peak=${peakPacketsBudgetUsed.get() / mb}МБ " +
+                    "limit=${globalPacketBudgetBytes() / mb}МБ\n")
+                append("oomHalvings=${oomHalvings.get()} headroom=${GROW_HEADROOM_STREAMS}")
+            }
+        }
+
+        /** Обнулить накопленные пики — чтобы замерять каждый прогон с чистого листа. */
+        @JvmStatic
+        fun resetPacketStats() {
+            peakPacketsBudgetUsed.set(packetsBudgetUsed.get())
+            peakPacketHolders.set(livePacketHolders.get())
+            oomHalvings.set(0)
+        }
     }
 
     private val lifecycleRef = AtomicReference(StreamLifecycle.CREATED)
@@ -271,6 +397,12 @@ class BinauralStreamImpl(
      * бы файловый лог потока и утопили в нём всё остальное.
      */
     private var growDeferredLogged = false
+    /**
+     * Сколько байт этого потока учтено в [packetsBudgetUsed]. Atomic, а не
+     * обычное поле: бюджет правят две нити — писатель (доращивание) и актёр
+     * (prepare/releaseInternal).
+     */
+    private val packetBudgetCommitted = AtomicLong(0)
     /**
      * Сколько неудачных попыток (OutOfMemoryError) понадобилось [allocateDirect]
      * перед успехом. Только для диагностики: каждый провал — это реальные
@@ -457,6 +589,9 @@ class BinauralStreamImpl(
             // факту — иначе JNI вернёт 0 («buffer too small») и звук встанет.
             val capacitySamples = directBuffer!!.capacity() / 8
             samplesPerChannel = maxOf(1, minOf(startupSamples, capacitySamples))
+            // Стартовый буфер тоже входит в общий бюджет: в шторме смен пресетов
+            // подряд создаётся много потоков, и 768 КБ × N — уже не мелочь.
+            commitPacketBudget(capacitySamples.toLong() * 8)
             if (capacitySamples < startupSamples) {
                 // Единицы — МИЛЛИСЕКУНДЫ: samples*1000/rate, а не samples/rate.
                 // Раньше здесь стояло «...${...}s», из-за чего реальное 75 с
@@ -583,6 +718,20 @@ class BinauralStreamImpl(
             }
             return
         }
+        // Общий бюджет: считаем, сколько УЖЕ держат все потоки вместе, а не
+        // «влезло бы ещё три» ([GROW_HEADROOM_STREAMS] — предсказание, а не
+        // предел). Неудачу не считаем попыткой ([growAttempts] не растёт):
+        // отпустится чужой буфер — дорастим на следующем пакете.
+        if (!globalBudgetAllows(neededBytes)) {
+            if (!growDeferredLogged) {
+                growDeferredLogged = true
+                StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: отложено — общий бюджет " +
+                    "занят на ${packetsBudgetUsed.get() / (1024 * 1024)}/" +
+                    "${globalPacketBudgetBytes() / (1024 * 1024)}МБ, " +
+                    "этому потоку нужно ${neededBytes / (1024 * 1024)}МБ")
+            }
+            return
+        }
         growAttempts++
         val grown = allocateDirect(target * 2 * 4, rate) ?: return
         // Между аллокацией и публикацией мог успеть пройти releaseInternal().
@@ -606,6 +755,11 @@ class BinauralStreamImpl(
         directBuffer = grown
         samplesPerChannel = capacitySamples
         packetBufferGrown = true
+        // Учесть ФАКТ. Важно сделать это именно в момент публикации, а не сразу
+        // после allocateDirect(): буфер, выделенный, но не опубликованный
+        // (поток успели утилизировать), ничьей памяти не занимает — за него
+        // заплатит GC, и в бюджет он не входит.
+        commitPacketBudget(grown.capacity().toLong())
         StreamLogger.d(TAG, "growPacketBuffer spec#${spec.serial}: буфер доращен до " +
             "${capacitySamples * 1000L / rate}мс (цель ${target * 1000L / rate}мс, " +
             "провалов аллокации $directAllocateAttempts)")
@@ -618,8 +772,44 @@ class BinauralStreamImpl(
      */
     private fun packetBudgetBytes(): Long {
         val heap = Runtime.getRuntime().maxMemory()
-        return (heap / PACKET_HEAP_DIVISOR).coerceIn(PACKET_MIN_BYTES, PACKET_MAX_BYTES)
+        return (heap / PACKET_HEAP_DIVISOR).coerceIn(PACKET_MIN_BYTES, packetMaxBytesEffective())
     }
+
+    /**
+     * Записать в общий бюджет фактический объём буфера ЭТОГО потока.
+     *
+     * Считаем по ФАКТУ ([ByteBuffer.capacity]), а не по запросу: [allocateDirect]
+     * при OOM уполовинивает запрос, и учёт по запросу разошёлся бы с реальностью.
+     * Идемпотентно: повтор с тем же значением ничего не меняет.
+     *
+     * Здесь же ведётся счётчик ЖИВЫХ держателей пакета — это и есть измеритель
+     * инварианта «не больше двух потоков с пакетом одновременно».
+     */
+    private fun commitPacketBudget(actualBytes: Long) {
+        val prev = packetBudgetCommitted.getAndSet(actualBytes)
+        val delta = actualBytes - prev
+        if (delta != 0L) {
+            val used = packetsBudgetUsed.addAndGet(delta)
+            peakPacketsBudgetUsed.getAndUpdate { p -> maxOf(p, used) }
+        }
+        if (prev == 0L && actualBytes > 0L) {
+            val n = livePacketHolders.incrementAndGet()
+            peakPacketHolders.getAndUpdate { p -> maxOf(p, n) }
+        } else if (prev > 0L && actualBytes == 0L) {
+            livePacketHolders.decrementAndGet()
+        }
+    }
+
+    /**
+     * Влезет ли [neededBytes] в общий бюджет сверх уже занятого этим потоком.
+     *
+     * Проверка и последующая аллокация — не одна атомарная операция (два
+     * счётчика), поэтому под одновременным штормом бюджет может проскочить на
+     * один буфер. Это допустимо: бюджет — мягкий предохранитель, а поведение
+     * в худшем случае такое же, как до его появления.
+     */
+    private fun globalBudgetAllows(neededBytes: Long): Boolean =
+        packetsBudgetUsed.get() - packetBudgetCommitted.get() + neededBytes <= globalPacketBudgetBytes()
 
     private fun allocateDirect(sizeBytes: Int, rateHz: Int): ByteBuffer? {
         val minSize = maxOf(audioTrackBufferSize, rateHz * 2 * 4)
@@ -630,10 +820,46 @@ class BinauralStreamImpl(
                 return ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
             } catch (e: OutOfMemoryError) {
                 directAllocateAttempts++
+                // Глобальный счётчик — главный критерий «предел не превышен»:
+                // каждый провал означает, что куча ушла в потолок и GC поднят
+                // принудительно, даже если в итоге буфер удалось получить.
+                oomHalvings.incrementAndGet()
                 if (size <= minSize) return null
                 size = maxOf(minSize, size / 2)
             }
         }
+    }
+
+    /**
+     * Отдать ТОЛЬКО пакетный буфер — трек, движок и писатель остаются живы.
+     *
+     * Точка вызова: поток уже НЕСЛЫШЕН (фейд-аут дошёл до нуля, NEXT
+     * повышается), но утилизация ещё не завершена — писатель вправе провисеть
+     * в `track.write(WRITE_BLOCKING)` до одного чанка, а `releaseInternal()`
+     * ждёт его выхода. Пакет в этот момент — чистый балласт размером в десятки
+     * мегабайт, и держим мы его ровно тогда, когда новый поток аллоцирует
+     * свой. До сброса пик кучи был «два полных пакета», после — «один полный
+     * плюс стартовый», то есть вдвое ниже: именно это и развязывает руки
+     * для подъёма [PACKET_MAX_BYTES].
+     *
+     * Безопасность по отношению к писателю: он читает [directBuffer] в локальную
+     * переменную перед каждым использованием, поэтому обнуление поля не рвёт
+     * его посреди `generateBufferDirect`/`write` — он просто выйдет из цикла
+     * на следующей итерации (`directBuffer ?: break`). [samplesPerChannel]
+     * обнуляется ПОСЛЕ буфера и страхуется проверкой `<= 0` в writerLoop.
+     *
+     * Идемпотентно: повторный вызов ничего не меняет (бюджет уже возвращён).
+     */
+    fun releasePacketBuffer() {
+        if (packetBudgetCommitted.get() == 0L && directBuffer == null) return
+        StreamLogger.d(TAG, "releasePacketBuffer spec#${spec.serial}: пакет отдан " +
+            "(lc=${lifecycleRef.get()}, было ${packetBudgetCommitted.get() / (1024 * 1024)}МБ)")
+        directBuffer = null
+        samplesPerChannel = 0
+        // Больше не доращиваем: иначе следующий виток писателя мог бы
+        // аллоцировать полный интервал потоку, который уже утилизируется.
+        packetBufferGrown = true
+        commitPacketBudget(0)
     }
 
     // ------------------------------------------------------------------ start
@@ -1286,6 +1512,11 @@ class BinauralStreamImpl(
         writerThread?.quitSafely()
         writerThread = null
         directBuffer = null
+        // Вернуть долю в общий бюджет ВМЕСТЕ с обнулением буфера. Без этого
+        // счётчик [packetsBudgetUsed] только рос: после нескольких хэндоффов
+        // бюджет считался бы выбранным навсегда и ни один поток больше не
+        // доращивал бы пакет.
+        commitPacketBudget(0)
         lifecycleRef.set(StreamLifecycle.RELEASED)
     }
 
@@ -1363,9 +1594,14 @@ class BinauralStreamImpl(
                         // каждый поток, а при быстрой смене пресетов потоков
                         // несколько — куча переполнялась и процесс убивался.
                         maybeGrowPacketBuffer(spec.sampleRate.value)
+                        // Буфер мог быть отдан ДОСРОЧно ([releasePacketBuffer] —
+                        // поток уже в тишине и утилизируется): тогда выходим,
+                        // а не генерируем в освобождённую память.
                         val buf = directBuffer ?: break
+                        val want = samplesPerChannel
+                        if (want <= 0) break
                         buf.clear()
-                        val generated = engine.generateBufferDirect(buf, samplesPerChannel)
+                        val generated = engine.generateBufferDirect(buf, want)
                         if (generated <= 0) {
                             StreamLogger.e(TAG, "writerLoop spec#${spec.serial}: generate failed=$generated")
                             onRuntimeError(this, "generate failed: $generated")

@@ -5,15 +5,12 @@ import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
 
 /**
- * Модуль DI для аудио-компонентов.
- * 
- * Примечание: BinauralAudioEngine больше не предоставляется через DI,
- * так как он создаётся и управляется исключительно в BinauralPlaybackService.
- * Это обеспечивает полную изоляцию аудио-генерации от UI потока.
+ * Модуль DI для аудио-компонентов. Сейчас пуст и оставлен как точка расширения.
+ *
+ * Исторически через DI предоставлялся `BinauralAudioEngine`, но он давно
+ * создаётся и управляется самим `BinauralPlaybackService` (полная изоляция
+ * генерации от UI-потока), а в 2026-08-31 и сам класс удалён как мёртвый.
  */
 @Module
 @InstallIn(SingletonComponent::class)
-object AudioModule {
-    // BinauralAudioEngine создаётся в BinauralPlaybackService
-    // и не должен быть singleton в Hilt, чтобы избежать утечек памяти
-}
+object AudioModule

@@ -11,7 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.binauralcycles.R
 import com.binauralcycles.service.BinauralPlaybackService
 import com.binauralcycles.util.BatteryOptimizationHelper
-import com.binaural.core.audio.engine.SampleRate
+import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.PointIntentMemory
 import com.binaural.core.audio.model.BinauralPreset
