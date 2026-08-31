@@ -515,41 +515,24 @@ std::pair<float, float> BinauralEngine::getFrequenciesAtCurrentTime() {
     // Читаем конфигурацию с shared_lock
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
     
-    const auto& curve = m_config.curve;
-    
     // Проверяем что lookup table построена
-    if (!curve.hasFreqTables()) {
+    if (!m_config.curve.hasFreqTables()) {
         return {0.0f, 0.0f};
     }
 
-    // O(1) доступ к предвычисленной таблице.
-    // Индекс: время в мс / шаг таблицы. Шаг АДАПТИВНЫЙ (100…1000 мс) и лежит
-    // в самой кривой — брать константу нельзя, у разных кривых он разный.
-    const float timeMs = currentSeconds * 1000.0f;
-    const float indexFloat = timeMs / static_cast<float>(curve.tableIntervalMs);
-    const std::vector<float>& lo = *curve.lowerFreqTable;
-    const std::vector<float>& up = *curve.upperFreqTable;
-    const int tableSize = static_cast<int>(lo.size());
+    // ЕДИНАЯ точка истины частот ушей — channelsAt(): та же функция, что
+    // кормит осцилляторы. Поэтому знак beat на индикаторе — это ЗНАК
+    // РАСКЛАДКИ, реально слышимой в наушниках, а не знак кривой.
+    //
+    // Раньше здесь жила своя копия интерполяции по таблице: она дублировала
+    // FrequencyCurve::getChannelFrequenciesAt, но без special-case для STEP —
+    // на ступенчатой кривой индикатор показывал глиссандо вместо ступеньки.
+    const FrequencyTableResult ear = channelsAt(m_config, currentSeconds);
 
-    // Линейная интерполяция между соседними ячейками — та же модель, что в
-    // аудио-пути (FrequencyCurve::getChannelFrequenciesAt). Раньше брался целый
-    // индекс: показания UI квантовались по 100 мс и могли отличаться от того,
-    // что реально звучит, на величину дрейфа внутри ячейки.
-    const int baseIndex = static_cast<int>(std::floor(indexFloat));
-    const float frac = indexFloat - static_cast<float>(baseIndex);
+    // Знаковая beat: right − left. Только несущая остаётся беззнаковой.
+    const float beatFreq = ear.upperFreq - ear.lowerFreq;
+    const float carrierFreq = (ear.lowerFreq + ear.upperFreq) / 2.0f;
 
-    // Индексы с циклическим переходом через полночь и защитой от отрицательного
-    // времени (модуль в C++ для отрицательных даёт отрицательный результат).
-    const int i0 = ((baseIndex % tableSize) + tableSize) % tableSize;
-    const int i1 = (i0 + 1) % tableSize;
-
-    const float lowerFreq = lo[i0] + (lo[i1] - lo[i0]) * frac;
-    const float upperFreq = up[i0] + (up[i1] - up[i0]) * frac;
-    
-    // Вычисляем beat и carrier частоты
-    const float beatFreq = upperFreq - lowerFreq;
-    const float carrierFreq = (lowerFreq + upperFreq) / 2.0f;
-    
     return {beatFreq, carrierFreq};
 }
 
@@ -622,11 +605,11 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
     const float prevEndForSeam = s_lastPkgEnd.load(std::memory_order_relaxed);
     if (PKG_LOG_ENABLED()) {
         const float prevEnd = prevEndForSeam;
-        FrequencyTableResult fS = config.curve.getChannelFrequenciesAt(timeSeconds);
+        FrequencyTableResult fS = binaural::channelsAt(config, timeSeconds);
         FrequencyTableResult fP;
         fP.lowerFreq = 0.0f; fP.upperFreq = 0.0f;
         if (prevEnd >= 0.0f) {
-            fP = config.curve.getChannelFrequenciesAt(prevEnd);
+            fP = binaural::channelsAt(config, prevEnd);
         }
         PKG_LOG("PKG_BOUNDARY: prevEnd=%.4f start=%.4f dt=%.6f | "
              "f@prevEnd=[%.3f,%.3f] f@start=[%.3f,%.3f] | cfgVer=%u swapped=%d "
@@ -726,7 +709,7 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         const float dL = hasPrev ? firstL - s_seamPrevLastL.load(std::memory_order_relaxed) : 0.0f;
         const float dR = hasPrev ? firstR - s_seamPrevLastR.load(std::memory_order_relaxed) : 0.0f;
 
-        const FrequencyTableResult curStart = config.curve.getChannelFrequenciesAt(timeSeconds);
+        const FrequencyTableResult curStart = binaural::channelsAt(config, timeSeconds);
         const float peL = s_seamPrevEndLower.load(std::memory_order_relaxed);
         const float peU = s_seamPrevEndUpper.load(std::memory_order_relaxed);
 

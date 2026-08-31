@@ -130,15 +130,6 @@ private:
     int m_sampleRate = 44100;
     
     /**
-     * Получить частоты каналов для заданного времени с учётом смещения
-     */
-    std::pair<float, float> getChannelFrequenciesAtTime(
-        const BinauralConfig& config,
-        int32_t baseTimeSeconds,
-        int64_t offsetMs
-    ) const;
-    
-    /**
      * Вычислить нормализованные амплитуды
      */
     std::pair<float, float> calculateNormalizedAmplitudes(
@@ -214,17 +205,6 @@ private:
         // Для остальных - точный расчёт
         return std::exp(n * std::log(x));
     }
-    
-    /**
-     * Получить частоты каналов через lookup table
-     * Возвращает интерполированные частоты для конкретного момента времени
-     * СЛОЖНОСТЬ: O(1) - прямой доступ к предвычисленным значениям
-     * @param timeSeconds секунды с начала суток (поддерживает дробные значения)
-     */
-    FrequencyTableResult getChannelFrequenciesAt(
-        const FrequencyCurve& curve,
-        float timeSeconds
-    ) const;
     
     // ========================================================================
     // СПЕЦИАЛИЗИРОВАННЫЕ ФУНКЦИИ ГЕНЕРАЦИИ (приватные)

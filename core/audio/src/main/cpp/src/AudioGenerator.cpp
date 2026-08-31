@@ -1,4 +1,5 @@
 #include "AudioGenerator.h"
+#include "ChannelLayout.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -207,28 +208,6 @@ void AudioGenerator::resetState(GeneratorState& state) {
     state.swapPhase = SwapPhase::SOLID;
     state.phaseRemainingMs = 0;
     state.cyclePositionMs = 0;
-}
-
-FrequencyTableResult AudioGenerator::getChannelFrequenciesAt(
-    const FrequencyCurve& curve,
-    float timeSeconds
-) const {
-    return curve.getChannelFrequenciesAt(timeSeconds);
-}
-
-std::pair<float, float> AudioGenerator::getChannelFrequenciesAtTime(
-    const BinauralConfig& config,
-    int32_t baseTimeSeconds,
-    int64_t offsetMs
-) const {
-    float offsetSeconds = offsetMs / 1000.0;
-    int32_t totalSeconds = static_cast<int32_t>(baseTimeSeconds + offsetSeconds);
-    
-    totalSeconds = ((totalSeconds % SECONDS_PER_DAY) + SECONDS_PER_DAY) % SECONDS_PER_DAY;
-    
-    FrequencyTableResult freqResult = getChannelFrequenciesAt(config.curve, totalSeconds);
-    
-    return {freqResult.lowerFreq, freqResult.upperFreq};
 }
 
 std::pair<float, float> AudioGenerator::calculateNormalizedAmplitudes(
@@ -499,6 +478,15 @@ void AudioGenerator::updatePhasesOverCurve(
     const bool stepMode = !constantFreq &&
         config.curve.interpolationType == InterpolationType::STEP &&
         config.curve.points.size() > 1;
+    // ЕДИНАЯ точка истины частот ушей: раскладка (знак beat) применяется
+    // ДО осцилляторов, поэтому звук, фазы паузы и телеметрия берут частоты
+    // из одного места и разойтись не могут.
+    auto earFreqsAt = [&](double t) -> FrequencyTableResult {
+        return constantFreq
+            // debug-бисекция: кривая игнорируется, раскладка сохраняется.
+            ? channelsAtConstant(config, static_cast<float>(t), 203.0f, 6.0f)
+            : channelsAt(config, static_cast<float>(t));
+    };
 
     int gen = 0;
     while (gen < samples) {
@@ -517,13 +505,8 @@ void AudioGenerator::updatePhasesOverCurve(
         }
         const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
         const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-        auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-        auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-        if (constantFreq) {
-            // Бисекция: игнорируем кривую, частота постоянна.
-            f0.lowerFreq = f1.lowerFreq = 200.0f;
-            f0.upperFreq = f1.upperFreq = 206.0f;
-        }
+        auto f0 = earFreqsAt(static_cast<float>(t0));
+        auto f1 = earFreqsAt(static_cast<float>(t1));
         if (stepMode) {
             // STEP: hold the step value inside the piece (see the fade loops).
             f1.lowerFreq = f0.lowerFreq;
@@ -1365,6 +1348,16 @@ GenerateResult AudioGenerator::generatePackage(
     }
     
     const bool constantFreq = bisectionConstantFreq();
+
+    // ЕДИНАЯ точка истины частот ушей: раскладка (знак beat) применяется
+    // ДО осцилляторов, поэтому звук, фазы паузы и телеметрия берут частоты
+    // из одного места и разойтись не могут.
+    auto earFreqsAt = [&](double t) -> FrequencyTableResult {
+        return constantFreq
+            // debug-бисекция: кривая игнорируется, раскладка сохраняется.
+            ? channelsAtConstant(config, static_cast<float>(t), 203.0f, 6.0f)
+            : channelsAt(config, static_cast<float>(t));
+    };
     
     const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
     
@@ -1399,23 +1392,15 @@ GenerateResult AudioGenerator::generatePackage(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
-            config.curve, static_cast<float>(currentTime));
+        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
-        FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve,
-            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
+        FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
 
-        if (constantFreq) {
-            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
-            startLeftFreq = endLeftFreq = 200.0f;
-            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
-        }
 
         LOG_SEG("SEGMENT_FREQS: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
@@ -1449,9 +1434,7 @@ GenerateResult AudioGenerator::generatePackage(
                         int pieceStart = 0;
                         for (size_t k = 0; k <= stepBounds.size(); ++k) {
                             const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
-                                config.curve,
-                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
                             );
                             const float pieceLeftFreq = pieceFreq.lowerFreq;
                             const float pieceRightFreq = pieceFreq.upperFreq;
@@ -1541,12 +1524,8 @@ GenerateResult AudioGenerator::generatePackage(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
@@ -1637,12 +1616,8 @@ GenerateResult AudioGenerator::generatePackage(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
@@ -1737,6 +1712,16 @@ GenerateResult AudioGenerator::generatePackageNeon(
     }
     
     const bool constantFreq = bisectionConstantFreq();
+
+    // ЕДИНАЯ точка истины частот ушей: раскладка (знак beat) применяется
+    // ДО осцилляторов, поэтому звук, фазы паузы и телеметрия берут частоты
+    // из одного места и разойтись не могут.
+    auto earFreqsAt = [&](double t) -> FrequencyTableResult {
+        return constantFreq
+            // debug-бисекция: кривая игнорируется, раскладка сохраняется.
+            ? channelsAtConstant(config, static_cast<float>(t), 203.0f, 6.0f)
+            : channelsAt(config, static_cast<float>(t));
+    };
     
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
@@ -1761,23 +1746,15 @@ GenerateResult AudioGenerator::generatePackageNeon(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
-            config.curve, static_cast<float>(currentTime));
+        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
-        FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve,
-            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
+        FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
 
-        if (constantFreq) {
-            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
-            startLeftFreq = endLeftFreq = 200.0f;
-            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
-        }
 
         LOG_SEG("SEGMENT_FREQS_NEON: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
@@ -1818,9 +1795,7 @@ GenerateResult AudioGenerator::generatePackageNeon(
                         int pieceStart = 0;
                         for (size_t k = 0; k <= stepBounds.size(); ++k) {
                             const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
-                                config.curve,
-                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
                             );
                             const float pieceLeftFreq = pieceFreq.lowerFreq;
                             const float pieceRightFreq = pieceFreq.upperFreq;
@@ -1909,12 +1884,8 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
@@ -2002,12 +1973,8 @@ GenerateResult AudioGenerator::generatePackageNeon(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
@@ -2121,6 +2088,16 @@ GenerateResult AudioGenerator::generatePackageSse(
     }
     
     const bool constantFreq = bisectionConstantFreq();
+
+    // ЕДИНАЯ точка истины частот ушей: раскладка (знак beat) применяется
+    // ДО осцилляторов, поэтому звук, фазы паузы и телеметрия берут частоты
+    // из одного места и разойтись не могут.
+    auto earFreqsAt = [&](double t) -> FrequencyTableResult {
+        return constantFreq
+            // debug-бисекция: кривая игнорируется, раскладка сохраняется.
+            ? channelsAtConstant(config, static_cast<float>(t), 203.0f, 6.0f)
+            : channelsAt(config, static_cast<float>(t));
+    };
     
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
@@ -2145,23 +2122,15 @@ GenerateResult AudioGenerator::generatePackageSse(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = getChannelFrequenciesAt(
-            config.curve, static_cast<float>(currentTime));
+        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         float startLeftFreq = startFreqResult.lowerFreq;
         float startRightFreq = startFreqResult.upperFreq;
         
-        FrequencyTableResult endFreqResult = getChannelFrequenciesAt(
-            config.curve,
-            static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
+        FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
         float endRightFreq = endFreqResult.upperFreq;
 
-        if (constantFreq) {
-            // Бисекция: игнорируем кривую. Частота/амплитуда постоянны во всех пакетах.
-            startLeftFreq = endLeftFreq = 200.0f;
-            startRightFreq = endRightFreq = 206.0f;   // beat 6 Гц
-        }
 
         LOG_SEG("SEGMENT_FREQS_SSE: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
@@ -2194,9 +2163,7 @@ GenerateResult AudioGenerator::generatePackageSse(
                         int pieceStart = 0;
                         for (size_t k = 0; k <= stepBounds.size(); ++k) {
                             const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = getChannelFrequenciesAt(
-                                config.curve,
-                                static_cast<float>(currentTime + pieceStart * stepSecPerSample)
+                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
                             );
                             const float pieceLeftFreq = pieceFreq.lowerFreq;
                             const float pieceRightFreq = pieceFreq.upperFreq;
@@ -2285,12 +2252,8 @@ GenerateResult AudioGenerator::generatePackageSse(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
@@ -2378,12 +2341,8 @@ GenerateResult AudioGenerator::generatePackageSse(
                     }
                     const double t0 = currentTime + static_cast<double>(gen) * secPerSample;
                     const double t1 = currentTime + static_cast<double>(gen + ps) * secPerSample;
-                    auto f0 = getChannelFrequenciesAt(config.curve, static_cast<float>(t0));
-                    auto f1 = getChannelFrequenciesAt(config.curve, static_cast<float>(t1));
-                    if (constantFreq) {
-                        f0.lowerFreq = f1.lowerFreq = 200.0f;
-                        f0.upperFreq = f1.upperFreq = 206.0f;
-                    }
+                    auto f0 = earFreqsAt(static_cast<float>(t0));
+                    auto f1 = earFreqsAt(static_cast<float>(t1));
                     if (stepMode) {
                         // STEP: inside a step the frequency is CONSTANT (delta omega = 0),
                         // exactly as in SOLID. A chord f0->f1 would smear the
