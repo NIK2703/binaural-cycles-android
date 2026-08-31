@@ -569,11 +569,11 @@ fun FrequencyGraph(
 
             }
 
-            // Метки оси Y: прижаты к краям области графика, и при
-            // пересечении с маркером точки уезжают внутрь (наружу
-            // нельзя — край карточки). Сдвиг минимальный, ровно
-            // настолько, чтобы круг не пересекал прямоугольник метки.
-            // Размер узнаём после первой раскладки.
+            // Метки оси Y: прижаты к левому краю области графика, и при
+            // пересечении с маркером точки сдвигаются ГОРИЗОНТАЛЬНО ВПРАВО
+            // (наезжая на область построения), ровно настолько, чтобы круг
+            // не пересекал прямоугольник метки. Вертикально метка не
+            // двигается. Размер узнаём после первой раскладки.
             var maxLabelSize by remember { mutableStateOf(IntSize.Zero) }
             var minLabelSize by remember { mutableStateOf(IntSize.Zero) }
 
@@ -629,7 +629,7 @@ fun FrequencyGraph(
                     labelRight = labelLeftPx + maxLabelSize.width,
                     labelHeight = maxLabelSize.height.toFloat(),
                     graphHeight = graphHeightF,
-                    shiftDown = true
+                    atTop = true
                 )
             val minLabelTargetPx = if (minLabelSize == IntSize.Zero) 0f else
                 minimalLabelShift(
@@ -638,7 +638,7 @@ fun FrequencyGraph(
                     labelRight = labelLeftPx + minLabelSize.width,
                     labelHeight = minLabelSize.height.toFloat(),
                     graphHeight = graphHeightF,
-                    shiftDown = false
+                    atTop = false
                 )
             val maxLabelShiftPx by animateFloatAsState(
                 targetValue = maxLabelTargetPx, animationSpec = shiftSpec, label = "maxLabelShift"
@@ -652,7 +652,7 @@ fun FrequencyGraph(
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
                     modifier = Modifier
                         .onSizeChanged { maxLabelSize = it }
-                        .offset { IntOffset(0, maxLabelShiftPx.roundToInt()) }
+                        .offset { IntOffset(maxLabelShiftPx.roundToInt(), 0) }
                         .clickable { editingRangeType = RangeType.MAX; tempRangeValue = "%.0f".format(carrierRange.max); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.max), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
@@ -661,7 +661,7 @@ fun FrequencyGraph(
                 Surface(shape = RoundedCornerShape(4.dp), color = primaryColor.copy(alpha = 0.1f),
                     modifier = Modifier
                         .onSizeChanged { minLabelSize = it }
-                        .offset { IntOffset(0, (-minLabelShiftPx).roundToInt()) }
+                        .offset { IntOffset(minLabelShiftPx.roundToInt(), 0) }
                         .clickable { editingRangeType = RangeType.MIN; tempRangeValue = "%.0f".format(carrierRange.min); showRangeDialog = true }
                 ) {
                     Text(hzFormat.format(carrierRange.min), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = primaryColor, modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp))
@@ -1362,28 +1362,36 @@ private const val TIME_STEP_MINUTES = 5
 private data class PointMarker(val cx: Float, val cy: Float, val radius: Float)
 
 /**
- * Минимальный вертикальный сдвиг метки оси Y, при котором она перестаёт
- * пересекать маркеры точек.
+ * Минимальный ГОРИЗОНТАЛЬНЫЙ сдвиг метки оси Y ВПРАВО, при котором она
+ * перестаёт пересекать маркеры точек.
  *
- * Метка прижата к краю области графика (к верхнему у максимума, к нижнему
- * у минимума) и может уйти только ВНУТРЬ графика — снаружи карточка, и
- * метка уехала бы за её пределы. Поэтому метка максимума смещается вниз
- * ([shiftDown] = true), а метка минимума — вверх ([shiftDown] = false).
- * Во втором случае координаты зеркалятся, и дальше задача одна: метка
- * занимает вертикальный отрезок [s, s + labelHeight] в «нормальных»
- * координатах (0 — край, к которому она прижата; вниз — внутрь графика).
+ * Раньше метка уезжала по вертикали (максимум — вниз, минимум — вверх).
+ * Теперь она не двигается по вертикали, а сдвигается ВПРАВО, наезжая на
+ * область построения, — ровно настолько, чтобы круг точки больше не
+ * перекрывал прямоугольник метки.
  *
- * Пересечение круга и прямоугольника сводится к одномерной задаче: по
- * горизонтали метка неподвижна, поэтому для каждой точки считается
- * «полувысота» [dy] зоны, в которой метка её задевает (как у круга,
- * рассечённого вертикальными краями метки). Точки, проходящие сбоку
- * (зазор по горизонтали >= радиусу), метке не мешают вовсе.
+ * Метка прижата к левому краю области графика (за пределами Box'а, на
+ * Y_AXIS_LABEL_OFFSET_X, то есть её левый край отрицательный). Маркеры
+ * лежат внутри графика (cx >= 0), поэтому сдвиг ВПРАВО уводит метку от
+ * них. Точки, чей круг не задевает вертикальную полосу метки (метка
+ * максимума — у самого верха графика, метка минимума — у самого низа),
+ * не мешают ей вовсе и сдвига не вызывают.
  *
- * Сдвиг минимален: перебираются по возрастанию только те позиции, где
- * метка может оказаться свободной, — текущая (0) и «ровно под очередной
- * мешающей точкой». Первая же позиция, не пересекающая НИ ОДНУ точку, и
- * есть ответ. Если внутри графика свободного места нет, метка остаётся
- * на исходном краю — лучше пересечься, чем уехать за противоположный.
+ * Пересечение круга и прямоугольника: метка занимает фиксированную
+ * вертикальную полосу [bandTop, bandBottom] и горизонтальный отрезок
+ * [labelLeft + s, labelRight + s], где [s] — искомый сдвиг вправо. Для
+ * каждой точки, чей круг пересекает полосу, запрещённый интервал сдвига —
+ * [cx - radius - labelRight, cx + radius - labelLeft]: вне него метка
+ * свободна. Точки мимо полосы не дают запрещённых интервалов.
+ *
+ * Сдвиг минимален и неотрицателен: перебираются позиции 0 (остаться на
+ * месте) и «ровно правее очередной мешающей точки» (cx + radius -
+ * labelLeft). Первая свободная позиция — ответ. Если правее свободного
+ * места нет, метка возвращается на место (s = 0) — лучше пересечься, чем
+ * уехать за правый край графика.
+ *
+ * @param atTop true для метки максимума (полоса у верхнего края), false —
+ *              для метки минимума (полоса у нижнего края).
  */
 private fun minimalLabelShift(
     markers: List<PointMarker>,
@@ -1391,25 +1399,34 @@ private fun minimalLabelShift(
     labelRight: Float,
     labelHeight: Float,
     graphHeight: Float,
-    shiftDown: Boolean
+    atTop: Boolean
 ): Float {
     if (labelHeight <= 0f) return 0f
 
-    // Зоны, в которых метка пересекает точку: (верх, низ) в координатах
-    // «0 — край, к которому прижата метка; вниз — внутрь графика».
+    // Вертикальная полоса, которую метка занимает на графике: у максимума
+    // — у самого верха [0, labelHeight], у минимума — у самого низа
+    // [graphHeight - labelHeight, graphHeight].
+    val bandTop = if (atTop) 0f else (graphHeight - labelHeight)
+    val bandBottom = if (atTop) labelHeight else graphHeight
+
+    // Запрещённые интервалы сдвига s: метка пересекает точку, когда её
+    // горизонтальный отрезок [labelLeft+s, labelRight+s] накладывается на
+    // круг [cx-radius, cx+radius]. Только для точек, чей круг задевает
+    // вертикальную полосу метки.
     val zones = ArrayList<FloatArray>(markers.size)
     for (marker in markers) {
-        val dx = maxOf(labelLeft - marker.cx, 0f, marker.cx - labelRight)
-        if (dx >= marker.radius) continue   // точка сбоку: вертикально не мешает
-        val dy = kotlin.math.sqrt((marker.radius * marker.radius - dx * dx).coerceAtLeast(0f))
-        val center = if (shiftDown) marker.cy else graphHeight - marker.cy
-        zones.add(floatArrayOf(center - dy, center + dy))
+        val overlap = minOf(bandBottom, marker.cy + marker.radius) -
+            maxOf(bandTop, marker.cy - marker.radius)
+        if (overlap <= 0f) continue   // круг мимо вертикальной полосы
+        zones.add(floatArrayOf(
+            marker.cx - marker.radius - labelRight,
+            marker.cx + marker.radius - labelLeft
+        ))
     }
     if (zones.isEmpty()) return 0f
 
-    val limit = (graphHeight - labelHeight).coerceAtLeast(0f)
-    // Кандидаты: 0 (остаться на месте) и «ровно под очередной мешающей
-    // точкой» — выше её метке всё равно не встать, только дальше.
+    // Кандидаты: остаться на месте (0) и «ровно правее очередной точки» —
+    // левее её метке всё равно не встать, только дальше вправо.
     val candidates = ArrayList<Float>(zones.size + 1)
     candidates.add(0f)
     for (zone in zones) candidates.add(zone[1])
@@ -1417,18 +1434,17 @@ private fun minimalLabelShift(
 
     for (s in candidates) {
         if (s < 0f) continue
-        if (s > limit) break
         var free = true
         for (zone in zones) {
-            // Свободно, если метка целиком выше зоны или целиком ниже её
-            if (!(s + labelHeight <= zone[0] || s >= zone[1])) {
+            // Свободно, если сдвиг вне запрещённого интервала точки.
+            if (!(s <= zone[0] || s >= zone[1])) {
                 free = false
                 break
             }
         }
         if (free) return s
     }
-    // Внутри графика места нет — оставляем метку на месте.
+    // Правее свободного места нет — оставляем метку на месте.
     return 0f
 }
 

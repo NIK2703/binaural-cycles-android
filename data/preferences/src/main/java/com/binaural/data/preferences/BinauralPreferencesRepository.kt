@@ -473,11 +473,11 @@ class BinauralPreferencesRepository @Inject constructor(
     
     /**
      * Получить громкость воспроизведения
-     * По умолчанию 0.7 (70%)
+     * По умолчанию 1.0 (100%)
      */
     fun getVolume(): Flow<Float> {
         return dataStore.data.map { preferences ->
-            preferences[VOLUME_KEY]?.toFloatOrNull() ?: 0.7f
+            preferences[VOLUME_KEY]?.toFloatOrNull() ?: 1.0f
         }
     }
     

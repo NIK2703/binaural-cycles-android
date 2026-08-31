@@ -317,6 +317,96 @@ class PointIntentMemoryTest {
         assertEquals(200.0f, limitAt(200.0f), EPS)
     }
 
+    /**
+     * Несущую задали ЗА границу диапазона: она не отбрасывается, а встаёт на
+     * границу, биения в этой точке гаснут в ноль — и возвращаются, как только
+     * несущая (или сама граница) отодвигается.
+     *
+     * Здесь проверяется ровно то, что делает редактор: память желаемой несущей
+     * получает ЗАПРОШЕННОЕ значение, а частота биений выводится из желаемой
+     * ([PointIntentMemory.resolveBeat]) и потому не сгорает.
+     */
+    @Test
+    fun carrierSetBeyondBoundary_beatDropsToZeroAndReturns() {
+        val memory = PointIntentMemory()
+        val point = point(0, 300.0f, 200.0f)
+        memory.seedFrom(listOf(point))
+
+        // Пользователь задал 900 Гц при диапазоне 100…600: значение не
+        // потеряно — точка встала на границу 600 Гц.
+        memory.rememberCarrier(point.time, 900.0f)
+        val atBoundary = memory.resolveCarrier(point, range)
+        assertEquals(600.0f, atBoundary, EPS)
+
+        // У самой границы каналам негде развернуться — биения гаснут в ноль.
+        assertEquals(0.0f, memory.resolveBeat(point, atBoundary, range), EPS)
+        // Желаемые 200 Гц при этом живы: правка несущей их не затирает.
+        assertEquals(200.0f, memory.desiredBeatFor(point), EPS)
+
+        // Точка перезаписана прижатыми значениями — как это делает редактор.
+        val stored = point.copy(
+            carrierFrequency = atBoundary,
+            beatFrequency = memory.resolveBeat(point, atBoundary, range)
+        )
+        assertEquals(0.0f, stored.beatFrequency, EPS)
+
+        // Отодвинули несущую от границы — биения вернулись целиком.
+        assertEquals(200.0f, memory.resolveBeat(stored, 400.0f, range), EPS)
+
+        // Отодвинули саму границу — вернулись и несущая, и биения.
+        val widened = FrequencyRange(100.0f, 1200.0f)
+        val restoredCarrier = memory.resolveCarrier(stored, widened)
+        assertEquals(900.0f, restoredCarrier, EPS)
+        assertEquals(200.0f, memory.resolveBeat(stored, restoredCarrier, widened), EPS)
+    }
+
+    /** Тот же случай у НИЖНЕЙ границы: несущую задали ниже минимума. */
+    @Test
+    fun carrierSetBelowBoundary_beatDropsToZeroAndReturns() {
+        val memory = PointIntentMemory()
+        val point = point(0, 300.0f, 120.0f)
+        memory.seedFrom(listOf(point))
+
+        memory.rememberCarrier(point.time, 40.0f)
+        val atBoundary = memory.resolveCarrier(point, range)
+        assertEquals(100.0f, atBoundary, EPS)
+        assertEquals(0.0f, memory.resolveBeat(point, atBoundary, range), EPS)
+
+        // Чуть отодвинули — биения вернулись (предел 2*30 = 60 Гц, 120 не влезли).
+        assertEquals(60.0f, memory.resolveBeat(point, 130.0f, range), EPS)
+        // Отодвинули достаточно — вернулись полностью.
+        assertEquals(120.0f, memory.resolveBeat(point, 300.0f, range), EPS)
+    }
+
+    /**
+     * Правка частоты биений двигает несущую (см. FrequencyMathFitTest), и
+     * сдвинутая несущая обязана стать желаемой: иначе при следующей правке
+     * диапазона точка отпрыгнула бы на прежнее место — под биения, которые
+     * там уже не помещаются.
+     */
+    @Test
+    fun beatChange_movesCarrierAndNewCarrierBecomesDesired() {
+        val memory = PointIntentMemory()
+        val point = point(0, 150.0f, 100.0f)
+        memory.seedFrom(listOf(point))
+
+        // Просим 200 Гц при несущей 150: нижний канал уходил бы на 50 Гц,
+        // поэтому несущая отодвигается на 200 Гц, а пульсация остаётся 200 Гц.
+        val fit = FrequencyMath.fitBeatWithCarrierShift(
+            point.carrierFrequency, 200.0f, range)
+        assertEquals(200.0f, fit.beatFrequency, EPS)
+        assertEquals(200.0f, fit.carrierFrequency, EPS)
+
+        memory.rememberBeat(point.time, fit.beatFrequency)
+        memory.rememberCarrier(point.time, fit.carrierFrequency)
+
+        // Сдвинутая несущая — теперь желаемая: диапазон расширили, а точка
+        // осталась там, куда её отодвинули под увеличенную пульсацию.
+        val widened = FrequencyRange(50.0f, 600.0f)
+        assertEquals(200.0f, memory.resolveCarrier(point, widened), EPS)
+        assertEquals(200.0f, memory.resolveBeat(point, 200.0f, widened), EPS)
+    }
+
     private companion object {
         const val EPS = 1e-4f
     }

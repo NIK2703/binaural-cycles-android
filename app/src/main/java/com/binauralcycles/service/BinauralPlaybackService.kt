@@ -161,7 +161,7 @@ class BinauralPlaybackService : Service() {
                     wasPausedByTransientFocus = false
                     audioEngine?.resumeWithFade()
                 }
-                audioEngine?.setVolume(audioEngine?.currentConfig?.value?.volume ?: 0.7f)
+                audioEngine?.setVolume(audioEngine?.currentConfig?.value?.volume ?: 1.0f)
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 // Другой экземпляр (или другое приложение) забрало фокус.
@@ -193,7 +193,7 @@ class BinauralPlaybackService : Service() {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 // Приглушение: временно снижаем громкость,
                 // восстановление - в AUDIOFOCUS_GAIN
-                val volume = audioEngine?.currentConfig?.value?.volume ?: 0.7f
+                val volume = audioEngine?.currentConfig?.value?.volume ?: 1.0f
                 audioEngine?.setVolume(volume * 0.2f)
             }
             AudioManager.AUDIOFOCUS_GAIN_TRANSIENT -> {

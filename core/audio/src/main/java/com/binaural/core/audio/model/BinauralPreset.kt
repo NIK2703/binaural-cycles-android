@@ -460,7 +460,7 @@ data class FrequencyCurve(
  */
 data class BinauralConfig(
     val frequencyCurve: FrequencyCurve = FrequencyCurve.defaultCurve(),
-    val volume: Float = 0.7f,
+    val volume: Float = 1.0f,
     // Настройки перестановки каналов
     val channelSwapEnabled: Boolean = false,
     val channelSwapIntervalSeconds: Int = 300, // 5 минут по умолчанию (только TIMER)
@@ -509,7 +509,7 @@ data class PlaybackState(
     val isPlaying: Boolean = false,
     val config: BinauralConfig = BinauralConfig(),
     val elapsedSeconds: Int = 0,
-    val volume: Float = 0.7f
+    val volume: Float = 1.0f
 )
 
 /**

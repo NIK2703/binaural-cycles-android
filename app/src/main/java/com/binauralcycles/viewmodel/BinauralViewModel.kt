@@ -73,7 +73,7 @@ data class BinauralUiState(
     val activePreset: BinauralPreset? = null,
     // Флаг воспроизведения дублируется в PlaybackTelemetry — здесь он НЕ хранится,
     // иначе любое его изменение снова перекомпонует всё дерево (см. Navigation).
-    val volume: Float = 0.7f,
+    val volume: Float = 1.0f,
     val selectedPointIndex: Int? = null,
     // НОВОЕ: debug virtual time
     val debugVirtualTimeEnabled: Boolean = false,
@@ -211,6 +211,57 @@ class BinauralViewModel @Inject constructor(
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
 
+    /** Настройка, значение которой уже прочитано из DataStore (см. [loadedSettings]). */
+    private enum class Setting {
+        /** Список пресетов и активный пресет (кривая + режим расслабления). */
+        PRESETS,
+        VOLUME,
+        SAMPLE_RATE,
+        BUFFER_MINUTES,
+        CHANNEL_SWAP,
+        NORMALIZATION,
+        HEADSET_RESUME
+    }
+
+    /**
+     * Что уже прочитано из DataStore.
+     *
+     * Причина появления: при возврате в свёрнутое приложение активити и
+     * ViewModel пересоздаются, а сервис ПРОДОЛЖАЕТ ИГРАТЬ. Свежий ViewModel
+     * честно пушил в живой движок дефолты из [BinauralUiState] — громкость
+     * 1.0, SampleRate.LOW, дефолтную кривую, отключённую нормализацию. Для
+     * движка такой пуш неотличим от команды пользователя «всё поменяй», и он
+     * пересобирал поток: кроссфейд (или два — дефолтами и настоящими
+     * значениями, если чтение DataStore не уложилось в окно фейда) плюс
+     * скачок громкости. Ровно тот «перезапуск», на который жаловались.
+     *
+     * Дедупликация внутри менеджера тут не помощник: она отсекает ПОВТОРЫ,
+     * а дефолт для движка — полноценное другое значение.
+     *
+     * Повторные пуши настоящих значений дешевы: менеджер сравнивает их со
+     * своими полями и не делает ничего.
+     */
+    private val loadedSettings = java.util.EnumSet.noneOf(Setting::class.java)
+
+    /** Прочитано ли всё, из чего собирается [BinauralConfig]. */
+    private val settingsReady: Boolean get() = loadedSettings.size == Setting.entries.size
+
+    /**
+     * Отметить настройку прочитанной.
+     *
+     * Конфиг зависит от четырёх источников сразу (кривая/расслабление,
+     * громкость, перестановка каналов, нормализация), поэтому уходит один раз —
+     * когда прочитан последний из них. Раньше он собирался четырежды (по одному
+     * разу на каждый источник), и три из этих сборок были заведомо неполными.
+     */
+    private fun onSettingLoaded(setting: Setting) {
+        val becameReady = loadedSettings.add(setting) && settingsReady
+        if (becameReady) {
+            android.util.Log.d("BinauralViewModel", "Настройки прочитаны полностью — собираем конфиг")
+            updateAudioConfig()
+        }
+    }
+
     // Переключение пресета — синхронный кроссфейд: UPDATE config уходит в beginHandoff(),
     // NEXT начинает фейд-ин одновременно с фейд-аутом CURRENT. Никаких корутин, задержек
     // и стопов между пресетами, поэтому single-flight-джобы и guard'ы больше не нужны.
@@ -223,30 +274,40 @@ class BinauralViewModel @Inject constructor(
             _uiState.update { it.copy(isServiceConnected = true) }
             android.util.Log.d("BinauralViewModel", "Service connected")
             
-            // При подключении сервиса ВСЕГДА обновляем конфиг
-            // Это гарантирует, что настройки (включая channelSwap) будут применены
-            // даже если сервис подключился после загрузки пресетов
+            // При подключении сервиса применяем те настройки, которые УЖЕ
+            // прочитаны из DataStore. Сервис мог подключиться и раньше (тогда
+            // их применит коллектор), и позже (тогда они ждут здесь).
+            //
+            // Пушить НЕпрочитанное нельзя ни в коем случае: см. [loadedSettings].
+            // До правки здесь уходили ровно дефолты — потому что bindService
+            // отвечает на главной нити за миллисекунды, а DataStore читает
+            // диск десятки миллисекунд, и гонку выигрывал bind.
             val state = _uiState.value
-            if (state.activePreset != null) {
-                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset.name}, channelSwap=${state.channelSwapSettings.enabled}")
+            if (Setting.PRESETS in loadedSettings) {
+                android.util.Log.d("BinauralViewModel", "Updating audio config for active preset: ${state.activePreset?.name}, channelSwap=${state.channelSwapSettings.enabled}")
                 // Устанавливаем название активного пресета для уведомления
-                playbackService?.setCurrentPresetName(state.activePreset.name)
-                playbackService?.setCurrentPresetId(state.activePreset.id)
+                playbackService?.setCurrentPresetName(state.activePreset?.name)
+                playbackService?.setCurrentPresetId(state.activePreset?.id)
             }
-            // Всегда вызываем updateAudioConfig - это обновит конфиг даже если activePreset ещё не загружен
-            // (в этом случае будет использован дефолтный конфиг, который потом заменится при загрузке пресета)
+            // Конфиг — в конце: он единственный, кто реально меняет звук, и
+            // внутри него лежит guard на «все настройки прочитаны».
             updateAudioConfig()
-            
+
             // Устанавливаем настройки, которые могли быть загружены до подключения сервиса
-            playbackService?.setFrequencyUpdateInterval(state.bufferGenerationMinutes * 60 * 1000)
-            playbackService?.setVolume(state.volume)
-            playbackService?.setSampleRate(state.sampleRate)
-            playbackService?.setResumeOnHeadsetConnect(state.resumeOnHeadsetConnect)
+            if (Setting.BUFFER_MINUTES in loadedSettings) {
+                playbackService?.setFrequencyUpdateInterval(state.bufferGenerationMinutes * 60 * 1000)
+            }
+            if (Setting.VOLUME in loadedSettings) playbackService?.setVolume(state.volume)
+            if (Setting.SAMPLE_RATE in loadedSettings) playbackService?.setSampleRate(state.sampleRate)
+            if (Setting.HEADSET_RESUME in loadedSettings) {
+                playbackService?.setResumeOnHeadsetConnect(state.resumeOnHeadsetConnect)
+            }
             
             // Устанавливаем список ID пресетов для переключения с гарнитуры
-            val presetIdList = state.presets.map { it.id }
-            playbackService?.setPresetIds(presetIdList)
-            playbackService?.setCurrentPresetId(state.activePreset?.id)
+            if (Setting.PRESETS in loadedSettings) {
+                playbackService?.setPresetIds(state.presets.map { it.id })
+                playbackService?.setCurrentPresetId(state.activePreset?.id)
+            }
             
             // Устанавливаем callback для переключения пресетов с гарнитуры
             playbackService?.onPresetSwitch = { presetId ->
@@ -314,11 +375,15 @@ class BinauralViewModel @Inject constructor(
                         }
                         // Устанавливаем название пресета для уведомления
                         playbackService?.setCurrentPresetName(activePreset.name)
-                        // Обновляем весь конфиг в сервисе, а не только кривую
-                        // Это важно для корректного воспроизведения при старте
-                        updateAudioConfig()
                     }
                 }
+                // Отмечаем «пресеты прочитаны» ВСЕГДА (независимо от наличия
+                // активного пресета). Иначе без активного пресета settingsReady
+                // никогда не станет true и обновлённый конфиг не уйдёт в движок.
+                // Ставим ПОСЛЕ блока активного пресета, чтобы к моменту
+                // возможного срабатывания updateAudioConfig() activePreset
+                // уже лежал в _uiState.
+                onSettingLoaded(Setting.PRESETS)
             }
         }
         
@@ -335,6 +400,7 @@ class BinauralViewModel @Inject constructor(
                 }
                 _uiState.update { it.copy(sampleRate = sampleRate) }
                 playbackService?.setSampleRate(sampleRate)
+                onSettingLoaded(Setting.SAMPLE_RATE)
             }
         }
         // Интервал генерации буфера (в минутах)
@@ -352,14 +418,17 @@ class BinauralViewModel @Inject constructor(
                 // Преобразуем минуты в миллисекунды для частоты обновления
                 // Большой буфер = реже обновления = лучше энергопотребление
                 playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
+                onSettingLoaded(Setting.BUFFER_MINUTES)
             }
         }
-        // Громкость - загружаем только для UI
-        // Громкость в сервис устанавливается через setVolumeImmediate() при движении слайдера
-        // или при подключении сервиса в onServiceConnected
+        // Громкость — читаем из хранилища и применяем к движку, но ТОЛЬКО
+        // когда значение реально прочитано (иначе пошлём дефолт 1.0, который
+        // движок примет за «сделай громче» и пересоберёт поток).
         viewModelScope.launch {
             preferencesRepository.getVolume().collect { volume ->
                 _uiState.update { it.copy(volume = volume) }
+                playbackService?.setVolume(volume)
+                onSettingLoaded(Setting.VOLUME)
             }
         }
         // Глобальные настройки перестановки каналов
@@ -368,6 +437,7 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getChannelSwapSettings().collect { settings ->
                 _uiState.update { it.copy(channelSwapSettings = settings) }
+                onSettingLoaded(Setting.CHANNEL_SWAP)
             }
         }
         // Глобальные настройки нормализации громкости
@@ -376,6 +446,7 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getVolumeNormalizationSettings().collect { settings ->
                 _uiState.update { it.copy(volumeNormalizationSettings = settings) }
+                onSettingLoaded(Setting.NORMALIZATION)
             }
         }
         // Возобновление воспроизведения при подключении гарнитуры
@@ -384,6 +455,7 @@ class BinauralViewModel @Inject constructor(
                 _uiState.update { it.copy(resumeOnHeadsetConnect = enabled) }
                 // Уведомляем сервис об изменении настройки
                 playbackService?.setResumeOnHeadsetConnect(enabled)
+                onSettingLoaded(Setting.HEADSET_RESUME)
             }
         }
         // Автовозобновление воспроизведения при запуске приложения
@@ -958,7 +1030,13 @@ class BinauralViewModel @Inject constructor(
                 }
                 Triple(clampedCarrier, beat, FrequencyRange(newMin, newMax))
             } else {
-                // Ограничение частот заданными границами графика (новое поведение по умолчанию)
+                // Ограничение частот заданными границами графика (новое поведение по умолчанию).
+                // Несущая, вышедшая за границу, НЕ отбрасывается: она встаёт на
+                // саму границу, а частота биений в этой точке гаснет — у самой
+                // границы каналам негде развернуться. Биения при этом не
+                // теряются: желаемое значение памяти не перезаписывается, и
+                // ровно оно возвращается, когда несущая (или граница)
+                // отодвигается — см. PointIntentMemory.resolveBeat.
                 val clampedCarrier = curve.carrierRange.clamp(newCarrier)
                 // Желаемое значение обрезается по модулю под новое удаление
                 // от границы — и ровно настолько же восстанавливается, когда
@@ -967,10 +1045,14 @@ class BinauralViewModel @Inject constructor(
                 Triple(clampedCarrier, beat, curve.carrierRange)
             }
 
-            // ПРЯМАЯ правка несущей — источник желаемого значения. Как и в
-            // случае частоты биений, запоминается ПРИМЕНЁННОЕ значение: оно же
-            // осталось в поле ввода и на графике.
-            pointIntent.rememberCarrier(oldPoint.time, carrier)
+            // ПРЯМАЯ правка несущей — источник желаемого значения. Запоминается
+            // ЗАПРОШЕННОЕ значение, а не прижатое к границе: иначе несущая,
+            // которая не влезла в диапазон, терялась бы навсегда и при
+            // расширении границ осталась бы лежать у старого края. Точка
+            // встала на границу сейчас — но вернётся туда, куда её тянул
+            // пользователь, как только граница отодвинется. То же правило,
+            // что и при создании точки (см. addEditingPoint).
+            pointIntent.rememberCarrier(oldPoint.time, newCarrier)
 
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
@@ -988,17 +1070,22 @@ class BinauralViewModel @Inject constructor(
         if (index in points.indices) {
             val oldPoint = points[index]
             
-            val (clampedBeat, newCarrierRange) = if (state.autoExpandGraphRange) {
+            val beat: Float
+            val carrier: Float
+            val newCarrierRange: FrequencyRange
+            if (state.autoExpandGraphRange) {
                 // Автоматическое расширение границ (старое поведение)
                 // Предел модуля — геометрический (20/2000 Гц), хранимый beatRange
                 // в расчёт не входит: это масштаб маркеров, а не разрешённый предел.
-                val beat = FrequencyMath.clampBeat(
+                // Несущая не двигается: границы графика сами следом расширяются.
+                beat = FrequencyMath.clampBeat(
                     oldPoint.carrierFrequency, newBeat)
+                carrier = oldPoint.carrierFrequency
 
                 // Границы расширяем по модулю beat (при знаке минус каналы меняются местами).
-                val upperFrequency = oldPoint.carrierFrequency + FrequencyMath.beatMagnitude(beat) / 2.0f
-                val lowerFrequency = oldPoint.carrierFrequency - FrequencyMath.beatMagnitude(beat) / 2.0f
-                
+                val upperFrequency = carrier + FrequencyMath.beatMagnitude(beat) / 2.0f
+                val lowerFrequency = carrier - FrequencyMath.beatMagnitude(beat) / 2.0f
+
                 val newMin = if (lowerFrequency < curve.carrierRange.min) {
                     (lowerFrequency * 0.9f).coerceAtMost(lowerFrequency - 10.0f).coerceAtLeast(20.0f)
                 } else {
@@ -1009,23 +1096,38 @@ class BinauralViewModel @Inject constructor(
                 } else {
                     curve.carrierRange.max
                 }
-                Pair(beat, FrequencyRange(newMin, newMax))
+                newCarrierRange = FrequencyRange(newMin, newMax)
             } else {
-                // Ограничение частот заданными границами графика (новое поведение по умолчанию)
-                val beat = FrequencyMath.clampBeat(
-                    oldPoint.carrierFrequency, newBeat, carrierRange = curve.carrierRange)
-                Pair(beat, curve.carrierRange)
+                // Границы графика заданы пресетом (поведение по умолчанию).
+                // Частота биений НЕ режется: если при её увеличении канал
+                // начинает заходить за границу, несущая ОТОДВИГАЕТСЯ от этой
+                // границы внутрь диапазона — ровно настолько, насколько канал
+                // вылез. Пользователь тянет пульсацию, он её и получает.
+                // Обрезка остаётся только на ПОТОЛОК (ширина диапазона): выше
+                // него разнос каналов не влезет ни при какой несущей, и тогда
+                // несущая встаёт ровно посередине между границами.
+                // См. FrequencyMath.fitBeatWithCarrierShift.
+                val fit = FrequencyMath.fitBeatWithCarrierShift(
+                    oldPoint.carrierFrequency, newBeat, curve.carrierRange)
+                beat = fit.beatFrequency
+                carrier = fit.carrierFrequency
+                newCarrierRange = curve.carrierRange
             }
-            
+
             // РУЧНАЯ установка — единственный источник «желаемого» значения.
-            // Запоминается именно применённое (обрезанное) значение: оно же
-            // осталось в поле ввода, и расхождение выглядело бы обманом.
-            pointIntent.rememberBeat(oldPoint.time, clampedBeat)
+            // Запоминается именно применённое значение: оно же осталось
+            // в поле ввода, и расхождение выглядело бы обманом.
+            pointIntent.rememberBeat(oldPoint.time, beat)
+            // Несущая, отодвинутая от границы под пульсацию, — тоже воля
+            // пользователя: он её видит на графике и в поле. Без запоминания
+            // желаемым осталось бы ПРЕЖНЕЕ положение, и при следующей правке
+            // диапазона точка отпрыгнула бы назад под уже увеличенные биения.
+            pointIntent.rememberCarrier(oldPoint.time, carrier)
 
             points[index] = FrequencyPoint(
                 time = oldPoint.time,
-                carrierFrequency = oldPoint.carrierFrequency,
-                beatFrequency = clampedBeat
+                carrierFrequency = carrier,
+                beatFrequency = beat
             )
             updateEditingCurve(points, newCarrierRange, curve.beatRange, curve.interpolationType)
         }
@@ -1551,6 +1653,15 @@ class BinauralViewModel @Inject constructor(
     }
 
     private fun updateAudioConfig() {
+        // НЕ пушим конфиг, пока не прочитаны ВСЕ настоящие настройки из DataStore.
+        // При пересоздании ViewModel (возврат из свёрнутого состояния) коллекторы
+        // сначала эмитят значения по умолчанию из _uiState — и если отдать их в
+        // живой движок, менеджер увидит «другой конфиг» и сделает кроссфейд/рестарт
+        // уже звучащего потока. Ждём реальных значений (settingsReady).
+        if (!settingsReady) {
+            android.util.Log.d("BinauralViewModel", "updateAudioConfig: настройки ещё не прочитаны — пропускаем пуш в движок")
+            return
+        }
         // Намеренно без guard'а на «переключение пресета идёт»: смены настроек во
         // время воспроизведения — это тоже кроссфейд (updateConfig -> beginHandoff),
         // а не мгновенная подмена частот в звучащем потоке. Дубликаты отсекает сам

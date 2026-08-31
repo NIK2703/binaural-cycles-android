@@ -515,26 +515,35 @@ fun PointEditorPopup(
     // beat = right − left; знак задаёт раскладку каналов, |beat| — пульсация):
     //   1. |beat| <= 2*(carrier − 20 Гц):    обе боковые остаются >= 20 Гц;
     //   2. |beat| <= 2*(2000 Гц − carrier):  обе боковые остаются <= 2000 Гц;
-    //   3. если autoExpandGraphRange = false, дополнительно границами графика:
-    //      |beat| <= 2*(carrier − carrierRange.min) и 2*(carrierRange.max − carrier).
-    // Иначе говоря, предел — это УДВОЕННОЕ РАССТОЯНИЕ ОТ НЕСУЩЕЙ ВЫБРАННОЙ
-    // ТОЧКИ ДО БЛИЖАЙШЕЙ ГРАНИЦЫ. Хранимый в пресете beatRange здесь НЕ
-    // участвует: это масштаб для размера маркера на графике, а не разрешённый
-    // предел, поэтому старый потолок 1000 Гц больше не режет выбор.
+    //   3. если autoExpandGraphRange = false, каналы не должны выходить и за
+    //      вертикальные границы графика.
+    // Хранимый в пресете beatRange здесь НЕ участвует: это масштаб для
+    // размера маркера на графике, а не разрешённый предел, поэтому старый
+    // потолок 1000 Гц больше не режет выбор.
+    //
+    // Но предел считается ПО-РАЗНОМУ в двух режимах, и это принципиально:
+    // - при autoExpandGraphRange границы едут за пульсацией, поэтому предел —
+    //   удвоенное расстояние от несущей до ближайшей ФИЗИЧЕСКОЙ границы;
+    // - при заданных границах несущая сама отодвигается от границы под
+    //   пульсацию (см. FrequencyMath.fitBeatWithCarrierShift), поэтому предел
+    //   от несущей больше не зависит — это ПОТОЛОК, ширина диапазона: выше
+    //   него разнос каналов не влезет ни при какой несущей.
 
-    // Максимальный МОДУЛЬ частоты биений вычисляется от текущего значения
-    // в текстовом поле (для валидации) или от значения точки (для проверки
-    // при потере фокуса). Пол 1 Гц — чтобы точка, стоящая ровно на границе
-    // графика (там геометрический предел равен нулю), оставалась редактируемой.
-    val maxBeatMagnitudeForValidation = run {
-        val carrierForLimit = if (carrierValue != null && isCarrierValid) carrierValue
-                              else point.carrierFrequency
-        val range = if (autoExpandGraphRange) null else carrierRange
-        FrequencyMath.maxBeatMagnitude(carrierForLimit, range).coerceAtLeast(1.0f)
-    }
+    // Пол 1 Гц — чтобы точка, у которой предел равен нулю, оставалась
+    // редактируемой (например, несущая стоит ровно на границе диапазона).
+    val maxBeatMagnitudeForValidation = (
+        if (autoExpandGraphRange) {
+            // От текущего значения несущей: из текстового поля (для валидации
+            // по мере ввода) или из значения точки (при потере фокуса).
+            val carrierForLimit = if (carrierValue != null && isCarrierValid) carrierValue
+                                  else point.carrierFrequency
+            FrequencyMath.maxBeatMagnitude(carrierForLimit, null)
+        } else {
+            FrequencyMath.maxFittableBeatMagnitude(carrierRange)
+        }
+    ).coerceAtLeast(1.0f)
 
-    // Валидация частоты биений: проверяем МОДУЛЬ (знак разрешён всегда),
-    // относительно текущего значения несущей в поле ввода
+    // Валидация частоты биений: проверяем МОДУЛЬ (знак разрешён всегда).
     val isBeatValid = beatValue != null &&
         beatValue >= -maxBeatMagnitudeForValidation &&
         beatValue <= maxBeatMagnitudeForValidation

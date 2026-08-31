@@ -281,7 +281,7 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "setVolume $volume -> $v")
         actor.post {
             // Повторная установка того же значения — не только лишний binder-вызов:
-            // при рестарте Activity ViewModel пушит дефолт 0.7f поверх реальной
+            // при рестарте Activity ViewModel пушит дефолт 1.0f поверх реальной
             // громкости, и это слышимый скачок уровня.
             if (kotlin.math.abs(this.volume - v) < 0.0001f) return@post
             this.volume = v
