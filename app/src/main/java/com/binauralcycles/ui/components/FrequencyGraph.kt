@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -32,6 +33,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
@@ -39,7 +41,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import android.graphics.Paint
 import com.binaural.core.audio.model.CardinalTension
 import com.binauralcycles.ui.theme.Spacing
 import com.binaural.core.audio.model.FrequencyMath
@@ -72,28 +76,11 @@ private const val MIN_AUDIBLE_FREQUENCY = 20.0f
 // Максимальная частота для графика
 private const val MAX_FREQUENCY = 2000.0f
 
-// Шаг, с которым ручки диалога двигают границы диапазона несущей (Гц).
-private const val CARRIER_RANGE_STEP = 10.0f
-
-// Минимальный зазор между нижней и верхней границей диапазона (Гц). Меньше
-// его ручки не свести: диапазон из двух почти слипшихся границ всё равно
-// нечитаем — на нём вся кривая превращается в горизонтальную полосу.
-private const val CARRIER_RANGE_MIN_SPAN = 100.0f
-
-// Пределы, внутри которых ходят ручки диалога. Зазор [CARRIER_RANGE_MIN_SPAN]
-// заведомо меньше всей шкалы (2000 - 20), поэтому обеим ручкам всегда есть
-// куда отодвинуться, и «упирание» одной в другую не заклинивает жест.
-private val CARRIER_RANGE_BOUNDS = MIN_AUDIBLE_FREQUENCY..MAX_FREQUENCY
-
-// Число промежуточных делений RangeSlider: всего узлов на шкале
-// (2000 - 20) / 10 + 1 = 199, а параметр steps не считает два конца.
-private val CARRIER_RANGE_STEPS =
-    ((MAX_FREQUENCY - MIN_AUDIBLE_FREQUENCY) / CARRIER_RANGE_STEP).roundToInt() - 1
-
-// Порог «ручка сдвинулась». Со слайдера значения приходят уже с шагом 10 Гц,
-// поэтому настоящее движение заметно больше, а пол-герца отсекает дребезг
-// округления и повторные вызовы с неизменившимся значением.
-private const val CARRIER_RANGE_EPSILON = 0.5f
+// Минимально допустимая ширина диапазона несущих частот. При правке
+// границ (через клик по крайним меткам) разница между пределами не может
+// быть меньше этого значения — иначе график вырождается в почти прямую
+// линию и теряет смысл. См. проверку в диалоге смены границы.
+private const val MIN_CARRIER_RANGE_SPAN_HZ = 100.0f
 
 // Диаметр маркера точки на графике. Вынесен в константу, чтобы размер в
 // расчёте разъезда меток оси Y совпадал с размером нарисованного круга —
@@ -101,9 +88,9 @@ private const val CARRIER_RANGE_EPSILON = 0.5f
 private val POINT_MARKER_SIZE = 24.dp
 private val POINT_MARKER_SELECTED_SIZE = 30.dp
 
-// Вынос метки диапазона за область графика: метка стоит у ПРАВОГО края
-// и торчит наружу на эту величину.
-private val Y_AXIS_LABEL_OUTSET = 8.dp
+// Смещение меток оси Y влево за пределы Box'а графика: метки стоят у
+// левого края оси Y и торчат наружу на эту величину (отрицательное значение).
+private val Y_AXIS_LABEL_OFFSET_X = (-8).dp
 
 // Анимация контекстного окна точки. Появление — слайд СНИЗУ ВВЕРХ,
 // скрытие — слайд СВЕРХУ ВНИЗ (окно всегда стоит под точкой, поэтому
@@ -270,13 +257,15 @@ fun FrequencyGraph(
     // использовалось — в drawBehind передаётся allPoints. Отсортированный список
     // берётся из remember ниже (displayPoints).
     var dragState by remember { mutableStateOf(PointDragState()) }
-    // Диалог единой метки диапазона: обе границы правятся в нём одними ручками.
+    // Диалог правки границы несущей: две метки (MIN/MAX) открывают диалог
+    // ввода значения по отдельности. Без алгоритма смещения меток — позиции
+    // фиксированы, метки не разъезжаются при перетаскивании/добавлении точек.
     var showRangeDialog by remember { mutableStateOf(false) }
+    var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
+    var tempRangeValue by remember { mutableStateOf("") }
 
     // Локализованный формат Гц - объявляем здесь для использования во всём компоненте
     val hzFormat = stringResource(R.string.hz_value_format)
-    // Единая метка диапазона оси Y: «20-2000 Гц».
-    val rangeFormat = stringResource(R.string.carrier_range_format)
 
     // Единое время приходит из PlaybackTelemetry (StateFlow сервиса);
     // приватный тикер удалён - график живёт тем же потоком данных, что и карточки
@@ -318,7 +307,13 @@ fun FrequencyGraph(
                 val corner = CornerRadius(8.dp.toPx(), 8.dp.toPx())
                 drawRoundRect(color = cardSurfaceColor, cornerRadius = corner)
             }
-            .padding(16.dp)
+            // Отступы сверху/снизу уменьшены (16.dp -> Spacing.sm=8.dp) по
+            // просьбе: график на экране редактирования пресета должен быть
+            // вертикально плотнее. Горизонталь тоже уменьшена (16.dp ->
+            // Spacing.sm=8.dp) по просьбе — график ближе к краям экрана.
+            // Крайние метки частот рисуются внутри Box'а (от 3.dp от левого
+            // края), поэтому уменьшение внешнего отступа их не обрезает.
+            .padding(horizontal = Spacing.sm, vertical = Spacing.sm)
     ) {
         BoxWithConstraints(
             // zIndex: контекстное окно точки — последний ребёнок этого Box и
@@ -333,6 +328,32 @@ fun FrequencyGraph(
             }
 
             val primaryColor = MaterialTheme.colorScheme.primary
+            // Прежний цвет обычных меток (до правки) — onSurfaceVariant, рисовался
+            // при α≈0.85. Текущий (после правки) — primary при α0.15 (как линии сетки).
+            val axisLabelColor = MaterialTheme.colorScheme.onSurfaceVariant
+            // Цвет обычных (некликабельных) меток — СЕРЕДИНА между прежним и
+            // текущим: усредняем оба цвета по hue и берём α = (0.85 + 0.15) / 2 = 0.5.
+            // Кликабельные крайние метки границ остаются яркими (primary), чтобы
+            // выделяться на их фоне.
+            val gridLabelColor = Color(
+                red = (axisLabelColor.red + primaryColor.red) / 2f,
+                green = (axisLabelColor.green + primaryColor.green) / 2f,
+                blue = (axisLabelColor.blue + primaryColor.blue) / 2f,
+                alpha = 0.5f
+            )
+
+            // Кисть и цвет для подписей осей (часовые метки + метки частот).
+            // Размер текста считается один раз по density; цвет переставляется
+            // прямо в DrawScope на случай смены темы.
+            val axisLabelPaint = remember(density) {
+                Paint().apply {
+                    textSize = with(density) { 9.sp.toPx() }
+                    isAntiAlias = true
+                    textAlign = Paint.Align.LEFT
+                }
+            }
+            val axisLabelBottomPx = with(density) { 11.dp.toPx() }
+            val axisLabelLeftPx = with(density) { 3.dp.toPx() }
             val errorColor = MaterialTheme.colorScheme.error
 
             // Границы контекстного окна точки в координатах области графика.
@@ -401,7 +422,30 @@ fun FrequencyGraph(
                 modifier = Modifier
                     .fillMaxSize()
                     .drawBehind {
+                        val width = size.width
+                        val height = size.height
                         drawGrid(primaryColor)
+                        // ВСЕ метки — ДО кривой, то есть в фоне, ПОД графиком.
+                        drawHourAxisLabels(
+                            width = width,
+                            height = height,
+                            paint = axisLabelPaint,
+                            textColor = gridLabelColor,
+                            bgColor = cardSurfaceColor.copy(alpha = 0.75f),
+                            bottomPx = axisLabelBottomPx
+                        )
+                        drawFrequencyAxisLabels(
+                            width = width,
+                            height = height,
+                            graphParams = graphParams,
+                            paint = axisLabelPaint,
+                            edgeTextColor = primaryColor,
+                            edgeBgColor = primaryColor.copy(alpha = 0.1f),
+                            midTextColor = gridLabelColor,
+                            midBgColor = cardSurfaceColor.copy(alpha = 0.75f),
+                            hzFormat = hzFormat,
+                            leftPx = axisLabelLeftPx
+                        )
                         drawGraphPaths(staticPaths, primaryColor)
                     }
                     // Отдельный слой под динамичный указатель: он единственный
@@ -579,28 +623,57 @@ fun FrequencyGraph(
                     }
                 }
 
-            }
+                // Прозрачные зоны касания поверх крайних меток частот (MAX сверху,
+                // MIN снизу), нарисованных в drawFrequencyAxisLabels. Геометрия
+                // синхронна с отрисовкой (padX/padY те же), чтобы зона точно
+                // накрывала видимую часть метки. Касание открывает диалог смены
+                // соответствующей границы диапазона. Метки лежат В ФОНЕ (до
+                // кривой), поэтому зоны касания — отдельные прозрачные Box-дети.
+                val edgeTextH = axisLabelPaint.textSize
+                val edgePadX = edgeTextH * 0.3f
+                val edgePadY = edgeTextH * 0.18f
+                val maxTw = axisLabelPaint.measureText(hzFormat.format(carrierRange.max))
+                val minTw = axisLabelPaint.measureText(hzFormat.format(carrierRange.min))
+                val edgeLabelLeft = axisLabelLeftPx - edgePadX
+                val maxLabelTop = -edgeTextH * 0.65f - edgePadY
+                val minLabelTop = heightPx - edgeTextH * 0.65f - edgePadY
 
-            // Ось Y: одна метка на весь диапазон вместо двух отдельных
-            // меток границ. Стоит в ПРАВОМ ВЕРХНЕМ углу графика — фиксировано,
-            // без разъезда с маркерами точек, чтобы её положение не «прыгало»
-            // при добавлении/выделении точек. Нажатие открывает диалог, где
-            // обе границы правятся двумя ручками.
-            Surface(
-                shape = RoundedCornerShape(4.dp),
-                color = primaryColor.copy(alpha = 0.1f),
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .offset(x = Y_AXIS_LABEL_OUTSET)
-                    .clickable { showRangeDialog = true }
-            ) {
-                Text(
-                    rangeFormat.format(carrierRange.min, carrierRange.max),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                    color = primaryColor,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset { IntOffset(edgeLabelLeft.toInt(), maxLabelTop.toInt()) }
+                        .size(
+                            width = with(density) { (maxTw + 2 * edgePadX).toDp() },
+                            height = with(density) { (edgeTextH + 2 * edgePadY).toDp() }
+                        )
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            editingRangeType = RangeType.MAX
+                            tempRangeValue = "%.0f".format(carrierRange.max)
+                            showRangeDialog = true
+                        }
+                ) {}
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset { IntOffset(edgeLabelLeft.toInt(), minLabelTop.toInt()) }
+                        .size(
+                            width = with(density) { (minTw + 2 * edgePadX).toDp() },
+                            height = with(density) { (edgeTextH + 2 * edgePadY).toDp() }
+                        )
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) {
+                            editingRangeType = RangeType.MIN
+                            tempRangeValue = "%.0f".format(carrierRange.min)
+                            showRangeDialog = true
+                        }
+                ) {}
+
             }
 
             // Контекстное окно редактирования точки — всплывающий слой
@@ -706,6 +779,9 @@ fun FrequencyGraph(
                 (POINT_POPUP_OUTER_PADDING - POINT_POPUP_SCREEN_MARGIN).roundToPx()
             }
             val popupSlidePx = with(density) { POPUP_SLIDE_DISTANCE.roundToPx() }.toFloat()
+            // Запас под тень окна в пикселях: на него расширяется слой
+            // анимации и на столько же сдвигается позиция слоя (см. ниже).
+            val shadowPadPx = with(density) { POINT_POPUP_SHADOW_PAD.toPx() }
 
             // Левый край окна по положению точки: центр окна идёт за точкой,
             // а у крайних точек окно выносится за границы области графика.
@@ -744,139 +820,138 @@ fun FrequencyGraph(
                 Box(
                     modifier = Modifier
                         // Положение читается на фазе раскладки, поэтому
-                        // переезд не перекомпонуется ни разу.
+                        // переезд не перекомпонуется ни разу. Из него вычтен
+                        // запас под тень: слой больше самого окна (padding
+                        // ниже), и без вычета окно уехало бы влево-вверх.
                         .offset {
                             IntOffset(
-                                popupLeftPx(popupAnchorX.value, popupSize.width).roundToInt(),
-                                (popupAnchorY.value + gapPx).roundToInt()
+                                (popupLeftPx(popupAnchorX.value, popupSize.width) - shadowPadPx).roundToInt(),
+                                (popupAnchorY.value + gapPx - shadowPadPx).roundToInt()
                             )
                         }
                         // Слайд: при появлении окно приезжает снизу вверх,
                         // при скрытии уезжает вниз. Слой, а не модификатор
                         // композиции: кадры анимации не трогают композицию.
+                        //
+                        // ВАЖНО: пока альфа меньше единицы, слой рисует
+                        // содержимое в отдельный буфер и обрезает рисование
+                        // по СВОИМ границам. Тень тела окна рисуется ВНЕ
+                        // прямоугольника окна — под ним, слева и справа, —
+                        // поэтому при слое точно по окну она срезается
+                        // полностью: на экране остаются лишь клочки тени в
+                        // скруглённых углах, то есть там, где тень попадает
+                        // внутрь прямоугольника окна. Границы слоя расширены
+                        // на [POINT_POPUP_SHADOW_PAD] (padding ниже) — тень
+                        // целиком внутри слоя и едет вместе с окном.
                         .graphicsLayer {
                             alpha = popupProgress.value
                             translationY = (1f - popupProgress.value) * popupSlidePx
                         }
-                        .onSizeChanged { popupSize = it }
-                        // Касания по самому окну не должны уходить на график
-                        // и закрывать его: съедаем их, без ripple.
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { }
-                        )
+                        // Запас под тень — ВНУТРИ слоя, поэтому padding
+                        // объявлен ПОСЛЕ graphicsLayer: так слой становится
+                        // больше окна. Наоборот (padding до graphicsLayer)
+                        // не работает — запас остался бы снаружи слоя, и
+                        // тень по-прежнему срезалась бы по границам окна.
+                        .padding(POINT_POPUP_SHADOW_PAD)
                 ) {
-                    PointEditorPopup(
-                        point = shownPoint,
-                        pointIndex = anchorIndex,
-                        carrierRange = carrierRange,
-                        autoExpandGraphRange = autoExpandGraphRange,
-                        // Уголок смотрит на точку, поэтому его смещение внутри
-                        // окна считается на фазе раскладки — по тому же
-                        // анимационному положению, что и само окно. Значение,
-                        // а не состояние: иначе каждый кадр переезда
-                        // перекомпоновывал бы всё окно.
-                        arrowOffsetX = {
-                            val x = popupAnchorX.value
-                            x - popupLeftPx(x, popupSize.width)
-                        },
-                        onCarrierFrequencyChange = { onPointCarrierChanged(anchorIndex, it) },
-                        onBeatFrequencyChange = { onPointBeatChanged(anchorIndex, it) },
-                        onTimeChange = { onPointTimeChanged(anchorIndex, it) },
-                        onRemove = { onRemovePoint(anchorIndex) }
-                    )
+                    Box(
+                        modifier = Modifier
+                            // Размер самого окна — БЕЗ запаса: по нему
+                            // считаются и центрирование под точкой, и
+                            // прямоугольник закрытия по касанию мимо окна.
+                            .onSizeChanged { popupSize = it }
+                            // Касания по самому окну не должны уходить на
+                            // график и закрывать его: съедаем их, без ripple.
+                            // Висит на ВНУТРЕННЕМ Box — зона касания ровно
+                            // по окну, без запаса под тень: касание впритык
+                            // к окну закрывает его, как и раньше.
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { }
+                            )
+                    ) {
+                        PointEditorPopup(
+                            point = shownPoint,
+                            pointIndex = anchorIndex,
+                            carrierRange = carrierRange,
+                            autoExpandGraphRange = autoExpandGraphRange,
+                            // Уголок смотрит на точку, поэтому его смещение
+                            // внутри окна считается на фазе раскладки — по
+                            // тому же анимационному положению, что и само
+                            // окно. Значение, а не состояние: иначе каждый
+                            // кадр переезда перекомпоновывал бы всё окно.
+                            arrowOffsetX = {
+                                val x = popupAnchorX.value
+                                x - popupLeftPx(x, popupSize.width)
+                            },
+                            onCarrierFrequencyChange = { onPointCarrierChanged(anchorIndex, it) },
+                            onBeatFrequencyChange = { onPointBeatChanged(anchorIndex, it) },
+                            onTimeChange = { onPointTimeChanged(anchorIndex, it) },
+                            onRemove = { onRemovePoint(anchorIndex) }
+                        )
+                    }
                 }
-            }
-
-            // Ось X - отметки каждые 3 часа, внутри графика снизу (не снаружи).
-            // Каждая метка — маленький «ярлык» на полупрозрачном фоне карточки,
-            // чтобы оставаться читаемой поверх кривой и сетки.
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .padding(bottom = 2.dp),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val hourLabelModifier = Modifier
-                    .background(cardSurfaceColor.copy(alpha = 0.75f), RoundedCornerShape(3.dp))
-                    .padding(horizontal = 2.dp)
-                Text("0", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("3", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("6", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("9", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("12", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("15", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("18", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("21", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
-                Text("24", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = hourLabelModifier)
             }
         }
         
     }
     
-    val rangeTitle = stringResource(R.string.carrier_range_title)
-    val closeLabel = stringResource(R.string.close)
+    val minCarrierTitle = stringResource(R.string.min_carrier_frequency)
+    val maxCarrierTitle = stringResource(R.string.max_carrier_frequency)
+    val frequencyLabel = stringResource(R.string.frequency_hz)
+    val okLabel = stringResource(R.string.ok)
+    val cancelLabel = stringResource(R.string.cancel)
 
     if (showRangeDialog) {
-        // Своё значение диапазона, а не carrierRange напрямую: смена границ
-        // пересобирает ВСЕ точки кривой и уходит в сервис воспроизведения,
-        // поэтому наружу отдаём только по отпусканию ручки, а не на каждом
-        // кадре перетаскивания — так же, как DiscreteSlider в настройках.
-        var sliderRange by remember(carrierRange.min, carrierRange.max) {
-            mutableStateOf(carrierRange.min..carrierRange.max)
-        }
-
         AlertDialog(
             onDismissRequest = { showRangeDialog = false },
-            title = { Text(rangeTitle) },
+            title = { Text(if (editingRangeType == RangeType.MIN) minCarrierTitle else maxCarrierTitle) },
             text = {
-                Column {
-                    // Живая подпись: пока ручка едет, график за диалогом
-                    // замирает, и значение видно только здесь.
-                    Text(
-                        rangeFormat.format(sliderRange.start, sliderRange.endInclusive),
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(Spacing.md))
-                    RangeSlider(
-                        value = sliderRange,
-                        onValueChange = { candidate ->
-                            sliderRange = applyRangeGap(candidate, sliderRange)
-                        },
-                        // Отпустили ручку — теперь диапазон можно отдать
-                        // наружу один раз, а не на каждое деление шкалы.
-                        onValueChangeFinished = {
-                            onCarrierRangeChange(sliderRange.start, sliderRange.endInclusive)
-                        },
-                        valueRange = CARRIER_RANGE_BOUNDS,
-                        steps = CARRIER_RANGE_STEPS,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    // Концы шкалы: видно, в каких пределах ходят ручки.
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            hzFormat.format(MIN_AUDIBLE_FREQUENCY),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.weight(1f))
-                        Text(
-                            hzFormat.format(MAX_FREQUENCY),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
+                OutlinedTextField(
+                    value = tempRangeValue,
+                    onValueChange = { tempRangeValue = it },
+                    label = { Text(frequencyLabel) },
+                    singleLine = true
+                )
             },
-            // Значение уже применено по отпусканию ручки, поэтому кнопка не
-            // «применяет», а закрывает — отмены здесь быть не может.
             confirmButton = {
-                TextButton(onClick = { showRangeDialog = false }) { Text(closeLabel) }
-            }
+                TextButton(onClick = {
+                    val value = tempRangeValue.toFloatOrNull()
+                    // Вместо молчаливого отказа при выходе за допустимые границы
+                    // ЗАЖИМАЕМ значение в пределы: нижний предел не может быть
+                    // меньше слышимого минимума (20 Гц), верхний — больше
+                    // максимума (2000 Гц). Дополнительно не даём границам
+                    // сблизиться ближе MIN_CARRIER_RANGE_SPAN_HZ.
+                    if (value != null) {
+                        if (editingRangeType == RangeType.MIN) {
+                            // Меняем только нижний предел. Значения < 20 Гц
+                            // зажимаются в 20, а не отвергаются молча; также не
+                            // даём ему подойти к верхнему ближе
+                            // MIN_CARRIER_RANGE_SPAN_HZ: [20 Гц, верхний − 100 Гц].
+                            val newMin = value.coerceIn(
+                                MIN_AUDIBLE_FREQUENCY,
+                                carrierRange.max - MIN_CARRIER_RANGE_SPAN_HZ
+                            )
+                            onCarrierRangeChange(newMin, carrierRange.max)
+                        } else {
+                            // Меняем только верхний предел. Значения > 2000 Гц
+                            // зажимаются в 2000, а не отвергаются молча; также
+                            // не даём ему подойти к нижнему ближе 100 Гц:
+                            // [нижний + 100 Гц, 2000 Гц].
+                            val newMax = value.coerceIn(
+                                carrierRange.min + MIN_CARRIER_RANGE_SPAN_HZ,
+                                MAX_FREQUENCY
+                            )
+                            onCarrierRangeChange(carrierRange.min, newMax)
+                        }
+                    }
+                    showRangeDialog = false
+                }) { Text(okLabel) }
+            },
+            dismissButton = { TextButton(onClick = {
+                showRangeDialog = false
+            }) { Text(cancelLabel) } }
         )
     }
 }
@@ -979,6 +1054,102 @@ private fun DrawScope.drawGrid(primaryColor: Color) {
     for (hour in 0..24 step 3) {
         val x = width * hour / 24
         drawLine(color = gridColor, start = Offset(x, 0f), end = Offset(x, height), strokeWidth = 1f)
+    }
+}
+
+/**
+ * Часовые метки по вертикальным линиям сетки. Формат — время суток
+ * (например, «3:00»), конец суток — «23:59». Каждая метка центрируется
+ * ровно ПО своей вертикальной линии, включая крайние (0:00 и 23:59) — они
+ * могут чуть обрезаться у граней графика, но стоят ПОСЕРЕДИНЕ линии.
+ * Рисуются ДО кривой — в фоне, под графиком и точками.
+ */
+private fun DrawScope.drawHourAxisLabels(
+    width: Float,
+    height: Float,
+    paint: Paint,
+    textColor: Color,
+    bgColor: Color,
+    bottomPx: Float
+) {
+    paint.textAlign = Paint.Align.LEFT
+    val baseline = height - bottomPx
+    val textSize = paint.textSize
+    val padX = textSize * 0.3f
+    val padY = textSize * 0.18f
+    for (hour in 0..24 step 3) {
+        val x = width * hour / 24
+        // Метки — в формате времени суток. Последняя линия (час 24) —
+        // это конец суток, поэтому показываем «23:59», а не «24:00».
+        val text = if (hour >= 24) "23:59" else "%d:00".format(hour)
+        val tw = paint.measureText(text)
+        // Центрируем ровно по линии (включая крайние — без прижима к краям).
+        val drawX = x - tw / 2f
+        drawRoundRect(
+            color = bgColor,
+            topLeft = Offset(drawX - padX, baseline - textSize - padY),
+            size = Size(tw + 2 * padX, textSize + 2 * padY),
+            cornerRadius = CornerRadius(padY * 2f)
+        )
+        paint.color = android.graphics.Color.argb(
+            (textColor.alpha * 255).toInt(),
+            (textColor.red * 255).toInt(),
+            (textColor.green * 255).toInt(),
+            (textColor.blue * 255).toInt()
+        )
+        drawContext.canvas.nativeCanvas.drawText(text, drawX, baseline, paint)
+    }
+}
+
+/**
+ * Частотные метки по горизонтальным линиям сетки. Частота каждой линии
+ * вычисляется из [GraphParams.yToCarrier] (т.е. из текущего carrierRange),
+ * поэтому метки автоматически пересчитываются при смене границ графика
+ * в пресете. Крайние линии (i=0 — MAX, i=4 — MIN) — границы диапазона:
+ * их метки центрируются ПО линии и рисуются ЦВЕТОМ (как прежние боковые
+ * метки границ), по нажатию на них открывается диалог смены границы.
+ * Все метки рисуются ДО кривой — в фоне, под графиком.
+ */
+private fun DrawScope.drawFrequencyAxisLabels(
+    width: Float,
+    height: Float,
+    graphParams: GraphParams,
+    paint: Paint,
+    edgeTextColor: Color,
+    edgeBgColor: Color,
+    midTextColor: Color,
+    midBgColor: Color,
+    hzFormat: String,
+    leftPx: Float
+) {
+    paint.textAlign = Paint.Align.LEFT
+    val textH = paint.textSize
+    val padX = textH * 0.3f
+    val padY = textH * 0.18f
+    for (i in 0..4) {
+        val y = height * i / 4
+        val carrier = graphParams.yToCarrier(y)
+        val text = hzFormat.format(carrier)
+        val tw = paint.measureText(text)
+        // Центрируем метку ровно ПО линии (включая крайние — без сдвига внутрь).
+        val centerY = y
+        val baseline = centerY + textH * 0.35f
+        val isEdge = i == 0 || i == 4
+        val textColor = if (isEdge) edgeTextColor else midTextColor
+        val bgColor = if (isEdge) edgeBgColor else midBgColor
+        drawRoundRect(
+            color = bgColor,
+            topLeft = Offset(leftPx - padX, baseline - textH - padY),
+            size = Size(tw + 2 * padX, textH + 2 * padY),
+            cornerRadius = CornerRadius(padY * 2f)
+        )
+        paint.color = android.graphics.Color.argb(
+            (textColor.alpha * 255).toInt(),
+            (textColor.red * 255).toInt(),
+            (textColor.green * 255).toInt(),
+            (textColor.blue * 255).toInt()
+        )
+        drawContext.canvas.nativeCanvas.drawText(text, leftPx, baseline, paint)
     }
 }
 
@@ -1334,57 +1505,12 @@ fun DraggablePoint(
 private const val TIME_STEP_MINUTES = 5
 
 /**
- * Приводит диапазон, пришедший из [RangeSlider], к допустимому: удерживает
- * минимальный зазор [CARRIER_RANGE_MIN_SPAN] между ручками и не выпускает их
- * за [CARRIER_RANGE_BOUNDS].
- *
- * [RangeSlider] сам не даёт ручкам разойтись (start <= end), но позволяет им
- * слипнуться. Какая именно ручка тянется, он тоже не сообщает, поэтому
- * двинувшийся конец ищется сравнением с [previous]: за одно касание меняется
- * только один из них.
- *
- * Второй конец остаётся на месте, пока движущийся не подойдёт к нему
- * вплотную — тогда он ОТТАЛКИВАЕТСЯ, сохраняя зазор: верхняя граница
- * уезжает вверх, если нижнюю тянут к ней снизу, и наоборот. Тем самым ручка
- * всегда идёт за пальцем, а не залипает.
- *
- * Границы [CARRIER_RANGE_BOUNDS] заведомо шире зазора, поэтому место для
- * отталкивания есть всегда: нижняя ручка не уходит выше
- * `MAX - SPAN`, верхняя не опускается ниже `MIN + SPAN`, и зазор выполняется
- * без взаимных уступок.
- *
- * Значения, не менявшие диапазон (повторный вызов с тем же значением),
- * возвращаются как есть: иначе у пресета с исторически узким диапазоном
- * (зазор < 100 Гц) метка скакнула бы сразу при открытии диалога, без касания.
+ * Какую границу несущей правит диалог: нижнюю ([MIN]) или верхнюю ([MAX]).
+ * Метки оси Y открывают диалог по отдельности, поэтому диалогу нужно знать,
+ * какую именно границу он сейчас меняет. Алгоритма смещения меток нет —
+ * позиции фиксированы, диалог просто подставляет текущее значение границы.
  */
-private fun applyRangeGap(
-    candidate: ClosedFloatingPointRange<Float>,
-    previous: ClosedFloatingPointRange<Float>
-): ClosedFloatingPointRange<Float> {
-    val startDelta = abs(candidate.start - previous.start)
-    val endDelta = abs(candidate.endInclusive - previous.endInclusive)
-    if (startDelta < CARRIER_RANGE_EPSILON && endDelta < CARRIER_RANGE_EPSILON) {
-        return previous
-    }
-
-    return if (startDelta >= endDelta) {
-        // Тянут нижнюю границу.
-        val start = candidate.start.coerceIn(
-            MIN_AUDIBLE_FREQUENCY, MAX_FREQUENCY - CARRIER_RANGE_MIN_SPAN
-        )
-        val end = maxOf(previous.endInclusive, start + CARRIER_RANGE_MIN_SPAN)
-            .coerceAtMost(MAX_FREQUENCY)
-        start..end
-    } else {
-        // Тянут верхнюю границу.
-        val end = candidate.endInclusive.coerceIn(
-            MIN_AUDIBLE_FREQUENCY + CARRIER_RANGE_MIN_SPAN, MAX_FREQUENCY
-        )
-        val start = minOf(previous.start, end - CARRIER_RANGE_MIN_SPAN)
-            .coerceAtLeast(MIN_AUDIBLE_FREQUENCY)
-        start..end
-    }
-}
+private enum class RangeType { MIN, MAX }
 
 /**
  * Вычисляет время из перетаскивания с шагом в 5 минут.

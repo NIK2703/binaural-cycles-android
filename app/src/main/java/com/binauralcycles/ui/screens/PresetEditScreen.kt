@@ -123,10 +123,23 @@ fun PresetEditScreen(
     // Очистка фокуса при скрытии клавиатуры
     val focusManager = LocalFocusManager.current
     
-    // Обработка системной кнопки "назад"
+    // Обработка системной кнопки "назад".
+    //
+    // Порядок важен: сначала закрывается то, что лежит ПОВЕРХ экрана, и
+    // только потом сам экран. Открытое контекстное окно точки — первый
+    // кандидат: «назад» закрывает его и оставляет пользователя в редакторе,
+    // а не выкидывает на список пресетов (и тем более не показывает диалог
+    // несохранённых изменений — окно точки ничего не сохраняет и не отменяет).
+    // Снятие выделения идёт тем же путём, что касание мимо окна и повторное
+    // нажатие на точку: набранное в полях применится по уходу окна.
     BackHandler(enabled = true) {
-        focusManager.clearFocus()
-        navigateBackWithCheck()
+        if (uiState.selectedPointIndex != null) {
+            focusManager.clearFocus()
+            viewModel.deselectPoint()
+        } else {
+            focusManager.clearFocus()
+            navigateBackWithCheck()
+        }
     }
     
     with(sharedTransitionScope) {
@@ -219,7 +232,8 @@ fun PresetEditScreen(
                     onValueChange = { presetName = it },
                     label = { Text(stringResource(R.string.preset_name)) },
                     modifier = Modifier
-                        .fillMaxWidth(),
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.lg),
                     singleLine = true
                 )
                 
