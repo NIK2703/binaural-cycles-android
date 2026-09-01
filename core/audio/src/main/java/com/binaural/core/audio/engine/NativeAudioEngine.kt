@@ -548,6 +548,13 @@ class NativeAudioEngine {
     private external fun nativeDebugIsEnabled(handle: Long): Boolean
     private external fun nativeDebugGetTimeScale(handle: Long): Float
 
+    // === НОВОЕ: виртуальные НАСТЕННЫЕ часы (сдвиг на весь процесс) ===
+    private external fun nativeDebugSetWallOffsetMs(handle: Long, offsetMs: Long)
+    private external fun nativeDebugAddWallOffsetMs(handle: Long, deltaMs: Long)
+    private external fun nativeDebugGetWallOffsetMs(handle: Long): Long
+    private external fun nativeDebugGetWallNowMs(handle: Long): Long
+    private external fun nativeDebugGetWallTimeOfDayMs(handle: Long): Long
+
     /**
      * Установить длительность батча для оптимизации энергопотребления
      * @param durationMinutes длительность в минутах (0 = отключено)
@@ -634,6 +641,43 @@ class NativeAudioEngine {
             val hh = h()
             if (hh != 0L) nativeDebugGetVirtualTime(hh) else 0
         } else 0
+
+    // === Виртуальные НАСТЕННЫЕ часы: публичные обёртки (no-op в release) ===
+    //
+    // Сдвиг ГЛОБАЛЬНЫЙ (один на процесс), handle нужен только чтобы дотянуться
+    // до JNI. Если движок ещё не создан, честно передаём 0 — нативный код
+    // handle всё равно игнорирует, а Kotlin-сдвиг живёт в DebugClock и не
+    // зависит от существования движка.
+
+    /** Задать абсолютный сдвиг настенных часов, мс. */
+    fun debugSetWallOffsetMs(offsetMs: Long) {
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            nativeDebugSetWallOffsetMs(h(), offsetMs)
+        }
+    }
+
+    /** Сдвинуть настенные часы на дельту, мс. Возвращает новый сдвиг. */
+    fun debugAddWallOffsetMs(deltaMs: Long): Long {
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            nativeDebugAddWallOffsetMs(h(), deltaMs)
+            return nativeDebugGetWallOffsetMs(h())
+        }
+        return 0L
+    }
+
+    /** Текущий нативный сдвиг, мс (для сверки с DebugClock). */
+    fun debugGetWallOffsetMs(): Long =
+        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugGetWallOffsetMs(h()) else 0L
+
+    /** Нативное «сейчас» в мс эпохи (для сверки). */
+    fun debugGetWallNowMs(): Long =
+        if (BuildConfig.DEBUG && !nativeUnavailable()) nativeDebugGetWallNowMs(h()) else 0L
+
+    /** Нативное время суток, СЕКУНДЫ с миллисекундной точностью (tod*1000). */
+    fun debugGetWallTimeOfDaySeconds(): Float =
+        if (BuildConfig.DEBUG && !nativeUnavailable()) {
+            nativeDebugGetWallTimeOfDayMs(h()) / 1000f
+        } else 0f
 
     // === Публичные методы для интерполяции (используются в UI для графика) ===
 

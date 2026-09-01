@@ -9,22 +9,44 @@
 #   bash tools/dbgxfade.sh              полный прогон (все фазы)
 #   bash tools/dbgxfade.sh "a b"        только фазы A и B
 #   PHASES="a b" bash tools/dbgxfade.sh
+#
+# Путь до adb и адрес устройства задаются снаружи — в Windows и в Termux они
+# разные, плюс adb-демон в песочнице поднимается заново:
+#   DEVICE=192.168.61.212:5555 ADB=/path/to/adb bash tools/dbgxfade.sh
+# DEVICE пуст — работаем по единственному подключённому устройству.
 set -u
 
 ADB=${ADB:-/home/nikita/tools/android-sdk/platform-tools/adb}
+DEVICE=${DEVICE:-}
 PKG=com.binauralcycles.debug
 ACTION=com.binauralcycles.debug.COMMAND
 LOG=/sdcard/Android/data/com.binauralcycles.debug/files/Download/binaural_stream.log
+
+# Демон может быть мёртв (или только что поднят) — подключаемся сами. Без этого
+# команды молча уходят в никуда: sed в cmd() вырезает сообщение об ошибке, и
+# прогон выглядит успешным, а в логе устройства нет ни одной строки.
+ADB_ARGS=()
+if [ -n "$DEVICE" ]; then
+  "$ADB" connect "$DEVICE" >/dev/null 2>&1
+  ADB_ARGS=(-s "$DEVICE")
+fi
+adb() { "$ADB" "${ADB_ARGS[@]}" "$@"; }
+
+if ! adb shell true >/dev/null 2>&1; then
+  echo "НЕТ УСТРОЙСТВА: adb не видит цель (DEVICE='${DEVICE}')." >&2
+  echo "Сначала: adb connect <ip:5555> — иначе прогон пройдёт впустую." >&2
+  exit 1
+fi
 
 cmd() {
     # --include-stopped-packages: поднять процесс после установки или
     # force-stop, когда пакет числится «остановленным» и система исключает его
     # из broadcast'ов. Активити при этом не запускается.
-    "$ADB" shell am broadcast -a "$ACTION" -p "$PKG" --include-stopped-packages \
+    adb shell am broadcast -a "$ACTION" -p "$PKG" --include-stopped-packages \
         --es cmd "'$1'" 2>&1 |
         sed -n '/Broadcast completed/,$p' | sed 's/^Broadcast completed: result=0, data="//; s/"$//'
 }
-logsize() { "$ADB" shell stat -c '%s' "$LOG" 2>/dev/null | tr -d '\r'; }
+logsize() { adb shell stat -c '%s' "$LOG" 2>/dev/null | tr -d '\r'; }
 
 # Все маркеры, по которым потом считаются тайминги
 MARKERS='beginHandoff|requestHandoff|fadeOutCurrent|fade-out\(|fade-in|start spec|prepare |releaseInternal|writerLoop exit|onStreamReleased|onStreamFullyStopped|createAudioTrack|VolumeShaper|RC1|growPacketBuffer|launchSpec|launchStream|discardPausedCurrent|resumeFromPaused|onResumeFromPaused|switch #'
@@ -33,15 +55,32 @@ MARKERS='beginHandoff|requestHandoff|fadeOutCurrent|fade-out\(|fade-in|start spe
 # прошлых экспериментов (packetdiv/packetgdiv/packetmax/buffer живут в
 # companion-объекте до перезапуска) и проверяет не дефолтную конфигурацию,
 # а случайную. --include-stopped-packages поднимает процесс без активити.
-"$ADB" shell am force-stop "$PKG" >/dev/null 2>&1
+adb shell am force-stop "$PKG" >/dev/null 2>&1
 sleep 1
 for _ in 1 2 3 4 5; do
-    [ -n "$("$ADB" shell pidof "$PKG" | tr -d '\r')" ] && break
+    [ -n "$(adb shell pidof "$PKG" | tr -d '\r')" ] && break
     cmd "status" >/dev/null
     sleep 2
 done
 
-echo "=== состояние до эксперимента (PID=$("$ADB" shell pidof "$PKG" | tr -d '\r')) ==="
+# force-stop убивает и воспроизведение, а фазы A–C первым же шагом шлют
+# `preset N`. Без запущенного сервиса они отвечают «Сервис не запущен» и
+# проходят впустую (в логе потом ноль `switch #`) — прогон выглядит зелёным,
+# но стресс-серию не проверяет. Поэтому стартуем playback до фаз и ждём
+# выхода в RUNNING; OFFSET снимаем ПОСЛЕ, чтобы стартовый шум не попал в лог
+# эксперимента.
+cmd "play" >/dev/null
+for _ in $(seq 1 20); do
+    cmd "state" | grep -q "state=RUNNING" && break
+    sleep 1
+done
+if ! cmd "state" | grep -q "state=RUNNING"; then
+    echo "НЕ УДАЛОСЬ ЗАПУСТИТЬ ВОСПРОИЗВЕДЕНИЕ: фазы A–C пройдут впустую." >&2
+    echo "Открой приложение один раз (или пошли \`ui\`) и повтори." >&2
+    exit 1
+fi
+
+echo "=== состояние до эксперимента (PID=$(adb shell pidof "$PKG" | tr -d '\r')) ==="
 cmd "status" | head -3
 echo
 
@@ -180,5 +219,5 @@ for p in $PHASES; do
 done
 
 echo "############ ЛОГ ЭКСПЕРИМЕНТА ############"
-"$ADB" shell "tail -c +$((OFFSET + 1)) '$LOG'" 2>&1 |
+adb shell "tail -c +$((OFFSET + 1)) '$LOG'" 2>&1 |
     grep -E "$MARKERS"

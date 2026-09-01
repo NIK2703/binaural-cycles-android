@@ -156,9 +156,8 @@
     <string name="hz">Hz</string>
     
     <!-- Frequency Graph -->
-    <string name="frequency_hz">Frequency (Hz)</string>
-    <string name="min_carrier_frequency">Min carrier frequency</string>
-    <string name="max_carrier_frequency">Max carrier frequency</string>
+    <string name="carrier_range_title">Carrier range</string>
+    <string name="carrier_range_format">%1$.0f-%2$.0f Hz</string>
     <string name="ok">OK</string>
     <string name="minutes_short">min</string>
     <string name="hours_short">h</string>

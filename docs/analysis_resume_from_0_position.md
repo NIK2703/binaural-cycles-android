@@ -83,14 +83,17 @@
 на `now`.
 
 ### Что делает возобновление
-- **Не устарел** → мягкое возобновление того же потока + **пропуск `Δ*rate`
-  кадров** из пакета: писатель сдвигает свой `offset` вперёд на `Δ*rate*frameBytes`
-  (перенося остаток на следующий пакет, если `Δ` выходит за конец текущего — см.
-  Шаг 3). Результат: после того как кольцо трека (≈ `R`, 3–10 с) доигрывает
-  старый хвост, звук идёт ровно для `now`. Указатель UI переякоривается на `now`
-  (`resumeUiTimelineFrom(now)`), чтобы индикатор графика показывал текущий момент.
-  Первые `R` секунд слышимый звук отстаёт от `now` на `Δ` — это переходный
-  участок (на 24-часовой кривой дрейф частоты за `R` пренебрежим), затем синхрон.
+- **Не устарел** → мягкое возобновление того же потока + **АБСОЛЮТНАЯ
+  перемотка внутрь пакета** на кадр `T = A0 + Δ·rate` (см. Шаг 3, реализацию
+  `planResumeSeek`/`applyResumeSeek`). Писатель ставит курсор ровно на этот
+  кадр — **вперёд ИЛИ назад** (пакет сохранён целиком в `directBuffer`, поэтому
+  отмотка назад возможна) — и **сбрасывает кольцо трека** через
+  `AudioTrack.flush()`, выбрасывая уже отданный треку PCM. Результат: звук
+  начинается ровно с `now` БЕЗ переходного участка — кольцо не доигрывает старый
+  хвост (его больше нет), а `frameBias` переякоривается по голове ПОСЛЕ flush,
+  поэтому `audibleCurveSeconds()` СРАЗУ равна `now`. Указатель UI переякоривается
+  на `now` (`resumeUiTimelineFrom(now)`), индикатор графика показывает текущий
+  момент с первой же секунды.
 - **Устарел** → пересборка потока (`resumeFromPaused`): свежий движок,
   `resumeCurveTimeSeconds = -1` ⇒ `prepare()` якорит кривую на `now`
   (`engine.setCurveTime(now)`). Часы сессии продолжаются (`resumeElapsedMs =
@@ -172,36 +175,47 @@ engine.setCurveTime(curveTod)
   `resumeCurveTimeSeconds = pausedTimeOfDay` — `resetSession()` уже занулил
   `pausedTimeOfDay`, старт и так свежий от `now`.
 
-В `BinauralStreamImpl`:
-- Добавить `@Volatile var pendingSkipFrames = 0L` (пишет нить управления в
-  `resume()`, читает писатель) и `@Volatile var skippedFrames = 0L` (накопленные
-  выброшенные кадры — участвуют в расчёте слышимой позиции).
-- `resume(skipSeconds: Float)`:
-  - `pendingSkipFrames = (skipSeconds * spec.sampleRate.value).toLong()`.
-  - UI-якорь на `now`: `nativeEngine?.resumeUiTimelineFrom(realTimeOfDaySeconds())`
-    вместо `audibleCurveSeconds()`.
-- `writerLoop()`: сразу после `if (paused) { parkWriter(); continue }` вставить
-  применение пропуска (до блока генерации пакета, чтобы остаток переносился на
-  следующий пакет):
-  ```
-  if (pendingSkipFrames > 0) {
-      val frame = frameBytes.toLong()            // байт на кадр (stereo float = 8)
-      val avail = ((packetBytes - offset) / frame).toLong()
-      val take = minOf(avail, pendingSkipFrames)
-      offset += (take * frame).toInt()
-      skippedFrames += take
-      pendingSkipFrames -= take
-      if (pendingSkipFrames > 0) continue        // добрать из следующего пакета
-  }
-  ```
-  - Защита от зацикливания: если `pendingSkipFrames` всё ещё > 0 после генерации
-    ≥ 2 пакетов — сбросить в 0 и залогировать ошибку (на практике не случится:
-    условие `dA <= dF` ограничивает пропуск окном одного пакета).
-- `audibleCurveSeconds()`: `eng.getAudibleTimeSeconds(head + skippedFrames,
-  generatedFrames)` — недоигранный буфер уменьшается на выброшенные кадры, слышимая
-  позиция совпадает с продвинутым фронтиром.
+В `BinauralStreamImpl` (реализовано — абсолютная перемотка + flush):
+- Поля: `pendingSeekFrame = AtomicLong(NO_SEEK)` (целевой АБС. кадр `T`; пишет
+  нить управления в `resume()`, атомарно забирает писатель), `frameBias =
+  AtomicLong(0)` (`кадр пакета = голова + bias` — смещение оси трека к оси
+  пакета, переякоривается каждой перемоткой), `seekReadyLatch` (латч готовности
+  перемотки к `play()`). Константы `NO_SEEK = -1L`, `SEEK_EPSILON_SECONDS = 0.05f`,
+  `SEEK_PREFILL_TIMEOUT_MS = 150L`, `SEEK_PREFILL_MARGIN_MS = MIN_WRITE_MARGIN_MS`.
+- `planResumeSeek(deltaSeconds)` (считает `T`):
+  - `NO_SEEK`, если `Δ ≤ SEEK_EPSILON_SECONDS`, нет трека/головы, либо
+    `unplayed ≤ 0` (писатель припаркован, снимок `head`/`generatedFrames`
+    согласован).
+  - иначе `A0 = head + frameBias`, `window = normalizeTimeOfDay(F0 − A0)`
+    (F0 = `frontierCurveSeconds()`), `skipFrames = Δ/window · unplayed`,
+    `T = A0 + skipFrames`. Δ — секунды КРИВОЙ; умножением на `rate` НЕ считаем,
+    чтобы в debug-режиме виртуальных часов масштаб сократился (без новых JNI).
+- `applyResumeSeek(target, offset, packetBytes)` (ТОЛЬКО в писателе, на паузе):
+  `track.flush()` выбрасывает уже отданный треку PCM — кольцо это КОПИИ кадров,
+  пропуском по пакету не убираемые; читает голову ПОСЛЕ flush (часть реализаций
+  её обнуляет) и ставит `frameBias = T − head`; `offset` = нужный кадр внутри
+  пакета (`index = (T − firstFrame).coerceIn(0, packetFrames) · frameBytes`,
+  вперёд ИЛИ назад). При неудачном flush деградирует к относительному пропуску
+  (старое поведение: кольцо доигрывает хвост, звук сходится с `now` через R с).
+- `writerLoop()`: сразу после `if (paused) { parkWriter(); continue }` —
+  `seekTarget = pendingSeekFrame.getAndSet(NO_SEEK)`; если не `NO_SEEK`, то
+  `offset = applyResumeSeek(...)` и `prefillUntilPlay = true`. После
+  `offset += written` считается число кадров в кольце; когда набралось
+  `prefillFrames = audioTrackBufferSize/frameBytes − rate·SEEK_PREFILL_MARGIN_MS/1000`,
+  взводится `seekReadyLatch` (кольцо наполнено — можно `play()` без разрыва;
+  трек ещё на паузе, голова стоит, конкуренции с микшером нет).
+- `resume(skipSeconds)`: ставит `pendingSeekFrame` + свежий `CountDownLatch(1)`
+  в `seekReadyLatch`, переякоривает UI на `normalizeTimeOfDay(A0 + Δ)` (т.е.
+  `now`), будит писателя, ждёт латч ≤ `SEEK_PREFILL_TIMEOUT_MS` (неблокирующе),
+  затем `applyShaper(from=0,to=1)` + `play()` (и `wakeWriter()` ещё раз — на
+  случай, если писатель заблокировался в `write()` на полном кольце).
+- `audibleCurveSeconds()`: `eng.getAudibleTimeSeconds(head + frameBias,
+  generatedFrames)` — после flush+bias слышимая позиция СРАЗУ равна `now`,
+  переходной задержки НЕТ (по построению).
+- `audibleCurveSecondsRaw()` == `audibleCurveSeconds()` (отдельная raw-мера
+  расхождения `raw − now` упразднена: переходная задержка устранена flush).
 - `getAudibleTimeOfDaySeconds()`/`getFrequenciesAtCurrentTime()` не меняются
-  (читают состояние движка; фронтир `m_curveTimeSeconds` пропуск не трогает).
+  (читают состояние движка; фронтир `m_curveTimeSeconds` перемотка не трогает).
 
 ### Шаг 4. Убрать лишнее сохранение позиции в hard-stop
 - `BinauralStreamManager.onStop()` для `RUNNING/FADE_IN`: `capturePauseMetrics()`
@@ -249,11 +263,14 @@ engine.setCurveTime(curveTod)
   - `onResumeFromPaused()` решает `Δ = normalize(now − A0)` против
     `window = normalize(F0 − A0)`;
     `Δ ≤ window` → `resumePausedStream(Δ)` (мягкое продолжение того же потока
-    с пропуском `Δ·rate` кадров из пакета), иначе `resumeFromPaused()`
-    (пересборка потока, свежий старт от `now`).
-  - `BinauralStreamImpl.resume(skipSeconds)` ставит `pendingSkipFrames`;
-    `writerLoop` выбрасывает голову пакета, `skippedFrames` учитывается в
-    `audibleCurveSeconds()`; UI-якорь ставится на `now` (`reanchorUiTimeline`).
+    с АБСОЛЮТНОЙ перемоткой на кадр `T = A0 + Δ·rate` внутри пакета + сброс
+    кольца трека `flush()`), иначе `resumeFromPaused()` (пересборка потока,
+    свежий старт от `now`).
+  - `BinauralStreamImpl.resume(skipSeconds)` ставит `pendingSeekFrame` (целевой
+    кадр `T` из `planResumeSeek`); писатель в `applyResumeSeek` делает
+    `AudioTrack.flush()` и переякоривает `frameBias`, `audibleCurveSeconds()`
+    СРАЗУ равна `now` (переходная задержка устранена); UI-якорь на `now`
+    (`reanchorUiTimeline`).
 - Шаг 4 выполнен: `onStop()` для `RUNNING/FADE_IN` больше не делает
   `capturePauseMetrics()` (hard-stop не возобновляется из паузы); снимок
   A0/F0 остался только в мягкой паузе (`onPause`/`finalizePause`).
@@ -263,10 +280,51 @@ engine.setCurveTime(curveTod)
   прогнано (нет под рукой запущенного сеанса), нужен полный прогон по
   `dbgverify_resume.sh` + стресс памяти.
 
+### Ревизия 2026-09-01: относительный пропуск → абсолютная перемотка + flush
+
+Первоначальный план (и черновик этого документа) опирался на **относительный**
+пропуск `Δ·rate` кадров от курсора записи. Это НЕПРАВИЛЬНО: между курсором и
+динамиком лежит кольцо `AudioTrack` (до `TRACK_BUFFER_MS` = 10 с, фактически
+≈ 5.5 с после потолка `MAX_TRACK_BUFFER_BYTES` = 2 МиБ) — уже отданные треку
+КОПИИ кадров. Пропуск по пакету их не убирает, поэтому первые R секунд звучит
+именно СТАРАЯ позиция — ровно тот симптом «продолжение с того же места»,
+который жалоба и описывала. Кольцо принадлежит треку, а не пакету, и сбросить
+его может только `AudioTrack.flush()`.
+
+Реализовано иначе (шаги выше обновлены под реальный код):
+- Цель перемотки **АБСОЛЮТНАЯ**: `T = A0 + Δ·rate` на сквозной оси
+  `generatedFrames` (А0 = слышимый кадр заморозки). Вычисляется через
+  окно `skipFrames = Δ/window · unplayed` (масштаб debug-часов сокращается).
+- `AudioTrack.flush()` сбрасывает кольцо; `frameBias` переякоривается по
+  голове ПОСЛЕ flush (платформы расходятся в том, обнуляют голову или нет).
+- Пакет сохранён в `directBuffer` целиком → перемотка ВПЕРЁД и НАЗАД (повторная
+  подача удержанного PCM) без перегенерации.
+- Писатель после flush **наполняет опустевшее кольцо** до `prefillFrames`
+  ДО `play()` (трек ещё на паузе — конкуренции с микшером нет); нить
+  управления ждёт латч ≤ `SEEK_PREFILL_TIMEOUT_MS` (150 мс, неблокирующе).
+- `audibleCurveSeconds()` после flush+bias равна `now` СРАЗУ — переходной
+  задержки нет ПО ПОСТРОЕНИЮ (отдельная `audibleCurveSecondsRaw` упразднена).
+
+**Компиляция:** `:app:assembleDebug` — BUILD SUCCESSFUL (2026-09-01,
+3m22s), нативный `libbinaural-engine.so` собран; бенефайсные варнинги —
+unused `timeScale` в `BinauralEngine.cpp` и «unable to strip» для .so.
+
+**Прогон на устройстве (2026-09-01):** POCO 23049PCD8G / Android 13,
+`com.binauralcycles.debug`, все 9 сценариев `tools/dbgverify_resume.sh`
+пройдены (`ALL PASS`). Главный инвариант держится везде: `Δ = audible − now`
+= 0.00 с (допуск 5 с). Окно свежести пакета на устройстве ≈ 601 с, поэтому
+Δ = 2 с шло по SOFT, а Δ = 1 ч / 2 ч и «часы назад» — по пересборке.
+Переход через полночь отработан: pause на 23:59:5x → `warp 30s` →
+`audible = 26 s`, то есть слышимое перешагнуло полночь, а не застряло на
+23:59. Подробности и расшифровка путей: `docs/resume_verification_handoff.md`.
+
 ### Что ещё проверить на устройстве (обязательно перед релизом)
-- `bash tools/dbgverify_resume.sh` — оба сценария + прерванный стоп→play:
-  маркер `audible ≈ now` (Δ < 5 с) и `audible != 0`.
-- `bash tools/dbgxfade.sh` (все 10 фаз) + стресс после правок — смотреть
-  ошибки в СЫРОМ логе устройства.
-- Переход через полночь (опц.): pause перед полночью, resume после →
-  `audible = now` (нормализация в `normalizeTimeOfDay` ловит переход).
+- [x] `bash tools/dbgverify_resume.sh` — 9 сценариев на виртуальных настенных
+      часах, маркер `audible ≈ now` (Δ < 5 с) и `audible != 0`.
+- [x] Переход через полночь: pause перед полночью, resume после →
+      `audible = now` (нормализация в `normalizeTimeOfDay` ловит переход).
+- [ ] `bash tools/dbgxfade.sh` (все 10 фаз) + стресс после правок — смотреть
+      ошибки в СЫРОМ логе устройства.
+- [ ] Ручные проверки, которые скрипт не покрывает: слышимость скачка на ухо
+      (flush не должен щёлкать), реальная (не виртуальная) пауза 10–60 с,
+      поведение при выключенном экране.

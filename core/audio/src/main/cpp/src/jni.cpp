@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include "BinauralEngine.h"
+#include "DebugWallClock.h"
 #include "Interpolation.h"
 #include <memory>
 #include <vector>
@@ -1098,6 +1099,85 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetTimeScale(
 #else
     (void)handle;
     return 1.0f;
+#endif
+}
+
+// ============================================================================
+// Виртуальные НАСТЕННЫЕ часы (сдвиг на весь процесс).
+//
+// Это второй, принципиально другой инструмент управления временем. VirtualClock
+// ускоряет время движка, но его носитель — сгенерированные сэмплы: на паузе
+// генерация стоит, значит и «now» стоит, и решатель возобновления (Δ = now − A0)
+// просто никогда не испытывается. Сдвиг настенных часов, наоборот, воспроизводит
+// ровно то, что происходит при реальной паузе: «сейчас» уезжает вперёд, а
+// пакет, голова трека и фронтир генерации остаются замороженными на месте.
+//
+// Сдвиг ГЛОБАЛЬНЫЙ, а не per-engine: Kotlin-сторона (PlaybackSpec.
+// realTimeOfDaySeconds) обязана видеть то же смещённое «now», что и нативный
+// якорь свежего потока в prepare(). handle принимается только ради единообразия.
+// ============================================================================
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugSetWallOffsetMs(
+    JNIEnv* env, jobject thiz, jlong handle, jlong offsetMs) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    binaural::debug::wallOffsetMs().store(static_cast<int64_t>(offsetMs),
+                                          std::memory_order_relaxed);
+    LOGD("debug wall offset set to %lld ms", static_cast<long long>(offsetMs));
+#else
+    (void)handle; (void)offsetMs;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugAddWallOffsetMs(
+    JNIEnv* env, jobject thiz, jlong handle, jlong deltaMs) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    binaural::debug::wallOffsetMs().fetch_add(static_cast<int64_t>(deltaMs),
+                                              std::memory_order_relaxed);
+    LOGD("debug wall offset += %lld ms", static_cast<long long>(deltaMs));
+#else
+    (void)handle; (void)deltaMs;
+#endif
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetWallOffsetMs(
+    JNIEnv* env, jobject thiz, jlong handle) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return static_cast<jlong>(binaural::debug::wallOffsetMs().load(std::memory_order_relaxed));
+#else
+    (void)handle;
+    return 0;
+#endif
+}
+
+/** Текущее время суток по СДВИНУТЫМ настенным часам, мс. */
+JNIEXPORT jlong JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetWallNowMs(
+    JNIEnv* env, jobject thiz, jlong handle) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    return static_cast<jlong>(binaural::debug::nowWallMs());
+#else
+    (void)handle;
+    return 0;
+#endif
+}
+
+/**
+ * Текущее время суток по сдвинутым часам, СЕКУНДЫ с дробной частью (×1000).
+ * Целое умножение на 1000 нужно, чтобы не гонять float через JNI и сохранить
+ * миллисекундную точность в отчётах верификации.
+ */
+JNIEXPORT jlong JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeDebugGetWallTimeOfDayMs(
+    JNIEnv* env, jobject thiz, jlong handle) {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    const float tod = binaural::debug::realTimeOfDaySeconds();
+    return static_cast<jlong>(tod * 1000.0f);
+#else
+    (void)handle;
+    return 0;
 #endif
 }
 

@@ -9,6 +9,8 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.binaural.core.audio.debug.DebugClock
+import com.binaural.core.audio.debug.DebugNativeClock
 import com.binaural.core.audio.stream.BinauralStreamImpl
 import com.binaural.core.audio.stream.PacketMemoryBudget
 import com.binaural.core.audio.model.SampleRate
@@ -109,6 +111,13 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "scale" -> setScale(arg)
             "vrun" -> setVirtualRunning(arg)
             "realtime" -> resetToRealTime()
+            // Виртуальное настенное время: проверка паузы БЕЗ реального ожидания.
+            "warp" -> warpTime(arg)
+            "totime" -> setTimeOfDay(arg)
+            "clock" -> clockInfo()
+            "clockreset" -> resetWallClock()
+            "vsnap" -> verifySnapshot()
+            "invcheck" -> invariantCheck()
             "delete", "del" -> withPreset(arg) { deletePreset(it) }
             "duplicate", "dup" -> withPreset(arg) { duplicatePreset(it) }
             "export" -> withPreset(arg) { exportPreset(it) }
@@ -177,13 +186,7 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         val s = service ?: return "Сервис не запущен"
         val audible = s.audibleTimeOfDaySeconds()
         val frontier = s.frontierTimeOfDaySeconds()
-        val now = runCatching {
-            // java.time: текущее локальное время с дробной долей секунды
-            // (minSdk 26 — приложение уже на нём).
-            val nowLdt = java.time.LocalDateTime.now()
-            nowLdt.toLocalTime().toSecondOfDay().toDouble() +
-                nowLdt.toLocalTime().nano / 1_000_000_000.0
-        }.getOrElse { 0.0 }
+        val now = nowTodSeconds()
         return "audible=${audible}s (${LocalTime.fromSecondOfDay(audible.coerceIn(0, 86399))}) " +
             "frontier=${frontier}s now=${"%05.2f".format(now)}s"
     }
@@ -203,14 +206,9 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         val s = service ?: return "Сервис не запущен"
         val raw = s.audibleTimeOfDaySecondsRaw()
         val frontier = s.frontierTimeOfDaySeconds()
-        val now = runCatching {
-            val nowLdt = java.time.LocalDateTime.now()
-            nowLdt.toLocalTime().toSecondOfDay().toDouble() +
-                nowLdt.toLocalTime().nano / 1_000_000_000.0
-        }.getOrElse { 0.0 }
+        val now = nowTodSeconds()
         // Нормализованная разница круглых суток: сколько слышимая отстаёт от now.
-        val d = now - raw
-        val lag = if (d < 0) d + 86400.0 else d
+        val lag = circularDelta(now, raw.toDouble())
         return "audibleraw=${raw}s (${LocalTime.fromSecondOfDay(raw.coerceIn(0, 86399))}) " +
             "frontier=${frontier}s now=${"%05.2f".format(now)}s " +
             "lag(now-raw)=${"%.2f".format(lag)}s"
@@ -227,6 +225,166 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         val s = service ?: return "Сервис не запущен"
         return s.resumeAccuracyReport()
             ?: "Нет снимка — сделайте pause, затем resume, и повторите `resumesnap`"
+    }
+
+    // ============= Виртуальное время (без реального ожидания) =============
+    //
+    // Проверять «возобновление играет ТЕКУЩИЙ момент суток» реальным ожиданием
+    // нельзя: чтобы дойти до границы окна (десятки секунд), пришлось бы сидеть
+    // минутами, а чтобы проверить переход через полночь — часами. VirtualClock
+    // тут не помощник: его носитель времени — сгенерированные сэмплы, на паузе
+    // генерация стоит, значит стоит и «now», и решатель (Δ = now − A0) не
+    // испытывается вовсе. Нужен сдвиг НАСТЕННЫХ часов: тогда «сейчас» уезжает
+    // мгновенно, а пакет, голова трека и фронтир остаются замороженными —
+    // ровно как при настоящей паузе (см. DebugWallClock.h).
+
+    /** Текущий момент суток по виртуальным часам (в release == реальные часы). */
+    private fun nowTodSeconds(): Double = DebugClock.realTimeOfDaySeconds().toDouble()
+
+    /** Разница времён суток по кругу: сколько [to] отстаёт от [from]. */
+    private fun circularDelta(from: Double, to: Double): Double {
+        var d = from - to
+        if (d < 0) d += 86400.0
+        return d
+    }
+
+    /**
+     * `warp <дельта>` — мгновенно прокрутить настенные часы.
+     *
+     * Понимает `5` (секунды), `5s`, `250ms`, `2m`, `1h`, `-3`, `-0.5s`.
+     * Всё, что связано со звуком, остаётся на месте: пакет, голова трека,
+     * фронтир генерации. Меняется только «сейчас» — то есть Δ паузы.
+     */
+    private fun warpTime(arg: String): String {
+        val ms = parseDurationMs(arg) ?: return "Не понял длительность \"$arg\". Примеры: 5, 5s, 250ms, 2m, 1h, -3"
+        val before = nowTodSeconds()
+        val totalOffset = DebugClock.warp(ms)
+        val after = nowTodSeconds()
+        return "warp ${ms}мс: now ${DebugClock.formatTimeOfDay(before.toFloat())} -> " +
+            "${DebugClock.formatTimeOfDay(after.toFloat())} " +
+            "(суммарный сдвиг ${totalOffset}мс = ${"%.2f".format(totalOffset / 1000.0)}с)"
+    }
+
+    /**
+     * `totime <сек|HH:MM[:SS]>` — поставить часы на конкретный момент суток.
+     * Берётся ближайший переход (вперёд или назад), поэтому `totime 23:59:55`
+     * аккуратно ставит нас в пяти секундах от полуночи.
+     */
+    private fun setTimeOfDay(arg: String): String {
+        val seconds = parseTimeOfDay(arg)
+            ?: return "Не понял время суток \"$arg\". Примеры: 3600, 01:00, 23:59:55"
+        DebugClock.setTimeOfDay(seconds)
+        return "now=${DebugClock.formatTimeOfDay(nowTodSeconds().toFloat())} " +
+            "(сдвиг ${DebugClock.offsetMs()}мс)"
+    }
+
+    /**
+     * `clock` — состояние виртуальных часов ОБЕИХ сторон (Kotlin и C++).
+     *
+     * `drift` — расхождение Kotlin- и нативного «сейчас». Ненулевой drift
+     * означает, что решатель и якорь свежего потока читают разное время, и
+     * ANY вывод верификации ненадёжен: сначала `clockreset`.
+     */
+    private fun clockInfo(): String {
+        val kOffset = DebugClock.offsetMs()
+        val kTod = nowTodSeconds()
+        val nOffset = DebugNativeClock.getOffsetMs()
+        val nTod = DebugNativeClock.getTimeOfDaySeconds().toDouble()
+        val drift = if (DebugNativeClock.available) {
+            var d = kTod - nTod
+            if (d > 43200.0) d -= 86400.0
+            if (d < -43200.0) d += 86400.0
+            d
+        } else Double.NaN
+        return "kotlin: offset=${kOffset}мс now=${DebugClock.formatTimeOfDay(kTod.toFloat())}\n" +
+            "native: offset=${nOffset}мс now=${DebugClock.formatTimeOfDay(nTod.toFloat())} " +
+            "(available=${DebugNativeClock.available})\n" +
+            "drift=${"%.3f".format(drift)}с ${if (!drift.isNaN() && kotlin.math.abs(drift) < 1.0) "OK" else "РАСХОЖДЕНИЕ"}"
+    }
+
+    /** `clockreset` — вернуть реальное время (обе стороны). */
+    private fun resetWallClock(): String {
+        DebugClock.reset()
+        return "Часы возвращены к реальному времени: offset=${DebugClock.offsetMs()}мс " +
+            "now=${DebugClock.formatTimeOfDay(nowTodSeconds().toFloat())}"
+    }
+
+    /**
+     * `vsnap` — ОДНОСТРОЧНЫЙ машинный снимок всего, что нужно верификации.
+     *
+     * Одна строка, потому что его разбирает shell: `grep -o 'lag=[0-9.]*'`.
+     * Поля:
+     *   state      — фаза актёра (RUNNING / PAUSED / HANDOFF / …);
+     *   playing    — флаг воспроизведения;
+     *   now        — текущий момент суток (по виртуальным часам), сек;
+     *   audible    — слышимая позиция С компенсацией пропуска, сек;
+     *   audibleraw — REAL'ная слышимая позиция (что звучит прямо сейчас), сек;
+     *   frontier   — F0, конец сгенерированного аудио, сек;
+     *   lag        — now − audibleraw по кругу: главная метрика (должен → 0);
+     *   window     — F0 − audible по кругу: окно, внутри которого пакет ещё жив;
+     *   warped     — сдвиг часов, мс (0 == реальное время).
+     */
+    private fun verifySnapshot(): String {
+        val s = service
+        val now = nowTodSeconds()
+        if (s == null) {
+            return "state=NONE playing=0 now=${"%.2f".format(now)} audible=0 audibleraw=0 " +
+                "frontier=0 lag=0.00 window=0.00 warped=${DebugClock.offsetMs()}"
+        }
+        val audible = s.audibleTimeOfDaySeconds().toDouble()
+        val raw = s.audibleTimeOfDaySecondsRaw().toDouble()
+        val frontier = s.frontierTimeOfDaySeconds().toDouble()
+        return "state=${s.managerState()} playing=${if (BinauralPlaybackService.isPlaying.value) 1 else 0} " +
+            "now=${"%.2f".format(now)} audible=${"%.2f".format(audible)} " +
+            "audibleraw=${"%.2f".format(raw)} frontier=${"%.2f".format(frontier)} " +
+            "lag=${"%.2f".format(circularDelta(now, raw))} " +
+            "window=${"%.2f".format(circularDelta(frontier, audible))} " +
+            "warped=${DebugClock.offsetMs()}"
+    }
+
+    /**
+     * Разовая проверка инварианта «слышимая позиция == сейчас».
+     *
+     * Фоновый сторож делает то же каждые 500 мс и пишет в лог, если расхождение
+     * держится дольше 3 с; эта команда — для ручного разбора прямо в момент,
+     * когда «что-то не так слышно».
+     */
+    private fun invariantCheck(): String {
+        val s = service ?: return "Сервис не запущен"
+        return s.invariantCheck()
+    }
+
+    /** Разбор длительности: 5 | 5s | 250ms | 2m | 1h | -0.5s. Возвращает мс. */
+    private fun parseDurationMs(raw: String): Long? {
+        val t = raw.trim().lowercase(Locale.US)
+        val m = Regex("^(-?[0-9]*\\.?[0-9]+)\\s*(ms|s|m|h)?$").matchEntire(t) ?: return null
+        val value = m.groupValues[1].toDoubleOrNull() ?: return null
+        val mult = when (m.groupValues[2]) {
+            "ms" -> 1.0
+            "m" -> 60_000.0
+            "h" -> 3_600_000.0
+            else -> 1000.0 // "s" или пусто — по умолчанию секунды
+        }
+        return (value * mult).toLong()
+    }
+
+    /** Разбор момента суток: секунды или HH:MM[:SS]. */
+    private fun parseTimeOfDay(raw: String): Double? {
+        val t = raw.trim()
+        if (t.contains(":")) {
+            val parts = t.split(":")
+            if (parts.size !in 2..3) return null
+            val h = parts[0].toIntOrNull() ?: return null
+            val m = parts[1].toIntOrNull() ?: return null
+            val sec = if (parts.size == 3) {
+                parts[2].toDoubleOrNull() ?: return null
+            } else {
+                0.0
+            }
+            if (h !in 0..23 || m !in 0..59) return null
+            return (h * 3600 + m * 60).toDouble() + sec
+        }
+        return t.toDoubleOrNull()
     }
 
     private fun togglePlayback(): String =

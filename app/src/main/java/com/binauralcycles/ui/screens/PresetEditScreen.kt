@@ -21,6 +21,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import com.binauralcycles.ui.components.*
+import com.binauralcycles.ui.theme.Spacing
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binauralcycles.R
 
@@ -206,9 +207,11 @@ fun PresetEditScreen(
                             }
                         }
                     }
-                    .padding(horizontal = 16.dp)
-                    .verticalScroll(rememberScrollState()),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(horizontal = Spacing.lg)
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = Spacing.lg),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(Spacing.lg)
             ) {
                 // Название пресета
                 OutlinedTextField(
@@ -216,12 +219,9 @@ fun PresetEditScreen(
                     onValueChange = { presetName = it },
                     label = { Text(stringResource(R.string.preset_name)) },
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 8.dp),
+                        .fillMaxWidth(),
                     singleLine = true
                 )
-                
-                Spacer(modifier = Modifier.height(16.dp))
                 
                 // График частот (используем редактируемую кривую)
                 val editingCurve = uiState.editingFrequencyCurve
@@ -276,19 +276,13 @@ fun PresetEditScreen(
                     )
                 }
                 
-                Spacer(modifier = Modifier.height(8.dp))
-                
                 // Настройки интерполяции пресета
                 PresetSettingsCard(
                     interpolationType = editingCurve?.interpolationType ?: com.binaural.core.audio.model.InterpolationType.LINEAR,
                     onInterpolationTypeChange = { viewModel.setInterpolationType(it) }
                 )
                 
-                Spacer(modifier = Modifier.height(16.dp))
-                
                 // Режим расслабления
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(8.dp))
                 RelaxationModeCard(
                     relaxationModeSettings = uiState.editingRelaxationModeSettings,
                     onRelaxationModeEnabledChange = { viewModel.setEditingRelaxationModeEnabled(it) },
@@ -301,7 +295,6 @@ fun PresetEditScreen(
                     onSmoothIntervalChange = { viewModel.setEditingSmoothIntervalMinutes(it) }
                 )
                 
-                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }

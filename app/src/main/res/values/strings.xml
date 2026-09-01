@@ -156,9 +156,8 @@
     <string name="hz">Гц</string>
     
     <!-- Frequency Graph -->
-    <string name="frequency_hz">Частота (Гц)</string>
-    <string name="min_carrier_frequency">Мин. несущая частота</string>
-    <string name="max_carrier_frequency">Макс. несущая частота</string>
+    <string name="carrier_range_title">Диапазон несущей</string>
+    <string name="carrier_range_format">%1$.0f-%2$.0f Гц</string>
     <string name="ok">OK</string>
     <string name="minutes_short">мин</string>
     <string name="hours_short">ч</string>

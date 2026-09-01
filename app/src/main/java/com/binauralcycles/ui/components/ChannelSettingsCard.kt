@@ -23,6 +23,7 @@ import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.core.audio.stream.PacketMemoryBudget
 import com.binauralcycles.R
+import com.binauralcycles.ui.theme.Spacing
 
 /**
  * Блок настроек интерполяции для пресета
@@ -36,7 +37,7 @@ fun PresetSettingsCard(
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
         // Интерполяция по точкам
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -56,7 +57,7 @@ fun PresetSettingsCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp)
-                    .padding(top = 8.dp),
+                    .padding(top = Spacing.sm),
                 verticalArrangement = Arrangement.spacedBy((-8).dp)
             ) {
                 // Первая строка: Ступенчатая, Линейная
@@ -137,7 +138,7 @@ fun VolumeNormalizationSettingsCard(
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
         // Нормализация громкости
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -155,7 +156,7 @@ fun VolumeNormalizationSettingsCard(
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = Spacing.sm)
             )
             Row(
                 modifier = Modifier
@@ -260,7 +261,7 @@ fun ChannelSwapSettingsCard(
 
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
         // Смена каналов: один ряд из трёх чипов (как у нормализации)
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -280,7 +281,7 @@ fun ChannelSwapSettingsCard(
                 ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = Spacing.sm)
             )
             Row(
                 modifier = Modifier
@@ -349,7 +350,7 @@ fun ChannelSwapSettingsCard(
                     Text(
                         text = stringResource(R.string.swap_points),
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = 8.dp)
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 0.dp, bottom = Spacing.sm)
                     )
                     Row(
                         modifier = Modifier
@@ -479,7 +480,7 @@ fun PowerSettingsCard(
     }
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
         // Интервал генерации буфера в минутах - слайдер (от 1 минуты до 1 часа)
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -492,7 +493,7 @@ fun PowerSettingsCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Spacing.sm))
             DiscreteSlider(
                 label = "",
                 value = currentMinutes,
@@ -502,8 +503,6 @@ fun PowerSettingsCard(
                 modifier = Modifier.fillMaxWidth()
             )
         }
-        
-        HorizontalDivider()
         
         // Качество аудио - строка чипов
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -518,7 +517,7 @@ fun PowerSettingsCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Spacing.sm))
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -861,7 +860,7 @@ fun RelaxationModeCard(
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
         // Выбор режима расслабления: 3 чипа в одной строке
         Column(modifier = Modifier.fillMaxWidth()) {
@@ -881,7 +880,7 @@ fun RelaxationModeCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(Spacing.sm))
             // Одна строка: Выкл, Расширенный, Плавный
             Row(
                 modifier = Modifier
@@ -936,7 +935,6 @@ fun RelaxationModeCard(
         
         // Настройки режима (показываем только когда режим включен)
         if (relaxationModeSettings.enabled) {
-            HorizontalDivider()
             
             // Настройки ступенчатого режима
             if (relaxationModeSettings.mode == RelaxationMode.STEP) {
@@ -970,8 +968,6 @@ fun RelaxationModeCard(
                     onValueChange = onTransitionPeriodChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
-                HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
             }
             
             // Настройки плавного режима
@@ -985,8 +981,6 @@ fun RelaxationModeCard(
                     onValueChange = onSmoothIntervalChange,
                     modifier = Modifier.padding(horizontal = 16.dp)
                 )
-                
-                HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
             }
             
             // Слайдер снижения несущей частоты
@@ -1053,5 +1047,52 @@ fun RelaxationModeCard(
                 )
             }
         }
+    }
+}
+
+/**
+ * Строка-переключатель для экрана настроек.
+ *
+ * Принципиально: у строки НЕТ внутренних вертикальных паддингов — высота ровно
+ * по контенту. Material3 [ListItem] для двух строк резервирует min-height 72.dp
+ * (`ListTokens.ListItemTwoLineContainerHeight`) и центрирует контент, из-за чего
+ * внутри блока получается ~14.dp сверху и снизу. Если мешать [ListItem] и голые
+ * группы-карточки в одном вертикальном ритме, зазор «заголовок раздела → первый
+ * элемент» разъезжается между разделами (у карточек внутренних паддингов нет).
+ * Поэтому ритм здесь задаёт ТОЛЬКО контейнер через [Arrangement.spacedBy], а
+ * каждый блок сам по себе не добавляет вертикальных отступов. Горизонтальный
+ * padding = [Spacing.lg] — для совпадения с контентом карточек (16 колонки + 16
+ * здесь = 32 от края).
+ */
+@Composable
+fun SettingsSwitchRow(
+    title: String,
+    description: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.lg),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        Spacer(modifier = Modifier.width(Spacing.lg))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange
+        )
     }
 }

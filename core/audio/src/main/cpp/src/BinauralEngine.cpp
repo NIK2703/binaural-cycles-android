@@ -16,6 +16,12 @@
 #include "../tests/android_stub.h"
 #endif
 
+// Виртуальные НАСТЕННЫЕ часы процесса (сдвиг DebugClock). Включены ВСЕГДА, а не
+// только под ENABLE_DEBUG_TIME_CONTROL: сдвиг обязан видеть и носитель дельт
+// UI-таймлайна (nowWallClockMs), иначе `warp` во время воспроизведения
+// молча прибавил бы свой сдвиг к прошедшему времени пакета.
+#include "DebugWallClock.h"
+
 #ifdef USE_NEON
 #include <arm_neon.h>
 #endif
@@ -65,9 +71,12 @@ inline float normalizeTimeOfDay(float t) {
     return r;
 }
 
+// Носитель ДЕЛЬТ UI-таймлайна. Обязан учитывать сдвиг виртуальных настенных
+// часов, иначе `warp` между anchorUiTimeline() и computeUiTimeSeconds()
+// прибавился бы к «прошедшему с якоря» времени целым сдвигом: указатель
+// графика уехал бы к фронтиру пакета (elapsed клампится span'ом).
 inline int64_t nowWallClockMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
+    return binaural::debug::nowWallMs();
 }
 
 // ===== Диагностика стыков пакетов (видна в debug-сборке через LOGD) =====
@@ -412,6 +421,13 @@ int32_t BinauralEngine::getCurrentTimeSeconds() const {
         // чтобы UI-индикатор и отображаемые частоты совпадали со звуком.
         return static_cast<int32_t>(computePlaybackTimeSeconds());
     }
+    // Виртуальные НАСТЕННЫЕ часы (сдвиг процесса): без него свежий старт
+    // (`prepare()` → `getCurrentTimeOfDay()` → сюда) якорился бы на реальное
+    // время суток, тогда как решатель возобновления в Kotlin читает сдвинутое.
+    // Расхождение сделало бы любую проверку «звук == сейчас» ложью.
+    if (binaural::debug::wallOffsetMs().load(std::memory_order_relaxed) != 0) {
+        return static_cast<int32_t>(binaural::debug::realTimeOfDaySeconds());
+    }
 #endif
     // Thread-safe получение текущего времени суток
     auto now = std::chrono::system_clock::now();
@@ -436,6 +452,13 @@ int32_t BinauralEngine::getCurrentTimeSeconds() const {
 // ось через localtime_r (как в getCurrentTimeSeconds/VirtualClock), т.к.
 // сырой %86400000 от эпохи дал бы UTC-сутки, а не локальные.
 float BinauralEngine::realTimeOfDaySeconds() {
+#ifdef ENABLE_DEBUG_TIME_CONTROL
+    // Сдвиг виртуальных настенных часов (см. getCurrentTimeSeconds): один и тот
+    // же сдвиг обязан видеть и якорь свежего старта, и Kotlin-решатель.
+    if (binaural::debug::wallOffsetMs().load(std::memory_order_relaxed) != 0) {
+        return binaural::debug::realTimeOfDaySeconds();
+    }
+#endif
     const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
     const std::time_t sec = static_cast<std::time_t>(nowMs / 1000);
@@ -701,13 +724,29 @@ int32_t BinauralEngine::getCurrentTimeOfDaySeconds() const {
     }
 #endif
     // J4: ЕДИНЫЙ источник с частотами UI (getFrequenciesAtCurrentTime ->
-    // computeUiTimeSeconds -> m_uiLastUiTimeSec): пока играем — та же плавная
-    // экстраполяция по якорю пакета, при паузе/остановке записи — то же
-    // замороженное значение конца сгенерированного диапазона. Оси X и Y
-    // индикатора рассинхронизироваться не могут по построению.
+    // computeUiTimeSeconds -> computeUiTimeSecondsUncached). Формула одна на
+    // двоих, поэтому оси X и Y индикатора рассинхронизироваться не могут.
     // До первого якоря — реальное время суток.
     if (m_uiAnchorWallMs.load(std::memory_order_relaxed) != 0) {
-        return static_cast<int32_t>(m_uiLastUiTimeSec.load(std::memory_order_relaxed));
+        // НЕ читаем сырой кэш.
+        //
+        // Раньше здесь было `return (int32_t)m_uiLastUiTimeSec`, и это была
+        // корневая причина бага «возобновление с 0:00»: кэш писался ТОЛЬКО в
+        // computeUiTimeSeconds() (опрос частот UI), тогда как страж
+        // m_uiAnchorWallMs ставился ещё и anchorUiTimeline(). После
+        // resetState() (кэш = 0) и setCurveTimeSeconds() -> anchorUiTimeline()
+        // геттер видел «якорь есть» и до первого опроса UI (~20-100 мс)
+        // отдавал протухший ноль. Хендоверы при правке пресета идут вплотную,
+        // поэтому вероятность попадания в окно стремилась к 1, а захваченный
+        // ноль защёлкивался: следующий поток якорился на 0, его кэш был 0,
+        // следующий захват снова читал 0.
+        //
+        // Теперь считаем той же формулой, что и частоты UI. При span = 0
+        // (свежий якорь из setCurveTimeSeconds / setPlaying) это ровно start;
+        // на паузе — замороженное значение; в играющем пакете — плавная
+        // экстраполяция. Оси X/Y индикатора по-прежнему не могут
+        // рассинхронизироваться: формула одна на двоих.
+        return static_cast<int32_t>(computeUiTimeSecondsUncached());
     }
     return getCurrentTimeSeconds();
 }
@@ -739,9 +778,17 @@ void BinauralEngine::anchorUiTimeline(float startSec, float endSec) {
     m_uiAnchorStartSec.store(startSec, std::memory_order_relaxed);
     m_uiAnchorEndSec.store(endSec, std::memory_order_relaxed);
     m_uiAnchorWallMs.store(nowWallClockMs(), std::memory_order_relaxed);
+    // ИНВАРИАНТ КОНСИСТЕНТНОСТИ КЭША: любая функция, меняющая якорь, обязана
+    // атомарно обновить и производный от него кэш. Геттеры не должны читать
+    // кэш, способный протухнуть относительно своего стража.
+    //
+    // Нормализация startSec обязательна: выше хранятся СЫРЫЕ значения (end
+    // может быть > 86400 при переходе через полночь), а кэш — это показанное
+    // UI время суток и лежит строго в [0, 86400).
+    m_uiLastUiTimeSec.store(normalizeTimeOfDay(startSec), std::memory_order_relaxed);
 }
 
-float BinauralEngine::computeUiTimeSeconds() {
+float BinauralEngine::computeUiTimeSecondsUncached() const {
 #ifdef ENABLE_DEBUG_TIME_CONTROL
     const float scale = m_virtualClock.isEnabled() ? m_virtualClock.getTimeScale() : 1.0f;
 #else
@@ -759,9 +806,7 @@ float BinauralEngine::computeUiTimeSeconds() {
     const int64_t wallMs = m_uiAnchorWallMs.load(std::memory_order_relaxed);
     if (wallMs == 0) {
         // Ещё не якорили (нет ни одного пакета) — прежнее поведение.
-        const float t = computePlaybackTimeSeconds();
-        m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
-        return t;
+        return computePlaybackTimeSeconds();
     }
 
     const float start = m_uiAnchorStartSec.load(std::memory_order_relaxed);
@@ -774,7 +819,13 @@ float BinauralEngine::computeUiTimeSeconds() {
     if (elapsed < 0.0f) elapsed = 0.0f;
     if (elapsed > span) elapsed = span;
 
-    const float t = normalizeTimeOfDay(start + elapsed);
+    return normalizeTimeOfDay(start + elapsed);
+}
+
+float BinauralEngine::computeUiTimeSeconds() {
+    const float t = computeUiTimeSecondsUncached();
+    // Кэш пишется ТОЛЬКО здесь (опрос частот UI): это «заморозка» для
+    // индикатора на паузе, а не источник истины для геттеров позиции.
     m_uiLastUiTimeSec.store(t, std::memory_order_relaxed);
     return t;
 }

@@ -6,6 +6,8 @@
 #include <ctime>
 #include <mutex>
 
+#include "DebugWallClock.h"
+
 namespace binaural {
 
 constexpr int32_t VC_SECONDS_PER_DAY = 86400;
@@ -123,10 +125,13 @@ private:
     // Реальное локальное время суток с миллисекундной дробью.
     // Целая и дробная части из ОДНОГО снимка часов (согласовано с
     // BinauralEngine::realTimeOfDaySeconds).
+    //
+    // Сдвиг виртуальных настенных часов (binaural::debug) прибавляется здесь же:
+    // VirtualClock — ИСТОЧНИК посева для sample-driven оси движка, и если он
+    // останется на реальных часах, то `vtime on` после перемотки настенных часов
+    // посадит кривую на реальное время суток и вся верификация паузы поедет.
     static float realTimeOfDaySeconds() {
-        const auto now = std::chrono::system_clock::now();
-        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()).count();
+        const int64_t nowMs = binaural::debug::nowWallMs();
         const std::time_t t = static_cast<std::time_t>(nowMs / 1000);
         std::tm tmInfo{};
 #if defined(_WIN32)

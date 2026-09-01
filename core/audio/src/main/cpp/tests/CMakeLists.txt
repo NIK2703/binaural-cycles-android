@@ -21,7 +21,8 @@ target_include_directories(binaural_engine_test_lib
     PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
     PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}  # Для android_stub.h
+    ${CMAKE_CURRENT_SOURCE_DIR}   # Для android_stub.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. # Для DebugWallClock.h (как в основном CMakeLists)
 )
 
 # Определения для тестов (заглушка ANDROID)
@@ -44,12 +45,14 @@ endif()
 add_executable(buffer_package_tests
     BufferPackageTest.cpp
     FrequencyTableTest.cpp
+    AnchorUiTimelineTest.cpp
 )
 
 target_include_directories(buffer_package_tests
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../include
-    ${CMAKE_CURRENT_SOURCE_DIR}  # Для android_stub.h
+    ${CMAKE_CURRENT_SOURCE_DIR}   # Для android_stub.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. # Для DebugWallClock.h
 )
 
 target_link_libraries(buffer_package_tests

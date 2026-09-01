@@ -1,5 +1,6 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -98,7 +99,14 @@ fun BottomPlaybackPanel(
                             text = hzDecimalFormat.format(beatFrequency),
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            // В светлой теме onSecondaryContainer уходит в почти чёрный —
+                            // метка частоты биений сливается с фоном. Берём контрастный
+                            // monet (primary), как уже делается для графика. В тёмной теме
+                            // onSecondaryContainer остаётся контрастным и его не трогаем.
+                            color = if (isSystemInDarkTheme())
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            else
+                                MaterialTheme.colorScheme.primary,
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                         )
                     }

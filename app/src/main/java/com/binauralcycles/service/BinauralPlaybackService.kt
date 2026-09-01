@@ -1209,6 +1209,13 @@ class BinauralPlaybackService : Service() {
     fun resumeAccuracyReport(): String? = audioEngine?.getResumeAccuracyReport()
 
     /**
+     * Проверка инварианта «слышимая позиция == сейчас» по требованию
+     * (debug-CLI `invcheck`). Фоновый сторож тикает сам и пишет в лог; эта
+     * команда — разовый снимок для ручного разбора.
+     */
+    fun invariantCheck(): String = audioEngine?.checkInvariantNow() ?: "Менеджер не создан"
+
+    /**
      * ФРОНТИР ГЕНЕРАЦИИ (секунды суток) — для диагностики (debug-CLI `audible`):
      * конец уже посчитанного аудио, правая граница окна актуальности пакета.
      */

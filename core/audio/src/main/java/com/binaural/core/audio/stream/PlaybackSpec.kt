@@ -1,5 +1,6 @@
 package com.binaural.core.audio.stream
 
+import com.binaural.core.audio.debug.DebugClock
 import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.RelaxationModeSettings
@@ -22,8 +23,20 @@ data class PlaybackSpec(
     val resumeAnchorMs: Long = 0L,
     /** RESUME: накопленное чистое время воспроизведения до паузы. */
     val resumeElapsedMs: Long = 0L,
-    /** Позиция кривой (секунды суток) для продолжения; -1 = свежий старт от настенных часов. */
-    val resumeCurveTimeSeconds: Int = -1,
+    /**
+     * Якорь кривой: позиция И её происхождение ([CurveAnchor]).
+     *
+     * Раньше здесь был голый `Int resumeCurveTimeSeconds` с сентинелом `-1`, и
+     * проверка `>= 0` не отличала легальную ПОЛНОЧЬ (0) от «якоря нет». Из-за
+     * этого литеральный 0 из протухшего захвата беспрепятственно становился
+     * якорем и защёлкивался (0 → 0 → 0). Теперь сентинел — только
+     * [CurveAnchor.NONE], а 0 — обычное время суток.
+     *
+     * Хэндофф (SETTINGS/PRESET_SWITCH/SAMPLE_RATE) якорь НЕ несёт: новый поток
+     * встаёт на «сейчас» в `prepare()`, от уходящего наследуются только фазы
+     * несущих и часы сессии (см. docs/handoff_anchor_zero_analysis_plan.md, P1).
+     */
+    val resumeAnchor: CurveAnchor = CurveAnchor.NONE,
     /** ФИКС RC-2: фаза несущих для бесшовного кроссфейда (null = свежий старт, фаза 0). */
     val resumeLeftPhase: Float? = null,
     val resumeRightPhase: Float? = null
@@ -36,7 +49,7 @@ data class PlaybackSpec(
 }
 
 /** Секунд в сутках — знаменатель нормализации времени суток. */
-private const val SECONDS_PER_DAY = 86_400f
+internal const val SECONDS_PER_DAY = 86_400f
 
 /**
  * РЕАЛЬНОЕ локальное время суток в секундах, с дробной долей.
@@ -52,12 +65,16 @@ private const val SECONDS_PER_DAY = 86_400f
  *
  * `java.time.LocalTime` сознательно не используется: он требует API 26 и
  * дешугаринга, а арифметика выше одна и та же на всех версиях.
+ *
+ * ВИРТУАЛЬНОЕ ВРЕМЯ: часы читаются через [DebugClock], а не напрямую из
+ * `System.currentTimeMillis()`. Сдвиг [DebugClock] в release всегда 0, поэтому
+ * боевое поведение не меняется ни на йоту, зато в debug-сборке верификация
+ * возобновления может мгновенно «прокрутить» паузу: настенные часы уезжают
+ * вперёд, а фронтир генерации остаётся замороженным — ровно как при реальной
+ * паузе, но без ожидания. Нативная сторона обязана видеть тот же сдвиг
+ * (см. `DebugWallClock.h`), иначе `now` решателя и якорь `prepare()` разойдутся.
  */
-internal fun realTimeOfDaySeconds(): Float {
-    val nowMs = System.currentTimeMillis()
-    val localMs = nowMs + java.util.TimeZone.getDefault().getOffset(nowMs)
-    return (localMs % 86_400_000L) / 1000f
-}
+internal fun realTimeOfDaySeconds(): Float = DebugClock.realTimeOfDaySeconds()
 
 /**
  * Нормализация разницы времён суток в [0, 86400).

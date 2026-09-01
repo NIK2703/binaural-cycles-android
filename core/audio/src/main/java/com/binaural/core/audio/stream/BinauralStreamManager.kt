@@ -57,6 +57,19 @@ class BinauralStreamManager(private val context: Context) {
         private const val MIN_BUFFER_INTERVAL_MS = 1_000
         /** Как часто подтверждаем удержание CPU во время воспроизведения. */
         private const val WAKE_LOCK_RENEW_MS = 5 * 60 * 1000L
+
+        // ---- Сторож инварианта «звук == сейчас» (только debug) ----
+        /** Как часто снимать слышимую позицию. */
+        private const val WATCHDOG_PERIOD_MS = 500L
+        /** Допустимое расхождение слышимой позиции с «сейчас», секунды. */
+        private const val WATCHDOG_TOL_SEC = 2f
+        /** Как долго расхождение должно ДЕРЖАТЬСЯ, чтобы считаться нарушением. */
+        private const val WATCHDOG_SUSTAIN_MS = 3_000L
+        /**
+         * Грейс после старта потока: стартовый пакет (2 с) и разгон кольца
+         * трека дают легальное расхождение, которое нечего логировать.
+         */
+        private const val WATCHDOG_GRACE_MS = 3_000L
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -229,20 +242,31 @@ class BinauralStreamManager(private val context: Context) {
     @Volatile
     private var lastResumeAccuracy: String? = null
 
-    // Непрерывность при сквозном переключении сегментов: точка кривой времени
-    // (секунды суток), с которой стартует СЛЕДУЮЩИЙ поток, и пройденное
-    // реальное время на момент переключения. Захватываются живыми из CURRENT в
-    // beginHandoff (и перезахватываются в requestHandoff, если за время фейда
-    // прилетела спека новее) и уезжают в следующий поток обогащённой спекой.
+    // Непрерывность при сквозном переключении сегментов.
     //
-    // Это не «бесшовный кроссфейд» в прежнем смысле — разрыв звука есть, и он
-    // сознательный. Здесь решается другая задача: новый поток обязан
-    // продолжить кривую и часы сессии с того места, где их застал переключатель,
-    // а не начать сначала.
-    private var switchCurveTod: Float? = null
+    // Наследуется ТОЛЬКO то, что нельзя вычислить заново: фазы несущих
+    // (иначе NEXT стартует с фазы 0 и интерферирует с уходящим — провал
+    // огибающей) и часы сессии ( elapsed ).
+    //
+    // ПОЗИЦИЯ КРИВОЙ НЕ НАСЛЕДУЕТСЯ, и это осознанно. Раньше следующий поток
+    // якорился на замороженную позицию старого, снятую в beginHandoff; за
+    // фейд-аут и релиз (0.3–1 с) она успевала отстать от настенных часов, и
+    // лаг КОПИЛСЯ от правки к правке (в логе шторма — минус 1 с за 7
+    // хендоверов). А когда захват попадал в окно FADE_IN, он читал протухший
+    // нативный кэш = 0, и цепочка 0 → 0 → 0 защёлкивалась навсегда.
+    //
+    // Теперь новый поток встаёт на «сейчас» в prepare() — единственной точке
+    // якорения. Скачок позиции кривой при этом не больше длительности
+    // хэндоффа (< 1 с кривой): для гладкой кривой неразличимо, зато инвариант
+    // «звук == сейчас» выполняется точно и без накопления лага.
+    // См. docs/handoff_anchor_zero_analysis_plan.md, P1.4.
     private var switchElapsedMs: Long = 0L
     private var switchLeftPhase: Float? = null
     private var switchRightPhase: Float? = null
+    // Состояние сторожа инварианта (только debug-сборка).
+    private var watchdogBreachSinceMs = 0L
+    private var watchdogGraceUntilMs = 0L
+
     // Маркер: ближайший launchStream — это продолжение handoff'а (не сбрасывать якорь).
     private var pendingHandoff = false
     // Wall-якорь начала хэндоффа: точный учёт сессионного времени при загрузке
@@ -633,17 +657,17 @@ class BinauralStreamManager(private val context: Context) {
             launchSpec(queue.poll() ?: return)
             return
         }
-        // Захватываем живые координаты CURRENT ДО его fade-out — точку на кривой,
-        // пройденное время и фазы несущих. Обогащённая спека уходит обратно в
-        // очередь: новый поток стартует ровно отсюда, без скачка частоты и без
-        // сброса часов сессии.
+        // Захватываем живые координаты CURRENT ДО его fade-out: пройденное
+        // время и фазы несущих. Обогащённая спека уходит обратно в очередь:
+        // новый поток продолжит часы сессии и фазу, а позицию кривой поставит
+        // на «сейчас» сам prepare().
         captureContinuity()
         pendingHandoff = true
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
         queue.offer(enriched)
         StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: фейд-аут CURRENT, загрузка " +
-            "spec#${enriched.serial} — после полного релиза (curveTod=$switchCurveTod, " +
+            "spec#${enriched.serial} — после полного релиза (якорь=NONE→now в prepare(), " +
             "elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
 
         // Фейд-аут — единственное, что происходит до момента тишины. Рампа
@@ -745,7 +769,7 @@ class BinauralStreamManager(private val context: Context) {
                     // Никакой подстановки saved-позиции: прерванный стоп — это
                     // тот же свежий старт, звук обязан соответствовать текущему
                     // моменту суток. Якорь поставит prepare()
-                    // (resumeCurveTimeSeconds = -1 → engine.getCurrentTimeOfDay()).
+                    // (resumeAnchor = NONE → engine.getCurrentTimeOfDay()).
                     StreamLogger.d(TAG, "onStreamFullyStopped: STOP -> play пришёл во время фейда, " +
                         "свежий старт spec#${finalSpec.serial} от текущего времени суток")
                     sessionSpec = finalSpec
@@ -997,9 +1021,15 @@ class BinauralStreamManager(private val context: Context) {
      * Три ветки:
      *  - настройки менялись на паузе → пересборка потока (звучал бы старый
      *    конфиг);
-     *  - `now` внутри [A0, F0] → мягкое продолжение того же потока с
-     *    пропуском Δ = now − A0 кадров из пакета;
+     *  - `now` внутри [A0, F0] → мягкое продолжение того же потока: писатель
+     *    перематывается на кадр `T = A0 + Δ·rate` (Δ = now − A0) и сбрасывает
+     *    кольцо трека. Пакет сохранён, переходной задержки нет;
      *  - `now` за F0 → пакет устарел, пересборка потока.
+     *
+     * Граница ветвей именно F0, а не «сколько реально можно пропустить»:
+     * сброс кольца делает пропускаемой ЛЮБУЮ величину вплоть до фронтира,
+     * потому что целевой кадр отсчитывается от слышимой позиции A0, а не от
+     * курсора записи.
      */
     private fun onResumeFromPaused() {
         if (resumeInFlight) {
@@ -1088,11 +1118,12 @@ class BinauralStreamManager(private val context: Context) {
                 val frameErr = 1.0f / sr
                 append("skipFrames=$skipFrames (${"%.1f".format(delta * sr)} ожидалось)\n")
                 append("quantizationError≤${"%.3f".format(frameErr)}s @${sr}Гц\n")
-                // Переходная задержка до сходимости = длина замороженного кольца
-                // трека = lead (window). За это время СЛЫШИМАЯ (raw) отстаёт от
-                // now ровно на Δ, затем сходится. Компенсированный `audible`
-                // уже равен now и эту задержку прячет.
-                append("transientLagUntilConverge≈${windowSec}s (raw audible lags now by Δ=$delta)\n")
+                // Переходной задержки НЕТ: перемотка ставит курсор на абсолютный
+                // кадр T = A0 + Δ·rate и СБРАСЫВАЕТ кольцо трека (flush), иначе
+                // первые R секунд звучал бы PCM, записанный до паузы. Пакет при
+                // этом сохранён целиком — сбрасываются только копии, уже
+                // отданные треку.
+                append("transientLag=0s (кольцо сброшено flush, пакет сохранён)\n")
             } else {
                 append("Δ/окно: — (пересборка, звук стартует с текущего момента суток)\n")
             }
@@ -1114,15 +1145,16 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     /**
-     * Мягкое возобновление: тот же поток и тот же пакет, но с пропуском
-     * устаревшей головы.
+     * Мягкое возобновление: тот же поток и тот же пакет, но с перемоткой на
+     * позицию, соответствующую текущему моменту суток.
      *
-     * Пакет не перегенерируется, фазы не сбрасываются. Единственное, что
-     * меняется, — смещение чтения: писатель выбрасывает первые
-     * [skipSeconds]·rate кадров, потому что они соответствуют уже прошедшему
-     * времени суток. Слышимый звук догоняет текущий момент через R секунд
-     * (кольцо трека доигрывает старый хвост) — на 24-часовой кривой дрейф
-     * частоты за это время пренебрежим.
+     * Пакет НЕ перегенерируется, фазы не сбрасываются. Меняется только точка
+     * чтения: писатель встаёт на кадр `T = A0 + Δ·rate` — вперёд или назад,
+     * пакет в памяти цел — и СБРАСЫВАЕТ кольцо трека, где лежат копии PCM,
+     * записанные до паузы. Без сброса кольца первые R секунд звучала бы
+     * СТАРАЯ позиция (кольцо принадлежит треку, а не пакету, и пропуском
+     * кадров пакета его не убрать) — ровно это и выглядело как «продолжение
+     * с той же позиции».
      *
      * @param skipSeconds Δ = now − A0; 0 — пакет не успел устареть, продолжаем
      *        ровно с того же сэмпла.
@@ -1199,15 +1231,24 @@ class BinauralStreamManager(private val context: Context) {
                 volume = volume,
                 reason = SpecReason.RESUME,
                 resumeAnchorMs = System.currentTimeMillis() - accumulatedMs,
-                resumeElapsedMs = accumulatedMs
-                // resumeCurveTimeSeconds ОСТАЁТСЯ -1 — сознательно.
+                resumeElapsedMs = accumulatedMs,
+                // Якорь и фазы сбрасываются ЯВНО, а не «по умолчанию из base».
                 //
-                // СУТЬ ПРИЛОЖЕНИЯ: возобновление играет ритм для ТЕКУЩЕГО
-                // момента суток. Подставлять сюда pausedTimeOfDay (как делал
-                // предыдущий фикс) — значит превратить паузу в «перемотку
-                // назад»: после десятиминутной паузы звук продолжал бы с
-                // десятиминутной давности точки кривой. prepare() при
-                // resumeCurveTimeSeconds = -1 якорит кривую на now явно.
+                // СУТЬ ПРИЛОЖЕНИЯ: пересборка играет ритм для ТЕКУЩЕГО момента
+                // суток. Подставлять сюда pausedTimeOfDay (как делал предыдущий
+                // фикс) — значит превратить паузу в «перемотку назад»: после
+                // десятиминутной паузы звук продолжал бы с десятиминутной
+                // давности точки кривой. prepare() при [CurveAnchor.NONE]
+                // якорит кривую на now явно.
+                //
+                // Явный сброс обязателен потому, что [base] берётся из очереди
+                // или из [sessionSpec] и теоретически может нести внешний якорь:
+                // унаследовав его, «свежий старт» молча приземлился бы на
+                // старую точку кривой — ровно то же «продолжение с той же
+                // позиции», только уже на пути пересборки.
+                resumeAnchor = CurveAnchor.NONE,
+                resumeLeftPhase = null,
+                resumeRightPhase = null
                 // Часы сессии при этом продолжаются (resumeElapsedMs =
                 // accumulatedMs): пауза в elapsed не идёт.
             )
@@ -1270,32 +1311,77 @@ class BinauralStreamManager(private val context: Context) {
         }
     }
 
-    // ---- ФИКС 3. Непрерывность сквозного переключения сегментов ----
-    private fun captureContinuity() {
-        // Читаем ЖИВЫЕ координаты старого потока (ещё играет). Если current уже
-        // нет (fallback), оставляем последнее захваченное значение.
-        current?.let {
-            switchCurveTod = it.getCurrentCurveTimeSeconds()
-            switchElapsedMs = it.getElapsedMs()
-            // ФИКС RC-2: живые фазы несущих для бесшовного кроссфейда.
-            it.getPhases()?.let { (l, r) ->
-                switchLeftPhase = l
-                switchRightPhase = r
-            }
-        }
+    // ---- Непрерывность сквозного переключения сегментов ----
+
+    /**
+     * Состояния, в которых CURRENT ещё ЖИВОЙ и его можно опрашивать.
+     *
+     * Захват из `PREPARING`, `IDLE`, `PAUSED` (без живого трека) и из окон
+     * фейд-аута в стоп запрещён: там «текущая позиция» либо ещё не
+     * определена, либо уже не имеет отношения к звуку, который услышит
+     * пользователь. Окно «current жив, движок мёртв» отсекается отдельной
+     * проверкой [BinauralStreamImpl.hasLiveEngine].
+     */
+    private fun continuityCaptureAllowed(): Boolean = when (state) {
+        ManagerState.FADE_IN, ManagerState.RUNNING, ManagerState.HANDOFF, ManagerState.PAUSED -> true
+        ManagerState.IDLE, ManagerState.PREPARING,
+        ManagerState.FADE_OUT_PAUSE, ManagerState.FADE_OUT_STOP -> false
     }
 
+    /**
+     * Снять с CURRENT то, что нельзя вычислить заново: часы сессии и фазы
+     * несущих. Позиция кривой НЕ снимается — следующий поток встанет на
+     * «сейчас» (см. комментарий к [switchElapsedMs]).
+     *
+     * Позиция всё же читается, но только для ДИАГНОСТИКИ: штормовые прогоны
+     * asserting'ом ловят «`curveTod=0` при `now ≫ 0`» — ровно тот признак, по
+     * которому баг был найден. Ошибкой воспроизведения она больше не является:
+     * поле в спеку не уезжает, поэтому рассинхрон исключён по построению.
+     */
+    private fun captureContinuity() {
+        val s = current ?: return
+        if (!continuityCaptureAllowed()) {
+            StreamLogger.d(TAG, "captureContinuity: состояние $state — захват запрещён, " +
+                "наследуются только ранее снятые фазы")
+            return
+        }
+        if (!s.hasLiveEngine()) {
+            StreamLogger.w(TAG, "captureContinuity: движок spec#${s.spec.serial} уже разрушен — " +
+                "координаты нечитаемы, NEXT якорится на «сейчас»")
+            return
+        }
+        switchElapsedMs = s.getElapsedMs()
+        // ФИКС RC-2: живые фазы несущих для бесшовного кроссфейда.
+        s.getPhases()?.let { (l, r) ->
+            switchLeftPhase = l
+            switchRightPhase = r
+        }
+        val tod = s.getCurrentCurveTimeSeconds()
+        when {
+            tod == null -> StreamLogger.w(TAG, "captureContinuity: позиция кривой недоступна")
+            !CurveAnchorRules.isPlausible(tod, realTimeOfDaySeconds()) ->
+                StreamLogger.w(TAG, "captureContinuity: позиция кривой $tod далека от " +
+                    "now=${"%.1f".format(realTimeOfDaySeconds())} — как якорь она была бы " +
+                    "отвергнута валидацией (сейчас это только диагностика)")
+        }
+        StreamLogger.d(TAG, "captureContinuity spec#${s.spec.serial}: curveTod=$tod " +
+            "(диагностика, якорем не становится), elapsed=${switchElapsedMs}ms, " +
+            "phase=$switchLeftPhase/$switchRightPhase")
+    }
+
+    /**
+     * Обогатить спеку наследуемой непрерывностью.
+     *
+     * ЯКОРЯ КРИВОЙ ЗДЕСЬ НЕТ И БЫТЬ НЕ ДОЛЖНО: `resumeAnchor` остаётся
+     * [CurveAnchor.NONE], и `prepare()` сам возьмёт «сейчас». Этим убирается
+     * весь канал протухшего захвата — а с ним и защёлкивание 0 → 0.
+     */
     private fun enrichForContinuity(spec: PlaybackSpec): PlaybackSpec {
         // Отладочный скраб — ЯВНАЯ установка времени оператором, непрерывность
-        // её не перебивает. Порядок в prepare(): сначала nativeCustomizer
-        // (applyNativeDebug -> engine.debugScrub), ПОТОМ
-        // setCurveTime(spec.resumeCurveTimeSeconds) — то есть подставленное
-        // здесь текущее время CURRENT молча вернуло бы NEXT на старую позицию,
-        // и перемотка перестала бы работать.
+        // её не перебивает: prepare() и так якорится по оси самого движка,
+        // которую скраб уже переставил.
         if (debugScrubPending != null) return spec
-        val tod = switchCurveTod ?: return spec
         return spec.copy(
-            resumeCurveTimeSeconds = tod.toInt(),
             resumeElapsedMs = switchElapsedMs,
             resumeLeftPhase = switchLeftPhase,
             resumeRightPhase = switchRightPhase
@@ -1303,7 +1389,6 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     private fun resetContinuity() {
-        switchCurveTod = null
         switchElapsedMs = 0L
         switchLeftPhase = null
         switchRightPhase = null
@@ -1373,6 +1458,10 @@ class BinauralStreamManager(private val context: Context) {
             listener?.onError("stream start failed")
             updateWakeLock()
         } else {
+            // Грейс сторожу: стартовый пакет и разгон кольца дают легальное
+            // расхождение слышимой позиции с «сейчас».
+            watchdogGraceUntilMs = System.currentTimeMillis() + WATCHDOG_GRACE_MS
+            watchdogBreachSinceMs = 0L
             StreamLogger.d(TAG, "launchStream: start spec#${stream.spec.serial} успешно, fade-in идёт")
         }
     }
@@ -1445,6 +1534,90 @@ class BinauralStreamManager(private val context: Context) {
         )
     }
 
+    // ============================================================ Сторож инварианта
+
+    /**
+     * Сторож инварианта «слышимая позиция кривой == сейчас».
+     *
+     * Generic-проверка на ВЕСЬ класс ошибок «звук уехал от настенных часов», а
+     * не только на тот, с которого начался разбор протухшего кэша. Любая
+     * будущая правка якорения, паузы или кроссфейда либо держит |Δ| в пределах
+     * допуска, либо попадает в этот лог.
+     *
+     * Почему выдерживается [WATCHDOG_SUSTAIN_MS], а не срабатывает сразу:
+     * легальные переходные процессы (стартовый пакет 2 с, доигрывание кольца
+     * трека, fade-in) дают кратковременное расхождение. Устойчивое
+     * расхождение — это уже нарушение сути приложения.
+     *
+     * Только debug: в release [BuildConfig.DEBUG] = false и сторож не тикает.
+     */
+    private val invariantWatchdog = object : Runnable {
+        override fun run() {
+            if (!BuildConfig.DEBUG) return
+            watchdogBreachSinceMs = checkInvariant(watchdogBreachSinceMs)
+            if (isActiveState()) actor.postDelayed(this, WATCHDOG_PERIOD_MS)
+        }
+    }
+
+    /** Возвращает новое значение «нарушение длится с» (0 = нарушения нет). */
+    private fun checkInvariant(breachSinceMs: Long): Long {
+        if (!isActiveState()) return 0L
+        if (System.currentTimeMillis() < watchdogGraceUntilMs) return 0L
+        val s = currentRef.get()
+        if (s == null || !s.hasLiveEngine()) return 0L
+        // Некомпенсированная позиция: «что реально в динамике», без поправки
+        // на перемотку. Компенсированная [BinauralStreamImpl.audibleCurveSeconds]
+        // скрыла бы настоящее отставание звука.
+        val raw = s.audibleCurveSecondsRaw() ?: return 0L
+        val now = realTimeOfDaySeconds()
+        val delta = CurveAnchorRules.circularDistance(raw, now)
+        if (delta <= WATCHDOG_TOL_SEC) {
+            if (breachSinceMs != 0L) {
+                StreamLogger.d(TAG, "INVARIANT: расхождение закрылось за " +
+                    "${System.currentTimeMillis() - breachSinceMs}мс (Δ=${"%.2f".format(delta)}с)")
+            }
+            return 0L
+        }
+        val since = if (breachSinceMs != 0L) breachSinceMs else System.currentTimeMillis()
+        val held = System.currentTimeMillis() - since
+        if (held >= WATCHDOG_SUSTAIN_MS) {
+            StreamLogger.e(TAG, "INVARIANT НАРУШЕН: слышимая позиция ${"%.1f".format(raw)} " +
+                "отличается от now=${"%.1f".format(now)} на ${"%.2f".format(delta)}с " +
+                "уже ${held}мс (порог ${WATCHDOG_TOL_SEC}с / ${WATCHDOG_SUSTAIN_MS}мс); " +
+                "state=$state spec#${s.spec.serial} reason=${s.spec.reason} " +
+                "anchor=${s.spec.resumeAnchor} frontier=${"%.1f".format(s.frontierCurveSeconds())}")
+        }
+        return since
+    }
+
+    private fun startInvariantWatchdog() {
+        if (!BuildConfig.DEBUG) return
+        actor.removeCallbacks(invariantWatchdog)
+        watchdogBreachSinceMs = 0L
+        actor.postDelayed(invariantWatchdog, WATCHDOG_PERIOD_MS)
+    }
+
+    private fun stopInvariantWatchdog() {
+        actor.removeCallbacks(invariantWatchdog)
+        watchdogBreachSinceMs = 0L
+        watchdogGraceUntilMs = 0L
+    }
+
+    /** Диагностическая проверка по требованию (debug-CLI `invcheck`). */
+    fun checkInvariantNow(): String {
+        val s = currentRef.get()
+        if (s == null) return "нет активного потока (state=$state)"
+        val raw = s.audibleCurveSecondsRaw()
+        val now = realTimeOfDaySeconds()
+        val delta = raw?.let { CurveAnchorRules.circularDistance(it, now) }
+        return "state=$state spec#${s.spec.serial} reason=${s.spec.reason} " +
+            "anchor=${s.spec.resumeAnchor} now=${"%.2f".format(now)} " +
+            "audibleraw=${raw?.let { "%.2f".format(it) } ?: "н/д"} " +
+            "Δ=${delta?.let { "%.2f".format(it) } ?: "н/д"}с " +
+            "порог=${WATCHDOG_TOL_SEC}с/${WATCHDOG_SUSTAIN_MS}мс " +
+            "нарушение=${if (watchdogBreachSinceMs != 0L) "да (${System.currentTimeMillis() - watchdogBreachSinceMs}мс)" else "нет"}"
+    }
+
     // ================================================================== WakeLock
 
     private val wakeLockLock = Any()
@@ -1479,8 +1652,13 @@ class BinauralStreamManager(private val context: Context) {
         if (wakeLockNeeded()) {
             acquireWakeLock()
             actor.postDelayed(wakeLockRenew, WAKE_LOCK_RENEW_MS)
+            startInvariantWatchdog()
         } else {
             releaseWakeLock()
+            // Сторож осознанно гасится и на пути в паузу: замороженный пакет
+            // УЖЕ отстаёт от настенных часов, и это штатное состояние паузы,
+            // а не нарушение. Проверка возобновляется при возобновлении.
+            stopInvariantWatchdog()
         }
     }
 

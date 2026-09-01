@@ -14,6 +14,8 @@ import com.binauralcycles.ui.components.PowerSettingsCard
 import com.binauralcycles.ui.components.ChannelSwapSettingsCard
 import com.binauralcycles.ui.components.VolumeNormalizationSettingsCard
 import com.binauralcycles.ui.components.DebugTimeControlPanel
+import com.binauralcycles.ui.components.SettingsSwitchRow
+import com.binauralcycles.ui.theme.Spacing
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binauralcycles.BuildConfig
 import com.binauralcycles.R
@@ -25,7 +27,7 @@ fun SettingsScreen(
     onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -46,126 +48,102 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = Spacing.lg)
                 .verticalScroll(rememberScrollState())
+                .padding(vertical = Spacing.lg),
+            // Ритм МЕЖДУ секциями. Внутри каждой секции — свой Column со
+            // spacedBy(Spacing.lg), поэтому зазор «заголовок → первый элемент»
+            // всегда 16 и не зависит от типа элемента (карточка-группа или
+            // строка-переключатель). Ни у одного блока нет внутренних
+            // вертикальных паддингов — иначе ритм разъезжается.
+            verticalArrangement = Arrangement.spacedBy(Spacing.xl)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
-            
             // Раздел: Комфорт прослушивания
-            Text(
-                text = stringResource(R.string.settings_section_comfort),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-            
-            // Глобальные настройки перестановки каналов
-            ChannelSwapSettingsCard(
-                channelSwapSettings = uiState.channelSwapSettings,
-                onChannelSwapSelect = { viewModel.setChannelSwapSelection(it) },
-                onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
-                onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
-                onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) },
-                onChannelSwapTrendPointsChange = { viewModel.setChannelSwapTrendPoints(it) }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-            
-            // Глобальные настройки нормализации громкости
-            VolumeNormalizationSettingsCard(
-                volumeNormalizationSettings = uiState.volumeNormalizationSettings,
-                onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
-                onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
-                onTemporalNormalizationEnabledChange = { viewModel.setTemporalNormalizationEnabled(it) }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-            
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.lg)) {
+                Text(
+                    text = stringResource(R.string.settings_section_comfort),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                ChannelSwapSettingsCard(
+                    channelSwapSettings = uiState.channelSwapSettings,
+                    onChannelSwapSelect = { viewModel.setChannelSwapSelection(it) },
+                    onChannelSwapIntervalChange = { viewModel.setChannelSwapInterval(it) },
+                    onChannelSwapFadeDurationChange = { viewModel.setChannelSwapFadeDuration(it) },
+                    onChannelSwapPauseDurationChange = { viewModel.setChannelSwapPauseDuration(it) },
+                    onChannelSwapTrendPointsChange = { viewModel.setChannelSwapTrendPoints(it) }
+                )
+
+                VolumeNormalizationSettingsCard(
+                    volumeNormalizationSettings = uiState.volumeNormalizationSettings,
+                    onVolumeNormalizationEnabledChange = { viewModel.setVolumeNormalizationEnabled(it) },
+                    onVolumeNormalizationStrengthChange = { viewModel.setVolumeNormalizationStrength(it) },
+                    onTemporalNormalizationEnabledChange = { viewModel.setTemporalNormalizationEnabled(it) }
+                )
+            }
+
             // Раздел: Интерфейс
-            Text(
-                text = stringResource(R.string.settings_section_interface),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-            
-            // Настройка возобновления при подключении гарнитуры
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.resume_on_headset_connect)) },
-                supportingContent = { Text(stringResource(R.string.resume_on_headset_connect_desc)) },
-                trailingContent = {
-                    Switch(
-                        checked = uiState.resumeOnHeadsetConnect,
-                        onCheckedChange = { viewModel.setResumeOnHeadsetConnect(it) }
-                    )
-                }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-            
-            // Настройка автовозобновления при запуске приложения
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.auto_resume_on_app_start)) },
-                supportingContent = { Text(stringResource(R.string.auto_resume_on_app_start_desc)) },
-                trailingContent = {
-                    Switch(
-                        checked = uiState.autoResumeOnAppStart,
-                        onCheckedChange = { viewModel.setAutoResumeOnAppStart(it) }
-                    )
-                }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-            
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.lg)) {
+                Text(
+                    text = stringResource(R.string.settings_section_interface),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                SettingsSwitchRow(
+                    title = stringResource(R.string.resume_on_headset_connect),
+                    description = stringResource(R.string.resume_on_headset_connect_desc),
+                    checked = uiState.resumeOnHeadsetConnect,
+                    onCheckedChange = { viewModel.setResumeOnHeadsetConnect(it) }
+                )
+
+                SettingsSwitchRow(
+                    title = stringResource(R.string.auto_resume_on_app_start),
+                    description = stringResource(R.string.auto_resume_on_app_start_desc),
+                    checked = uiState.autoResumeOnAppStart,
+                    onCheckedChange = { viewModel.setAutoResumeOnAppStart(it) }
+                )
+            }
+
             // Раздел: Энергопотребление
-            Text(
-                text = stringResource(R.string.settings_section_power),
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(vertical = 8.dp)
-            )
-            
-            Spacer(modifier = Modifier.height(8.dp))
-            
-            // Исключение фонового энергосбережения.
-            // Состояние переключателя = фактическое состояние системы: выдать или
-            // отозвать исключение может только пользователь, поэтому оба
-            // направления открывают системный экран, а не пишут локальный флаг
-            ListItem(
-                headlineContent = { Text(stringResource(R.string.uninterrupted_background_playback)) },
-                supportingContent = { Text(stringResource(R.string.uninterrupted_background_playback_desc)) },
-                trailingContent = {
-                    Switch(
-                        checked = uiState.isIgnoringBatteryOptimizations,
-                        onCheckedChange = { viewModel.setBatteryOptimizationExemption(it) }
-                    )
-                }
-            )
-            
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-            
-            // Настройки энергопотребления
-            PowerSettingsCard(
-                sampleRate = uiState.sampleRate,
-                bufferGenerationMinutes = uiState.bufferGenerationMinutes,
-                onSampleRateChange = { viewModel.setSampleRate(it) },
-                onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
-            )
-            
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.lg)) {
+                Text(
+                    text = stringResource(R.string.settings_section_power),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                // Исключение фонового энергосбережения.
+                // Состояние переключателя = фактическое состояние системы: выдать или
+                // отозвать исключение может только пользователь, поэтому оба
+                // направления открывают системный экран, а не пишут локальный флаг
+                SettingsSwitchRow(
+                    title = stringResource(R.string.uninterrupted_background_playback),
+                    description = stringResource(R.string.uninterrupted_background_playback_desc),
+                    checked = uiState.isIgnoringBatteryOptimizations,
+                    onCheckedChange = { viewModel.setBatteryOptimizationExemption(it) }
+                )
+
+                PowerSettingsCard(
+                    sampleRate = uiState.sampleRate,
+                    bufferGenerationMinutes = uiState.bufferGenerationMinutes,
+                    onSampleRateChange = { viewModel.setSampleRate(it) },
+                    onBufferGenerationMinutesChange = { viewModel.setBufferGenerationMinutes(it) }
+                )
+            }
+
             // НОВОЕ: DEBUG-панель виртуального времени (только debug-сборка)
             if (BuildConfig.DEBUG) {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
-                Text(
-                    text = stringResource(R.string.settings_section_debug),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(vertical = 8.dp)
-                )
-                DebugTimeControlPanel(viewModel)
-                Spacer(modifier = Modifier.height(16.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.lg)) {
+                    Text(
+                        text = stringResource(R.string.settings_section_debug),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    DebugTimeControlPanel(viewModel)
+                }
             }
-            
-            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
