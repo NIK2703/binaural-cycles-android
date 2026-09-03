@@ -58,7 +58,7 @@
     <string name="swap_mode_timer">Таймер</string>
     <string name="swap_mode_trend">Тенденция</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
-    <string name="swap_mode_trend_description">Смена каналов происходит в точках смены тенденции частоты биения выбранных типов</string>
+    <string name="swap_mode_trend_description">Смена каналов происходит в точках смены тенденции изменения частоты биения выбранных типов</string>
     <string name="swap_points">Типы переходов со сменой каналов</string>
     <string name="swap_points_both">Все</string>
     <string name="swap_points_peaks">Спад</string>
