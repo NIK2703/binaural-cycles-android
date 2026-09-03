@@ -127,6 +127,21 @@ data class BinauralUiState(
 private const val SETTINGS_FADE_DEBOUNCE_MS = 300L
 
 /**
+ * Интервал генерации буфера для потоков, пересобираемых правкой опций в
+ * редакторе пресета: фиксированная 1 минута вместо пользовательской настройки.
+ *
+ * Правка опций редактируемого активного пресета слышна сразу — движок
+ * пересобирает звучащий поток кроссфейдом на каждое изменение. При быстрой
+ * смене опций (перетаскивание точки, слайдеры расслабления) каждая пересборка
+ * генерировала бы буфер на весь пользовательский интервал (десять минут по
+ * умолчанию — сотни мегабайт PCM и тяжёлая подготовка на каждый тик слайдера).
+ * Минутный пакет делает такую пересборку дешёвой. Пользовательское значение
+ * возвращается при завершении сессии редактирования
+ * ([BinauralViewModel.restoreUserBufferInterval]) и никуда не сохраняется.
+ */
+private const val EDITOR_PREVIEW_BUFFER_INTERVAL_MS = 60_000
+
+/**
  * Сборка [BinauralConfig] из кривой пресета и ГЛОБАЛЬНЫХ настроек — тех, что
  * не лежат в пресете (громкость, перестановка каналов, нормализация).
  *
@@ -423,6 +438,20 @@ class BinauralViewModel @Inject constructor(
                     else -> SampleRate.MEDIUM
                 }
                 _uiState.update { it.copy(sampleRate = sampleRate) }
+                // Страховка на старте: интервал буфера из хранилища мог быть
+                // сохранён для ДРУГОЙ частоты (старая версия приложения или
+                // сбой между двумя сохранениями) и не влезать в бюджет новой.
+                // Усекаем до максимальной стопы загруженной частоты. Хранилище
+                // не переписываем — усечение страховочное, честно сохранит
+                // пользовательский setSampleRate. В сервис-менеджер интервал
+                // уйдёт и из коллектора самих минут, здесь пушим только при
+                // реальном усечении (дедупликацию менеджера не дёргаем).
+                val stored = _uiState.value.bufferGenerationMinutes
+                val clamped = PacketMemoryBudget.coerceMinutes(sampleRate.value, stored)
+                if (clamped != stored) {
+                    _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
+                    playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
+                }
                 playbackService?.setSampleRate(sampleRate)
                 onSettingLoaded(Setting.SAMPLE_RATE)
             }
@@ -648,6 +677,12 @@ class BinauralViewModel @Inject constructor(
             return
         }
 
+        // Явный запуск пресета — не «редакторский» перезапуск: возвращаем
+        // пользовательский интервал генерации буфера, если он был зафиксирован
+        // правкой опций в редакторе (например, переключение с гарнитуры во
+        // время редактирования). Повтор того же значения отсекает менеджер.
+        restoreUserBufferInterval()
+
         // Устанавливаем активный пресет
         _uiState.update {
             it.copy(
@@ -776,6 +811,11 @@ class BinauralViewModel @Inject constructor(
             )
         }
         
+        // Сессия редактирования завершена: возвращаем пользовательский интервал
+        // генерации буфера ДО восстановления кривой — пересборка после отмены
+        // должна идти уже с ним.
+        restoreUserBufferInterval()
+
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
             playbackService?.updateFrequencyCurve(activePreset.frequencyCurve)
@@ -787,6 +827,11 @@ class BinauralViewModel @Inject constructor(
      * Используется при выходе с экрана редактирования для плавной анимации.
      */
     fun cancelEditingInService() {
+        // Сессия редактирования завершена: возвращаем пользовательский интервал
+        // генерации буфера ДО восстановления кривой — пересборка после отмены
+        // должна идти уже с ним.
+        restoreUserBufferInterval()
+
         val activePreset = _uiState.value.activePreset
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
@@ -914,6 +959,10 @@ class BinauralViewModel @Inject constructor(
                     beatRange = curve.beatRange
                 )
             }
+            // Сессия редактирования завершена: возвращаем пользовательский
+            // интервал генерации буфера ДО применения конфига, чтобы
+            // кроссфейд-пересборка после сохранения сразу шла с ним.
+            restoreUserBufferInterval()
             updateAudioConfig()
         }
         viewModelScope.launch {
@@ -1055,6 +1104,11 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
+            // Время не изменилось (повторный commit без правки: движение
+            // каретки в заполненном поле триггерит валидацию по каждой
+            // смене выделения) — не перестраиваем кривую и не пушим её
+            // в движок впустую.
+            if (newTime == oldPoint.time) return
             // Память желаемой частоты биений привязана к ВРЕМЕНИ точки,
             // поэтому переезд по оси времени переносит и её — иначе частота
             // «останется» на покинутой секунде, а переехавшая точка потеряет
@@ -1310,6 +1364,42 @@ class BinauralViewModel @Inject constructor(
         updateEditingCurve(updatedPoints, newRange, curve.beatRange, curve.interpolationType)
     }
 
+    /**
+     * Редактируется ли именно тот пресет, который сейчас активен
+     * (воспроизводится). Только в этом случае правки из редактора уходят
+     * в движок и пересобирают звучащий поток.
+     */
+    private fun isEditingActivePreset(): Boolean {
+        val state = _uiState.value
+        return state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+    }
+
+    /**
+     * Зафиксировать интервал генерации буфера на 1 минуте
+     * ([EDITOR_PREVIEW_BUFFER_INTERVAL_MS]) для следующего пересобранного потока.
+     *
+     * Вызывается перед КАЖДЫМ пушем правки из редактора: пересборка после
+     * изменения опций должна генерировать дешёвый минутный пакет, а не буфер
+     * на весь пользовательский интервал. Повторные пуши того же значения
+     * отсекает дедупликацией сам менеджер. Пользовательская настройка в базу
+     * не пишется и возвращается при выходе из редактора
+     * ([restoreUserBufferInterval]).
+     */
+    private fun armEditorPreviewBufferInterval() {
+        playbackService?.setFrequencyUpdateInterval(EDITOR_PREVIEW_BUFFER_INTERVAL_MS)
+    }
+
+    /**
+     * Вернуть пользовательский интервал генерации буфера после правки в
+     * редакторе. Вызывается при завершении сессии редактирования (сохранение
+     * или отмена), чтобы поток, пересобранный уже вне редактора, снова
+     * генерировал буфер по настройке пользователя. Значение берётся из
+     * состояния (прочитано из DataStore), в хранилище не пишется.
+     */
+    private fun restoreUserBufferInterval() {
+        playbackService?.setFrequencyUpdateInterval(_uiState.value.bufferGenerationMinutes * 60 * 1000)
+    }
+
     private fun updateEditingCurve(
         points: List<FrequencyPoint>,
         carrierRange: FrequencyRange,
@@ -1326,12 +1416,12 @@ class BinauralViewModel @Inject constructor(
                 splineTension = currentCurve?.splineTension ?: 0.0f
             )
             _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
-            
-            // Обновляем кривую в сервисе только если редактируется активный пресет
-            val state = _uiState.value
-            val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-            
-            if (isActivePreset) {
+
+            // Обновляем кривую в сервисе только если редактируется активный
+            // пресет: звучащий поток пересобирается кроссфейдом, и правка
+            // слышна сразу.
+            if (isEditingActivePreset()) {
+                armEditorPreviewBufferInterval()
                 playbackService?.updateFrequencyCurve(newCurve)
             }
         } catch (e: IllegalArgumentException) {
@@ -1356,8 +1446,8 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        if (isActivePreset) {
+        if (isEditingActivePreset()) {
+            armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
     }
@@ -1379,14 +1469,29 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        if (isActivePreset) {
+        if (isEditingActivePreset()) {
+            armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
     }
 
     // ============= Методы для редактирования режима расслабления =============
-    
+
+    /**
+     * Пуш настроек расслабления из редактора в движок.
+     *
+     * Настройки расслабления — такие же опции редактора, как и точки кривой:
+     * пока редактируется именно активный пресет, любое их изменение должно
+     * пересобрать звучащий поток (кроссфейд), иначе слайдеры меняли бы только
+     * сохраняемый пресет, а звук продолжал бы играть по-старому.
+     * Вызывается из каждого setEditing-метода после обновления состояния.
+     */
+    private fun pushEditingRelaxationToService() {
+        if (!isEditingActivePreset()) return
+        armEditorPreviewBufferInterval()
+        playbackService?.updateRelaxationModeSettings(_uiState.value.editingRelaxationModeSettings)
+    }
+
     /**
      * Включить/выключить режим расслабления
      */
@@ -1397,6 +1502,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(enabled = enabled)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1410,6 +1516,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(carrierReductionPercent = clampedPercent)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1426,6 +1533,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1439,6 +1547,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(mode = mode)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1452,6 +1561,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(gapBetweenRelaxationMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1465,6 +1575,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(relaxationDurationMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1478,6 +1589,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(transitionPeriodMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1491,6 +1603,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(smoothIntervalMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
 
     // ============= Методы для управления общими настройками приложения =============
@@ -1542,6 +1655,22 @@ class BinauralViewModel @Inject constructor(
     }
     
     fun setSampleRate(rate: SampleRate) {
+        // Смена частоты дискретизации меняет и потолок длительности буфера:
+        // тот же бюджет кучи покупает на 48 кГц вдвое меньше секунд, чем на
+        // 16 кГц. Интервал, выбранный на прежней частоте, мог перестать
+        // влезать — усекаем его до максимальной стопы новой частоты сразу
+        // (не дожидаясь кроссфейда), чтобы слайдер, хранилище и движок не
+        // расходились: иначе слайдер показал бы стопы, среди которых нет
+        // выбранного значения, а движок молча урезал бы интервал.
+        val currentMinutes = _uiState.value.bufferGenerationMinutes
+        val clampedMinutes = PacketMemoryBudget.coerceMinutes(rate.value, currentMinutes)
+        if (clampedMinutes != currentMinutes) {
+            _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
+            playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)
+            viewModelScope.launch {
+                preferencesRepository.saveBufferGenerationMinutes(clampedMinutes)
+            }
+        }
         restartWithFadeIfNeeded {
             _uiState.update { it.copy(sampleRate = rate) }
             playbackService?.setSampleRate(rate)

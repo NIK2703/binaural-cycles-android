@@ -54,13 +54,13 @@
     <string name="swap_interval">Интервал перестановки</string>
     <string name="swap_mode_off_description">Каналы всегда в обычном расположении</string>
     <string name="swap_mode_timer">Таймер</string>
-    <string name="swap_mode_trend">Тенденция</string>
+    <string name="swap_mode_trend">Экстремумы</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
     <string name="swap_mode_trend_description">Смена происходит в экстремумах графика выбранных типов</string>
     <string name="swap_points">Типы экстремумов</string>
     <string name="swap_points_both">Все</string>
-    <string name="swap_points_peaks">Пики</string>
-    <string name="swap_points_troughs">Впадины</string>
+    <string name="swap_points_peaks">Максимумы</string>
+    <string name="swap_points_troughs">Минимумы</string>
     <string name="smooth_fade">Плавное затухание</string>
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
     <string name="instant_switch">Мгновенное переключение</string>

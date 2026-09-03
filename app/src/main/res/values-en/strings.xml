@@ -54,13 +54,13 @@
     <string name="swap_interval">Swap interval</string>
     <string name="swap_mode_off_description">Channels always in normal arrangement</string>
     <string name="swap_mode_timer">Timer</string>
-    <string name="swap_mode_trend">Trend-based</string>
+    <string name="swap_mode_trend">Extrema</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
     <string name="swap_mode_trend_description">Switches occur at the extrema of the curve of the selected types</string>
     <string name="swap_points">Extremum types</string>
-    <string name="swap_points_both">Peaks and troughs</string>
-    <string name="swap_points_peaks">Peaks</string>
-    <string name="swap_points_troughs">Troughs</string>
+    <string name="swap_points_both">Max and min</string>
+    <string name="swap_points_peaks">Maximum</string>
+    <string name="swap_points_troughs">Minimum</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>

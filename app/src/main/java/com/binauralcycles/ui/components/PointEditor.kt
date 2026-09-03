@@ -338,9 +338,24 @@ private fun parseFrequency(value: String): Float? {
 }
 
 /**
- * Ограничивает ввод частоты: максимум 4 знака в целой части и 2 в дробной
- * Разрешает только одну точку или запятую как разделитель
- * Убирает ведущие нули в целой части (кроме случая "0.xxx")
+ * Региональный десятичный разделитель локали системы: точка или запятая.
+ * Поля частот принимают ВВОД в обоих вариантах (клавиатура Decimal даёт ту
+ * клавишу, что привычна пользователю), а показывают значения региональным —
+ * поэтому набранное с клавиатуры и подставленное свайпом выглядит одинаково.
+ */
+private val decimalSeparator: Char =
+    java.text.DecimalFormatSymbols.getInstance().decimalSeparator
+
+/**
+ * Ограничивает ввод частоты: максимум 4 знака в целой части и 4 в дробной.
+ * Разделителем служит ПЕРВЫЙ введённый из точки и запятой — как набрал
+ * пользователь, так и остаётся (региональная привычка: запятая в ряде
+ * локалей не переписывается точкой и наоборот); второй разделитель и всё
+ * после него отбрасываются как мусор.
+ * Убирает ведущие нули в целой части (кроме случая "0.xxx").
+ * Строка из ОДНИХ нулей сохраняется как есть ("000" → "000"): нули набраны
+ * или оставлены после удаления ненулевых цифр намеренно, и стирать их —
+ * значит удалять больше, чем удалил пользователь.
  *
  * @param allowNegative разрешить ведущий минус. Нужно для ЧАСТОТЫ БИЕНИЙ,
  *        которая величина знаковая (beat = right − left; знак задаёт раскладку
@@ -366,23 +381,37 @@ private fun limitFrequencyInput(value: String, allowNegative: Boolean = false): 
     return if (separatorIndex == -1) {
         // Нет разделителя - только целая часть, максимум 4 цифры
         val digits = value.filter { it.isDigit() }.take(4)
-        // Убираем ведущие нули, но оставляем один ноль если всё число состоит из нулей
-        // "-0" не имеет смысла — знак теряется (минус пропадёт при вводе цифр после "-0")
-        if (digits.isEmpty() || digits.all { it == '0' }) sign else sign + digits.trimLeadingZeros()
+        when {
+            // Поле без цифр — остаётся только знак (набор минуса до цифр).
+            digits.isEmpty() -> sign
+            // Одни нули НЕ трогаем: пользователь удалил ненулевые цифры
+            // и оставил нули ("1000" → "000"), и поле обязано показать
+            // ровно то, что он оставил — иначе удаление одной цифры
+            // стирало всё поле целиком. Ноль как значение отсечёт
+            // валидация при commit (у несущей 0 ниже порога слышимости —
+            // значение откатится к прежнему).
+            digits.all { it == '0' } -> sign + digits
+            // Обычный ввод: ведущие нули схлопываем ("0100" → "100")
+            else -> sign + digits.trimLeadingZeros()
+        }
     } else {
         // Есть разделитель - разбиваем на целую и дробную части
         val integerPart = value.substring(0, separatorIndex).filter { it.isDigit() }.take(4)
-        val decimalPart = value.substring(separatorIndex + 1).filter { it.isDigit() }.take(2)
+        val decimalPart = value.substring(separatorIndex + 1).filter { it.isDigit() }.take(4)
 
         // Убираем ведущие нули в целой части, но оставляем один ноль для чисел вида "0.xxx"
         val normalizedInteger = integerPart.trimLeadingZeros()
 
-        // Собираем результат с точкой как разделителем
-        // Всегда сохраняем точку, даже если дробная часть пуста (пользователь продолжает ввод)
+        // Разделитель сохраняем РОВНО как набрал пользователь (точку или
+        // запятую) — parseFrequency понимает оба, а переписывание знака
+        // под пальцем выглядело бы как порча ввода.
+        // Разделитель держим, даже если дробная часть пуста (пользователь
+        // продолжает ввод).
+        val separator = value[separatorIndex]
         if (decimalPart.isEmpty()) {
-            "$sign$normalizedInteger."
+            "$sign$normalizedInteger$separator"
         } else {
-            "$sign$normalizedInteger.$decimalPart"
+            "$sign$normalizedInteger$separator$decimalPart"
         }
     }
 }
@@ -515,15 +544,20 @@ fun PointEditorPopup(
     onTimeChange: (LocalTime) -> Unit,
     onRemove: () -> Unit
 ) {
-    // Функция форматирования: показывает до 2-х ненулевых знаков после запятой
-    // Всегда использует точку как разделитель (Locale.US)
+    // Функция форматирования: показывает до 4-х ненулевых знаков после
+    // разделителя — столько же, сколько принимает ввод, иначе набранное
+    // вручную значение при следующем открытии окна отражалось бы урезанным.
+    // Числа без дробной части — целыми. Разделитель — региональный
+    // ([decimalSeparator]): форматируем в Locale.US и меняем точку на
+    // разделитель локали, чтобы вид поля совпадал с тем, что даёт клавиатура.
     fun formatFrequency(value: Float): String {
-        return if (value == kotlin.math.floor(value)) {
+        val formatted = if (value == kotlin.math.floor(value)) {
             value.toInt().toString()
         } else {
-            // Форматируем с 2 знаками после запятой и убираем trailing нули
-            "%.2f".format(Locale.US, value).trimEnd('0').trimEnd('.')
+            // Форматируем с 4 знаками после разделителя и убираем trailing нули
+            "%.4f".format(Locale.US, value).trimEnd('0').trimEnd('.')
         }
+        return if (decimalSeparator != '.') formatted.replace('.', decimalSeparator) else formatted
     }
 
     // Отображаем частоты с ненулевыми десятичными знаками
@@ -695,7 +729,15 @@ fun PointEditorPopup(
                                 value = tempHours,
                                 onValueChange = { input ->
                                     val digits = input.text.filter { it.isDigit() }.take(2)
-                                    tempHours = TextFieldValue(digits, selection = TextRange(digits.length))
+                                    // Текст не изменился (движение каретки, выделение) —
+                                    // сохраняем TextFieldValue целиком: пересборка с
+                                    // кареткой в конце прижимала курсор к правому краю,
+                                    // и сдвинуть его было невозможно.
+                                    tempHours = if (digits == input.text) {
+                                        input
+                                    } else {
+                                        TextFieldValue(digits, selection = TextRange(digits.length))
+                                    }
                                     if (digits.length == 2) validateAndSaveTime()
                                 },
                                 wasFocused = hoursWasFocused,
@@ -715,17 +757,34 @@ fun PointEditorPopup(
                             modifier = Modifier.weight(1f),
                             stepPx = valueStepPx,
                             read = { currentMinutes().toFloat() },
-                            // Деление — 5 минут, сетка кратна пяти: та же, что
-                            // при перетаскивании точки по графику (5-минутный
-                            // снап), поэтому оба жеста дают одинаковые значения.
-                            // Верхний узел — 55: 59 минут сетке недоступны,
-                            // как и при перетаскивании.
+                            // Деление — 5 минут, сетка кратна пяти и идёт СКВОЗЬ
+                            // сутки: докручивание за 55 перекатывает час вперёд
+                            // (минуты в 00), ниже нуля — назад (минуты в 55).
+                            // Внутри часа верхний узел — 55: 59 минут сетке
+                            // недоступны, как и при перетаскивании по графику.
+                            // Сетка считается от ПОЛНЫХ минут суток, поэтому
+                            // переход через границу часа (и границу суток —
+                            // 00:00 / 23:55, дальше деление ничего не сдвигает)
+                            // работает сам собой. Перекат часа пишется прямо
+                            // в поле часов — как это делает preview, — чтобы
+                            // часы тикали вместе с минутами, а commit собрал
+                            // итог по currentHours().
                             shift = { current, delta ->
-                                stepWithinGrid(
-                                    ((round(current / 5f).toInt() + delta) * 5f).coerceIn(0f, 55f),
-                                    current,
+                                val hour = currentHours()
+                                val dayMinutes = 23 * 60 + 55
+                                val total = hour * 60 + round(current).toInt()
+                                val stepped = stepWithinGrid(
+                                    ((round(total / 5f).toInt() + delta) * 5f)
+                                        .coerceIn(0f, dayMinutes.toFloat()),
+                                    total.toFloat(),
                                     delta
-                                )
+                                ).toInt()
+                                val newHour = stepped / 60
+                                if (newHour != hour) {
+                                    val text = newHour.toString().padStart(2, '0')
+                                    tempHours = TextFieldValue(text, selection = TextRange(text.length))
+                                }
+                                (stepped % 60).toFloat()
                             },
                             // Пока палец идёт, меняется только текст в поле;
                             // к кривой значение уйдёт по отпускании.
@@ -742,7 +801,13 @@ fun PointEditorPopup(
                                 value = tempMinutes,
                                 onValueChange = { input ->
                                     val digits = input.text.filter { it.isDigit() }.take(2)
-                                    tempMinutes = TextFieldValue(digits, selection = TextRange(digits.length))
+                                    // Сохраняем ввод как есть при неизменном тексте —
+                                    // иначе каретка прижималась к концу (см. поле часов).
+                                    tempMinutes = if (digits == input.text) {
+                                        input
+                                    } else {
+                                        TextFieldValue(digits, selection = TextRange(digits.length))
+                                    }
                                     if (digits.length == 2) validateAndSaveTime()
                                 },
                                 wasFocused = minutesWasFocused,
@@ -814,8 +879,24 @@ fun PointEditorPopup(
                                 onValueChange = { newValue ->
                                     val limited = limitFrequencyInput(newValue.text)
                                     tempCarrierFrequency = if (limited != newValue.text) {
-                                        TextFieldValue(limited, selection = TextRange(limited.length))
+                                        // Текст переписан фильтром (второй
+                                        // разделитель, срез ведущих нулей, обрезка
+                                        // длины): каретку
+                                        // переносим из СТАРОЙ позиции, зажатой в новый
+                                        // текст, а не жёстко в конец — иначе каждое
+                                        // нормализующее изменение уводило курсор из-под
+                                        // пальца и прижимало его к правому краю.
+                                        newValue.copy(
+                                            text = limited,
+                                            selection = TextRange(
+                                                newValue.selection.min.coerceAtMost(limited.length),
+                                                newValue.selection.max.coerceAtMost(limited.length)
+                                            ),
+                                            composition = null
+                                        )
                                     } else {
+                                        // Текст не изменился (движение каретки,
+                                        // выделение) — сохраняем всё как есть.
                                         newValue
                                     }
                                 },
@@ -883,7 +964,16 @@ fun PointEditorPopup(
                                     // allowNegative=true: частота биений знаковая
                                     val limited = limitFrequencyInput(newValue.text, allowNegative = true)
                                     tempBeatFrequency = if (limited != newValue.text) {
-                                        TextFieldValue(limited, selection = TextRange(limited.length))
+                                        // Каретка из старой позиции, зажатая в новый
+                                        // текст (см. поле несущей), — не жёстко в конец.
+                                        newValue.copy(
+                                            text = limited,
+                                            selection = TextRange(
+                                                newValue.selection.min.coerceAtMost(limited.length),
+                                                newValue.selection.max.coerceAtMost(limited.length)
+                                            ),
+                                            composition = null
+                                        )
                                     } else {
                                         newValue
                                     }
