@@ -57,6 +57,8 @@ keystore.properties
 
 # CMake build folders
 build_tests/
+core/audio/src/main/cpp/build_verify/
+core/audio/src/main/cpp/tests/build_arm64/
 
 # Google Services (e.g. APIs or Firebase)
 google-services.json

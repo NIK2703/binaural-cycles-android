@@ -58,11 +58,11 @@
     <string name="swap_mode_timer">Таймер</string>
     <string name="swap_mode_trend">Экстремумы</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
-    <string name="swap_mode_trend_description">Смена происходит в экстремумах графика выбранных типов</string>
-    <string name="swap_points">Типы экстремумов</string>
+    <string name="swap_mode_trend_description">Смена каналов происходит в точках смены тенденции частоты биения выбранных типов</string>
+    <string name="swap_points">Типы переходов со сменой каналов</string>
     <string name="swap_points_both">Все</string>
-    <string name="swap_points_peaks">Максимумы</string>
-    <string name="swap_points_troughs">Минимумы</string>
+    <string name="swap_points_peaks">Спад</string>
+    <string name="swap_points_troughs">Рост</string>
     <string name="smooth_fade">Плавное затухание</string>
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
     <string name="instant_switch">Мгновенное переключение</string>
@@ -175,7 +175,7 @@
     <!-- Point Editor -->
     <string name="point">Точка</string>
     <string name="carrier">Несущая</string>
-    <string name="beats">Биения</string>
+    <string name="beats">Биение</string>
     <string name="carrier_tone_frequency">Частота тона несущей</string>
     <string name="beat_frequency_full">Частота биения</string>
     <string name="max_format">макс %.1f</string>
