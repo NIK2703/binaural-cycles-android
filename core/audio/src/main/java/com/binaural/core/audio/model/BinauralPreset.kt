@@ -762,7 +762,7 @@ data class RelaxationModeSettings(
         splineTension: Float,
         carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER
     ): List<FrequencyPoint> {
-        if (!enabled || points.size < 2) return emptyList()
+        if (!enabled || points.isEmpty()) return emptyList()
 
         val baseCurve = FrequencyCurve(
             points = points,
