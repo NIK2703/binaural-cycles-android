@@ -98,6 +98,7 @@ inline bool bisectionConstantFreq() {
 // аудио-потоке для КАЖДОГО сегмента. Буфер переиспользуется, поэтому
 // вызывающий обязан потребить результат до следующего вызова — в
 // generatePackage* так и есть.
+
 static const std::vector<int>& collectSegmentCuts(
     const BinauralConfig& config,
     const FrequencyCurve& curve,

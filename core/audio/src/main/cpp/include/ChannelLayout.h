@@ -110,8 +110,9 @@ inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
 //
 // Позиция — float (ось суток 0..86400 с). Внутренняя арифметика здесь тоже
 // float: для наших диапазонов (pos < 86400, interval ≤ 3600) точности float
-// хватает с запасом, а вызывающий nearestSwapProcedure берёт соседние float
-// через nextafterf (строго float, без сужения double→float).
+// хватает с запасом. Валидность процедуры смены (nearestSwapProcedure, ред. 5)
+// определяется КОНСТРУКТИВНО по самому расписанию, без соседних float /
+// nextafter / окрестностных зондов.
 inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
     constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
     float pos = std::fmod(curvePosSec, dayF);
@@ -356,39 +357,58 @@ inline float swapGapSec(const BinauralConfig& cfg) {
 }
 
 /**
+ * Число ВЫБРАННЫХ переходов раскладки на кривой (TREND-режим).
+ *
+ * Используется в nearestSwapProcedure (ред. 5) для КОНСТРУКТИВНОЙ валидности:
+ * ступенька в TREND есть ⇔ выбран хотя бы один переход. Это тот же самый
+ * отбор selected, что и в channelSwapStateAt/nearestSwapTimeSec — единая точка
+ * истины отбора, без дублирования логики.
+ */
+inline int64_t numSelectedCrossings(const BinauralConfig& cfg) {
+    std::vector<TrendCrossing> localCrossings;
+    const std::vector<TrendCrossing>* crossings = &cfg.curve.trendCrossings;
+    if (!cfg.curve.trendCrossingsValid) {
+        computeTrendCrossings(cfg.curve, localCrossings);
+        crossings = &localCrossings;
+    }
+    const bool wantPeaks = (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::PEAKS);
+    int64_t count = 0;
+    for (const TrendCrossing& c : *crossings) {
+        const bool selected =
+            (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH)
+                ? true
+                : (c.toSwapped == wantPeaks);
+        if (selected) ++count;
+    }
+    return count;
+}
+
+/**
  * Процедура смены раскладки, ближайшая к моменту t (ЧИСТАЯ ФУНКЦИЯ конфига).
  *
- * T* берётся из nearestSwapTimeSec и ПРОВЕРЯЕТСЯ: знак должен реально
- * меняться в сколь угодно малой окрестности T*
- * (channelSwapStateAt(T*−ε) ≠ channelSwapStateAt(T*+ε)). Без проверки на кривой
- * без экстремумов (TREND, nearestSwapTimeSec → 0) звук затухал бы каждую
- * полночь при неизменной раскладке.
+ * T* берётся из nearestSwapTimeSec, а ВАЛИДНОСТЬ определяется КОНСТРУКТИВНО —
+ * без окрестностных зондов (nextafter/nextafterf/±inf), которые под -ffast-math
+ * на устройстве (arm64 NDK clang) схлопываются и гасят процедуру на все сутки
+ * (ред. 4, см. docs/analysis_swap_crossfade_missing.md).
  *
- * ПОЧЕМУ СОСЕДНИЕ float ЧЕРЕЗ nextafterf, А НЕ АБСОЛЮТНЫЙ ε И НЕ double. Ось
- * суток — float от 0 до 86400 с, и наивные попытки выразить окрестность через
- * квантирование дважды ломали эту проверку:
+ *   TIMER — valid ⇔ channelSwapIntervalSec > 0.
+ *           Чётность n = floor(pos / I) меняется на каждом узле сетки k·I по
+ *           построению: при переходе pos через k·I значение n скачком меняется
+ *           на 1, значит channelSwapStateAt меняет знак в каждом узле. Поэтому
+ *           ступенька есть ровно там, где интервал положителен. Без ULP/зондов.
  *
- *   1. Абсолютный ε = 1e-3 с (первая редакция). ULP float растёт с величиной:
- *      0.06 мс на 1000 с, 1.95 мс на 21600 с, 7.8 мс выше 65536 с. С ~10 часов
- *      суток ε становится НИЖЕ ULP: T*−ε и T*+ε округлялись в один и тот же
- *      float, процедура объявлялась невалидной и фейд пропадал вечером и ночью.
+ *   TREND — valid ⇔ число выбранных переходов ≥ 1 (numSelectedCrossings).
+ *           Счётчик инкрементируется на каждом выбранном экстремуме, значит
+ *           channelSwapStateAt меняет знак в каждом выбранном переходе. Если
+ *           выбранных переходов нет (пологая кривая / не тот фильтр) — знак
+ *           не меняется ни в одной точке суток, и затухать незачем (без
+ *           окрестностного зонда это раньше ломалось на полуночном нуле).
  *
- *   2. ±1 ULP через nextafter() БЕЗ суффикса (вторая редакция). Шаг зависит от
- *      выбранной перегрузки: если вызов разрешается в double-вариант, соседние
- *      значения (T* ± ~7e-12 с на t ≈ 4e4) при обратном сужении во float
- *      округляются В САМ T*. Проверка снова даёт «знак не меняется» — но теперь
- *      круглые сутки. Именно это наблюдалось на устройстве: SWAPDIAG печатал
- *      `proc valid=0 … gain=1.0000` при полностью корректном конфиге
- *      (en=1 mode=TIMER int=30 fadeEn=1 fadeMs=2000).
- *
- * Обе ловушки — от попытки выразить окрестность ЧЕРЕЗ КВАНТОВАНИЕ. Решение:
- * брать соседние float строго через nextafterf (float-перегрузка, без пути
- * через double и без сужения double→float). ULP float на оси суток
- * (≤ 7.8 мс при t > 65536 с) на три порядка больше любого реального зазора
- * между сменами (интервал таймера ≥ 1 с; экстремумы тренда — тем более),
- * поэтому «до» и «после» всегда попадают в разные состояния там, где переворот
- * есть, и в одно и то же там, где его нет. Сама channelSwapStateAt остаётся
- * float, как и вся ось суток.
+ * Это ЭКВИВАЛЕНТНО старой проверке «знак меняется в окрестности T*»
+ * (channelSwapStateAt(T*−ε) ≠ channelSwapStateAt(T*+ε)), но ВЫВЕДЕНО из самой
+ * КОНСТРУКЦИИ расписания, а не из квантирования float. Чистый float, без
+ * nextafter/inf/double/ULP — доказуемо на бумаге и не зависит от флагов
+ * оптимизации.
  *
  * Длительности: F = channelSwapFadeDurationMs, P = channelSwapPauseDurationMs
  * (по отдельности, а не свёрнутые в W = 2F+P: это разные фазы). При
@@ -401,16 +421,17 @@ inline SwapProcedure nearestSwapProcedure(const BinauralConfig& cfg, float t) {
     if (!cfg.channelSwapEnabled) return p;
 
     const float Tstar = nearestSwapTimeSec(cfg, t);
-    // Ступенька есть только там, где знак действительно переворачивается.
-    // Соседние float берём СТРОГО через nextafterf (float-перегрузка, без
-    // double и без сужения double→float — иначе на устройстве оба соседа
-    // схлопываются в T* и процедура гаснет круглые сутки, см. комментарий
-    // к функции). ULP float (≤ 7.8 мс) ≫ любого зазора между сменами.
-    const float before = std::nextafterf(Tstar, -std::numeric_limits<float>::infinity());
-    const float after  = std::nextafterf(Tstar,  std::numeric_limits<float>::infinity());
-    if (channelSwapStateAt(cfg, before) == channelSwapStateAt(cfg, after)) {
-        return p;
+
+    // КОНСТРУКТИВНАЯ ВАЛИДНОСТЬ (ред. 5): ступенька есть ⇔ расписание по
+    // построению меняет знак в этой точке. Без соседних float / nextafter / inf.
+    bool hasFlip = false;
+    if (cfg.channelSwapMode == ChannelSwapMode::TIMER) {
+        hasFlip = (cfg.channelSwapIntervalSec > 0);
+    } else {  // TREND (и BOTH — тот же трендовый путь отбора)
+        hasFlip = (numSelectedCrossings(cfg) >= 1);
     }
+    if (!hasFlip) return p;  // valid=false, Tstar=0
+
     p.valid = true;
     p.tStarSec = Tstar;
 
