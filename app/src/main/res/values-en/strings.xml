@@ -5,11 +5,13 @@
     <!-- Navigation -->
     <string name="back">Back</string>
     <string name="settings">Settings</string>
+    <string name="menu">Menu</string>
     
     <!-- Preset List Screen -->
     <string name="preset_list_title">Binaural Cycles</string>
     <string name="add_preset">Add preset</string>
-    <string name="no_presets_message">No saved presets.\nPress + to create a new one.</string>
+    <string name="create_preset">Create preset</string>
+    <string name="no_presets_message">No saved presets.\nOpen the menu to create a new one.</string>
     
     <!-- Preset Edit Screen -->
     <string name="new_preset">New preset</string>
@@ -54,13 +56,13 @@
     <string name="swap_interval">Swap interval</string>
     <string name="swap_mode_off_description">Channels always in normal arrangement</string>
     <string name="swap_mode_timer">Timer</string>
-    <string name="swap_mode_trend">Trend-based</string>
+    <string name="swap_mode_trend">Extrema</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
     <string name="swap_mode_trend_description">Switches occur at the extrema of the curve of the selected types</string>
     <string name="swap_points">Extremum types</string>
-    <string name="swap_points_both">Peaks and troughs</string>
-    <string name="swap_points_peaks">Peaks</string>
-    <string name="swap_points_troughs">Troughs</string>
+    <string name="swap_points_both">Max and min</string>
+    <string name="swap_points_peaks">Maximum</string>
+    <string name="swap_points_troughs">Minimum</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>
@@ -179,7 +181,17 @@
     <string name="max_format">max %.1f</string>
     <string name="apply">Apply</string>
     <string name="close">Close</string>
-    
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Gesture help</string>
+    <string name="gestures_help_title">Editor gestures</string>
+    <string name="gesture_add_point">Double-tap an empty spot on the graph to add a point.</string>
+    <string name="gesture_select_point">Tap a point to open its editing popup.</string>
+    <string name="gesture_drag_point">Move a point: right-left to change its time, up-down to change the carrier frequency.</string>
+    <string name="gesture_swipe_fields">Swipe up or down across the fields of the point editing popup to increase/decrease their values.</string>
+    <string name="gesture_range_labels">Tap the frequency limit labels (%1$s and %2$s) to change the graph scale.</string>
+    <string name="got_it">Got it</string>
+
     <!-- Frequencies -->
     <string name="beat_frequency">Beats</string>
     <string name="carrier_frequency">Carrier</string>

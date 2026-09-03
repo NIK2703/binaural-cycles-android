@@ -85,11 +85,17 @@ fun BottomPlaybackPanel(
                     )
                 }
                 
-                // Частоты в одну строку
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
+                // Частоты в одну строку — только пока идёт воспроизведение:
+                // при паузе и сразу после запуска приложения телеметрия
+                // частот ещё не актуальна, и строка с устаревшими значениями
+                // только сбивала бы. Без неё название пресета, прижатое к
+                // центру колонки (Arrangement.Center + CenterVertically
+                // внешнего Row), остаётся одно и центрируется по вертикали.
+                if (isPlaying) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
                     // Частота биений с фоном для выделения
                     Surface(
                         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -133,6 +139,7 @@ fun BottomPlaybackPanel(
                             color = MaterialTheme.colorScheme.error
                         )
                     }
+                    }
                 }
             }
             
@@ -175,17 +182,17 @@ fun BottomPlaybackPanel(
                     }
                 )
             }
-            
+
             Spacer(modifier = Modifier.width(8.dp))
-            
+
             // Кнопка воспроизведения
             FilledIconButton(
                 onClick = onPlayClick,
                 modifier = Modifier.size(44.dp),
                 colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = if (isPlaying) 
-                        MaterialTheme.colorScheme.error 
-                    else 
+                    containerColor = if (isPlaying)
+                        MaterialTheme.colorScheme.error
+                    else
                         MaterialTheme.colorScheme.primary
                 )
             ) {
@@ -195,7 +202,7 @@ fun BottomPlaybackPanel(
                     modifier = Modifier.size(24.dp)
                 )
             }
-            }
         }
     }
+}
 }

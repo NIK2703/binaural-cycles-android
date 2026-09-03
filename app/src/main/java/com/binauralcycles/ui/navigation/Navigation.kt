@@ -112,7 +112,7 @@ fun BinauralNavigation(
     
     // Высота нижней панели воспроизведения (для компенсации в контенте)
     val bottomPanelHeight = 60.dp
-    
+
     Box(modifier = Modifier.fillMaxSize()) {
         SharedTransitionLayout {
             Scaffold(
@@ -162,6 +162,9 @@ fun BinauralNavigation(
                         },
                         onOpenSettings = {
                             navController.navigate(Screen.Settings.route)
+                        },
+                        onImportPreset = {
+                            importLauncher.launch(arrayOf("application/json"))
                         }
                     )
                 }
@@ -192,9 +195,6 @@ fun BinauralNavigation(
                         animatedVisibilityScope = this@composable,
                         onNavigateBack = {
                             navController.popBackStack()
-                        },
-                        onImportPreset = {
-                            importLauncher.launch(arrayOf("application/json"))
                         }
                     )
                 }
@@ -211,7 +211,9 @@ fun BinauralNavigation(
             }
         }
         
-        // Нижняя панель воспроизведения поверх контента
+        // Нижняя панель воспроизведения поверх контента.
+        // Автоматически скрывается при паузе (panelVisible == false) — за возобновление
+        // воспроизведения отвечает круглая плавающая кнопка ниже.
         // navigationBarsPadding применяется внутри BottomPlaybackPanel только к контенту
         // чтобы фон Surface заходил под navigation bar
         if (showBottomPanel) {

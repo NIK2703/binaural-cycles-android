@@ -5,11 +5,13 @@
     <!-- Navigation -->
     <string name="back">Назад</string>
     <string name="settings">Настройки</string>
+    <string name="menu">Меню</string>
     
     <!-- Preset List Screen -->
     <string name="preset_list_title">Бинауральные циклы</string>
     <string name="add_preset">Добавить пресет</string>
-    <string name="no_presets_message">Нет сохранённых пресетов.\nНажмите + для создания нового.</string>
+    <string name="create_preset">Создать предустановку</string>
+    <string name="no_presets_message">Нет сохранённых пресетов.\nОткройте меню, чтобы создать новый.</string>
     
     <!-- Preset Edit Screen -->
     <string name="new_preset">Новая предустановка</string>
@@ -54,13 +56,13 @@
     <string name="swap_interval">Интервал перестановки</string>
     <string name="swap_mode_off_description">Каналы всегда в обычном расположении</string>
     <string name="swap_mode_timer">Таймер</string>
-    <string name="swap_mode_trend">Тенденция</string>
+    <string name="swap_mode_trend">Экстремумы</string>
     <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
     <string name="swap_mode_trend_description">Смена происходит в экстремумах графика выбранных типов</string>
     <string name="swap_points">Типы экстремумов</string>
     <string name="swap_points_both">Все</string>
-    <string name="swap_points_peaks">Пики</string>
-    <string name="swap_points_troughs">Впадины</string>
+    <string name="swap_points_peaks">Максимумы</string>
+    <string name="swap_points_troughs">Минимумы</string>
     <string name="smooth_fade">Плавное затухание</string>
     <string name="smooth_fade_description">Плавный переход при смене каналов</string>
     <string name="instant_switch">Мгновенное переключение</string>
@@ -179,7 +181,17 @@
     <string name="max_format">макс %.1f</string>
     <string name="apply">Применить</string>
     <string name="close">Закрыть</string>
-    
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Справка по жестам</string>
+    <string name="gestures_help_title">Жесты в редакторе</string>
+    <string name="gesture_add_point">Дважды нажмите на пустом месте графика, чтобы добавить точку.</string>
+    <string name="gesture_select_point">Нажмите на точку, чтобы открыть окно её редактирования.</string>
+    <string name="gesture_drag_point">Переместите точку: вправо-влево — для изменения времени, вверх-вниз — для изменения частоты несущей.</string>
+    <string name="gesture_swipe_fields">Проведите вверх-вниз по полям окна редактирования точки, чтобы увеличить/уменьшить их значения.</string>
+    <string name="gesture_range_labels">Нажмите на граничные метки частот (%1$s и %2$s), чтобы изменить масштаб графика.</string>
+    <string name="got_it">Понятно</string>
+
     <!-- Frequencies -->
     <string name="beat_frequency">Биения</string>
     <string name="carrier_frequency">Несущая</string>

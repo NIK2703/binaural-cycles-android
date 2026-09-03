@@ -171,7 +171,7 @@ data class FrequencyCurve(
     )
 
     init {
-        require(points.size >= 2) { "Кривая должна содержать минимум 2 точки" }
+        require(points.size >= 1) { "Кривая должна содержать минимум 1 точку" }
     }
 
     /**
@@ -431,6 +431,28 @@ data class FrequencyCurve(
     }
 
     companion object {
+        /**
+         * Кривая для НОВОГО пресета (пустой шаблон).
+         *
+         * Одна точка в полдень (12:00) с несущей 200 Гц и частотой биений 16 Гц.
+         * Редактор позволяет удалить все точки кроме одной, поэтому одноточечная
+         * кривая — допустимое состояние (см. require(points.size >= 1) выше).
+         * Диапазон несущей по умолчанию: 100…600 Гц.
+         */
+        fun newPresetCurve(): FrequencyCurve {
+            return FrequencyCurve(
+                points = listOf(
+                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 200.0f, beatFrequency = 16.0f)
+                ),
+                carrierRange = FrequencyRange(100.0f, 600.0f),
+                beatRange = FrequencyRange(
+                    -FrequencyMath.MAX_BEAT_MAGNITUDE,
+                    FrequencyMath.MAX_BEAT_MAGNITUDE
+                ),
+                interpolationType = InterpolationType.MONOTONE
+            )
+        }
+
         /**
          * Создаёт кривую по умолчанию
          * Точки каждые 3 часа (0:00, 3:00, ..., 21:00)

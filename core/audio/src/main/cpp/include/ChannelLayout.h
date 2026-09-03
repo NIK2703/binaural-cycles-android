@@ -27,6 +27,22 @@
 // ГЛАВНОЕ СВОЙСТВО: раскладка — ЧИСТАЯ ФУНКЦИЯ (конфиг, t). Она переживает
 // рестарт воспроизведения, смену пресета, смерть сервиса и смену конфига,
 // потому что выводится из данных, а не из состояния времени исполнения.
+//
+// ПРОЦЕДУРА СМЕНЫ (как она звучит): знак — СТУПЕНЬКА s(t) ∈ {−1, +1}, а не
+// непрерывная рампа. Плавность даёт не частота, а ОГИБАЮЩАЯ ГРОМКОСТИ g(t):
+//
+//     [затухание F] → [тишина P] → [нарастание F],  центр — в T*,
+//
+// ровно тот ритуал FADE_OUT→PAUSE→FADE_IN, что был до миграции на знаковый
+// beat (см. docs/design_signed_beat_channel_layout.md §3.4). Рампа « beat
+// проходит через ноль » слушалась как быстрый перепад частот каналов на
+// противоположные и была отброшена: частота обязана следовать графику, а
+// переход между раскладками — это тишина, а не глиссандо.
+//
+// Огибающая — тоже чистая функция (конфиг, t), поэтому процедура переживает
+// рестарт и смену конфига ровно как сама раскладка. В момент переворота знака
+// g(T*) = 0, поэтому ступенька частот не даёт щелчка. Генератор дополнительно
+// режет подсегмент по T*, чтобы ступенька попала на границу сэмпла.
 // ============================================================================
 
 #include "Config.h"
@@ -34,6 +50,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace binaural {
@@ -90,10 +107,16 @@ inline bool trendDesiredSwapped(bool currentlySwapped, float carrierDeltaHz) {
  * после Play). Поправка midnightPhase = (Δ(0) < 0) ровно восстанавливает
  * эквивалентность знаковому правилу.
  */
+//
+// Позиция — float (ось суток 0..86400 с). Внутренняя арифметика здесь тоже
+// float: для наших диапазонов (pos < 86400, interval ≤ 3600) точности float
+// хватает с запасом. Валидность процедуры смены (nearestSwapProcedure, ред. 5)
+// определяется КОНСТРУКТИВНО по самому расписанию, без соседних float /
+// nextafter / окрестностных зондов.
 inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
-    constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
-    double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
-    if (pos < 0.0) pos += dayD;
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    float pos = std::fmod(curvePosSec, dayF);
+    if (pos < 0.0f) pos += dayF;
 
     if (cfg.channelSwapMode == ChannelSwapMode::TREND) {
         std::vector<TrendCrossing> localCrossings;
@@ -109,7 +132,7 @@ inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
                 (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH)
                     ? true
                     : (c.toSwapped == wantPeaks);
-            if (selected && static_cast<double>(c.timeSec) < pos) ++count;
+            if (selected && c.timeSec < pos) ++count;
         }
         bool swapped = (count & 1) != 0;
 
@@ -131,7 +154,7 @@ inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
     // TIMER: узлы сетки k*channelSwapIntervalSec от начала суток.
     if (cfg.channelSwapIntervalSec <= 0) return false;
     const int64_t n = static_cast<int64_t>(
-        pos / static_cast<double>(cfg.channelSwapIntervalSec));  // floor, pos ≥ 0
+        pos / static_cast<float>(cfg.channelSwapIntervalSec));  // floor, pos ≥ 0
     return (n & 1) != 0;
 }
 
@@ -146,11 +169,11 @@ inline int64_t timerSolidDurationMs(float curvePosSec,
                                     float timeScale = 1.0f) {
     if (intervalSec <= 0) return 0;
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
-    const double interval = static_cast<double>(intervalSec);
-    const double pos = std::fmod(static_cast<double>(curvePosSec),
-                                 static_cast<double>(SECONDS_PER_DAY));
-    const double distSec = interval - std::fmod(pos, interval); // ∈ (0, I]
-    const int64_t dtMs = static_cast<int64_t>(distSec * 1000.0 / ts);
+    const float interval = static_cast<float>(intervalSec);
+    const float pos = std::fmod(curvePosSec,
+                                static_cast<float>(SECONDS_PER_DAY));
+    const float distSec = interval - std::fmod(pos, interval); // ∈ (0, I]
+    const int64_t dtMs = static_cast<int64_t>(distSec * 1000.0f / ts);
     return std::max<int64_t>(dtMs, 0);
 }
 
@@ -173,7 +196,7 @@ inline int64_t trendSolidDurationMs(
     ChannelSwapTrendPoints points = ChannelSwapTrendPoints::BOTH,
     int64_t swapOffsetMs = 0
 ) {
-    constexpr double dayD = static_cast<double>(SECONDS_PER_DAY);
+    constexpr float dayF2 = static_cast<float>(SECONDS_PER_DAY);
     const float ts = (timeScale > 0.0f) ? timeScale : 1.0f;
 
     std::vector<TrendCrossing> localCrossings;
@@ -184,8 +207,8 @@ inline int64_t trendSolidDurationMs(
     }
 
     const bool wantPeaks = (points == ChannelSwapTrendPoints::PEAKS);
-    const double pos = std::fmod(static_cast<double>(curvePosSec), dayD);
-    double bestRel = -1.0;
+    const float pos = std::fmod(curvePosSec, dayF2);
+    float bestRel = -1.0f;
     (void)currentlySwapped;
 
     for (const TrendCrossing& c : *crossings) {
@@ -193,15 +216,15 @@ inline int64_t trendSolidDurationMs(
             ? true
             : (c.toSwapped == wantPeaks);
         if (!isSelected) continue;
-        double rel = static_cast<double>(c.timeSec) - pos;
-        if (rel <= 0.0) rel += dayD; // wrap через полночь
-        if (bestRel < 0.0 || rel < bestRel) bestRel = rel;
+        float rel = c.timeSec - pos;
+        if (rel <= 0.0f) rel += dayF2; // wrap через полночь
+        if (bestRel < 0.0f || rel < bestRel) bestRel = rel;
     }
-    if (bestRel < 0.0) {
+    if (bestRel < 0.0f) {
         return kTrendMaxSolidMs; // подходящих переходов за сутки нет
     }
 
-    const int64_t dtMs = static_cast<int64_t>(bestRel * 1000.0 / ts);
+    const int64_t dtMs = static_cast<int64_t>(bestRel * 1000.0f / ts);
     const int64_t raw = dtMs - leadMs - swapOffsetMs;
     if (points == ChannelSwapTrendPoints::BOTH) {
         // Без верхнего клампа: редкий BOTH-тренд (пилообразный и т.п.) не должен
@@ -212,7 +235,7 @@ inline int64_t trendSolidDurationMs(
 }
 
 // ============================================================================
-// МНОЖИТЕЛЬ РАСКЛАДКИ s(t)
+// РАСКЛАДКА s(t) И ОГИБАЮЩАЯ ПРОЦЕДУРЫ g(t)
 // ============================================================================
 
 /**
@@ -221,10 +244,10 @@ inline int64_t trendSolidDurationMs(
  *   TIMER — арифметика по узлам сетки k·intervalSec;
  *   TREND — ближайшее выбранное пересечение trendCrossings (по кругу суток).
  *
- * Нужен рампе layoutSignAt: окно прохода биений через ноль центрируется на T*.
- * Если пересечений нет (TREND без экстремумов) — возвращает 0 (рампа к началу
- * суток; на практике channelSwapStateAt тогда тождественно false и рампа
- * вырождается в ступеньку +1).
+ * На T* центрируется процедура (затухание → тишина → нарастание) и ровно в T*
+ * знак раскладки переворачивается. Если пересечений нет (TREND без
+ * экстремумов) — возвращает 0; процедуры там тоже нет (см. nearestSwapProcedure:
+ * знак не меняется ⇒ затухать незачем).
  */
 inline float nearestSwapTimeSec(const BinauralConfig& cfg, float t) {
     constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
@@ -266,54 +289,241 @@ inline float nearestSwapTimeSec(const BinauralConfig& cfg, float t) {
 }
 
 /**
+ * Круговое смещение от t0 к t на оси суток: результат в [−day/2, day/2].
+ */
+inline float circularDeltaSec(float t, float t0) {
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    float d = t - t0;
+    if (d > dayF * 0.5f) d -= dayF;
+    else if (d < -dayF * 0.5f) d += dayF;
+    return d;
+}
+
+/**
+ * Процедура смены раскладки: чем именно сопровождается переворот знака.
+ *
+ * valid = false — переворота нет (swap выключен либо расписание в этой точке
+ *                знак не меняет): огибающая тождественно 1, резать нечего;
+ * fadeSec = 0   — переворот есть, но затухание выключено (ступенька частот
+ *                на полной громкости — осознанный выбор «без плавности»).
+ */
+struct SwapProcedure {
+    bool  valid    = false;
+    float tStarSec = 0.0f;  // мгновение переворота знака, центр процедуры
+    float fadeSec  = 0.0f;  // F — длительность затухания и нарастания
+    float pauseSec = 0.0f;  // P — тишина между ними
+};
+
+/**
+ * Минимальный зазор между СОСЕДНИМИ сменами раскладки (сек).
+ *
+ * Процедура не может быть длиннее зазора: иначе окна соседних смен
+ * перекрываются, огибающая не успевает вернуться к 1, а в пределе (P больше
+ * зазора) звук замолкает навсегда. TIMER: зазор = интервал сетки. TREND:
+ * минимальное круговое расстояние между соседними выбранными экстремумами;
+ * если выбранных пересечений меньше двух — ограничения нет (возвращаем сутки).
+ */
+inline float swapGapSec(const BinauralConfig& cfg) {
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    if (cfg.channelSwapMode == ChannelSwapMode::TIMER) {
+        return (cfg.channelSwapIntervalSec > 0)
+            ? static_cast<float>(cfg.channelSwapIntervalSec)
+            : dayF;
+    }
+    std::vector<TrendCrossing> localCrossings;
+    const std::vector<TrendCrossing>* crossings = &cfg.curve.trendCrossings;
+    if (!cfg.curve.trendCrossingsValid) {
+        computeTrendCrossings(cfg.curve, localCrossings);
+        crossings = &localCrossings;
+    }
+    const bool wantPeaks = (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::PEAKS);
+    std::vector<float> times;
+    for (const TrendCrossing& c : *crossings) {
+        const bool selected =
+            (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH)
+                ? true
+                : (c.toSwapped == wantPeaks);
+        if (selected) times.push_back(c.timeSec);
+    }
+    if (times.size() < 2) return dayF;
+    std::sort(times.begin(), times.end());
+    float gap = dayF;
+    for (size_t i = 0; i + 1 < times.size(); ++i) {
+        gap = std::min(gap, times[i + 1] - times[i]);
+    }
+    // Смычка через полночь: последний узел суток и первый следующего дня.
+    gap = std::min(gap, dayF - (times.back() - times.front()));
+    return (gap > 0.0f) ? gap : dayF;
+}
+
+/**
+ * Число ВЫБРАННЫХ переходов раскладки на кривой (TREND-режим).
+ *
+ * Используется в nearestSwapProcedure (ред. 5) для КОНСТРУКТИВНОЙ валидности:
+ * ступенька в TREND есть ⇔ выбран хотя бы один переход. Это тот же самый
+ * отбор selected, что и в channelSwapStateAt/nearestSwapTimeSec — единая точка
+ * истины отбора, без дублирования логики.
+ */
+inline int64_t numSelectedCrossings(const BinauralConfig& cfg) {
+    std::vector<TrendCrossing> localCrossings;
+    const std::vector<TrendCrossing>* crossings = &cfg.curve.trendCrossings;
+    if (!cfg.curve.trendCrossingsValid) {
+        computeTrendCrossings(cfg.curve, localCrossings);
+        crossings = &localCrossings;
+    }
+    const bool wantPeaks = (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::PEAKS);
+    int64_t count = 0;
+    for (const TrendCrossing& c : *crossings) {
+        const bool selected =
+            (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH)
+                ? true
+                : (c.toSwapped == wantPeaks);
+        if (selected) ++count;
+    }
+    return count;
+}
+
+/**
+ * Процедура смены раскладки, ближайшая к моменту t (ЧИСТАЯ ФУНКЦИЯ конфига).
+ *
+ * T* берётся из nearestSwapTimeSec, а ВАЛИДНОСТЬ определяется КОНСТРУКТИВНО —
+ * без окрестностных зондов (nextafter/nextafterf/±inf), которые под -ffast-math
+ * на устройстве (arm64 NDK clang) схлопываются и гасят процедуру на все сутки
+ * (ред. 4, см. docs/analysis_swap_crossfade_missing.md).
+ *
+ *   TIMER — valid ⇔ channelSwapIntervalSec > 0.
+ *           Чётность n = floor(pos / I) меняется на каждом узле сетки k·I по
+ *           построению: при переходе pos через k·I значение n скачком меняется
+ *           на 1, значит channelSwapStateAt меняет знак в каждом узле. Поэтому
+ *           ступенька есть ровно там, где интервал положителен. Без ULP/зондов.
+ *
+ *   TREND — valid ⇔ число выбранных переходов ≥ 1 (numSelectedCrossings).
+ *           Счётчик инкрементируется на каждом выбранном экстремуме, значит
+ *           channelSwapStateAt меняет знак в каждом выбранном переходе. Если
+ *           выбранных переходов нет (пологая кривая / не тот фильтр) — знак
+ *           не меняется ни в одной точке суток, и затухать незачем (без
+ *           окрестностного зонда это раньше ломалось на полуночном нуле).
+ *
+ * Это ЭКВИВАЛЕНТНО старой проверке «знак меняется в окрестности T*»
+ * (channelSwapStateAt(T*−ε) ≠ channelSwapStateAt(T*+ε)), но ВЫВЕДЕНО из самой
+ * КОНСТРУКЦИИ расписания, а не из квантирования float. Чистый float, без
+ * nextafter/inf/double/ULP — доказуемо на бумаге и не зависит от флагов
+ * оптимизации.
+ *
+ * Длительности: F = channelSwapFadeDurationMs, P = channelSwapPauseDurationMs
+ * (по отдельности, а не свёрнутые в W = 2F+P: это разные фазы). При
+ * fadeEnabled=false процедура вырождается в голую ступеньку (F = P = 0).
+ * Если 2F + P превышает зазор между сменами — обе длительности пропорционально
+ * сжимаются, чтобы огибающая успевала вернуться к 1 (см. swapGapSec).
+ */
+inline SwapProcedure nearestSwapProcedure(const BinauralConfig& cfg, float t) {
+    SwapProcedure p;
+    if (!cfg.channelSwapEnabled) return p;
+
+    const float Tstar = nearestSwapTimeSec(cfg, t);
+
+    // КОНСТРУКТИВНАЯ ВАЛИДНОСТЬ (ред. 5): ступенька есть ⇔ расписание по
+    // построению меняет знак в этой точке. Без соседних float / nextafter / inf.
+    bool hasFlip = false;
+    if (cfg.channelSwapMode == ChannelSwapMode::TIMER) {
+        hasFlip = (cfg.channelSwapIntervalSec > 0);
+    } else {  // TREND (и BOTH — тот же трендовый путь отбора)
+        hasFlip = (numSelectedCrossings(cfg) >= 1);
+    }
+    if (!hasFlip) return p;  // valid=false, Tstar=0
+
+    p.valid = true;
+    p.tStarSec = Tstar;
+
+    if (!cfg.channelSwapFadeEnabled) return p; // голая ступенька
+
+    float F = static_cast<float>(cfg.channelSwapFadeDurationMs) / 1000.0f;
+    float P = static_cast<float>(cfg.channelSwapPauseDurationMs) / 1000.0f;
+    if (F < 0.0f) F = 0.0f;
+    if (P < 0.0f) P = 0.0f;
+    const float W = 2.0f * F + P;
+    if (W > 0.0f) {
+        const float gap = swapGapSec(cfg);
+        if (W > gap) {
+            const float k = gap / W;
+            F *= k;
+            P *= k;
+        }
+    }
+    p.fadeSec = F;
+    p.pauseSec = P;
+    return p;
+}
+
+/**
  * Множитель раскладки ушей в момент t (сек суток).
  *
  *   s = +1 — прямое расположение (левое ухо = lower, правое = upper);
- *   s = −1 — обратное;
- *   |s| < 1 — ПРОХОД ПУЛЬСАЦИИ ЧЕРЕЗ НОЛЬ: оба уха сходятся в унисон и
- *             расходятся в противоположном направлении.
+ *   s = −1 — обратное.
  *
- * ШАГ 3 МИГРАЦИИ: НЕПРЕРЫВНАЯ рампа вокруг ближайшего T*:
+ * СТУПЕНЬКА, а не рампа: частота каждого уха обязана следовать графику, и
+ * «плавность» перехода обеспечивает НЕ частота, а огибающая громкости
+ * layoutGainAt() — затухание → тишина → нарастание вокруг T*. В T* огибающая
+ * равна нулю, поэтому ступенька не слышна как щелчок.
  *
- *     s(t) = s_before · cos(π·u),  u = (t − (T* − W/2)) / W ∈ [0, 1],
- *     W = 2·F + P,  F = channelSwapFadeDurationMs,  P = channelSwapPauseDurationMs.
- *
- * — вне окна |t − T*| ≥ W/2 рампа вырождается в ступеньку channelSwapStateAt;
- * — при fadeEnabled=false (W = 0) рампа исчезает, остаётся чистая ступенька
- *   (поведение шага 2 — бит-в-бит тот же звук при выключенном swap);
- * — в центре окна (t = T*) s = 0: несущая не меняется, громкость постоянна,
- *   фаза непрерывна — пульсация плавно замирает в унисоне и возрождается в
- *   противоположном направлении. Ни щелчка, ни провала громкости.
- *
- * Бывший ритуал FADE_OUT→PAUSE→FADE_IN (и вся фазовая машина планировщика)
- * удалён: раскладка — чистая функция (конфиг, t), а не состояние времени
- * исполнения, поэтому «смена каналов» = beat проходит через ноль.
- *
- * s_before = ступенчатый знак СЛЕВА от T* = channelSwapStateAt(T* − ε).
- * Справа от T* чётность расписания инвертируется (channelSwapStateAt(T* + ε)
- * = −s_before), и cos(π·1) = −1 даёт в точности −s_before — рампа непрерывна
- * со ступенькой с обеих сторон.
+ * Исторически здесь была непрерывная рампа s(t) = s_до·cos(π·u) («биения
+ * проходят через ноль»). На слух это быстрый перепад частот каналов на
+ * противоположные (частоты скользят навстречу и расходятся), к тому же
+ * расходясь с графиком на всём окне W. Рампа удалена, ритуал вернулся.
  */
 inline float layoutSignAt(const BinauralConfig& cfg, float t) {
     if (!cfg.channelSwapEnabled) return 1.0f;
-    const float sStep = channelSwapStateAt(cfg, t) ? -1.0f : 1.0f;
+    return channelSwapStateAt(cfg, t) ? -1.0f : 1.0f;
+}
 
+/**
+ * Огибающая громкости процедуры смены раскладки (множитель к амплитуде).
+ *
+ * Центр — в T* (мгновение переворота знака), окно симметрично:
+ *
+ *   |t − T*| ≥ P/2 + F           → 1.0  (процедуры нет)
+ *   T* − P/2 − F … T* − P/2      → затухание 0.5·(1 + cos(π·u)), u ∈ [0,1] → 1…0
+ *   |t − T*| ≤ P/2               → 0.0  (тишина; знак перевёрнут, фазе нечего рвать)
+ *   T* + P/2 … T* + P/2 + F      → нарастание 0.5·(1 − cos(π·u)), u ∈ [0,1] → 0…1
+ *
+ * Приподнятый косинус (а не линейная рампа) — та же кривая, что была у
+ * FADE_OUT/FADE_IN до миграции на знаковый beat; на концах производная равна
+ * нулю, поэтому стык с полной громкостью не слышен.
+ *
+ * Функция ЧЁТНАЯ относительно T*: g(T*−d) = g(T*+d). Отсюда непрерывность в
+ * точке смены «ближайшего узла» — ровно посередине между соседними сменами
+ * обе ветки дают одно и то же значение, скачка нет даже при перекрытии окон.
+ *
+ * Стоимость: при выключенном swap (по умолчанию) — один if, ноль сканов.
+ */
+inline float layoutGainAt(const BinauralConfig& cfg, float t) {
+    const SwapProcedure p = nearestSwapProcedure(cfg, t);
+    if (!p.valid || p.fadeSec <= 0.0f) return 1.0f;
+
+    const float d = circularDeltaSec(t, p.tStarSec);
+    const float halfP = 0.5f * p.pauseSec;
+    const float F = p.fadeSec;
+
+    if (d <= -halfP - F || d >= halfP + F) return 1.0f; // вне окна
+    if (d <= -halfP) {                                  // затухание
+        const float u = (d + halfP + F) / F;            // 0 … 1
+        constexpr float kPi = 3.14159265358979323846f;
+        return 0.5f * (1.0f + std::cos(kPi * u));
+    }
+    if (d <= halfP) return 0.0f;                        // тишина
     constexpr float kPi = 3.14159265358979323846f;
-    const float W = 2.0f * static_cast<float>(cfg.channelSwapFadeDurationMs) / 1000.0f
-                 + static_cast<float>(cfg.channelSwapPauseDurationMs) / 1000.0f;
-    if (W <= 0.0f) return sStep; // без рампы — ступенька
+    const float u = (d - halfP) / F;                    // 0 … 1
+    return 0.5f * (1.0f - std::cos(kPi * u));
+}
 
-    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
-    const float Tstar = nearestSwapTimeSec(cfg, t);
-    const float halfW = 0.5f * W;
-    float d = t - Tstar;
-    if (d > dayF * 0.5f) d -= dayF;
-    else if (d < -dayF * 0.5f) d += dayF;
-    if (std::abs(d) >= halfW) return sStep; // вне окна — ступенька
-
-    const float u = (d + halfW) / W; // ∈ [0, 1]
-    const float sBefore = channelSwapStateAt(cfg, Tstar - 1e-3f) ? -1.0f : 1.0f;
-    return sBefore * std::cos(kPi * u);
+/**
+ * Мгновение переворота знака раскладки (сек суток ∈ [0, day)) или −1, если
+ * знак не меняется. Нужно генератору: подсегмент режется по T*, чтобы
+ * ступенька частот попала на границу сэмпла, где огибающая равна нулю.
+ */
+inline float swapFlipTimeSec(const BinauralConfig& cfg, float t) {
+    const SwapProcedure p = nearestSwapProcedure(cfg, t);
+    return p.valid ? p.tStarSec : -1.0f;
 }
 
 /**

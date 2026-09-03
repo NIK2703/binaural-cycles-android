@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Help
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -20,6 +21,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
+import com.binaural.core.audio.model.FrequencyRange
 import com.binauralcycles.ui.components.*
 import com.binauralcycles.ui.theme.Spacing
 import com.binauralcycles.viewmodel.BinauralViewModel
@@ -32,8 +34,7 @@ fun PresetEditScreen(
     presetId: String?,  // null для нового пресета
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
-    onNavigateBack: () -> Unit,
-    onImportPreset: () -> Unit = {}
+    onNavigateBack: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
     // Телеметрия отдельным потоком: частоты/время тикают каждую секунду и
@@ -52,6 +53,10 @@ fun PresetEditScreen(
         mutableStateOf(editingPreset?.name ?: newPresetName) 
     }
     var showUnsavedDialog by remember { mutableStateOf(false) }
+    // Справка по жестам — по кнопке рядом с сохранением. Состояние здесь,
+    // а не внутри графика: справка описывает весь редактор (график, окно
+    // точки, метки границ), а не один его элемент.
+    var showGesturesHelp by remember { mutableStateOf(false) }
     var hasChanges by remember { mutableStateOf(false) }
     
     // Флаг для предотвращения повторных навигаций (локальный debounce)
@@ -158,11 +163,18 @@ fun PresetEditScreen(
                         }
                     },
                     actions = {
-                        // Кнопка импорта показывается только для нового пресета
-                        if (presetId == null) {
-                            IconButton(onClick = onImportPreset) {
-                                Icon(Icons.Default.FileDownload, contentDescription = stringResource(R.string.import_preset))
-                            }
+                        // Справка по жестам — СЛЕВА от сохранения: сохранить
+                        // остаётся крайней правой, то есть «дальней» от центра
+                        // и ближайшей к большому пальцу, а подсказка не
+                        // отодвигает её от привычного места.
+                        IconButton(onClick = { showGesturesHelp = true }) {
+                            // AutoMirrored-версия: в RTL иконка разворачивается,
+                            // а заодно это не-deprecated вариант (обычный
+                            // Icons.Default.Help помечен устаревшим).
+                            Icon(
+                                Icons.AutoMirrored.Filled.Help,
+                                contentDescription = stringResource(R.string.gestures_help)
+                            )
                         }
                         IconButton(
                             onClick = { saveAndNavigateBack() },
@@ -313,6 +325,17 @@ fun PresetEditScreen(
         }
     }
     
+    // Справка по жестам редактора. Диапазон несущей передаётся текущий:
+    // пункт про метки границ подставляет их живые значения («600 Гц и
+    // 100 Гц»), а не абстрактные «граничные метки».
+    if (showGesturesHelp) {
+        GesturesHelpDialog(
+            carrierRange = uiState.editingFrequencyCurve?.carrierRange
+                ?: FrequencyRange.DEFAULT_CARRIER,
+            onDismiss = { showGesturesHelp = false }
+        )
+    }
+
     // Диалог несохранённых изменений
     if (showUnsavedDialog) {
         AlertDialog(

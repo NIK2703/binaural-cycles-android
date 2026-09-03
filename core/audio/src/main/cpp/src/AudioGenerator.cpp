@@ -83,79 +83,73 @@ inline bool bisectionConstantFreq() {
 // ПРЕДВЫЧИСЛЕННАЯ ТАБЛИЦА ДЛЯ FADE КРИВОЙ (косинусная интерполяция)
 // ========================================================================
 
-// Границы (в сэмплах от начала сегмента) контрольных точек STEP-кривой внутри сегмента.
+// Границы разрезов внутри сегмента (в сэмплах от его начала):
+//
+//   1. границы ступеней STEP-кривой — ступенька не должна превращаться в
+//      глиссандо (как и раньше, см. collectStepBoundaries);
+//   2. мгновение ПЕРЕВОРОТА ЗНАКА BEAT (центр процедуры смены каналов) —
+//      ступенька частот обязана попасть на границу сэмпла, где огибающая
+//      процедуры равна нулю. Без разреза подсегмент до 100 мс проигрывает
+//      смену раскладки как глиссандо (левое ухо ползёт 200 → 204 Гц) на
+//      пусть и малой, но ненулевой громкости — на коротких затуханиях это
+//      слышно как «перепад частот», а не как пауза.
 //
 // ВОЗВРАЩАЕТ ССЫЛКУ НА thread_local-буфер, а не новый vector: вызывается на
-// аудио-потоке для КАЖДОГО STEP-сегмента (сегмент ≤100 мс ⇒ десятки раз в
-// секунду аудио), и раньше каждый вызов аллокировал. Буфер переиспользуется,
-// поэтому вызывающий обязан потребить результат до следующего вызова — в
-// generatePackage* так и есть (один проход по кусочкам, без вложенных вызовов).
-static const std::vector<int>& collectStepBoundaries(
-    const FrequencyCurve& curve,
-    double startTimeSeconds,
-    double secPerSample,
-    int samples
-) {
-    thread_local std::vector<int> bounds;
-    bounds.clear();
-    if (samples <= 1 || !(secPerSample > 0.0)) {
-        return bounds;
-    }
-    const double endTime = startTimeSeconds + secPerSample * samples;
-    const double day = static_cast<double>(SECONDS_PER_DAY);
-    for (const auto& p : curve.points) {
-        const double pt = static_cast<double>(p.timeSeconds);
-        const int64_t kFirst = static_cast<int64_t>(std::floor((startTimeSeconds - pt) / day)) - 1;
-        const int64_t kLast = static_cast<int64_t>(std::ceil((endTime - pt) / day)) + 1;
-        for (int64_t k = kFirst; k <= kLast; ++k) {
-            const double occurrence = pt + static_cast<double>(k) * day;
-            if (occurrence <= startTimeSeconds || occurrence >= endTime) {
-                continue;
-            }
-            const int n = static_cast<int>(
-                std::ceil((occurrence - startTimeSeconds) / secPerSample));
-            if (n > 0 && n < samples) {
-                bounds.push_back(n);
-            }
-        }
-    }
-    std::sort(bounds.begin(), bounds.end());
-    bounds.erase(std::unique(bounds.begin(), bounds.end()), bounds.end());
-    return bounds;
-}
+// аудио-потоке для КАЖДОГО сегмента. Буфер переиспользуется, поэтому
+// вызывающий обязан потребить результат до следующего вызова — в
+// generatePackage* так и есть.
 
-// Смещение (в сэмплах от начала окна) БЛИЖАЙШЕЙ границы ступени STEP-кривой
-// внутри окна [startTimeSeconds, startTimeSeconds + secPerSample*maxSamples).
-// 0 — границ внутри окна нет. Без выделений (вызывается на аудио-потоке).
-static int stepBoundaryOffset(
+static const std::vector<int>& collectSegmentCuts(
+    const BinauralConfig& config,
     const FrequencyCurve& curve,
     double startTimeSeconds,
     double secPerSample,
-    int maxSamples
+    int samples,
+    bool collectStepBounds
 ) {
-    if (maxSamples <= 1 || !(secPerSample > 0.0)) {
-        return 0;
+    thread_local std::vector<int> cuts;
+    cuts.clear();
+    if (samples <= 1 || !(secPerSample > 0.0)) {
+        return cuts;
     }
-    const double endTime = startTimeSeconds + secPerSample * maxSamples;
-    const double day = static_cast<double>(SECONDS_PER_DAY);
-    int best = 0;
-    for (const auto& p : curve.points) {
-        const double pt = static_cast<double>(p.timeSeconds);
-        const int64_t kFirst = static_cast<int64_t>(std::floor((startTimeSeconds - pt) / day)) - 1;
-        const int64_t kLast  = static_cast<int64_t>(std::ceil((endTime - pt) / day)) + 1;
-        for (int64_t k = kFirst; k <= kLast; ++k) {
-            const double occurrence = pt + static_cast<double>(k) * day;
-            if (occurrence <= startTimeSeconds || occurrence >= endTime) {
-                continue;
-            }
-            const int n = static_cast<int>(
-                std::ceil((occurrence - startTimeSeconds) / secPerSample));
-            if (n > 0 && n < maxSamples && (best == 0 || n < best)) {
-                best = n;
+    constexpr double day = static_cast<double>(SECONDS_PER_DAY);
+    const double endTime = startTimeSeconds + secPerSample * samples;
+
+    if (collectStepBounds) {
+        for (const auto& p : curve.points) {
+            const double pt = static_cast<double>(p.timeSeconds);
+            const int64_t kFirst = static_cast<int64_t>(std::floor((startTimeSeconds - pt) / day)) - 1;
+            const int64_t kLast  = static_cast<int64_t>(std::ceil((endTime - pt) / day)) + 1;
+            for (int64_t k = kFirst; k <= kLast; ++k) {
+                const double occurrence = pt + static_cast<double>(k) * day;
+                if (occurrence <= startTimeSeconds || occurrence >= endTime) continue;
+                const int n = static_cast<int>(
+                    std::ceil((occurrence - startTimeSeconds) / secPerSample));
+                if (n > 0 && n < samples) cuts.push_back(n);
             }
         }
     }
-    return best;
+
+    // Переворот знака ищем по факту смены расписания внутри сегмента, а не по
+    // «ближайшему узлу к началу»: узел может лежать и за пределами сегмента.
+    if (config.channelSwapEnabled &&
+        channelSwapStateAt(config, static_cast<float>(startTimeSeconds)) !=
+        channelSwapStateAt(config, static_cast<float>(endTime))) {
+        const float Tstar = nearestSwapTimeSec(config, static_cast<float>(
+            startTimeSeconds + 0.5 * secPerSample * samples));
+        if (Tstar >= 0.0f) {
+            double rel = static_cast<double>(Tstar) - std::fmod(startTimeSeconds, day);
+            if (rel < 0.0) rel += day;               // следующее вхождение в будущем
+            if (rel > 0.0 && rel < secPerSample * samples) {
+                const int n = static_cast<int>(std::ceil(rel / secPerSample));
+                if (n > 0 && n < samples) cuts.push_back(n);
+            }
+        }
+    }
+
+    std::sort(cuts.begin(), cuts.end());
+    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+    return cuts;
 }
 
 AudioGenerator::AudioGenerator() {
@@ -600,6 +594,18 @@ GenerateResult AudioGenerator::generatePackage(
             : channelsAt(config, static_cast<float>(t));
     };
     
+    // Амплитуда уха = нормализация по частоте × огибающая процедуры смены
+    // раскладки (layoutGainAt: затухание → тишина → нарастание вокруг T*).
+    // Частоты при этом продолжают идти по графику — огибающая множит только
+    // громкость, поэтому «смена каналов» слышна как пауза, а не как перепад
+    // частот. При выключенном swap это один if и умножение на 1.
+    auto earAmpsAt = [&](const FrequencyTableResult& f, float t) -> std::pair<float, float> {
+        auto [leftAmp, rightAmp] = calculateNormalizedAmplitudes(
+            f.lowerFreq, f.upperFreq, config, config.curve);
+        const float gain = layoutGainAt(config, t);
+        return {leftAmp * gain, rightAmp * gain};
+    };
+    
     const float twoPiOverSampleRate = TWO_PI / m_sampleRate;
     
     int currentSample = 0;
@@ -633,10 +639,9 @@ GenerateResult AudioGenerator::generatePackage(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
-        float startLeftFreq = startFreqResult.lowerFreq;
-        float startRightFreq = startFreqResult.upperFreq;
-        
+        // Частота старта сегмента нужна только диагностике: генерация считает
+        // частоты ВНУТРИ кусочков (сегмент может быть разрезан).
+        [[maybe_unused]] FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
@@ -645,81 +650,62 @@ GenerateResult AudioGenerator::generatePackage(
 
         LOG_SEG("SEGMENT_FREQS: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
-             startLeftFreq, startRightFreq,
+             startFreqResult.lowerFreq, startFreqResult.upperFreq,
              endLeftFreq, endRightFreq,
              static_cast<int>(segment.type));
         
-        auto [startLeftAmp, startRightAmp] = calculateNormalizedAmplitudes(
-            startLeftFreq, startRightFreq, config, config.curve
-        );
-        auto [endLeftAmp, endRightAmp] = calculateNormalizedAmplitudes(
-            endLeftFreq, endRightFreq, config, config.curve
-        );
-        
-        const float startLeftOmega = twoPiOverSampleRate * startLeftFreq;
-        const float startRightOmega = twoPiOverSampleRate * startRightFreq;
-        const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
-        const float endRightOmega = twoPiOverSampleRate * endRightFreq;
-        
+        // Амплитуды и омеги считаются ВНУТРИ кусочков (earAmpsAt): сегмент
+        // может быть разрезан по ступени STEP-кривой или по мгновению смены
+        // раскладки, и у каждого кусочка свои концы хорды.
         switch (segment.type) {
-            case BufferType::SOLID:
-                // STEP: ступенька должна быть мгновенной — режем сегмент по границам
-                // контрольных точек, в каждом под-кусочке частота константна (Δω=0)
-                if (!constantFreq &&
+            case BufferType::SOLID: {
+                // Сегмент режется на кусочки по двум причинам:
+                //   * STEP — ступенька должна быть мгновенной, внутри кусочка
+                //     частота константна (Δω=0), а не портаменто;
+                //   * смена раскладки — ступенька частот обязана попасть на
+                //     границу сэмпла (там огибающая процедуры равна нулю).
+                const bool stepCurve = !constantFreq &&
                     config.curve.interpolationType == InterpolationType::STEP &&
-                    config.curve.points.size() > 1) {
-                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int>& stepBounds = collectStepBoundaries(
-                        config.curve, currentTime, stepSecPerSample, samples);
-                    if (!stepBounds.empty()) {
-                        int pieceStart = 0;
-                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
-                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
-                            );
-                            const float pieceLeftFreq = pieceFreq.lowerFreq;
-                            const float pieceRightFreq = pieceFreq.upperFreq;
-                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
-                                pieceLeftFreq, pieceRightFreq, config, config.curve
-                            );
-                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
-                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
-                            generateSolidBuffer(
-                                buffer + (currentSample + pieceStart) * 2,
-                                pieceEnd - pieceStart,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftAmp, pieceRightAmp,
-                                pieceLeftAmp, pieceRightAmp,
-                                state
-                            );
-                            pieceStart = pieceEnd;
-                        }
-                        break;
-                    }
-                    // G1: граница ступени совпала с концом сегмента — держим
-                    // частоту старта (Δω=0), а не портаменто к постступенчатому значению
+                    config.curve.points.size() > 1;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                const std::vector<int>& cuts = collectSegmentCuts(
+                    config, config.curve, currentTime, secPerSample, samples, stepCurve);
+
+                int pieceStart = 0;
+                for (size_t k = 0; k <= cuts.size(); ++k) {
+                    const int pieceEnd = (k < cuts.size()) ? cuts[k] : samples;
+                    if (pieceEnd <= pieceStart) continue;
+                    const float t0 = static_cast<float>(currentTime + pieceStart * secPerSample);
+                    // G1+SWAP: конец кусочка берём на ПОСЛЕДНЕМ реальном сэмпле
+                    // (pieceEnd-1), а не на границе pieceEnd. sample pieceEnd-1 —
+                    // последний реальный сэмпл кусочка, его время =
+                    // currentTime + (pieceEnd-1)*secPerSample. Брать pieceEnd
+                    // означает на 1 сэмпл «в будущее»: для смены раскладки там
+                    // channelSwapStateAt уже вернул ПЕРЕВЁРНУТЫЙ знак beat, поэтому
+                    // левый кусочек рампил частоту pre→post через ноль — слышимое
+                    // глиссандо («быстрая плавная смена каналов»). На (pieceEnd-1)
+                    // знак внутри кусочка постоянен => мгновенная ступенька без
+                    // глиссандо (на границе pieceEnd огибающая процедуры = 0).
+                    const float t1 = static_cast<float>(currentTime + (pieceEnd - 1) * secPerSample);
+                    const FrequencyTableResult f0 = earFreqsAt(t0);
+                    // G1 (STEP): частота конца кусочка = частота его начала,
+                    // иначе ступенька превратилась бы в глиссандо.
+                    const FrequencyTableResult f1 = stepCurve ? f0 : earFreqsAt(t1);
+                    auto [amp0Left, amp0Right] = earAmpsAt(f0, t0);
+                    auto [amp1Left, amp1Right] = earAmpsAt(f1, t1);
                     generateSolidBuffer(
-                        buffer + currentSample * 2,
-                        samples,
-                        startLeftOmega, startRightOmega,
-                        startLeftOmega, startRightOmega,
-                        startLeftAmp, startRightAmp,
-                        endLeftAmp, endRightAmp,
+                        buffer + (currentSample + pieceStart) * 2,
+                        pieceEnd - pieceStart,
+                        twoPiOverSampleRate * f0.lowerFreq, twoPiOverSampleRate * f0.upperFreq,
+                        twoPiOverSampleRate * f1.lowerFreq, twoPiOverSampleRate * f1.upperFreq,
+                        amp0Left, amp0Right,
+                        amp1Left, amp1Right,
                         state
                     );
-                    break;
+                    pieceStart = pieceEnd;
                 }
-                generateSolidBuffer(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    state
-                );
                 break;
+            }
                 
             case BufferType::FADE_OUT: break;
             case BufferType::PAUSE: break;
@@ -783,6 +769,15 @@ GenerateResult AudioGenerator::generatePackageNeon(
             : channelsAt(config, static_cast<float>(t));
     };
     
+    // Амплитуда уха = нормализация по частоте × огибающая процедуры смены
+    // раскладки (см. скалярный generatePackage).
+    auto earAmpsAt = [&](const FrequencyTableResult& f, float t) -> std::pair<float, float> {
+        auto [leftAmp, rightAmp] = calculateNormalizedAmplitudes(
+            f.lowerFreq, f.upperFreq, config, config.curve);
+        const float gain = layoutGainAt(config, t);
+        return {leftAmp * gain, rightAmp * gain};
+    };
+    
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
     int currentSample = 0;
@@ -806,10 +801,9 @@ GenerateResult AudioGenerator::generatePackageNeon(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
-        float startLeftFreq = startFreqResult.lowerFreq;
-        float startRightFreq = startFreqResult.upperFreq;
-        
+        // Частота старта сегмента нужна только диагностике: генерация считает
+        // частоты ВНУТРИ кусочков (сегмент может быть разрезан).
+        [[maybe_unused]] FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
@@ -818,19 +812,23 @@ GenerateResult AudioGenerator::generatePackageNeon(
 
         LOG_SEG("SEGMENT_FREQS_NEON: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
-             startLeftFreq, startRightFreq,
+             startFreqResult.lowerFreq, startFreqResult.upperFreq,
              endLeftFreq, endRightFreq,
              static_cast<int>(segment.type));
         
+        // Амплитуды и омеги уровня СЕГМЕНТА нужны только диагностике
+        // (PARAMS_NEON): генерация считает их ВНУТРИ кусочков, поскольку
+        // сегмент может быть разрезан (STEP / смена раскладки). Огибающая
+        // процедуры здесь не учтена — это лог опорных значений хорды.
         auto [startLeftAmp, startRightAmp] = calculateNormalizedAmplitudes(
-            startLeftFreq, startRightFreq, config, config.curve
+            startFreqResult.lowerFreq, startFreqResult.upperFreq, config, config.curve
         );
         auto [endLeftAmp, endRightAmp] = calculateNormalizedAmplitudes(
             endLeftFreq, endRightFreq, config, config.curve
         );
         
-        const float startLeftOmega = twoPiOverSampleRate * startLeftFreq;
-        const float startRightOmega = twoPiOverSampleRate * startRightFreq;
+        const float startLeftOmega = twoPiOverSampleRate * startFreqResult.lowerFreq;
+        const float startRightOmega = twoPiOverSampleRate * startFreqResult.upperFreq;
         const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
         const float endRightOmega = twoPiOverSampleRate * endRightFreq;
         
@@ -843,62 +841,49 @@ GenerateResult AudioGenerator::generatePackageNeon(
              endLeftAmp, endRightAmp);
         
         switch (segment.type) {
-            case BufferType::SOLID:
-                // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
-                if (!constantFreq &&
+            case BufferType::SOLID: {
+                // Кусочки: границы ступеней STEP-кривой (Δω=0 внутри кусочка)
+                // плюс мгновение смены раскладки — см. скалярный путь.
+                const bool stepCurve = !constantFreq &&
                     config.curve.interpolationType == InterpolationType::STEP &&
-                    config.curve.points.size() > 1) {
-                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int>& stepBounds = collectStepBoundaries(
-                        config.curve, currentTime, stepSecPerSample, samples);
-                    if (!stepBounds.empty()) {
-                        int pieceStart = 0;
-                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
-                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
-                            );
-                            const float pieceLeftFreq = pieceFreq.lowerFreq;
-                            const float pieceRightFreq = pieceFreq.upperFreq;
-                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
-                                pieceLeftFreq, pieceRightFreq, config, config.curve
-                            );
-                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
-                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
-                            generateSolidBufferNeon(
-                                buffer + (currentSample + pieceStart) * 2,
-                                pieceEnd - pieceStart,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftAmp, pieceRightAmp,
-                                pieceLeftAmp, pieceRightAmp,
-                                state
-                            );
-                            pieceStart = pieceEnd;
-                        }
-                        break;
-                    }
-                    // G1: см. скалярный путь — держим частоту старта
+                    config.curve.points.size() > 1;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                const std::vector<int>& cuts = collectSegmentCuts(
+                    config, config.curve, currentTime, secPerSample, samples, stepCurve);
+
+                int pieceStart = 0;
+                for (size_t k = 0; k <= cuts.size(); ++k) {
+                    const int pieceEnd = (k < cuts.size()) ? cuts[k] : samples;
+                    if (pieceEnd <= pieceStart) continue;
+                    const float t0 = static_cast<float>(currentTime + pieceStart * secPerSample);
+                    // G1+SWAP: конец кусочка берём на ПОСЛЕДНЕМ реальном сэмпле
+                    // (pieceEnd-1), а не на границе pieceEnd. sample pieceEnd-1 —
+                    // последний реальный сэмпл кусочка, его время =
+                    // currentTime + (pieceEnd-1)*secPerSample. Брать pieceEnd
+                    // означает на 1 сэмпл «в будущее»: для смены раскладки там
+                    // channelSwapStateAt уже вернул ПЕРЕВЁРНУТЫЙ знак beat, поэтому
+                    // левый кусочек рампил частоту pre→post через ноль — слышимое
+                    // глиссандо («быстрая плавная смена каналов»). На (pieceEnd-1)
+                    // знак внутри кусочка постоянен => мгновенная ступенька без
+                    // глиссандо (на границе pieceEnd огибающая процедуры = 0).
+                    const float t1 = static_cast<float>(currentTime + (pieceEnd - 1) * secPerSample);
+                    const FrequencyTableResult f0 = earFreqsAt(t0);
+                    const FrequencyTableResult f1 = stepCurve ? f0 : earFreqsAt(t1);
+                    auto [amp0Left, amp0Right] = earAmpsAt(f0, t0);
+                    auto [amp1Left, amp1Right] = earAmpsAt(f1, t1);
                     generateSolidBufferNeon(
-                        buffer + currentSample * 2,
-                        samples,
-                        startLeftOmega, startRightOmega,
-                        startLeftOmega, startRightOmega,
-                        startLeftAmp, startRightAmp,
-                        endLeftAmp, endRightAmp,
+                        buffer + (currentSample + pieceStart) * 2,
+                        pieceEnd - pieceStart,
+                        twoPiOverSampleRate * f0.lowerFreq, twoPiOverSampleRate * f0.upperFreq,
+                        twoPiOverSampleRate * f1.lowerFreq, twoPiOverSampleRate * f1.upperFreq,
+                        amp0Left, amp0Right,
+                        amp1Left, amp1Right,
                         state
                     );
-                    break;
+                    pieceStart = pieceEnd;
                 }
-                generateSolidBufferNeon(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    state
-                );
                 break;
+            }
                 
             case BufferType::FADE_OUT: break;
             case BufferType::PAUSE: break;
@@ -980,6 +965,15 @@ GenerateResult AudioGenerator::generatePackageSse(
             : channelsAt(config, static_cast<float>(t));
     };
     
+    // Амплитуда уха = нормализация по частоте × огибающая процедуры смены
+    // раскладки (см. скалярный generatePackage).
+    auto earAmpsAt = [&](const FrequencyTableResult& f, float t) -> std::pair<float, float> {
+        auto [leftAmp, rightAmp] = calculateNormalizedAmplitudes(
+            f.lowerFreq, f.upperFreq, config, config.curve);
+        const float gain = layoutGainAt(config, t);
+        return {leftAmp * gain, rightAmp * gain};
+    };
+    
     const float twoPiOverSampleRate = static_cast<float>(TWO_PI / m_sampleRate);
     
     int currentSample = 0;
@@ -1003,10 +997,9 @@ GenerateResult AudioGenerator::generatePackageSse(
         
         // Начальные и конечные частоты ВСЕГДА вычисляем из таблицы по времени
         // Это гарантирует точное соответствие графику без скачков частот
-        FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
-        float startLeftFreq = startFreqResult.lowerFreq;
-        float startRightFreq = startFreqResult.upperFreq;
-        
+        // Частота старта сегмента нужна только диагностике: генерация считает
+        // частоты ВНУТРИ кусочков (сегмент может быть разрезан).
+        [[maybe_unused]] FrequencyTableResult startFreqResult = earFreqsAt(static_cast<float>(currentTime));
         FrequencyTableResult endFreqResult = earFreqsAt(static_cast<float>(currentTime + static_cast<double>(durationSec) * timeScale)
         );
         float endLeftFreq = endFreqResult.lowerFreq;
@@ -1015,79 +1008,57 @@ GenerateResult AudioGenerator::generatePackageSse(
 
         LOG_SEG("SEGMENT_FREQS_SSE: time=%.3f, start=[%.2f, %.2f], end=[%.2f, %.2f], type=%d",
              currentTime,
-             startLeftFreq, startRightFreq,
+             startFreqResult.lowerFreq, startFreqResult.upperFreq,
              endLeftFreq, endRightFreq,
              static_cast<int>(segment.type));
         
-        auto [startLeftAmp, startRightAmp] = calculateNormalizedAmplitudes(
-            startLeftFreq, startRightFreq, config, config.curve
-        );
-        auto [endLeftAmp, endRightAmp] = calculateNormalizedAmplitudes(
-            endLeftFreq, endRightFreq, config, config.curve
-        );
-        
-        const float startLeftOmega = twoPiOverSampleRate * startLeftFreq;
-        const float startRightOmega = twoPiOverSampleRate * startRightFreq;
-        const float endLeftOmega = twoPiOverSampleRate * endLeftFreq;
-        const float endRightOmega = twoPiOverSampleRate * endRightFreq;
-        
+        // Амплитуды и омеги считаются ВНУТРИ кусочков (earAmpsAt): сегмент
+        // может быть разрезан по ступени STEP-кривой или по мгновению смены
+        // раскладки, и у каждого кусочка свои концы хорды.
         switch (segment.type) {
-            case BufferType::SOLID:
-                // STEP: режем сегмент по границам контрольных точек, Δω=0 внутри кусочка
-                if (!constantFreq &&
+            case BufferType::SOLID: {
+                // Кусочки: границы ступеней STEP-кривой (Δω=0 внутри кусочка)
+                // плюс мгновение смены раскладки — см. скалярный путь.
+                const bool stepCurve = !constantFreq &&
                     config.curve.interpolationType == InterpolationType::STEP &&
-                    config.curve.points.size() > 1) {
-                    const double stepSecPerSample = static_cast<double>(timeScale) / m_sampleRate;
-                    const std::vector<int>& stepBounds = collectStepBoundaries(
-                        config.curve, currentTime, stepSecPerSample, samples);
-                    if (!stepBounds.empty()) {
-                        int pieceStart = 0;
-                        for (size_t k = 0; k <= stepBounds.size(); ++k) {
-                            const int pieceEnd = (k < stepBounds.size()) ? stepBounds[k] : samples;
-                            const FrequencyTableResult pieceFreq = earFreqsAt(static_cast<float>(currentTime + pieceStart * stepSecPerSample)
-                            );
-                            const float pieceLeftFreq = pieceFreq.lowerFreq;
-                            const float pieceRightFreq = pieceFreq.upperFreq;
-                            auto [pieceLeftAmp, pieceRightAmp] = calculateNormalizedAmplitudes(
-                                pieceLeftFreq, pieceRightFreq, config, config.curve
-                            );
-                            const float pieceLeftOmega = twoPiOverSampleRate * pieceLeftFreq;
-                            const float pieceRightOmega = twoPiOverSampleRate * pieceRightFreq;
-                            generateSolidBufferSse(
-                                buffer + (currentSample + pieceStart) * 2,
-                                pieceEnd - pieceStart,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftOmega, pieceRightOmega,
-                                pieceLeftAmp, pieceRightAmp,
-                                pieceLeftAmp, pieceRightAmp,
-                                state
-                            );
-                            pieceStart = pieceEnd;
-                        }
-                        break;
-                    }
-                    // G1: см. скалярный путь — держим частоту старта
+                    config.curve.points.size() > 1;
+                const double secPerSample = static_cast<double>(timeScale) / m_sampleRate;
+                const std::vector<int>& cuts = collectSegmentCuts(
+                    config, config.curve, currentTime, secPerSample, samples, stepCurve);
+
+                int pieceStart = 0;
+                for (size_t k = 0; k <= cuts.size(); ++k) {
+                    const int pieceEnd = (k < cuts.size()) ? cuts[k] : samples;
+                    if (pieceEnd <= pieceStart) continue;
+                    const float t0 = static_cast<float>(currentTime + pieceStart * secPerSample);
+                    // G1+SWAP: конец кусочка берём на ПОСЛЕДНЕМ реальном сэмпле
+                    // (pieceEnd-1), а не на границе pieceEnd. sample pieceEnd-1 —
+                    // последний реальный сэмпл кусочка, его время =
+                    // currentTime + (pieceEnd-1)*secPerSample. Брать pieceEnd
+                    // означает на 1 сэмпл «в будущее»: для смены раскладки там
+                    // channelSwapStateAt уже вернул ПЕРЕВЁРНУТЫЙ знак beat, поэтому
+                    // левый кусочек рампил частоту pre→post через ноль — слышимое
+                    // глиссандо («быстрая плавная смена каналов»). На (pieceEnd-1)
+                    // знак внутри кусочка постоянен => мгновенная ступенька без
+                    // глиссандо (на границе pieceEnd огибающая процедуры = 0).
+                    const float t1 = static_cast<float>(currentTime + (pieceEnd - 1) * secPerSample);
+                    const FrequencyTableResult f0 = earFreqsAt(t0);
+                    const FrequencyTableResult f1 = stepCurve ? f0 : earFreqsAt(t1);
+                    auto [amp0Left, amp0Right] = earAmpsAt(f0, t0);
+                    auto [amp1Left, amp1Right] = earAmpsAt(f1, t1);
                     generateSolidBufferSse(
-                        buffer + currentSample * 2,
-                        samples,
-                        startLeftOmega, startRightOmega,
-                        startLeftOmega, startRightOmega,
-                        startLeftAmp, startRightAmp,
-                        endLeftAmp, endRightAmp,
+                        buffer + (currentSample + pieceStart) * 2,
+                        pieceEnd - pieceStart,
+                        twoPiOverSampleRate * f0.lowerFreq, twoPiOverSampleRate * f0.upperFreq,
+                        twoPiOverSampleRate * f1.lowerFreq, twoPiOverSampleRate * f1.upperFreq,
+                        amp0Left, amp0Right,
+                        amp1Left, amp1Right,
                         state
                     );
-                    break;
+                    pieceStart = pieceEnd;
                 }
-                generateSolidBufferSse(
-                    buffer + currentSample * 2,
-                    samples,
-                    startLeftOmega, startRightOmega,
-                    endLeftOmega, endRightOmega,
-                    startLeftAmp, startRightAmp,
-                    endLeftAmp, endRightAmp,
-                    state
-                );
                 break;
+            }
                 
             case BufferType::FADE_OUT: break;
             case BufferType::PAUSE: break;

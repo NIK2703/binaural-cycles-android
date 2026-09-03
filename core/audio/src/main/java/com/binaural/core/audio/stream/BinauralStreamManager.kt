@@ -70,6 +70,26 @@ class BinauralStreamManager(private val context: Context) {
          * трека дают легальное расхождение, которое нечего логировать.
          */
         private const val WATCHDOG_GRACE_MS = 3_000L
+
+        /**
+         * Сколько максимум уходящий поток кроссфейда вправе BLOCKировать
+         * следующие смены пресета.
+         *
+         * Штатный релиз — это [BinauralStreamImpl] снимает трек (pause()
+         * прерывает заблокированный write()), писатель выходит на следующем
+         * витке, движок уничтожается: единицы — десятки миллисекунд. Плохой
+         * случай — писатель застрял в generate/write, и [finalizeStop] опрашивает
+         * латч до `WRITE_CHUNK_MS + 2 с` (≈ 10 с). Всё это время [outgoing] не
+         * `null`, а значит [beginCrossfade] не поднимает NEXT: пользователь жал
+         «сменить пресет», а звук не меняется десять секунд.
+         *
+         * Поэтому по истечении срока уходящий снимается принудительно.
+         * Безопасно: его рампа давно на нуле, база трека обнулена в
+         * finalizeStop, то есть в эфире от него нет ничего.
+         */
+        private const val OUTGOING_RELEASE_TIMEOUT_MS = 1_200L
+        /** Как часто проверяем застрявший релиз уходящего потока. */
+        private const val OUTGOING_REAPER_PERIOD_MS = 200L
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -141,33 +161,61 @@ class BinauralStreamManager(private val context: Context) {
     @Volatile
     private var state = ManagerState.IDLE
     /**
-     * ЕДИНСТВЕННЫЙ живой поток. Второй слот не существует — ни поля, ни
-     * состояния: загружено всегда не более одного потока.
+     * Звучащий поток. Второй слот — [outgoing] — существует только на
+     * длительность кроссфейда.
      *
-     * ИНВАРИАНТ (строже «не более двух»): новый поток создаётся только после
-     * того, как старый ПОЛНОСТЬЮ утилизирован ([onStreamFullyStopped], то есть
-     * после `releaseInternal()` — трек снят, движок уничтожен, пакет отдан).
-     * Между «старый утих» и «новый зазвучал» поэтому есть пауза: 60 мс
-     * стража шейпера ([BinauralStreamImpl] FADE_GUARD_MS) + выход писателя +
-     * `prepare()` нового потока. Это сознательная цена.
+     * ПРЕЖНИЙ ИНВАРИАНТ («загружен всегда ровно один поток») был строже, но
+     * стоил звуку разрыва: новый поток создавался лишь ПОСЛЕ полной утилизации
+     * старого ([onStreamFullyStopped]), а между «утих» и «зазвучал» лежали
+     * стража шейпера + выход писателя + `prepare()` — ≈100–200 мс тишины на
+     * каждой смене пресета. Взамен он давал: отсутствие осиротевших треков,
+     * отсутствие «зомби», свёртку шторма смен в один поток и гарантию, что
+     * двух больших пакетов в куче не бывает.
      *
-     * Что это даёт по сравнению со схемой «NEXT готовится под прикрытием
-     * фейд-аута»:
-     *  - не нужна очередь осиротевших треков (orphan-гейт) и таймаут
-     *    ожидания их релиза: третьего трека не бывает в принципе, а на два
-     *    кучи клиента AudioFlinger (7 МБ при кольце 2 МБ) хватает всегда;
-     *  - при шторме смен промежуточные пресеты не материализуются ВОВСЕ:
-     *    очередь — один слот latest-wins, поэтому за серию A→B→C→D создаётся
-     *    ровно один поток (на D), а не по потоку на каждую смену;
-     *  - из автомата удалены повышение NEXT, дооснащение вооружённого NEXT и
-     *    утилизация «зомби» (потока без владельца) — классы отказов, из
-     *    которых и выросла оценка «шесть потоков по 33.5 МБ».
+     * НОВЫЙ ИНВАРИАНТ (кроссфейд с опережением, docs/plan_crossfade_lead.md):
+     * ослаблен ровно на длительность перекрытия и сохраняет всё ценное:
+     *  - треков по-прежнему не больше ДВУХ (кольцо 2 МБ × 2 влезает в кучу
+     *    клиента AudioFlinger — проверено на устройстве; при 3 МБ второй трек
+     *    не создавался вовсе, `createTrack_l -12`); третьего не бывает:
+     *    [beginCrossfade] отказывается поднимать NEXT, пока [outgoing] не пуст;
+     *  - очередь по-прежнему один слот latest-wins: шторм A→B→C→D
+     *    материализует два потока, а не четыре;
+     *  - NEXT живёт на СТАРТОВОМ пакете (750 КБ) — доращивание запрещено до
+     *    релиза [outgoing], поэтому двух больших буферов не существует;
+     *  - «зомби» невозможен: ссылок ровно две, [current] и [outgoing], обе под
+     *    контролем актёра.
      *
-     * Цена звука: разрыв ≈ 100–200 мс на каждой смене пресета (замер —
-     * позже). При шторме смен это пульсация, а не непрерывный звук —
-     * принято как допустимое.
+     * Что получено: разрыв звука исчез полностью (NEXT стартует ДО фейд-аута),
+     * а весь путь утилизации старого потока — пауза трека, опрос писателя до
+     * 10 с, релиз движка — ушёл ПОД звучащий новый поток и больше не лежит на
+     * критическом пути звука вообще.
      */
     private var current: BinauralStreamImpl? = null
+
+    /**
+     * УХОДЯЩИЙ поток кроссфейда: уже затухает (или затух) и ждёт утилизации.
+     *
+     * Не `null` только во время кроссфейда (норма — ≤ 300 мс). Это НЕ второй
+     * равноправный поток: он не получает ни команд, ни громкости, ни пауз —
+     * единственное, что с ним делают, это ждут [onOutgoingReleased].
+     *
+     * Пока он не `null`, [beginCrossfade] не поднимает следующий NEXT — тем
+     * самым держится жёсткий предел «не больше двух AudioTrack». Если release
+     * затягивается сверх [OUTGOING_RELEASE_TIMEOUT_MS] (писатель застрял в
+     * write()), поток снимается принудительно: к тому моменту он давным-давно
+     * в нуле, и услышать его невозможно.
+     */
+    private var outgoing: BinauralStreamImpl? = null
+
+    /**
+     * Отложенное действие, которое обязано исполниться, когда [outgoing]
+     * освободится. Один слот: доживает последнее (например, пересборка потока
+     * на возобновлении, заказанная во время кроссфейда).
+     */
+    private var pendingAfterOutgoing: (() -> Unit)? = null
+
+    /** Wall-момент начала кроссфейда — для детекта застрявшего релиза. */
+    private var outgoingStartWallMs = 0L
 
     private val queue = PlaybackQueue()
     private var serialSeq = 0L
@@ -543,6 +591,13 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "release()")
         actor.post {
             queue.clear()
+            // Уходящий поток кроссфейда: дожидаться его рампы негде — нить
+            // актёра сейчас будет остановлена, и отложенный колбэк релиза не
+            // исполнился бы вовсе, оставив трек и пакет в куче навсегда.
+            actor.removeCallbacks(outgoingReaper)
+            pendingAfterOutgoing = null
+            outgoing?.releaseNow()
+            outgoing = null
             current?.stop(onFullyStopped = { /* утилизация */ })
             current = null; currentRef.set(null)
             resetSession()
@@ -597,34 +652,64 @@ class BinauralStreamManager(private val context: Context) {
     private fun requestHandoff(spec: PlaybackSpec) {
         // Быстрый путь: изменилась только громкость — потоки не пересоздаём.
         val cur = current
-        if (state == ManagerState.RUNNING && cur != null && cur.spec.audioEquals(spec)) {
+        if (cur != null && cur.spec.audioEquals(spec) &&
+            (state == ManagerState.RUNNING || state == ManagerState.FADE_IN || state == ManagerState.HANDOFF)
+        ) {
             cur.setVolume(spec.volume); return
         }
-        when (state) {
-            ManagerState.HANDOFF -> {
-                // Хэндофф уже идёт: старый поток гаснет, новый ещё НЕ создан.
-                //
-                // Здесь нечего перевооружать — достаточно обновить единственный
-                // слот очереди (latest-wins) и ПЕРЕЗАХВАТИТЬ непрерывность:
-                // CURRENT с момента начала фейда ушёл вперёд по кривой, и если
-                // оставить enrichment от начала хэндоффа, новый поток стартовал
-                // бы с позиции, отставшей на длительность фейда плюс релиз.
-                captureContinuity()
-                queue.offer(enrichForContinuity(spec))
-                StreamLogger.d(TAG, "requestHandoff: HANDOFF уже идёт — spec#${spec.serial} " +
-                    "заменяет ожидающую спеку, поток будет создан после релиза старого")
-            }
-            ManagerState.RUNNING, ManagerState.FADE_IN -> {
-                queue.offer(spec)               // коалесценция: побеждает новейший
-                beginHandoff()
-            }
-            ManagerState.PREPARING -> {
-                // PREPARING — транзиентное синхронное состояние на актёре;
-                // спека уже в очереди, её разберёт автомат по завершении подготовки.
-                queue.offer(spec)
-            }
-            else -> { /* недостижимо: onSpecChanged маршрутизирует иначе */ }
+        // Коалесценция: один слот, побеждает новейший. Шторм A→B→C→D
+        // материализуется не более чем в два потока (текущий + один NEXT).
+        queue.offer(spec)
+        StreamLogger.d(TAG, "requestHandoff: spec#${spec.serial} в очередь (state=$state, " +
+            "outgoing=${outgoing?.spec?.serial})")
+        tryAdvanceQueue()
+    }
+
+    /**
+     * Разыграть очередь: поднять NEXT на ту спеку, которая ещё не звучит.
+     *
+     * Единственная точка принятия решения «создавать поток или нет», поэтому
+     * все пути (смена настройки, смена пресета, частоты, догон после релиза
+     * уходящего) обязаны приходить сюда, а не вызывать [launchSpec] напрямую.
+     *
+     * Два условия, при которых очередь НЕ разыгрывается:
+     *  - [outgoing] не `null` — идёт кроссфейд, третий трек поднимать нельзя.
+     *    Спека дождётся [onOutgoingReleased];
+     *  - состояние не активное (IDLE/PAUSED/FADE_OUT_*) — там очередь
+     *    разбирают свои обработчики ([onPlay], [onResumeFromPaused],
+     *    [onStreamFullyStopped]), у них свои правила якорения.
+     */
+    private fun tryAdvanceQueue() {
+        if (outgoing != null) {
+            StreamLogger.d(TAG, "tryAdvanceQueue: кроссфейд идёт (outgoing " +
+                "spec#${outgoing?.spec?.serial}) — разыграем после его релиза")
+            return
         }
+        val queued = queue.peek() ?: return
+        val cur = current
+        if (cur == null) {
+            // Гасить нечего — это не кроссфейд, а обычный запуск. Спека из
+            // очереди НЕ обогащена непрерывностью, поэтому доработанный якорь
+            // надо закрыть здесь, иначе он доживёт до следующей смены.
+            val spec = queue.poll() ?: return
+            if (pendingHandoff) {
+                accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
+                resetContinuity()
+            }
+            launchSpec(spec)
+            return
+        }
+        if (!isActiveState()) {
+            StreamLogger.d(TAG, "tryAdvanceQueue: состояние $state — разберёт свой обработчик")
+            return
+        }
+        if (cur.spec.audioEquals(queued)) {
+            // За время ожидания успело совпасть с живым потоком — Nothing to do.
+            queue.poll()
+            cur.setVolume(volume)
+            return
+        }
+        beginCrossfade(queue.poll() ?: return)
     }
 
     // Дополнительное runtime-поле (продолжение): запрос НА СТАРТ для паттерна
@@ -632,49 +717,225 @@ class BinauralStreamManager(private val context: Context) {
     private var pendingPlaySpec: PlaybackSpec? = null
 
     /**
-     * ХЭНДОФФ ПРЕСЕТА: CURRENT уходит фейд-аутом, и ВСЁ. Новый поток здесь
-     * НЕ создаётся — он появится только в [onStreamFullyStopped], когда старый
-     * будет полностью утилизирован.
+     * КРОССФЕЙД С ОПЕРЕЖЕНИЕМ (основной путь смены пресета/настроек/частоты).
      *
-     * Так устроен инвариант «загружен не более одного потока»: во время фейда
-     * живёт ровно один AudioTrack, один нативный движок и один пакетный буфер.
-     * Следствия:
-     *  - не нужен orphan-гейт (ожидание, пока старый трек отпустит память
-     *    AudioFlinger): второго трека нет, третьего быть не может;
-     *  - шторм смен не создаёт промежуточных потоков вовсе — очередь один слот
-     *    latest-wins, и за серию A→B→C→D поднимется только D;
-     *  - невозможен «зомби» (поток без владельца): ссылка на живой поток одна.
+     * Порядок — вся суть. NEXT готовится и СТАРТУЕТ, пока CURRENT ещё звучит на
+     * полной громкости, и лишь после этого CURRENT уходит фейд-аутом:
      *
-     * Цена — разрыв звука между «старый утих» и «новый зазвучал». Он складывается
-     * из трёх слагаемых: FADE_GUARD_MS (стража VolumeShaper, ~60 мс), выход
-     * писателя и releaseInternal(), prepare() нового потока.
+     * ```
+     *   prepare(NEXT)  ──  только стартовый пакет (750 КБ), роста нет
+     *   start(NEXT)    ──  прайминг трека + шейпер 0→1 + play + писатель
+     *   SWAP           ──  current := NEXT, outgoing := old   (атомарно на актёре)
+     *   stop(old)      ──  шейпер 1→0, потом утилизация… ПОД УЖЕ ЗВУЧАЩИМ NEXT
+     * ```
+     *
+     * Что это даёт по сравнению с прежним последовательным хэндоффом:
+     *
+     *  1. **Разрыв звука исчезает.** Раньше между «старый утих» и «новый
+     *     зазвучал» лежало 100–200 мс тишины: 60 мс стражи шейпера + опрос
+     *     писателя + `prepare()` нового потока. Теперь `prepare()` происходит
+     *     ДО фейд-аута (под звуком старого), а всё остальное — ПОД звуком
+     *     нового. На критическом пути звука не остаётся ничего.
+     *  2. **Путь утилизации уходит из эфира.** Пауза трека, опрос латча
+     *     писателя (до 10 с!), `releaseInternal()` и его 250-мс `await` на нити
+     *     актёра — всё это теперь происходит, когда звучит уже NEXT. Раньше
+     *     именно отсюда росли «случайные» многосекундные провалы при смене.
+     *  3. **Провал энергии закрыт честно.** Обе рампы — EQUAL_POWER (cos-уход и
+     *     sin-приход, sin²+cos²=1), и это впервые ПРАВИЛЬНО: перекрытие теперь
+     *     есть. Раньше equal-power на уходе был пережитком: второго потока не
+     *     было, а более крутой хвост (−π/2 против −1) только превращал лаг
+     *     шейпера в больший остаточный шаг.
+     *  4. **Меньше щёлчков от HAL на смене частоты динамика.** При
+     *     последовательной схеме старый трек освобождался, и выход AudioFlinger
+     *     мог уйти в простой (HAL suspend) перед открытием нового — аппаратный
+     *     хлопок. Теперь выход не простаивает никогда.
+     *
+     * Почему можно держать два трека. Кольцо каждого урезано до 2 МиБ
+     * ([BinauralStreamImpl] MAX_TRACK_BUFFER_BYTES) именно под два живых трека
+     * в куче клиента AudioFlinger (~7 МиБ) — это проверено на устройстве, и
+     * при 3 МиБ второй трек не создавался вовсе (`createTrack_l -12`). Третьего
+     * трека не бывает: пока [outgoing] не `null`, [tryAdvanceQueue] не поднимает
+     * следующий NEXT.
+     *
+     * Почему можно держать два пакета. NEXT живёт на стартовом пакете:
+     * [BinauralStreamImpl.setPacketGrowthAllowed](false) до релиза [outgoing].
+     * 750 КБ против до 230 МБ у уходящего — второй большой буфер не возникает,
+     * а значит не срабатывает храповик `PacketMemoryBudget` и не поднимается
+     * принудительный GC на актёре в момент, который обязан быть незаметным.
+     *
+     * Аварийный путь: если `prepare()` NEXT не удался (куча AudioFlinger,
+     * OOM), CURRENT НЕ ТРОГАЕТСЯ ВОВСЕ — звук продолжается, а смена уходит в
+     * [beginHandoffSequential], прежний последовательный путь с разрывом, но
+     * гарантированно применяющий настройку.
      */
-    private fun beginHandoff() {
-        val spec = queue.peek() ?: return
-        if (current == null) {
+    private fun beginCrossfade(spec: PlaybackSpec) {
+        val old = current
+        if (old == null) {
             // Гасить нечего — это не кроссфейд, а обычный запуск.
-            StreamLogger.d(TAG, "beginHandoff: current==null — обычный запуск spec#${spec.serial}")
-            launchSpec(queue.poll() ?: return)
+            StreamLogger.d(TAG, "beginCrossfade: current==null — обычный запуск spec#${spec.serial}")
+            launchSpec(spec)
             return
         }
-        // Захватываем живые координаты CURRENT ДО его fade-out: пройденное
-        // время и фазы несущих. Обогащённая спека уходит обратно в очередь:
-        // новый поток продолжит часы сессии и фазу, а позицию кривой поставит
-        // на «сейчас» сам prepare().
+        // Захватываем живые координаты CURRENT ДО его fade-out: часы сессии и
+        // фазы несущих. Позицию кривой НЕ наследуем — NEXT встанет на «сейчас»
+        // в prepare() (см. комментарий к [switchElapsedMs]).
         captureContinuity()
-        pendingHandoff = true
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
-        queue.offer(enriched)
-        StreamLogger.d(TAG, "beginHandoff spec#${spec.serial}: фейд-аут CURRENT, загрузка " +
-            "spec#${enriched.serial} — после полного релиза (якорь=NONE→now в prepare(), " +
-            "elapsed=${switchElapsedMs}ms, phase=$switchLeftPhase/$switchRightPhase)")
+        val next = createStream(enriched)
 
-        // Фейд-аут — единственное, что происходит до момента тишины. Рампа
-        // EQUAL_POWER здесь не про «сумму энергий двух потоков» (второго нет),
-        // а про форму ухода в тишину: та же кривая, что и у стопа, но короче и
-        // без щелчка на стыке с будущим фейд-ином.
+        if (!next.prepare()) {
+            // NEXT не родился. Важно: CURRENT мы НЕ гасили, поэтому звук идёт
+            // дальше как ни в чём не бывало — худший исход здесь «настройка не
+            // применилась», а не «тишина». Дожимаем прежним путём.
+            StreamLogger.e(TAG, "beginCrossfade: prepare NEXT spec#${enriched.serial} не удался — " +
+                "переход на последовательный хэндофф (CURRENT spec#${old.spec.serial} не тронут)")
+            next.abort()
+            beginHandoffSequential(spec)
+            return
+        }
+
+        // Порядок критичен: сначала NEXT зазвучит, потом CURRENT гаснет.
+        // Если start() не удался — CURRENT вообще не трогали, разрыва нет.
+        pendingHandoff = true
+        accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
+        // NEXT обязан НЕ расти, пока уходящий держит свой пакет.
+        next.setPacketGrowthAllowed(false)
+        // Слепок на случай неудачи: launchStream забирает слот current и при
+        // отказе start() уводит автомат в IDLE. Старый поток при этом НИКУДА не
+        // девался — он звучит, и его владельца надо вернуть.
+        val prevState = state
+        val prevPlaying = _isPlaying.value
+        if (!launchStream(next)) {
+            StreamLogger.e(TAG, "beginCrossfade: start NEXT spec#${enriched.serial} не удался — " +
+                "CURRENT spec#${old.spec.serial} продолжает играть (откат владения)")
+            next.abort()
+            pendingHandoff = false
+            resetContinuity()
+            current = old
+            currentRef.set(old)
+            _isPlaying.value = prevPlaying
+            setState(prevState)
+            updateWakeLock()
+            queue.offer(spec)       // не теряем намерение: попробуем ещё раз
+            return
+        }
+
+        // SWAP. С этого мгновения NEXT считается CURRENT: UI-геттеры, сторож
+        // инварианта, pause/resume/stop — всё работает с ним. [old] больше не
+        // получает НИЧЕГО, кроме ожидания релиза.
+        outgoing = old
+        outgoingStartWallMs = System.currentTimeMillis()
+        setState(ManagerState.HANDOFF)
+        scheduleOutgoingReaper()
+        StreamLogger.d(TAG, "beginCrossfade: SWAP spec#${old.spec.serial} (уходит) → " +
+            "spec#${enriched.serial} (CURRENT, elapsed=${switchElapsedMs}ms, " +
+            "phase=$switchLeftPhase/$switchRightPhase)")
+
+        // Рампа ухода. EQUAL_POWER здесь снова осмысленна: входящий поднимается
+        // sin-ветвью, сумма квадратов даёт постоянную энергию в перекрытии.
+        // Утилизация ([onOutgoingReleased]) произойдёт, когда шейпер реально
+        // дойдёт до нуля — не по таймеру (см. [BinauralStreamImpl] FADE_POLL_MS).
+        old.stop(onFullyStopped = { onOutgoingReleased(old) }, shape = FadeShape.EQUAL_POWER)
+    }
+
+    /**
+     * ПОСЛЕДОВАТЕЛЬНЫЙ хэндофф — аварийный путь, сохранённый из прежней схемы.
+     *
+     * Отличается от [beginCrossfade] одним: NEXT создаётся ТОЛЬКО после полного
+     * релиза CURRENT, поэтому между «утих» и «зазвучал» лежит разрыв ~100–200 мс.
+     * Живёт ровно один поток, поэтому требования к памяти минимальны — это и
+     * делает его надёжной запасной ветвью, когда кроссфейд не влез.
+     */
+    private fun beginHandoffSequential(spec: PlaybackSpec) {
+        val enriched = enrichForContinuity(spec)
+        pendingHandoff = true
+        handoffStartWallMs = System.currentTimeMillis()
+        queue.offer(enriched)
+        StreamLogger.d(TAG, "beginHandoffSequential spec#${enriched.serial}: фейд-аут CURRENT, " +
+            "загрузка после полного релиза (разрыв звука ожидаем)")
         fadeOutCurrent(FadeTarget.SWITCH)
+    }
+
+    /**
+     * Уходящий поток полностью утилизирован: трек снят, движок уничтожен,
+     * пакет отдан куче. Кроссфейд закрыт.
+     */
+    private fun onOutgoingReleased(s: BinauralStreamImpl) {
+        if (s !== outgoing) {
+            StreamLogger.d(TAG, "onOutgoingReleased: orphan spec#${s.spec.serial} — игнор")
+            return
+        }
+        outgoing = null
+        StreamLogger.d(TAG, "onOutgoingReleased: spec#${s.spec.serial} утилизирован за " +
+            "${System.currentTimeMillis() - outgoingStartWallMs}мс — " +
+            "пакетодержателей=${BinauralStreamImpl.livePacketHolders()}")
+
+        // Память уходящего отдана: NEXT можно доращивать пакет.
+        current?.setPacketGrowthAllowed(true)
+
+        // Отложенное действие (пересборка и т.п.) имеет приоритет перед
+        // очередью: оно ждало именно этого момента.
+        val pending = pendingAfterOutgoing
+        pendingAfterOutgoing = null
+        if (pending != null) {
+            pending.invoke()
+            return
+        }
+        if (isActiveState()) tryAdvanceQueue()
+    }
+
+    /**
+     * Исполнить [action], когда уходящего потока не останется; если его уже
+     * нет — прямо сейчас. Один слот: доживает последнее.
+     *
+     * Нужно там, где аллокация второго ПОЛНОГО пакета недопустима, пока
+     * уходящий держит свой (пересборка на возобновлении —
+     * [resumeFromPaused]).
+     */
+    private fun afterOutgoingReleased(action: () -> Unit) {
+        if (outgoing == null) {
+            action()
+        } else {
+            StreamLogger.d(TAG, "afterOutgoingReleased: отложено до релиза " +
+                "spec#${outgoing?.spec?.serial}")
+            pendingAfterOutgoing = action
+        }
+    }
+
+    /**
+     * Сторож застрявшего релиза уходящего потока.
+     *
+     * Штатно [onOutgoingReleased] приходит за десятки миллисекунд. Если
+     * писатель застрял (длинный `write()`, генерация полного пакета),
+     * [finalizeStop] опрашивает латч до ~10 с — и всё это время [outgoing] не
+     * `null`, то есть смена пресета BLOCKируется. По истечении срока снимаем
+     * принудительно: к этому моменту поток в нуле по громкости, услышать его
+     * невозможно, а владение движком [releaseInternal] разрулит сам.
+     */
+    private val outgoingReaper = object : Runnable {
+        override fun run() {
+            val s = outgoing ?: return     // уже освободился штатно — сторож угасает
+            val waited = System.currentTimeMillis() - outgoingStartWallMs
+            if (waited < OUTGOING_RELEASE_TIMEOUT_MS) {
+                actor.postDelayed(this, OUTGOING_REAPER_PERIOD_MS)
+                return
+            }
+            StreamLogger.w(TAG, "outgoingReaper: spec#${s.spec.serial} не освободился за " +
+                "${waited}мс — принудительный релиз (поток уже в нуле, щелчка нет)")
+            outgoing = null
+            val pending = pendingAfterOutgoing
+            pendingAfterOutgoing = null
+            current?.setPacketGrowthAllowed(true)
+            s.releaseNow()
+            if (pending != null) pending.invoke()
+            else if (isActiveState()) tryAdvanceQueue()
+        }
+    }
+
+    private fun scheduleOutgoingReaper() {
+        actor.removeCallbacks(outgoingReaper)
+        actor.postDelayed(outgoingReaper, OUTGOING_REAPER_PERIOD_MS)
     }
 
     /** Сменить цель идущего/нового фейда И запустить фейд. */
@@ -703,6 +964,13 @@ class BinauralStreamManager(private val context: Context) {
      * потока (стоп/пауза во время фейда, discard) не трогает автомат.
      */
     private fun onStreamReleased(s: BinauralStreamImpl) {
+        if (s === outgoing) {
+            // Уходящий поток кроссфейда: автомат он не двигает — только закрывает
+            // перекрытие. (Основной путь передаёт [onOutgoingReleased] прямо в
+            // stop(); здесь — страховка на случай иного маршрута утилизации.)
+            onOutgoingReleased(s)
+            return
+        }
         if (s !== current) {
             StreamLogger.d(TAG, "onStreamReleased: orphan spec#${s.spec.serial} — игнор")
             return
@@ -782,7 +1050,10 @@ class BinauralStreamManager(private val context: Context) {
             }
 
             FadeTarget.SWITCH -> {
-                // ШТАТНЫЙ ПУТЬ ХЭНДОФФА (а не аварийный, как раньше).
+                // ПОСЛЕДОВАТЕЛЬНЫЙ хэндофф — только аварийная ветвь
+                // ([beginHandoffSequential]), когда кроссфейд не влез по памяти.
+                // Штатная смена пресета сюда больше не приходит: там NEXT
+                // стартует ДО fade-out CURRENT (см. [beginCrossfade]).
                 //
                 // Старый поток к этой точке ПОЛНОСТЬЮ утилизирован: трек снят,
                 // движок уничтожен, пакет отдан. current занулён выше, поэтому
@@ -858,13 +1129,17 @@ class BinauralStreamManager(private val context: Context) {
                 fadeOutCurrent(FadeTarget.STOP)
             }
             ManagerState.HANDOFF -> {
-                // Хэндофф идёт: фейд CURRENT уже запущен, второй поток ещё не
-                // создан — гасить нечего, только меняем цель рампы.
+                // КРОССФЕЙД ИДЁТ. Цель рампы менять НЕДОСТАТОЧНО: в этом
+                // состоянии CURRENT — это уже NEXT, он РАЗЫГРЫВАЕТСЯ, и ничто
+                // его не гасит (в последовательной схеме HANDOFF означал
+                // «старый гаснет», и retargetFade действительно всё решал).
+                // Гасим CURRENT явно; уходящий дойдёт до нуля своей рампой и
+                // закроет перекрытие сам — через [onOutgoingReleased].
                 queue.clear()
                 pendingPlaySpec = null
                 pendingHandoff = false
                 resetContinuity()
-                retargetFade(FadeTarget.STOP)
+                fadeOutCurrent(FadeTarget.STOP)
             }
             ManagerState.FADE_OUT_PAUSE -> {
                 queue.clear()
@@ -1221,6 +1496,15 @@ class BinauralStreamManager(private val context: Context) {
     }
 
     private fun resumeFromPaused() {
+        if (outgoing != null) {
+            // Пауза застала незакрытый кроссфейд (pause во время HANDOFF). Уходящий
+            // ещё держит свой пакет, а пересборка аллоцирует новый — два больших
+            // буфера одновременно. Ждём релиза: он близко и на слухе не присутствует.
+            StreamLogger.d(TAG, "resumeFromPaused: отложено до релиза уходящего " +
+                "spec#${outgoing?.spec?.serial}")
+            afterOutgoingReleased { resumeFromPaused() }
+            return
+        }
         pausedSpecDirty = false
         val base = queue.poll() ?: sessionSpec ?: return
         // Якорь снимается в момент РЕАЛЬНОГО старта: между вызовом и запуском
@@ -1427,7 +1711,17 @@ class BinauralStreamManager(private val context: Context) {
         launchStream(candidate)
     }
 
-    private fun launchStream(stream: BinauralStreamImpl) {
+    /**
+     * Занять слот current и запустить поток.
+     *
+     * @return true — трек стартовал; false — старт не удался, поток утилизирован.
+     *
+     * ВАЖНО для [beginCrossfade]: при неудаче слот current зануляется и автомат
+     * уходит в IDLE. Если до вызова в слоте был ЖИВОЙ поток (он как раз гасится
+     * кроссфейдом), вызывающий обязан вернуть его на место — иначе старый поток
+     * останется без владельца и будет звучать вечно.
+     */
+    private fun launchStream(stream: BinauralStreamImpl): Boolean {
         StreamLogger.d(TAG, "launchStream spec#${stream.spec.serial} sr=${stream.spec.sampleRate} beat=${stream.spec.config.frequencyCurve.getBeatFrequencyAt(kotlinx.datetime.LocalTime(0, 0))}")
         // Не-handoff запуск (PLAY/RESUME) — новый сегмент без непрерывности; сбрасываем
         // якорь. При handoff (PRESET_SWITCH/SETTINGS) якорь захвачен в beginHandoff и
@@ -1437,6 +1731,12 @@ class BinauralStreamManager(private val context: Context) {
         } else {
             resetContinuity()
         }
+        // Пока уходящий поток кроссфейда не отдал свой пакет, новый НЕ
+        // доращивает свой: два больших буфера одновременно — это ровно тот
+        // отказ PacketMemoryBudget, ради которого и введён флаг. Разрешение
+        // раздаёт только [onOutgoingReleased]; здесь — ТОЛЬКО сужение, иначе
+        // этот вызов отменил бы явный запрет, поставленный [beginCrossfade].
+        if (outgoing != null) stream.setPacketGrowthAllowed(false)
         current = stream
         currentRef.set(stream)
         sessionSpec = stream.spec
@@ -1457,13 +1757,14 @@ class BinauralStreamManager(private val context: Context) {
             setState(ManagerState.IDLE)
             listener?.onError("stream start failed")
             updateWakeLock()
-        } else {
-            // Грейс сторожу: стартовый пакет и разгон кольца дают легальное
-            // расхождение слышимой позиции с «сейчас».
-            watchdogGraceUntilMs = System.currentTimeMillis() + WATCHDOG_GRACE_MS
-            watchdogBreachSinceMs = 0L
-            StreamLogger.d(TAG, "launchStream: start spec#${stream.spec.serial} успешно, fade-in идёт")
+            return false
         }
+        // Грейс сторожу: стартовый пакет и разгон кольца дают легальное
+        // расхождение слышимой позиции с «сейчас».
+        watchdogGraceUntilMs = System.currentTimeMillis() + WATCHDOG_GRACE_MS
+        watchdogBreachSinceMs = 0L
+        StreamLogger.d(TAG, "launchStream: start spec#${stream.spec.serial} успешно, fade-in идёт")
+        return true
     }
 
     private fun createStream(spec: PlaybackSpec): BinauralStreamImpl {
@@ -1512,6 +1813,17 @@ class BinauralStreamManager(private val context: Context) {
     private fun handleRuntimeError(stream: BinauralStreamImpl, message: String) {
         StreamLogger.e(TAG, "handleRuntimeError: $message (stream spec#${stream.spec.serial}, isCurrent=${current === stream})")
         Log.e(TAG, "runtime error: $message")
+        if (outgoing === stream) {
+            // Ошибка УХОДЯЩЕГО потока. Он уже в нуле по громкости и в эфире не
+            // присутствует — провал его писателя не имеет слышимых последствий.
+            // Всё, что нужно: закрыть перекрытие немедленно, не трогая автомат
+            // (иначе сбой хвоста уходящего кроссфейда глушил бы живой CURRENT).
+            StreamLogger.w(TAG, "handleRuntimeError: сбой уходящего spec#${stream.spec.serial} — " +
+                "закрываем перекрытие принудительно")
+            stream.releaseNow()
+            onOutgoingReleased(stream)
+            return
+        }
         // Ссылка на живой поток одна ([current]), поэтому «потока без владельца»
         // не бывает: ошибка не от current означает, что поток уже утилизирован.
         if (current !== stream) return

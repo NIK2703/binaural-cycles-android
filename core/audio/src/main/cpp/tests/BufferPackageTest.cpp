@@ -1,18 +1,27 @@
 /**
- * Тесты генерации пакетов буферов — ШАГ 3 МИГРАЦИИ (непрерывная рампа,
- * ритуал планировщика удалён).
+ * Тесты генерации пакетов буферов — ВОССТАНОВЛЕННЫЙ РИТУАЛ FADE (ШАГ 4).
+ *
+ * История: ШАГ 3 заменил ритуал FADE_OUT→PAUSE→FADE_IN на непрерывную
+ * «рампу через унисон» s(t)=s_before·cos(πu) — это давало быстрый
+ * глиссандо частот к противоположным ушам. ШАГ 4 возвращает ритуал, Но
+ * сохраняет архитектуру знакового биения (отрицательная частота биения):
+ *   · layoutSignAt — СТУПЕНЬКА (s ∈ {+1, −1}), а НЕ рампа.
+ *   · layoutGainAt — отдельная огибающая (приподнятый косинус):
+ *     fade-out → тишина → fade-in, центрированная на T* (момент смены
+ *     знака). В T* усиление ≡ 0 → частотный скачок неслышим.
  *
  * Проверяемые свойства:
  *  1. Планировщик вырожден в нарезку на <=100 мс SOLID-подсегменты (без
  *     FADE_OUT/PAUSE/FADE_IN и без фазовой машины).
- *  2. Раскладка ушей — ЧИСТАЯ ФУНКЦИЯ (конфиг, t): множитель s(t) рампой
- *     проходит через ноль в ближайшем T*; вне окна s ≡ ±1.
+ *  2. Раскладка ушей — ЧИСТАЯ ФУНКЦИЯ (конфиг, t): множитель s(t) —
+ *     СТУПЕНЬКА (±1) от channelSwapStateAt; огибающая усиления
+ *     layoutGainAt(t) центрирована на T*.
  *  3. Якорь EarLayoutProperty: уши слышат ровно две частоты кривой
  *     (множество {lower, upper}), число смен == расписанию.
  *  4. Непрерывность через T*: сортированные пары ушей совпадают с {lower,upper}
- *     вне окна перехода; окна, накрывающие glide (схлопнутый разброс), — пропуск.
- *  5. Рампа: в T* частоты сходятся в унисон, IPD непрерывна, громкость
- *     (несущая) не меняется — провала звука нет.
+ *     вне окна перехода; окна, накрывающие провал усиления (тишину), — пропуск.
+ *  5. Ритуал FADE: в T* громкость (RMS) падает до нуля, частоты ушей НЕ сходятся
+ *     в унисон (всегда {lower,upper}), раскладка переключается ПОСЛЕ T*.
  *  6. Чистые функции расписания (TIMER-чётность, TREND-паритет, ближайший T*).
  */
 
@@ -94,17 +103,11 @@ inline EarFreqPair sortedEarPair(float leftFreq, float rightFreq) {
                                  : EarFreqPair{rightFreq, leftFreq};
 }
 
-// Порог «схлопнутого» разброса: окно накрывает glide, если разброс меньше
-// этой доли от максимального разброса пары окон. 0.6 — по фактическим
-// измерениям (см. docs/design_signed_beat_channel_layout.md §0.1.3).
+// Порог «схлопнутого» разброса: окно накрывает провал, если разброс меньше
+// этой доли от номинального beat. 0.6 — запасной порог на случай редкого
+// сбоя измерения частоты вблизи края окна (ритуал FADE частоты НЕ схлопывает,
+// поэтому по факту недостижим).
 constexpr float kCollapsedSpreadRatio = 0.6f;
-
-inline bool isUnisonGlideWindow(const EarFreqPair& before, const EarFreqPair& after) {
-    const float spreadMax = std::max(earPairSpread(before), earPairSpread(after));
-    if (spreadMax <= 0.0f) return false;
-    return earPairSpread(before) < kCollapsedSpreadRatio * spreadMax ||
-           earPairSpread(after)  < kCollapsedSpreadRatio * spreadMax;
-}
 
 // ============================================================================
 // КОНФИГУРАЦИИ
@@ -251,11 +254,10 @@ TEST_F(BufferPackagePlannerTest, Collapsed_RespectsPackageBoundary) {
 
 // Уши слышат ровно две частоты кривой вне окон смены; число смен == расписанию.
 TEST(EarLayoutProperty, EarSetEqualsCurveAndSwapCountMatchesSchedule) {
-    // TIMER, interval=5 с, beat=+8 -> lower=196, upper=204, W=0 (чистая
-    // ступенька: множество частот ровно {196,204} везде вне узлов сетки).
-    // ВАЖНО: layoutSignAt смотрит на channelSwapFadeDurationMs, а НЕ на
-    // channelSwapFadeEnabled — поэтому ступенька задаётся нулём длительности,
-    // иначе рампа (W=2с) сияла бы частоты унисоном вне ступеньки.
+    // TIMER, interval=5 с, beat=+8 -> lower=196, upper=204. Fade-длительность
+    // ставим в 0, чтобы окно огибающей вырождалось в точку: множество частот
+    // ровно {196,204} везде вне узлов сетки (ступенька без провала звука).
+    // layoutSignAt при F=0 возвращает чистую ступеньку channelSwapStateAt.
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
     cfg.channelSwapFadeDurationMs = 0;
 
@@ -310,7 +312,7 @@ TEST(EarLayoutProperty, EarSetEqualsCurveAndSwapCountMatchesSchedule) {
 // Раскладка в конце прогона совпадает с расписанием channelSwapStateAt.
 TEST(EarLayoutProperty, ArrangementMatchesScheduleAtEnd) {
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
-    cfg.channelSwapFadeDurationMs = 0; // W=0 -> чистая ступенька
+    cfg.channelSwapFadeDurationMs = 0; // F=0 -> чистая ступенька (без провала)
 
     const float durationSec = 31.0f;
     Emitted e = emitSignal(cfg, 0.0f, durationSec, SAMPLE_RATE);
@@ -328,15 +330,15 @@ TEST(EarLayoutProperty, ArrangementMatchesScheduleAtEnd) {
 }
 
 // Переход через T* непрерывен по множеству частот (сортированные пары
-// совпадают с {lower,upper}; окна glide пропускаются).
+// совпадают с {lower,upper}; окна в провале громкости — тишина, пропускаются).
 TEST(EarLayoutProperty, ContinuityAcrossTStar_SortedPairs) {
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
-    cfg.channelSwapFadeEnabled = true; // рампа: окна glide появляются
+    cfg.channelSwapFadeEnabled = true; // ритуал FADE: окно провала громкости
 
     // Старт в t=2.0 с (а НЕ 0): ближайший T* к полуночи — 0, и на нём тоже
-    // центрируется рампа, которая схлопнула бы частоты унисоном в начале
-    // прогона и сломала бы базовую сверку вне окон. С t=2.0 покрываются
-    // только T*=5 и T*=10 (обе внутри [2,14]).
+    // центрируется огибающая усиления, которая гасит звук в начале прогона
+    // и сломала бы базовую сверку вне окон. С t=2.0 покрываются только
+    // T*=5 и T*=10 (обе внутри [2,14]).
     const float durationSec = 12.0f; // старт 2.0 с -> покрывает [2,14], T*=5 и T*=10
     Emitted e = emitSignal(cfg, 2.0f, durationSec, SAMPLE_RATE);
     const int total = e.samples;
@@ -354,16 +356,15 @@ TEST(EarLayoutProperty, ContinuityAcrossTStar_SortedPairs) {
     for (int w = 0; (w + 1) * winSamples <= total; ++w) {
         const float lf = measureFrequencyInWindow(e.signal.data(), total, w * winSamples, winSamples, 0, SAMPLE_RATE);
         const float rf = measureFrequencyInWindow(e.signal.data(), total, w * winSamples, winSamples, 1, SAMPLE_RATE);
-        if (lf < 1.0f || rf < 1.0f) continue;
+        if (lf < 1.0f || rf < 1.0f) continue; // окно в тишине провала — пропуск
         EarFreqPair p = sortedEarPair(lf, rf);
 
         if (!first) {
-            // Glide-окно — АБСОЛЮТНЫЙ порог относительно номинального beat:
-            // разброс < 0.6*8 = 4.8 Гц означает, что окно накрывает унисон
-            // внутри рампы. Локальный порог (isUnisonGlideWindow — относительно
-            // соседа) НЕ ловит «дно» glide: две подряд идущие унисонные окна
-            // имеют крошечный локальный максимум, и отношение не срабатывает,
-            // из-за чего унисонные окна попадали под сверку с {196,204}.
+            // Ритуал FADE НЕ схлопывает частоты в унисон (в отличие от
+            // старой рампы), поэтому частотный разброс везде ~nominalBeat.
+            // Старый порог «glide» (разброс < 0.6*beat) здесь недостижим —
+            // оставляем его как защиту от редких сбоев измерения вблизи
+            // края окна, но по факту срабатывать не должен.
             if (earPairSpread(p) < kCollapsedSpreadRatio * nominalBeat) { prevPair = p; continue; }
             EXPECT_NEAR(p.lo, 196.0f, tol) << "window " << w;
             EXPECT_NEAR(p.hi, 204.0f, tol) << "window " << w;
@@ -382,46 +383,99 @@ TEST(EarLayoutProperty, ContinuityAcrossTStar_SortedPairs) {
 }
 
 // ============================================================================
-// РАМПА s(t)
+// РИТУАЛ FADE (восстановлен, ШАГ 4)
 // ============================================================================
 
-// В центре окна (t = T*) s = 0: унисон. Вне окна — ступенька.
-TEST(RampTest, LayoutSignAt_UnisonAtTStar) {
+// layoutSignAt — СТУПЕНЬКА (±1) ВСЕГДА, в том числе в T*: в центре окна
+// смены знак уже переключён на противоположный (раскладка «щёлкает» в
+// момент тишины), унисона (s=0) НЕТ.
+TEST(RampTest, LayoutSignAt_StepNotUnison) {
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
     cfg.channelSwapFadeEnabled = true;
-    cfg.channelSwapFadeDurationMs = 1000; // W = 2*1.0 + 0 = 2.0 с
+    cfg.channelSwapFadeDurationMs = 1000; // F = 1.0 с, P = 0
     cfg.channelSwapPauseDurationMs = 0;
 
-    // T* = 5.0 с.
-    EXPECT_NEAR(layoutSignAt(cfg, 5.0f), 0.0f, 1e-3f);
+    // T* = 5.0 с: знак уже переключен (floor(5/5)=1 -> swapped).
+    EXPECT_NEAR(layoutSignAt(cfg, 5.0f), -1.0f, 1e-3f);
     // Вне окна (|t-T*| >= 1.0 с): ступенька channelSwapStateAt.
     EXPECT_NEAR(layoutSignAt(cfg, 3.0f), 1.0f, 1e-3f);   // floor(3/5)=0 -> normal
     EXPECT_NEAR(layoutSignAt(cfg, 8.0f), -1.0f, 1e-3f);  // floor(8/5)=1 -> swapped
 }
 
-// Косинусоидальная форма: s(T* - δ) = -s(T* + δ).
-TEST(RampTest, LayoutSignAt_CosineShape) {
-    BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
-    cfg.channelSwapFadeEnabled = true;
-    cfg.channelSwapFadeDurationMs = 1000;
+// РЕГРЕССИЯ: валидность процедуры на ВСЕЙ оси суток, а не только утром.
+//
+// Проверка «знак действительно перевернулся» в nearestSwapProcedure раньше
+// делалась на абсолютном ε = 1e-3 с: channelSwapStateAt(T*−ε) !=
+// channelSwapStateAt(T*+ε). Ось суток — float до 86400 с, и её ULP растёт с
+// величиной: 1.95 мс на 21600 с, 3.9 мс на 43200 с, 7.8 мс выше 65536 с. Уже
+// с ~10 часов суток ε тонул в ULP: T*−ε и T*+ε округлялись в ОДИН И ТОТ ЖЕ
+// float, процедура объявлялась невалидной, layoutGainAt() возвращала ровно 1 —
+// и смена каналов звучала голой ступенькой частот БЕЗ затухания и нарастания.
+// Симптом был зависим от времени суток: утром фейд был, вечером пропадал;
+// зонды на малых t этого не видели.
+TEST(RampTest, SwapProcedureValidOnWholeDayAxis) {
+    // Интервал 300 с делит сутки нацело: 288 узлов, k·300 с.
+    BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 300, 1000);
     cfg.channelSwapPauseDurationMs = 0;
 
-    const float sLeft = layoutSignAt(cfg, 4.5f);  // u = 0.25
-    const float sRight = layoutSignAt(cfg, 5.5f); // u = 0.75
-    EXPECT_NEAR(sLeft, std::cos(3.14159265358979323846f * 0.25f), 1e-3f);
-    EXPECT_NEAR(sRight, std::cos(3.14159265358979323846f * 0.75f), 1e-3f);
-    EXPECT_NEAR(sLeft, -sRight, 1e-3f);
+    // Каждый узел, кроме полночи, — настоящая смена знака ⇒ процедура валидна
+    // и в её центре огибающая равна нулю. Проверяем и утро, и вечер: именно
+    // там старый ε переставал различать T*−ε и T*+ε.
+    for (int k = 1; k < 288; ++k) {
+        const float T = static_cast<float>(k) * 300.0f;
+        const SwapProcedure p = nearestSwapProcedure(cfg, T);
+        ASSERT_TRUE(p.valid) << "узел k=" << k << " (t=" << T << " с): процедура потеряна";
+        EXPECT_NEAR(p.tStarSec, T, 0.01f);
+        EXPECT_NEAR(p.fadeSec, 1.0f, 1e-3f);
+        EXPECT_NEAR(layoutGainAt(cfg, T), 0.0f, 1e-3f);
+    }
+
+    // Полночь: 288 узлов — ЧЁТНОЕ число, поэтому при переходе через полночь
+    // знак раскладки НЕ меняется и процедуры там быть не должно (ложное
+    // срабатывание гасилось бы лишним затуханием ровно в полночь).
+    EXPECT_FALSE(nearestSwapProcedure(cfg, 0.0f).valid);
+
+    // Вечерний прогон целиком: окно процедуры вокруг T* = 78000 с (21:40).
+    constexpr float kT = 78000.0f;
+    EXPECT_NEAR(layoutGainAt(cfg, kT), 0.0f, 1e-3f);
+    EXPECT_NEAR(layoutGainAt(cfg, kT - 0.5f), 0.5f, 0.02f);
+    EXPECT_NEAR(layoutGainAt(cfg, kT + 0.5f), 0.5f, 0.02f);
+    EXPECT_NEAR(layoutGainAt(cfg, kT - 1.5f), 1.0f, 1e-3f);
+    EXPECT_NEAR(layoutGainAt(cfg, kT + 1.5f), 1.0f, 1e-3f);
 }
 
-// Звук в T*: левый и правый сходятся в унисон (carrier), громкость (RMS
-// несущей) не проседает — провала звука нет.
-TEST(RampTest, Audio_UnisonAndNoVolumeDipAtTStar) {
+// layoutGainAt — приподнятый косинус, центрированный на T*, ЧЁТНЫЙ по T*:
+//   fade-out при d<0, тишина при |d|<=P/2, fade-in при d>0.
+// Усиление в T* (d=0) ≡ 0, на краях окна ≡ 1, форма косинусоидальна.
+TEST(RampTest, LayoutGainAt_RaisedCosineEnvelope) {
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
     cfg.channelSwapFadeEnabled = true;
-    cfg.channelSwapFadeDurationMs = 1000;
+    cfg.channelSwapFadeDurationMs = 1000; // F = 1.0 с, P = 0
     cfg.channelSwapPauseDurationMs = 0;
 
-    // 2 с начиная с 4.0 с -> покрывает T*=5.0 с.
+    constexpr float kPi = 3.14159265358979323846f;
+    // Вне окна (|d| ≥ F) — полная громкость.
+    EXPECT_NEAR(layoutGainAt(cfg, 3.0f), 1.0f, 1e-3f); // d = -2.0
+    EXPECT_NEAR(layoutGainAt(cfg, 8.0f), 1.0f, 1e-3f); // d = +3.0
+    // В T* (d=0) — тишина.
+    EXPECT_NEAR(layoutGainAt(cfg, 5.0f), 0.0f, 1e-3f);
+    // Симметрия: gain(T* ± δ) равны.
+    EXPECT_NEAR(layoutGainAt(cfg, 4.5f), layoutGainAt(cfg, 5.5f), 1e-4f);
+    // Косинусоидальная форма: на середине fade (u=0.5) усиление = 0.5.
+    EXPECT_NEAR(layoutGainAt(cfg, 4.5f), 0.5f * (1.0f + std::cos(kPi * 0.5f)), 1e-3f);
+    EXPECT_NEAR(layoutGainAt(cfg, 5.5f), 0.5f * (1.0f - std::cos(kPi * 0.5f)), 1e-3f);
+}
+
+// Звук в T*: частоты ушей остаются {lower,upper} (НЕТ унисона — быстрого
+// глиссандо к противоположным), но громкость (RMS) падает до нуля — это и
+// есть «фейд оут → тишина → фейд ин» вместо резкого перепада частот.
+TEST(RampTest, Audio_NoUnisonButVolumeDipAtTStar) {
+    BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
+    cfg.channelSwapFadeEnabled = true;
+    cfg.channelSwapFadeDurationMs = 1000; // F = 1.0, P = 0 -> окно 4..6 с
+    cfg.channelSwapPauseDurationMs = 0;
+
+    // 2 с начиная с 4.0 с -> покрывает T*=5.0 с и всё окно fade [4,6].
     Emitted e = emitSignal(cfg, 4.0f, 2.0f, SAMPLE_RATE);
     const int total = e.samples;
     const int winSamples = static_cast<int>(0.2f * SAMPLE_RATE);
@@ -435,29 +489,28 @@ TEST(RampTest, Audio_UnisonAndNoVolumeDipAtTStar) {
         return rmsChannel(e.signal.data(), total, startSample, winSamples, ch);
     };
 
-    // До рампы (4.0–4.2 с): прямое расположение, разнос ~8 Гц.
+    // До fade (4.0–4.2 с): прямое расположение, разнос ~8 Гц, полная громкость.
     const int beforeStart = 0;
     const EarFreqPair before = measurePair(beforeStart);
     EXPECT_NEAR(earPairSpread(before), 8.0f, 2.0f);
+    const float rmsL_before = rms(beforeStart, 0);
+    EXPECT_GT(rmsL_before, 0.05f); // звук есть
 
-    // В центре рампы (4.9–5.1 с): унисон (разнос близок к 0).
+    // В центре окна fade (4.9–5.1 с): частоты НЕ в унисоне (разнос ~8 Гц),
+    // но громкость просела почти до нуля (тишина ритуала).
     const int atStart = static_cast<int>(0.9f * SAMPLE_RATE);
     const EarFreqPair at = measurePair(atStart);
-    EXPECT_NEAR(earPairSpread(at), 0.0f, 3.0f);
+    EXPECT_NEAR(earPairSpread(at), 8.0f, 3.0f); // НЕТ унисона
+    const float rmsL_at = rms(atStart, 0);
+    EXPECT_LT(rmsL_at, 0.1f * rmsL_before);     // провал громкости ~ тишина
 
-    // После рампы (5.8–6.0 с): обратное расположение, разнос ~8 Гц.
+    // После fade (5.8–6.0 с): обратное расположение, разнос ~8 Гц, громкость
+    // восстановилась.
     const int afterStart = static_cast<int>(1.8f * SAMPLE_RATE);
     const EarFreqPair after = measurePair(afterStart);
     EXPECT_NEAR(earPairSpread(after), 8.0f, 2.0f);
-
-    // Несущая не меняется: RMS левого/правого до и в центре рампы равны
-    // (провала громкости нет). Допуск — на погрешность измерения RMS.
-    const float rmsL_before = rms(beforeStart, 0);
-    const float rmsL_at = rms(atStart, 0);
-    const float rmsR_before = rms(beforeStart, 1);
-    const float rmsR_at = rms(atStart, 1);
-    EXPECT_NEAR(rmsL_before, rmsL_at, 0.05f);
-    EXPECT_NEAR(rmsR_before, rmsR_at, 0.05f);
+    const float rmsL_after = rms(afterStart, 0);
+    EXPECT_GT(rmsL_after, 0.05f);
 }
 
 // ============================================================================
