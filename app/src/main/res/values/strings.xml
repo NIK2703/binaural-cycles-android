@@ -28,7 +28,7 @@
     
     <!-- Context Menu -->
     <string name="edit">Редактировать</string>
-    <string name="duplicate">Дублировать</string>
+    <string name="duplicate">Копировать</string>
     <string name="export">Экспортировать</string>
     <string name="delete">Удалить</string>
     

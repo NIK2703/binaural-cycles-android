@@ -343,7 +343,7 @@ private fun PresetCard(
             )
             DropdownMenuItem(
                 text = { Text(stringResource(R.string.export)) },
-                leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                leadingIcon = { Icon(Icons.Default.FileUpload, contentDescription = null) },
                 onClick = {
                     showDropdownMenu = false
                     onExportClick()
