@@ -1300,13 +1300,21 @@ class BinauralViewModel @Inject constructor(
         pointIntent.rememberCarrier(time, carrierFrequency)
         pointIntent.rememberBeat(time, beatFrequency)
 
-        val points = curve.points.toMutableList()
-        points.add(FrequencyPoint(
+        val newPoint = FrequencyPoint(
             time = time,
             carrierFrequency = clampedCarrier,
             beatFrequency = clampedBeat
-        ))
-        updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange, curve.interpolationType)
+        )
+        val points = curve.points.toMutableList()
+        points.add(newPoint)
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val newIndex = sortedPoints.indexOfFirst { it === newPoint }.coerceAtLeast(0)
+        updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange, curve.interpolationType)
+        // Если попап редактирования точки уже открыт — переключаем его на новую
+        // точку (см. запрос): контекстное окно «переезжает» на свежесозданную.
+        if (state.selectedPointIndex != null) {
+            _uiState.update { it.copy(selectedPointIndex = newIndex) }
+        }
     }
 
     fun removeEditingPoint(index: Int) {
