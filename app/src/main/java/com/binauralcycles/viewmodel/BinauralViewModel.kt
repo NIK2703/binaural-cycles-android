@@ -775,7 +775,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun startNewPreset() {
         savedStateHandle[KEY_EDITING_TARGET] = EDITING_TARGET_NEW
-        val defaultCurve = FrequencyCurve.defaultCurve()
+        val defaultCurve = FrequencyCurve.newPresetCurve()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = defaultCurve,
@@ -1314,7 +1314,9 @@ class BinauralViewModel @Inject constructor(
         val curve = state.editingFrequencyCurve ?: return
         
         val points = curve.points.toMutableList()
-        if (points.size > 2 && index in points.indices) {
+        // Редактор позволяет удалить все точки кроме одной (одноточечная
+        // кривая — допустимое состояние, см. FrequencyCurve.require(points.size >= 1)).
+        if (points.size > 1 && index in points.indices) {
             pointIntent.forget(points[index].time)
             points.removeAt(index)
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
@@ -1425,7 +1427,9 @@ class BinauralViewModel @Inject constructor(
                 playbackService?.updateFrequencyCurve(newCurve)
             }
         } catch (e: IllegalArgumentException) {
-            // Игнорируем ошибки валидации (например, меньше 2 точек)
+            // Игнорируем ошибки валидации (например, несущая/биения вне
+            // допустимых границ). Минимум точек — 1, поэтому удаление до
+            // последней точки исключения больше не бросает.
         }
     }
     

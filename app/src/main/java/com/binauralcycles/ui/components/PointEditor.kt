@@ -542,7 +542,12 @@ fun PointEditorPopup(
     onCarrierFrequencyChange: (Float) -> Unit,
     onBeatFrequencyChange: (Float) -> Unit,
     onTimeChange: (LocalTime) -> Unit,
-    onRemove: () -> Unit
+    onRemove: () -> Unit,
+    /**
+     * Можно ли удалить точку. false, когда в кривой осталась последняя
+     * (единственная) точка — кнопка удаления неактивна и не кликабельна.
+     */
+    canRemove: Boolean = true
 ) {
     // Функция форматирования: показывает до 4-х ненулевых знаков после
     // разделителя — столько же, сколько принимает ввод, иначе набранное
@@ -820,17 +825,20 @@ fun PointEditorPopup(
                         }
                         // Не IconButton: тот тянет за собой минимальный тач-таргет
                         // 48 dp и отбирает ширину у полей часов и минут.
+                        // Кнопка неактивна, когда осталась последняя точка
+                        // (canRemove == false): не кликабельна и приглушена.
                         Box(
                             modifier = Modifier
                                 .size(26.dp)
                                 .clip(CircleShape)
-                                .clickable { onRemove() },
+                                .clickable(enabled = canRemove) { onRemove() },
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 Icons.Default.Delete,
                                 contentDescription = deleteLabel,
-                                tint = errorColor,
+                                tint = if (canRemove) errorColor
+                                else errorColor.copy(alpha = 0.38f),
                                 modifier = Modifier.size(16.dp)
                             )
                         }

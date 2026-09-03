@@ -23,7 +23,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.geometry.Offset
-import com.binaural.core.ui.theme.LocalAccentColors
 import com.binauralcycles.ui.components.MiniFrequencyGraph
 import com.binauralcycles.viewmodel.BinauralViewModel
 import com.binaural.core.audio.model.FrequencyCurve
@@ -49,6 +48,7 @@ fun PresetListScreen(
     onEditPreset: (String) -> Unit,
     onCreatePreset: () -> Unit,
     onExportPreset: (String) -> Unit = {},
+    onImportPreset: () -> Unit = {},
     onOpenSettings: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -70,6 +70,9 @@ fun PresetListScreen(
         lastNavigationTime = System.currentTimeMillis()
     }
 
+    // Состояние выпадающего меню действий в TopAppBar
+    var showActionMenu by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -79,34 +82,61 @@ fun PresetListScreen(
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ),
                 actions = {
-                    IconButton(onClick = {
-                        if (canNavigate()) {
-                            recordNavigation()
-                            onOpenSettings()
+                    Box {
+                        IconButton(onClick = { showActionMenu = true }) {
+                            Icon(
+                                Icons.Default.MoreVert,
+                                contentDescription = stringResource(R.string.menu)
+                            )
                         }
-                    }) {
-                        Icon(Icons.Default.Settings, contentDescription = stringResource(R.string.settings))
+                        DropdownMenu(
+                            expanded = showActionMenu,
+                            onDismissRequest = { showActionMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.create_preset)) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Add, contentDescription = null)
+                                },
+                                onClick = {
+                                    showActionMenu = false
+                                    if (canNavigate()) {
+                                        recordNavigation()
+                                        onCreatePreset()
+                                    }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.import_preset)) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.FileDownload, contentDescription = null)
+                                },
+                                onClick = {
+                                    showActionMenu = false
+                                    if (canNavigate()) {
+                                        recordNavigation()
+                                        onImportPreset()
+                                    }
+                                }
+                            )
+                            HorizontalDivider()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.settings)) },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Settings, contentDescription = null)
+                                },
+                                onClick = {
+                                    showActionMenu = false
+                                    if (canNavigate()) {
+                                        recordNavigation()
+                                        onOpenSettings()
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             )
-        },
-        floatingActionButton = {
-            // Кнопка создания — единственный элемент, который НЕ приглушён:
-            // акцент берётся из схемы до обесцвечивания, поэтому на сером фоне
-            // списка она читается как цветовое пятно, а не сливается с карточками.
-            val accent = LocalAccentColors.current
-            FloatingActionButton(
-                onClick = {
-                    if (canNavigate()) {
-                        recordNavigation()
-                        onCreatePreset()
-                    }
-                },
-                containerColor = accent.container,
-                contentColor = accent.content
-            ) {
-                Icon(Icons.Default.Add, contentDescription = stringResource(R.string.add_preset))
-            }
         }
     ) { paddingValues ->
         Column(

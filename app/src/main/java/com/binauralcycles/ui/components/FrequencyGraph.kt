@@ -888,7 +888,10 @@ fun FrequencyGraph(
                             onCarrierFrequencyChange = { onPointCarrierChanged(anchorIndex, it) },
                             onBeatFrequencyChange = { onPointBeatChanged(anchorIndex, it) },
                             onTimeChange = { onPointTimeChanged(anchorIndex, it) },
-                            onRemove = { onRemovePoint(anchorIndex) }
+                            onRemove = { onRemovePoint(anchorIndex) },
+                            // Удаление неактивно, когда в кривой осталась
+                            // последняя (единственная) точка.
+                            canRemove = points.size > 1
                         )
                     }
                 }
@@ -1012,7 +1015,10 @@ private fun buildGraphStaticPaths(
     /** Веса касательных для [realPoints] — базовой кривой пунктира. */
     baseWeights: FloatArray? = null
 ): GraphStaticPaths {
-    val beatPaths = if (sortedPoints.size >= 2) {
+    // Одноточечная кривая — допустимое состояние (см. FrequencyCurve.require
+    // points.size >= 1). buildBeatPaths для одной точки строит плоскую полосу
+    // постоянной частоты, поэтому рисуем её наравне с многоточечными.
+    val beatPaths = if (sortedPoints.isNotEmpty()) {
         buildBeatPaths(sortedPoints, params, interpolationType, splineTension, beatWeights)
     } else {
         null

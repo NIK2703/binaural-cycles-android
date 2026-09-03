@@ -96,6 +96,10 @@ Thumbs.db
 *.kotlin_module
 .kotlin/
 
+# Host-side probe build artifacts (tools/swap_fade_probe)
+tools/swap_fade_probe/*.o
+tools/swap_fade_probe/*.exe
+
 # Logs
 logs/
 .qwen/

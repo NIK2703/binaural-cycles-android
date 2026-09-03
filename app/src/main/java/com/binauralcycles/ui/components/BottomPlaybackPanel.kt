@@ -182,17 +182,17 @@ fun BottomPlaybackPanel(
                     }
                 )
             }
-            
+
             Spacer(modifier = Modifier.width(8.dp))
-            
+
             // Кнопка воспроизведения
             FilledIconButton(
                 onClick = onPlayClick,
                 modifier = Modifier.size(44.dp),
                 colors = IconButtonDefaults.filledIconButtonColors(
-                    containerColor = if (isPlaying) 
-                        MaterialTheme.colorScheme.error 
-                    else 
+                    containerColor = if (isPlaying)
+                        MaterialTheme.colorScheme.error
+                    else
                         MaterialTheme.colorScheme.primary
                 )
             ) {
@@ -202,7 +202,7 @@ fun BottomPlaybackPanel(
                     modifier = Modifier.size(24.dp)
                 )
             }
-            }
         }
     }
+}
 }
