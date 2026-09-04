@@ -190,8 +190,7 @@
     <string name="gesture_drag_point">Move a point: right-left to change its time, up-down to change the carrier frequency.</string>
     <string name="gesture_swipe_fields">Swipe up or down across the fields of the point editing popup to increase/decrease their values.</string>
     <string name="gesture_range_labels">Tap the frequency limit labels (%1$s and %2$s) to change the graph scale.</string>
-    <string name="gesture_scrub_handle">Drag the ◀|▶ handle on the red indicator to preview how the preset sounds at another time of day. The sound is rebuilt once you release the handle.</string>
-    <string name="gesture_scrub_reset">Tap the reset button next to the handle (or drag the handle back onto the grey line) to return playback to the current moment.</string>
+    <string name="gesture_scrub_handle">While the preset you are editing is playing, move ◀|▶ left or right to change the playback position.</string>
     <string name="got_it">Got it</string>
 
     <!-- Scrub (previewing another time of day) -->

@@ -463,41 +463,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
 
     // Индикатор воспроизведения
     if (isPlaying || drawIndicatorOnly) {
-        val carrierRangeSize = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
         fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (24.0f * 3600f) * width)
-        fun carrierToY(carrier: Float): Float = height - ((carrier - carrierRange.min) / carrierRangeSize * height)
-        // Формулы каналов: при beat < 0 «верхний» и «нижний» меняются местами,
-        // поэтому границы полосы ниже берём по координатам, а не по именам.
-        fun beatUpperY(carrier: Float, beat: Float): Float =
-            carrierToY(FrequencyMath.rightChannelFrequency(carrier, beat))
-        fun beatLowerY(carrier: Float, beat: Float): Float =
-            carrierToY(FrequencyMath.leftChannelFrequency(carrier, beat))
-
         val currentX = timeToX(currentTime)
-        val rightChannelY = beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val leftChannelY = beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val currentUpperY = minOf(rightChannelY, leftChannelY)
-        val currentLowerY = maxOf(rightChannelY, leftChannelY)
-        
-        // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
-        // внутри области биений — ярче. Точку пересечения с несущей убираем.
+        // Зону пересечения с графиком (яркий сегмент внутри полосы биений)
+        // больше не рисуем — вертикальная линия однородная на всю высоту.
         val indicatorAlpha = 0.3f
         drawLine(
             color = indicatorColor.copy(alpha = indicatorAlpha),
             start = Offset(currentX, 0f),
-            end = Offset(currentX, currentUpperY),
-            strokeWidth = 2f
-        )
-        drawLine(
-            color = indicatorColor.copy(alpha = indicatorAlpha),
-            start = Offset(currentX, currentLowerY),
             end = Offset(currentX, height),
-            strokeWidth = 2f
-        )
-        drawLine(
-            color = indicatorColor.copy(alpha = 0.5f),
-            start = Offset(currentX, currentUpperY),
-            end = Offset(currentX, currentLowerY),
             strokeWidth = 2f
         )
     }

@@ -848,6 +848,24 @@ class BinauralViewModel @Inject constructor(
      * Воспроизвести пресет
      */
     fun playPreset(presetId: String) {
+        startPreset(presetId, curveOverride = null, relaxationOverride = null)
+    }
+
+    /**
+     * Запуск пресета с возможной подменой кривой и настроек расслабления.
+     *
+     * @param curveOverride кривая, которая должна зазвучать ВМЕСТО сохранённой
+     *   в пресете. Единственный сценарий — несохранённые правки из редактора:
+     *   график на экране и звук обязаны совпасть в момент переключения, а не
+     *   только после первой же следующей правки. `null` — звучит пресет как
+     *   сохранён (обычный запуск из списка).
+     * @param relaxationOverride то же для настроек расслабления.
+     */
+    private fun startPreset(
+        presetId: String,
+        curveOverride: FrequencyCurve?,
+        relaxationOverride: RelaxationModeSettings?
+    ) {
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val state = _uiState.value
         
@@ -863,6 +881,10 @@ class BinauralViewModel @Inject constructor(
         // время редактирования). Повтор того же значения отсекает менеджер.
         restoreUserBufferInterval()
 
+        // Кривая, которая реально зазвучит: подменённая (несохранённые правки
+        // из редактора) или сохранённая в пресете.
+        val soundingCurve = curveOverride ?: preset.frequencyCurve
+
         // СКРАБ: смена пресета стирает сдвиг оси. Сдвиг имел смысл только для
         // прослушивания конкретного пресета в конкретное время; на другом
         // пресете та же ось — уже не «предпросмотр», а просто ложные часы.
@@ -872,8 +894,8 @@ class BinauralViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 activePreset = preset,
-                carrierRange = preset.frequencyCurve.carrierRange,
-                beatRange = preset.frequencyCurve.beatRange
+                carrierRange = soundingCurve.carrierRange,
+                beatRange = soundingCurve.beatRange
             )
         }
         
@@ -885,13 +907,13 @@ class BinauralViewModel @Inject constructor(
         
         // Формируем конфиг из глобальных настроек каналов и нормализации
         val config = buildPlaybackConfig(
-            frequencyCurve = preset.frequencyCurve,
+            frequencyCurve = soundingCurve,
             volume = state.volume,
             channelSwap = state.channelSwapSettings,
             normalization = state.volumeNormalizationSettings
         )
 
-        val relaxationSettings = preset.relaxationModeSettings
+        val relaxationSettings = relaxationOverride ?: preset.relaxationModeSettings
 
         // ПЕРЕКЛЮЧЕНИЕ = КРОССФЕЙД, а не «стоп, потом старт».
         //
@@ -1227,6 +1249,40 @@ class BinauralViewModel @Inject constructor(
             // пресета.
             playbackService?.pauseWithFade()
         } else {
+            // РЕДАКТОР: «продолжить» внутри редактора — это ПЕРЕКЛЮЧЕНИЕ на
+            // редактируемую предустановку, а не возврат к звучавшей ранее.
+            //
+            // До этой правки кнопка просто возобновляла то, что играло (или
+            // последний активный пресет): пользователь открывает пресет,
+            // правит его, жмёт play — и слышит совсем другой пресет, который
+            // в редакторе даже не показан. Услышать правку можно было только
+            // выйдя из редактора и тапнув пресет в списке. Теперь нажатие
+            // «play» при открытом редакторе всегда приводит прослушивание к
+            // тому, что открыто на экране.
+            //
+            // Условие ровно по [editingPresetId]: он непуст только внутри
+            // сессии редактирования СУЩЕСТВУЮЩЕГО пресета (на выходе из
+            // редактора обнуляется). НОВЫЙ, ещё не сохранённый пресет
+            // ([editingPresetId] == null) переключать некуда — его просто нет
+            // в списке, поэтому там остаётся прежнее поведение.
+            //
+            // Кривую и настройки расслабления берём ИЗ РЕДАКТОРА, а не из
+            // сохранённого пресета: иначе несохранённые правки зазвучали бы
+            // лишь после следующей же правки (которая пушит кривую в движок),
+            // а до неё звук расходился бы с графиком на экране.
+            //
+            // Отдельная проверка «пресет ещё есть в списке»: он мог быть удалён
+            // (или список ещё не догружен после пересоздания ViewModel) — тогда
+            // переключать некуда, и кнопка честно возобновляет прежний звук.
+            val editingId = state.editingPresetId
+            if (editingId != null &&
+                editingId != state.activePreset?.id &&
+                state.presets.any { it.id == editingId }
+            ) {
+                startPreset(editingId, state.editingFrequencyCurve, state.editingRelaxationModeSettings)
+                return
+            }
+
             // Если есть активный пресет - обновляем конфиг и продолжаем воспроизведение
             if (state.activePreset != null) {
                 // Важно: сначала обновляем конфиг, т.к. при запуске приложения

@@ -430,6 +430,11 @@ fun FrequencyGraph(
             val axisLabelBottomPx = with(density) { 11.dp.toPx() }
             val axisLabelLeftPx = with(density) { 3.dp.toPx() }
             val errorColor = MaterialTheme.colorScheme.error
+            // Серая линия-призрак (реальное «сейчас» при скрабе): теперь цвет
+            // из динамической темы (Monet), а не серый onSurfaceVariant.
+            // tertiary выбран, чтобы не совпадать ни с primary (кривая), ни с
+            // error (красная линия воспроизведения).
+            val ghostLineColor = MaterialTheme.colorScheme.tertiary
 
             // Границы контекстного окна точки в координатах области графика.
             // Нужны, чтобы касание по самому окну его не закрывало.
@@ -557,7 +562,12 @@ fun FrequencyGraph(
                             if (ghostGapPx > GHOST_LINE_MIN_GAP_PX) {
                                 val realX = graphParams.timeToX(realTime)
                                 drawLine(
-                                    color = axisLabelColor.copy(alpha = 0.35f),
+                                    // Цвет из темы (Monet), альфа — как у
+                                    // основных сегментов красной линии
+                                    // воспроизведения (§14.9, 0.3f), а не 0.35f
+                                    // на сером: серый на светлой теме
+                                    // сливался с сеткой.
+                                    color = ghostLineColor.copy(alpha = SCRUB_ARROW_ALPHA),
                                     start = Offset(realX, 0f),
                                     end = Offset(realX, size.height),
                                     // Та же толщина, что у красной линии: её
@@ -571,17 +581,7 @@ fun FrequencyGraph(
                             drawCurrentTimeIndicator(
                                 graphParams = graphParams,
                                 currentLocalTime = previewTime,
-                                currentCarrierFrequency = currentCarrierFrequency,
-                                currentBeatFrequency = currentBeatFrequency,
-                                indicatorColor = errorColor,
-                                // СКРАБ (§14.12): на время жеста и оседания
-                                // оси снимаем яркого выделения с линии, НО не
-                                // оставляем на его месте дырки — линия остаётся
-                                // сплошной полупрозрачной. Выделение возвращаем,
-                                // только когда ручку отпустили и ось доехала до
-                                // цели — тогда частоты в ней соответствуют новой
-                                // красной линии.
-                                showBeatBand = scrubDragTime == null && scrubPendingTarget == null
+                                indicatorColor = errorColor
                             )
                         }
                     }
@@ -728,22 +728,15 @@ fun FrequencyGraph(
                 if (dragState.startIndex >= 0 && dragState.currentTime != null && dragState.direction != DragDirection.NONE) {
                     val previewXPx = graphParams.timeToX(dragState.currentTime!!)
                     val previewYPx = graphParams.carrierToY(dragState.currentCarrier)
-                    
+                    val badgeText = when (dragState.direction) {
+                        DragDirection.HORIZONTAL -> "%02d:%02d".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute)
+                        DragDirection.VERTICAL -> hzFormat.format(dragState.currentCarrier)
+                        DragDirection.NONE -> ""
+                    }
+                    // Бейдж времени/несущей над точкой — единый вид с ручкой
+                    // скраба (TimeLabelBadge, §запрос 2026-09-04).
                     Box(modifier = Modifier.offset { IntOffset(previewXPx.toInt() - 50, previewYPx.toInt() - 160) }) {
-                        Surface(color = MaterialTheme.colorScheme.inverseSurface, shape = RoundedCornerShape(8.dp)) {
-                            Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = when (dragState.direction) {
-                                        DragDirection.HORIZONTAL -> "%02d:%02d".format(dragState.currentTime!!.hour, dragState.currentTime!!.minute)
-                                        DragDirection.VERTICAL -> hzFormat.format(dragState.currentCarrier)
-                                        DragDirection.NONE -> ""
-                                    },
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.inverseOnSurface
-                                )
-                            }
-                        }
+                        TimeLabelBadge(badgeText)
                     }
                 }
 
@@ -798,30 +791,26 @@ fun FrequencyGraph(
                         }
                 ) {}
 
-                // СКРАБ: ручка ◀|▶ и кнопка сброса объявлены ПОСЛЕДНИМИ детьми
-                // Box-а области графика, то есть выше маркеров точек (§7 плана).
-                // Появляются только во время воспроизведения: без звука
-                // «прослушать другое время суток» невозможно.
+                // СКРАБ: ручка ◀|▶ — объявлена ПОСЛЕДНИМ детём Box-а области
+                // графика, то есть выше маркеров точек (§7 плана). Появляется
+                // только во время воспроизведения: без звука «прослушать
+                // другое время суток» невозможно.
                 if (isPlaying) {
+                    // ВИДИМОСТЬ кнопки сброса (§запрос 2026-09-04): видна, пока
+                    // красная линия ([previewTime]) разошлась с реальным «сейчас»
+                    // ([realTime]) дальше порога — тот же порог, что у серой
+                    // линии-призрака. ИЛИ пока идёт перетаскивание ручки
+                    // (scrubDragTime != null): тогда не гаснет даже при
+                    // мгновенном проходе через «сейчас», то есть скраб с одного
+                    // кастомного положения на другое кнопку не прячет.
+                    // Не `scrubOffsetSeconds != 0`: флаг — про состояние скраба,
+                    // а не про положение линии, и сразу после отпускания он ещё 0
+                    // (§14.8) — кнопка мигала бы.
+                    val showResetNow = offNowGapPx(previewTime, realTime, graphParams.widthPx) >
+                        GHOST_LINE_MIN_GAP_PX || scrubDragTime != null
                     ScrubHandle(
                         time = previewTime,
-                        // Кнопка сброса видна ПО ГЕОМЕТРИИ (§14.10 плана):
-                        // пока красная линия ([previewTime]) разошлась с
-                        // реальным «сейчас» ([realTime]) дальше порога — то
-                        // есть ровно пока видна серая линия, тем же порогом.
-                        //
-                        // Не `scrubOffsetSeconds != 0`: флаг описывает СОСТОЯНИЕ
-                        // скраба, а не положение линии, и в окно сразу после
-                        // отпускания ручки он ещё 0 (§14.8) — кнопка мигала бы.
-                        // Геометрия же честно отвечает на вопрос «мы сейчас не
-                        // на текущем моменте?» при ЛЮБОМ источнике расхождения:
-                        // палец, недоехавшая ось или уже применённый сдвиг.
-                        //
-                        // Исключение одно — пока палец на ручке кнопки нет:
-                        // их тактильные зоны пересекаются, и кнопка отбирала бы
-                        // захват (см. комментарий в ScrubHandle).
-                        showReset = offNowGapPx(previewTime, realTime, graphParams.widthPx) >
-                            GHOST_LINE_MIN_GAP_PX && scrubDragTime == null,
+                        showReset = showResetNow,
                         graphParams = graphParams,
                         indicatorColor = errorColor,
                         realTimeOfDay = realTimeOfDay,
@@ -1369,45 +1358,19 @@ private fun DrawScope.drawGraphPaths(paths: GraphStaticPaths, primaryColor: Colo
 private fun DrawScope.drawCurrentTimeIndicator(
     graphParams: GraphParams,
     currentLocalTime: LocalTime,
-    currentCarrierFrequency: Float,
-    currentBeatFrequency: Float,
-    indicatorColor: Color,
-    // СКРАБ (§14.12): яркий сегмент внутри полосы биений — «выделенная
-    // область пересечения» с графиком. Пока ручку тащат или ось ещё доезжает
-    // до цели, выделения нет, но и дырки не остаётся: сегмент рисуется той же
-    // полупрозрачной линией, что и остальная красная (линия сплошная).
-    // Частоты в ярком сегменте взяты из телеметрии движка (реальная позиция
-    // звука), а не из цели пальца, поэтому на время жеста они не
-    // соответствовали бы красной линии. Показываем выделение снова, когда
-    // скраб отпущен и ось доехала до цели.
-    showBeatBand: Boolean = true
+    indicatorColor: Color
 ) {
     val height = size.height
     val currentX = graphParams.timeToX(currentLocalTime)
-    val rightChannelY = graphParams.beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-    val leftChannelY = graphParams.beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-    // При ОТРИЦАТЕЛЬНОЙ частоте биений каналы меняются местами, поэтому
-    // верх/низ полосы берём по координатам, а не по именам «upper/lower».
-    val currentUpperY = minOf(rightChannelY, leftChannelY)
-    val currentLowerY = maxOf(rightChannelY, leftChannelY)
-
-    // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
-    // внутри области биений — ярче. Точку пересечения с несущей убираем.
+    // Зону пересечения с графиком (яркий сегмент внутри полосы биений)
+    // больше не рисуем — вертикальная линия текущего момента однородная
+    // на всю высоту.
     val indicatorAlpha = 0.3f
-    drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, 0f), end = Offset(currentX, currentUpperY), strokeWidth = 2f)
-    drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, currentLowerY), end = Offset(currentX, height), strokeWidth = 2f)
-    // Вертикальная линия показывающая диапазон частот каналов. В покое это
-    // ЯРКИЙ сегмент (выделенная область пересечения с полосой биений).
-    // Во время перетаскивания ручки выделения НЕТ, но и ДЫРКИ на его месте
-    // не остаётся: сегмент рисуется той же полупрозрачной линией, что и
-    // остальная красная (alpha 0.3, width 2), — линия СПЛОШНАЯ и однородная
-    // на весь период жеста. Яркое выделение возвращается только когда скраб
-    // отпущен и ось доехала до цели (§14.12, уточнение пользователя).
     drawLine(
-        color = indicatorColor.copy(alpha = if (showBeatBand) 0.5f else indicatorAlpha),
-        start = Offset(currentX, currentUpperY),
-        end = Offset(currentX, currentLowerY),
-        strokeWidth = if (showBeatBand) 3f else 2f
+        color = indicatorColor.copy(alpha = indicatorAlpha),
+        start = Offset(currentX, 0f),
+        end = Offset(currentX, height),
+        strokeWidth = 2f
     )
 }
 
@@ -1704,6 +1667,33 @@ fun DraggablePoint(
     }
 }
 
+/**
+ * Бейдж метки: всплывает над перетаскиваемым объектом — точкой графика или
+ * ручкой скраба — и показывает его текущее время суток (при горизонтальном
+ * перетаскивании) либо частоту несущей (при вертикальном). Единый вид для
+ * обоих жестов (§запрос 2026-09-04): скраб и точка не должны расходиться в
+ * оформлении бейджа.
+ */
+@Composable
+private fun TimeLabelBadge(text: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.inverseSurface,
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.inverseOnSurface
+            )
+        }
+    }
+}
+
 // ===== СКРАБ: ручка предпросмотра на указателе текущего момента =====
 // docs/plan_playback_scrub_handle.md §5.2 (геометрия), §6 (состояние), §7 (жесты).
 
@@ -1746,19 +1736,44 @@ private val SCRUB_SHADOW_PAD = 8.dp
 private const val SCRUB_GRAB_SCALE = 1.15f
 
 /**
- * Кнопка сброса: иконка 18 dp БЕЗ фона, тактильная зона 44 dp, зазор до ручки
- * 4 dp (§14.10).
+ * Кнопка сброса: иконка 18 dp БЕЗ фона, тактильная зона 40 dp.
  *
  * Фона нет сознательно: кружок `surfaceContainerHighest` весил визуально
  * больше самого ползунка и спорил с графиком под ним. Цвет и прозрачность
  * кнопки — как у треугольников ручки ([SCRUB_ARROW_ALPHA]).
  */
 private val SCRUB_RESET_ICON = 18.dp
-private val SCRUB_RESET_TOUCH = 44.dp
+private val SCRUB_RESET_TOUCH = 40.dp
+
+/**
+ * Зазор между НИЖНЕЙ гранью кнопки сброса и верхней гранью чипа ручки.
+ *
+ * Кнопка стоит НАД ручкой (§запрос 2026-09-04), а не сбоку от неё: сбоку она
+ * отбирала захват у самой ручки. Верхняя грань чипа — [SCRUB_CHIP_TOP]
+ * (3 dp), значит кнопка целиком лежит ВЫШЕ области графика — в полях
+ * карточки и в зазоре между карточкой и полем названия пресета.
+ */
 private val SCRUB_RESET_GAP = 4.dp
 
-/** На сколько пузырь времени поднят над верхней гранью тактильной зоны. */
-private val SCRUB_BUBBLE_LIFT = 25.dp
+/**
+ * Слот под бейдж времени над ручкой.
+ *
+ * Бейдж НЕЛЬЗЯ класть внутрь тактильной зоны ручки: та шириной 48 dp, и
+ * бейдж (~59 dp) ужался бы под неё — текст «14:30» не влез бы и перенёсся в
+ * две строки, а высота обрезалась бы 40 dp зоны. У точки бейдж лежит в
+ * свободном контейнере во всю область графика и потому рисуется в натуральную
+ * величину — расхождение было хорошо заметно (§запрос 2026-09-04).
+ *
+ * Поэтому бейдж вынесен ОТДЕЛЬНЫМ ребёнком области графика, а этот слот
+ * только позиционирует его: по центру ручки и сразу над кнопкой сброса.
+ */
+private val SCRUB_BUBBLE_SLOT_WIDTH = 160.dp
+
+/** Ожидаемая высота бейджа (pad 8 + строка bodyLarge + pad 8). */
+private val SCRUB_BUBBLE_SLOT_HEIGHT = 40.dp
+
+/** Зазор между нижней гранью бейджа и верхней гранью кнопки сброса. */
+private val SCRUB_BUBBLE_GAP = 2.dp
 
 /**
  * Ручка скраба: чип из двух залитых треугольников ◀|▶ на верхнем конце
@@ -1799,8 +1814,10 @@ private fun BoxScope.ScrubHandle(
     val topPx = with(density) { SCRUB_CHIP_TOP.roundToPx() }
     val resetIconPx = with(density) { SCRUB_RESET_ICON.roundToPx() }
     val resetTouchPx = with(density) { SCRUB_RESET_TOUCH.roundToPx() }
-    val gapPx = with(density) { SCRUB_RESET_GAP.roundToPx() }
-    val bubbleLiftPx = with(density) { (-SCRUB_BUBBLE_LIFT).roundToPx() }
+    val resetGapPx = with(density) { SCRUB_RESET_GAP.roundToPx() }
+    val slotWPx = with(density) { SCRUB_BUBBLE_SLOT_WIDTH.roundToPx() }
+    val slotHPx = with(density) { SCRUB_BUBBLE_SLOT_HEIGHT.roundToPx() }
+    val bubbleGapPx = with(density) { SCRUB_BUBBLE_GAP.roundToPx() }
 
     var dragging by remember { mutableStateOf(false) }
     // Цель жеста, ещё не зафиксированная. null — палец ни разу не сдвинулся.
@@ -1839,34 +1856,44 @@ private fun BoxScope.ScrubHandle(
     val touchTop = (topPx + chipHPx / 2f - touchHPx / 2f).toInt()
     val chipTopInTouch = (touchHPx - chipHPx) / 2
 
-    // Кнопка сброса: СПРАВА от ручки, пока справа хватает места; не хватает —
-    // переезжает ВЛЕВО (§14.10). Явное требование пользователя (2026-09-04):
-    // основное положение — справа. Запасной вариант слева нужен у правого
-    // края графика, где справа места уже нет (ручка упёрлась в край/полночь).
+    // Кнопка сброса: НАД ручкой, по центру линии воспроизведения.
     //
-    // Кламп по краям графика — по ВИЗУАЛУ кнопки (18 dp), как и раньше по
-    // кружку: тактильная зона 44 dp может выступать за область графика,
-    // визуал — нет.
-    val resetCenterX = run {
-        val left = centerX - halfChip - gapPx - resetIconPx / 2f
-        val right = centerX + halfChip + gapPx + resetIconPx / 2f
-        val half = resetIconPx / 2f
-        // СПРАВА в приоритете (§14.10, явное требование): берём right, если
-        // вся иконка влезает в график справа; иначе — запасной left.
-        val chosen = if (right + half <= graphParams.widthPx) right else left
-        chosen.coerceIn(half, (graphParams.widthPx - half).coerceAtLeast(half))
-    }
-    val resetLeft = (resetCenterX - resetTouchPx / 2f).toInt()
-    val resetTop = topPx + chipHPx / 2 - resetTouchPx / 2
+    // Нижняя грань иконки на [SCRUB_RESET_GAP] выше верхней грани чипа, то
+    // есть кнопка целиком лежит ВЫШЕ области графика (chipTop = 3 dp, иконка
+    // 18 dp → полоса −19…−1 dp). Рисуется оверлеем внутри того же Box-а,
+    // поэтому НЕ ЗАНИМАЕТ МЕСТА В РАКЛАДКЕ: график не сдвигается вниз, и
+    // никаких «дополнительных отступов сверху» не появляется (§запрос
+    // 2026-09-04 — «над графиком, но без отступов»).
+    //
+    // По горизонтали — центр ручки, с клампом по ВИЗУАЛУ иконки (как раньше
+    // клампился кружок): тактильная зона 40 dp может выступать за область
+    // графика, визуал — нет.
+    val resetHalf = resetIconPx / 2f
+    val resetCenterX = centerX.coerceIn(
+        resetHalf,
+        (graphParams.widthPx - resetHalf).coerceAtLeast(resetHalf)
+    )
+    val resetIconTop = topPx - resetGapPx - resetIconPx
+    val resetTouchLeft = (resetCenterX - resetTouchPx / 2f).toInt()
+    val resetTouchTop = (resetIconTop + resetIconPx / 2f - resetTouchPx / 2f).toInt()
 
-    // Кнопка сброса объявлена ДО ручки неслучайно: их тактильные зоны
-    // ПЕРЕСЕКАЮТСЯ (ручка 48 dp, кнопка 44 dp, а центры разнесены всего на
-    // 14 + 4 + 9 = 27 dp), и в зоне пересечения верх обязан забирать РУЧКА —
-    // она основное взаимодействие. Объявленная после, кнопка съедала бы
-    // захват ручки чуть в стороне от центра. Кнопке остаётся её сторо́нняя
-    // (непересекающаяся с ручкой) часть тактильной зоны — около 25×44 dp
-    // с той стороны, где она стоит (справа в основном случае, слева — в
-    // запасном у правого края графика).
+    // Слот бейджа: по центру ручки, НАД кнопкой сброса. Кламп по краям
+    // графика — чтобы у 00:00 и 23:59 бейдж не уезжал за экран.
+    val slotLeft = (centerX - slotWPx / 2f).coerceIn(
+        0f,
+        (graphParams.widthPx - slotWPx).coerceAtLeast(0).toFloat()
+    )
+    // Нижняя грань слота — на [SCRUB_BUBBLE_GAP] выше верхней грани иконки
+    // сброса. Позиция НЕ зависит от showReset: иначе в момент, когда ось ещё
+    // на «сейчас», бейдж при появлении кнопки подпрыгивал бы.
+    val slotTop = resetIconTop - bubbleGapPx - slotHPx
+
+    // Кнопка объявлена ДО ручки неслучайно: их тактильные зоны
+    // ПЕРЕСЕКАЮТСЯ (ручка 40 dp, кнопка 40 dp, а центры разнесены всего на
+    // 20 dp), и в зоне пересечения верх обязан забирать РУЧКА — она основное
+    // взаимодействие. Объявленная после, кнопка съедала бы захват ручки чуть
+    // в стороне от центра. Кнопке остаётся её верхняя непересекающаяся часть
+    // тактильной зоны — около 22×40 dp.
     AnimatedVisibility(
         visible = showReset,
         enter = fadeIn() + scaleIn(),
@@ -1875,7 +1902,7 @@ private fun BoxScope.ScrubHandle(
     ) {
         Box(
             modifier = Modifier
-                .offset { IntOffset(resetLeft, resetTop) }
+                .offset { IntOffset(resetTouchLeft, resetTouchTop) }
                 .size(SCRUB_RESET_TOUCH)
                 // Индикация нажатия оставлена (.clickable без indication=null):
                 // кнопка без фона почти не видна, и без ряби нажатие на
@@ -1891,6 +1918,25 @@ private fun BoxScope.ScrubHandle(
                 // то есть та же альфа, что у основной части красной линии.
                 tint = indicatorColor.copy(alpha = SCRUB_ARROW_ALPHA)
             )
+        }
+    }
+
+    // Пузырь времени — только пока палец на ручке. В отпущенном состоянии о
+    // сдвинутом положении говорят серая линия и кнопка сброса над ручкой.
+    //
+    // ВАЖНО: бейдж — ОТДЕЛЬНЫЙ ребёнок области графика, а не содержимое ручки.
+    // Внутри тактильной зоны ручки (48×40 dp) он ужимался под её ширину, и
+    // «14:30» не влезало в одну строку — визуально это расходилось с бейджем
+    // точки, который лежит в свободном контейнере. Здесь слот 160 dp, бейдж
+    // мерится в натуральную величину (§запрос 2026-09-04).
+    if (dragging) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(slotLeft.roundToInt(), slotTop) }
+                .size(SCRUB_BUBBLE_SLOT_WIDTH, SCRUB_BUBBLE_SLOT_HEIGHT),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            TimeLabelBadge("%02d:%02d".format(time.hour, time.minute))
         }
     }
 
@@ -1999,25 +2045,6 @@ private fun BoxScope.ScrubHandle(
             )
         }
 
-        // Пузырь времени — только пока палец на ручке. В отпущенном состоянии
-        // о сдвинутом положении говорят серая линия и кнопка сброса.
-        if (dragging) {
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .offset { IntOffset(0, bubbleLiftPx) },
-                color = MaterialTheme.colorScheme.inverseSurface,
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text(
-                    text = "%02d:%02d".format(time.hour, time.minute),
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.inverseOnSurface
-                )
-            }
-        }
     }
 
 }

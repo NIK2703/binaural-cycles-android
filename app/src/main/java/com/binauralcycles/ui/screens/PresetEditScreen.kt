@@ -58,6 +58,7 @@ fun PresetEditScreen(
         mutableStateOf(editingPreset?.name ?: newPresetName) 
     }
     var showUnsavedDialog by remember { mutableStateOf(false) }
+
     // Справка по жестам — по кнопке рядом с сохранением. Состояние здесь,
     // а не внутри графика: справка описывает весь редактор (график, окно
     // точки, метки границ), а не один его элемент.
@@ -321,6 +322,7 @@ fun PresetEditScreen(
                 val editingCurve = uiState.editingFrequencyCurve
                 // Показываем указатель текущей частоты только если редактируется активный пресет
                 val isEditingActivePreset = presetId != null && uiState.activePreset?.id == presetId
+
                 if (editingCurve != null) {
                     FrequencyGraph(
                         points = editingCurve.points,

@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.RadioButtonChecked
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.TouchApp
@@ -91,10 +90,10 @@ fun GesturesHelpDialog(
             )
         ),
         // СКРАБ: как подвинуть само прослушивание. Иконка жеста «тяни
-        // влево-вправо» повторяет форму ручки ◀|▶, а кнопка сброса — та же
-        // иконка, что и на графике: справка и экран не должны расходиться.
-        GestureHint(Icons.Filled.SwapHoriz, stringResource(R.string.gesture_scrub_handle)),
-        GestureHint(Icons.Filled.Refresh, stringResource(R.string.gesture_scrub_reset))
+        // влево-вправо» повторяет форму ручки ◀|▶: справка и экран не должны
+        // расходиться. Кнопка сброса из справки убрана (запрос 2026-09-04) —
+        // она теперь рисуется ВЫШЕ графика на экране редактора.
+        GestureHint(Icons.Filled.SwapHoriz, stringResource(R.string.gesture_scrub_handle))
     )
 
     AlertDialog(
