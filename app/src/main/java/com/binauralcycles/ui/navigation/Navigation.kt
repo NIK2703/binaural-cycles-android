@@ -11,14 +11,17 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.material3.*
 import androidx.compose.ui.Alignment
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.binauralcycles.R
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -35,7 +38,9 @@ import com.binauralcycles.ui.screens.PresetEditScreen
 import com.binauralcycles.ui.screens.PresetListScreen
 import com.binauralcycles.ui.screens.SettingsScreen
 import com.binauralcycles.viewmodel.BinauralViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 sealed class Screen(val route: String) {
     object PresetList : Screen("presets")
@@ -105,38 +110,77 @@ fun BinauralNavigation(
     // Панель отображается только когда есть активный пресет
     val showBottomPanel = uiState.activePreset != null
     
-    // Сохраняем ID пресета для экспорта (используется внутри лаунчера)
-    var currentExportPresetId by remember { mutableStateOf<String?>(null) }
-    
-    // Лаунчер для экспорта пресета (создание файла)
+    // Любой сбой экспорта/импорта раньше был полностью тихим: файл создавался
+    // и оставался пустым без единого признака ошибки. Теперь результат всегда
+    // виден пользователю.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val exportSuccessMessage = stringResource(R.string.export_success)
+    val exportFailedMessage = stringResource(R.string.export_failed)
+    val importSuccessMessage = stringResource(R.string.import_success)
+    val importFailedMessage = stringResource(R.string.import_failed)
+
+    // Лаунчер для экспорта пресета (создание файла).
+    //
+    // К моменту колбэка Activity уже пересоздана (пока открыт SAF-пикер, она
+    // уничтожается), поэтому ни на какое состояние в памяти — ни Compose, ни
+    // ViewModel — опираться нельзя: JSON пресета лежит в файле кэша, который
+    // ViewModel подготовила ДО открытия пикера.
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
-        uri?.let { exportUri ->
-            currentExportPresetId?.let { presetId ->
-                scope.launch {
-                    // Получаем JSON и записываем в файл
-                    viewModel.exportPresetToJson(presetId)?.let { json ->
-                        context.contentResolver.openOutputStream(exportUri)?.use { outputStream ->
-                            outputStream.bufferedWriter().use { writer ->
-                                writer.write(json)
-                            }
-                        }
-                    }
-                }
-                currentExportPresetId = null
+        if (uri == null) {
+            // Пользователь отменил выбор: файл не создан, но подготовленный
+            // JSON надо убрать, чтобы не лежал в кэше до следующего экспорта
+            scope.launch(Dispatchers.IO) { viewModel.discardPendingExport() }
+            return@rememberLauncherForActivityResult
+        }
+        android.util.Log.d("PresetExport", "callback: uri=$uri")
+        scope.launch(Dispatchers.IO) {
+            val pending = viewModel.consumePendingExport()
+            if (pending == null) {
+                // Раньше эта ветка молча пропускалась — и файл оставался пустым
+                android.util.Log.e("PresetExport", "callback: данные экспорта потеряны")
+                snackbarHostState.showSnackbar(
+                    String.format(exportFailedMessage, "данные экспорта потеряны, повторите")
+                )
+                return@launch
             }
+            val (presetName, presetJson) = pending
+            val message = runCatching {
+                val stream = context.contentResolver.openOutputStream(uri)
+                    ?: error("openOutputStream вернул null")
+                stream.bufferedWriter().use { writer -> writer.write(presetJson) }
+            }.fold(
+                onSuccess = {
+                    android.util.Log.d(
+                        "PresetExport",
+                        "callback: записано ${presetJson.toByteArray(Charsets.UTF_8).size} байт"
+                    )
+                    String.format(exportSuccessMessage, presetName)
+                },
+                onFailure = { error ->
+                    android.util.Log.e("PresetExport", "callback: запись не удалась", error)
+                    String.format(exportFailedMessage, error.message ?: error.javaClass.simpleName)
+                }
+            )
+            snackbarHostState.showSnackbar(message)
         }
     }
-    
+
     // Лаунчер для импорта пресета (открытие файла)
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         uri?.let { importUri ->
-            viewModel.importPresetFromUri(importUri)
-            // После успешного импорта возвращаемся к списку
-            navController.popBackStack()
+            scope.launch(Dispatchers.IO) {
+                val imported = viewModel.importPresetFromUri(importUri)
+                snackbarHostState.showSnackbar(
+                    if (imported != null) String.format(importSuccessMessage, imported.name)
+                    else importFailedMessage
+                )
+                // После успешного импорта возвращаемся к списку (навигация — с главного)
+                if (imported != null) withContext(Dispatchers.Main) { navController.popBackStack() }
+            }
         }
     }
     
@@ -146,7 +190,32 @@ fun BinauralNavigation(
     Box(modifier = Modifier.fillMaxSize()) {
         SharedTransitionLayout {
             Scaffold(
-                contentWindowInsets = WindowInsets(0, 0, 0, 0)
+                contentWindowInsets = WindowInsets(0, 0, 0, 0),
+                // Снэкбар поднимаем над нижней панелью воспроизведения, иначе
+                // та перекрывает его полностью.
+                snackbarHost = {
+                    SnackbarHost(
+                        hostState = snackbarHostState,
+                        modifier = Modifier
+                            .navigationBarsPadding()
+                            .padding(bottom = if (showBottomPanel) bottomPanelHeight else 0.dp)
+                    ) { data ->
+                        // Цвета — из темы, БЕЗ инверсии. Дефолт Material 3
+                        // (inverseSurface/inverseOnSurface) специально зеркалит
+                        // тему: в светлой теме подсказка тёмная, в тёмной —
+                        // светлая. Это ломает требование «оформление в стиле
+                        // приложения»: берём обычную пару surfaceContainerHigh/
+                        // onSurface — подсказка следует той же теме, что и всё
+                        // приложение, и остаётся различимой за счёт тона
+                        // поверхности и тени.
+                        Snackbar(
+                            snackbarData = data,
+                            shape = RoundedCornerShape(12.dp),
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            contentColor = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
             ) { paddingValues ->
                 NavHost(
                     navController = navController,
@@ -183,11 +252,19 @@ fun BinauralNavigation(
                             navController.navigate(Screen.PresetNew.route)
                         },
                         onExportPreset = { presetId ->
-                            val preset = viewModel.getPresetForExport(presetId)
-                            preset?.let {
-                                currentExportPresetId = presetId
-                                val fileName = "${it.name.replace(" ", "_")}.json"
-                                exportLauncher.launch(fileName)
+                            // JSON готовим ДО открытия пикера (запись в кэш — на IO)
+                            scope.launch(Dispatchers.IO) {
+                                val fileName = viewModel.prepareExport(presetId)
+                                // лаунчер и снэкбар — только с главного потока
+                                withContext(Dispatchers.Main) {
+                                    if (fileName != null) {
+                                        exportLauncher.launch(fileName)
+                                    } else {
+                                        snackbarHostState.showSnackbar(
+                                            String.format(exportFailedMessage, "пресет не найден")
+                                        )
+                                    }
+                                }
                             }
                         },
                         onOpenSettings = {

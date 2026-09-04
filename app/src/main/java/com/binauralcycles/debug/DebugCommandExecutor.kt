@@ -681,7 +681,7 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         val sec = (arg.toIntOrNull() ?: 0).coerceIn(5, 3600)
         val st = settings()
         io { repo.saveChannelSwapSettings(st.swap.copy(intervalSeconds = sec)) }
-        return applyConfig("Интервал перестановки: $sec с")
+        return applyConfig("Интервал смены каналов: $sec с")
     }
 
     private fun setSwapFade(arg: String): String {

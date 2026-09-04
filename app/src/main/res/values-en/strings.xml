@@ -53,7 +53,7 @@
     <string name="auto_channel_swap">Channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
     <string name="channel_swap_disabled">Disabled</string>
-    <string name="swap_interval">Swap interval</string>
+    <string name="swap_interval">Channel switch interval</string>
     <string name="swap_mode_off_description">Channels always in normal arrangement</string>
     <string name="swap_mode_timer">Timer</string>
     <string name="swap_mode_trend">Trend</string>
@@ -81,7 +81,7 @@
     <string name="normalization_temporal">Temporal</string>
     <string name="normalization_none_description">Volume is not balanced</string>
     <string name="normalization_channel_description">Balance volume between left and right channels based on their tone frequency ratio</string>
-    <string name="normalization_temporal_description">Balance volume between graph points for consistent sound throughout the day</string>
+    <string name="normalization_temporal_description">Balance channel volume by the lowest channel frequency of the playing preset</string>
     
     <!-- Temporal Normalization (deprecated, kept for compatibility) -->
     <string name="temporal_normalization">Temporal normalization</string>

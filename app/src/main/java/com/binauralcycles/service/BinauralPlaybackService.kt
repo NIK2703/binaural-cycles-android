@@ -575,6 +575,11 @@ class BinauralPlaybackService : Service() {
     // AudioDeviceCallback для отслеживания отключения аудиоустройств (API 23+)
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var hasHeadset = false
+    // Проводная гарнитура (по ACTION_HEADSET_PLUG) — отдельно от BT/USB,
+    // т.к. getDevices(GET_DEVICES_OUTPUTS) ненадёжно отдаёт провод при
+    // отсутствии активного воспроизведения.
+    private var wiredHeadsetConnected = false
+    private var headsetPlugReceiver: BroadcastReceiver? = null
     
     /**
      * Регистрирует приёмник для отключения гарнитуры (AUDIO_BECOMING_NOISY)
@@ -710,62 +715,54 @@ class BinauralPlaybackService : Service() {
                         wasStoppedByHeadsetDisconnect = true
                     }
                 }
-                
-                /**
-                 * Проверяет, является ли устройство гарнитурой/наушниками
-                 */
-                private fun isHeadsetDevice(device: AudioDeviceInfo): Boolean {
-                    return when (device.type) {
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                        AudioDeviceInfo.TYPE_USB_DEVICE,
-                        AudioDeviceInfo.TYPE_USB_ACCESSORY,
-                        AudioDeviceInfo.TYPE_USB_HEADSET,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                        AudioDeviceInfo.TYPE_BLE_HEADSET,
-                        AudioDeviceInfo.TYPE_HEARING_AID -> true
-                        else -> false
-                    }
-                }
-                
-                /**
-                 * Проверяет наличие подключенной гарнитуры
-                 */
-                private fun checkHeadsetDevices() {
-                    audioManager?.let { am ->
-                        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                        hasHeadset = devices.any { isHeadsetDevice(it) }
-                        _hasHeadset.value = hasHeadset
-                        android.util.Log.d("BinauralPlaybackService", "Headset available: $hasHeadset")
-                    }
-                }
             }
             
             // Регистрируем callback
             audioManager?.registerAudioDeviceCallback(audioDeviceCallback, null)
             
-            // Начальная проверка наличия гарнитуры
-            audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.let { devices ->
-                hasHeadset = devices.any { device ->
-                    when (device.type) {
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                        AudioDeviceInfo.TYPE_USB_DEVICE,
-                        AudioDeviceInfo.TYPE_USB_ACCESSORY,
-                        AudioDeviceInfo.TYPE_USB_HEADSET,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                        AudioDeviceInfo.TYPE_BLE_HEADSET,
-                        AudioDeviceInfo.TYPE_HEARING_AID -> true
-                        else -> false
+            // Начальная проверка наличия гарнитуры.
+            // Проводная гарнитура: читаем ЛИПКИЙ ACTION_HEADSET_PLUG, чтобы
+            // получить реальное состояние ДО начала воспроизведения, когда
+            // getDevices ещё не отдаёт провод. Без этого при запуске приложения
+            // с уже воткнутыми наушниками wiredHeadsetConnected остаётся false,
+            // hasHeadset=false, и диалог «подключите наушники» показывается при
+            // попытке возобновить воспроизведение, пока гарнитуру не переподключат.
+            // BT/USB докидываются внутри checkHeadsetDevices() через getDevices.
+            wiredHeadsetConnected = readWiredHeadsetFromStickyBroadcast()
+            checkHeadsetDevices()
+
+            // Отслеживание ПРОВОДНОЙ гарнитуры через ACTION_HEADSET_PLUG.
+            // getDevices(GET_DEVICES_OUTPUTS) ненадёжно отдаёт провод при
+            // отсутствии активного воспроизведения, а ACTION_HEADSET_PLUG —
+            // липкий системный интент, который надёжно прилетает на втыкание
+            // 3.5mm джек/USB-C и сразу сообщает текущее состояние (state=1/0).
+            // Для Bluetooth он НЕ прилетает — его детекция остаётся в
+            // AudioDeviceCallback/getDevices выше.
+            val plugFilter = IntentFilter(AudioManager.ACTION_HEADSET_PLUG)
+            headsetPlugReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action != AudioManager.ACTION_HEADSET_PLUG) return
+                    val plugged = intent.getIntExtra("state", 0) == 1
+                    android.util.Log.d("BinauralPlaybackService", "HEADSET_PLUG plugged=$plugged")
+                    if (plugged) {
+                        wiredHeadsetConnected = true
+                        hasHeadset = true
+                        _hasHeadset.value = true
+                    } else {
+                        wiredHeadsetConnected = false
+                        checkHeadsetDevices()
                     }
                 }
-                _hasHeadset.value = hasHeadset
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(headsetPlugReceiver, plugFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(headsetPlugReceiver, plugFilter)
             }
         }
     }
-    
+
     private fun unregisterAudioDeviceCallback() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioDeviceCallback?.let {
@@ -773,8 +770,72 @@ class BinauralPlaybackService : Service() {
             }
         }
         audioDeviceCallback = null
+        headsetPlugReceiver?.let { unregisterReceiver(it) }
+        headsetPlugReceiver = null
+        wiredHeadsetConnected = false
     }
-    
+
+    /**
+     * Проверяет, является ли устройство гарнитурой/наушниками (BT/USB/провод).
+     * Функция уровня класса — её вызывают и AudioDeviceCallback, и приёмник
+     * ACTION_HEADSET_PLUG.
+     */
+    private fun isHeadsetDevice(device: AudioDeviceInfo): Boolean {
+        return when (device.type) {
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_HEARING_AID -> true
+            else -> false
+        }
+    }
+
+    /**
+     * Пересчитывает наличие гарнитуры: проводная (по ACTION_HEADSET_PLUG) ИЛИ
+     * BT/USB (по getDevices). Обновляет общий StateFlow [hasHeadset].
+     * Функция уровня класса — вызывается из AudioDeviceCallback и приёмника
+     * ACTION_HEADSET_PLUG.
+     */
+    private fun checkHeadsetDevices() {
+        audioManager?.let { am ->
+            val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            hasHeadset = wiredHeadsetConnected || devices.any { isHeadsetDevice(it) }
+            _hasHeadset.value = hasHeadset
+            android.util.Log.d("BinauralPlaybackService", "Headset available: $hasHeadset (wired=$wiredHeadsetConnected)")
+        }
+    }
+
+    /**
+     * Возвращает текущее состояние ПРОВОДНОЙ гарнитуры, читая липкий системный
+     * интент [AudioManager.ACTION_HEADSET_PLUG]. В отличие от
+     * [AudioManager.getDevices], корректно работает ДО начала воспроизведения,
+     * то есть сразу на старте приложения, если наушники уже воткнуты в разъём.
+     * ACTION_HEADSET_PLUG — sticky-интент, поэтому последнее состояние (state=1/0)
+     * доступно без ожидания события подключения/отключения.
+     */
+    private fun readWiredHeadsetFromStickyBroadcast(): Boolean {
+        val plugFilter = IntentFilter(AudioManager.ACTION_HEADSET_PLUG)
+        val sticky = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(null, plugFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(null, plugFilter)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("BinauralPlaybackService", "Failed to read sticky HEADSET_PLUG", e)
+            null
+        }
+        val plugged = sticky?.getIntExtra("state", 0) == 1
+        android.util.Log.d("BinauralPlaybackService", "Sticky HEADSET_PLUG wiredHeadsetConnected=$plugged")
+        return plugged
+    }
+
     /**
      * Регистрирует приёмник для отслеживания изменений режима энергосбережения
      */

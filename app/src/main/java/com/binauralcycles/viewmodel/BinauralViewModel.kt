@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
+import java.io.File
 import android.os.IBinder
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -44,6 +45,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalTime
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -212,6 +214,14 @@ internal fun buildPlaybackConfig(
     volumeNormalizationStrength = normalization.strength
 )
 
+/**
+ * Пресет, подготовленный к экспорту: лежит в файле кэша, пока открыт SAF-пикер
+ * (см. [BinauralViewModel.prepareExport]). Имя нужно, чтобы после записи
+ * показать пользователю, какая именно предустановка экспортирована.
+ */
+@Serializable
+private data class PendingExport(val presetName: String, val json: String)
+
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -234,7 +244,12 @@ class BinauralViewModel @Inject constructor(
         private const val KEY_EDITING_TARGET = "editing_target"
         /** Специальное значение цели: создаётся новый пресет (presetId отсутствует). */
         private const val EDITING_TARGET_NEW = "NEW"
+        /** Имя временного файла (в cacheDir) с JSON, подготовленным к экспорту. */
+        private const val KEY_PENDING_EXPORT = "pending_export.json"
     }
+
+    /** Файл в кэше, куда кладётся JSON пресета до открытия SAF-пикера. */
+    private fun pendingExportFile(): File = File(context.cacheDir, KEY_PENDING_EXPORT)
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
@@ -284,6 +299,12 @@ class BinauralViewModel @Inject constructor(
     
     // Флаг для отслеживания, было ли обработано автовозобновление
     private var autoResumeHandled = false
+
+    // Пользователь подтвердил запуск БЕЗ наушников («Запустить» в диалоге) —
+    // при переключении пресетов во время воспроизведения диалог больше не
+    // показываем. Сбрасывается, когда воспроизведение останавливается, чтобы
+    // при следующей попытке запуска без наушников диалог снова показался.
+    private var headphoneBypassActive = false
     
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
@@ -452,6 +473,10 @@ class BinauralViewModel @Inject constructor(
                         }
                         // Устанавливаем название пресета для уведомления
                         playbackService?.setCurrentPresetName(activePreset.name)
+                        // Активный пресет готов — возможно, теперь выполнены
+                        // все условия автовозобновления (если сервис уже
+                        // подключён и опция загружена).
+                        tryAutoResumeOnAppStart()
                     }
                 }
                 // Отмечаем «пресеты прочитаны» ВСЕГДА (независимо от наличия
@@ -558,6 +583,9 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getAutoResumeOnAppStart().collect { enabled ->
                 _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
+                // Опция загружена — возможно, теперь выполнены все условия
+                // автовозобновления (если пресет и сервис уже готовы).
+                tryAutoResumeOnAppStart()
             }
         }
         // Признак «стартовое напоминание об энергосбережении уже показано»
@@ -641,6 +669,10 @@ class BinauralViewModel @Inject constructor(
     fun playPresetAnyway() {
         val presetId = _uiState.value.pendingPresetId ?: return
         _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+        // Пользователь подтвердил запуск без наушников: последующие
+        // переключения пресетов во время воспроизведения не должны снова
+        // показывать диалог (см. playPreset / headphoneBypassActive).
+        headphoneBypassActive = true
         startPreset(presetId, curveOverride = null, relaxationOverride = null)
     }
 
@@ -740,6 +772,12 @@ class BinauralViewModel @Inject constructor(
                 // и без этого StateFlow будил бы подписчиков впустую.
                 .distinctUntilChanged()
                 .collect { snapshot ->
+                    // Воспроизведение остановлено — сбрасываем байпас диалога
+                    // наушников. При следующей попытке запуска без наушников
+                    // диалог «Подключите наушники» снова покажется (см. playPreset
+                    // / headphoneBypassActive).
+                    if (!snapshot.isPlaying) headphoneBypassActive = false
+
                     // ПОЛЯ СКРАБА ЭТОМУ КОЛЛЕКТОРУ НЕ ПРИНАДЛЕЖАТ: их пишут
                     // два отдельных коллектора ниже (§14.7 плана) — у combine
                     // нет перегрузки на шесть потоков, поэтому сдвиг и реальное
@@ -880,8 +918,14 @@ class BinauralViewModel @Inject constructor(
      * Воспроизвести пресет
      */
     fun playPreset(presetId: String) {
-        // Проверяем подключение наушников (если сервис подключён)
-        if (playbackService != null && !BinauralPlaybackService.hasHeadset.value) {
+        // Проверяем подключение наушников (если сервис подключён).
+        // headphoneBypassActive: пользователь уже подтвердил запуск без
+        // наушников («Запустить») — при переключении пресетов во время
+        // воспроизведения диалог НЕ показываем повторно. Байпас сбрасывается
+        // в observePlaybackState, когда воспроизведение останавливается.
+        if (playbackService != null &&
+            !BinauralPlaybackService.hasHeadset.value &&
+            !headphoneBypassActive) {
             _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = presetId) }
             return
         }
@@ -2261,19 +2305,97 @@ class BinauralViewModel @Inject constructor(
             null
         }
     }
-    
+
     /**
      * Получить пресет для экспорта
      */
     fun getPresetForExport(presetId: String): BinauralPreset? {
         return _uiState.value.presets.find { it.id == presetId }
     }
+
+    /**
+     * Подготовить экспорт пресета: сериализовать его и сохранить результат
+     * ДО открытия системного пикера.
+     *
+     * ПОЧЕМУ НА ДИСК, А НЕ В ПАМЯТЬ. Пока открыт SAF-пикер, Activity уходит в
+     * фон и уничтожается; вместе с ней очищается `ViewModelStore` — то есть не
+     * выживает НИ `remember`-состояние рядом с лаунчером, НИ поле ViewModel
+     * (проверено на устройстве: переход на SavedStateHandle-независимое поле
+     * ViewModel баг не убрал). Выживает только то, что лежит вне процесса.
+     * Кладём JSON в `cacheDir`, а колбэк лаунчера забирает его оттуда — так
+     * экспорт переживает и пересоздание Activity, и смерть процесса.
+     * См. docs/analysis_preset_export_empty_file.md
+     *
+     * Вызывать с [Dispatchers.IO] — пишет файл.
+     *
+     * @return имя файла для пикера или null, если пресета нет, сериализация
+     * не удалась или не удалось записать временный файл
+     */
+    fun prepareExport(presetId: String): String? {
+        val preset = getPresetForExport(presetId) ?: return null
+        val exportedJson = exportPresetToJson(presetId) ?: return null
+        return try {
+            val payload = json.encodeToString(PendingExport(preset.name, exportedJson))
+            val tmp = File(context.cacheDir, KEY_PENDING_EXPORT + ".tmp")
+            tmp.writeText(payload)
+            val target = pendingExportFile()
+            if (!tmp.renameTo(target)) {
+                // rename может не сработать на некоторых ФС — тогда копируем
+                target.writeText(payload)
+                tmp.delete()
+            }
+            android.util.Log.d(
+                "PresetExport",
+                "prepare: id=$presetId, ${exportedJson.length} симв., vm=${System.identityHashCode(this)}"
+            )
+            "${preset.name.replace(" ", "_")}.json"
+        } catch (e: Exception) {
+            android.util.Log.e("PresetExport", "prepare: не удалось сохранить JSON", e)
+            null
+        }
+    }
+
+    /** Выбросить подготовленный экспорт (пользователь отменил выбор файла). */
+    fun discardPendingExport() {
+        if (pendingExportFile().delete()) {
+            android.util.Log.d("PresetExport", "discard: подготовленный экспорт удалён")
+        }
+    }
+
+    /**
+     * Забрать подготовленный к экспорту пресет (одноразово, файл удаляется).
+     *
+     * Вызывать с [Dispatchers.IO].
+     *
+     * @return имя пресета и его JSON, либо null, если подготовленных данных нет
+     * (экспорт не готовился, уже забран, либо кэш вычищен системой)
+     */
+    fun consumePendingExport(): Pair<String, String>? {
+        val file = pendingExportFile()
+        return try {
+            if (!file.exists()) {
+                android.util.Log.w("PresetExport", "consume: файла нет (кэш вычищен?)")
+                return null
+            }
+            val payload = json.decodeFromString<PendingExport>(file.readText().also { file.delete() })
+            android.util.Log.d(
+                "PresetExport",
+                "consume: ${payload.json.length} симв., vm=${System.identityHashCode(this)}"
+            )
+            payload.presetName to payload.json
+        } catch (e: Exception) {
+            android.util.Log.e("PresetExport", "consume: не удалось прочитать JSON", e)
+            file.delete()
+            null
+        }
+    }
     
     /**
      * Импортировать пресет из JSON
-     * @return ID импортированного пресета или null при ошибке
+     * @return импортированный пресет (уже с новым ID и уникальным именем)
+     * или null при ошибке
      */
-    fun importPresetFromJson(jsonString: String): String? {
+    fun importPresetFromJson(jsonString: String): BinauralPreset? {
         return try {
             val preset = json.decodeFromString<BinauralPreset>(jsonString)
             // Генерируем новый ID для импортированного пресета, чтобы избежать конфликтов
@@ -2286,7 +2408,7 @@ class BinauralViewModel @Inject constructor(
             viewModelScope.launch {
                 preferencesRepository.addPreset(importedPreset)
             }
-            importedPreset.id
+            importedPreset
         } catch (e: Exception) {
             android.util.Log.e("BinauralViewModel", "Failed to import preset", e)
             null
@@ -2295,9 +2417,9 @@ class BinauralViewModel @Inject constructor(
     
     /**
      * Импортировать пресет из Uri файла
-     * @return ID импортированного пресета или null при ошибке
+     * @return импортированный пресет или null при ошибке
      */
-    fun importPresetFromUri(uri: Uri): String? {
+    fun importPresetFromUri(uri: Uri): BinauralPreset? {
         return try {
             val jsonString = context.contentResolver.openInputStream(uri)?.use { inputStream ->
                 inputStream.bufferedReader().readText()
@@ -2395,24 +2517,44 @@ class BinauralViewModel @Inject constructor(
      */
     private fun tryAutoResumeOnAppStart() {
         val state = _uiState.value
-        
-        // Проверяем, что:
+
+        // Условия (ВСЕ должны выполняться):
         // 1. Автовозобновление включено
         // 2. Есть активный пресет
         // 3. Сервис подключен
-        // 4. Воспроизведение не идёт
-        // 5. Мы ещё не обрабатывали автовозобновление
+        // 4. Воспроизведение ещё не идёт
+        // 5. Мы ещё не обрабатывали автовозобновление в этой сессии
+        // 6. Подключены наушники (требование: запускать только при наушниках)
+        //
+        // Функция дёргается из нескольких мест (onServiceConnected, коллектор
+        // пресетов, коллектор самой опции), т.к. эти данные грузятся
+        // асинхронно и в разном порядке. guard autoResumeHandled гарантирует
+        // единый реальный запуск — сработает та попытка, где ВСЕ условия уже
+        // готовы (обычно onServiceConnected, где детекция наушников уже
+        // инициализирована).
         if (state.autoResumeOnAppStart &&
             state.activePreset != null &&
             state.isServiceConnected &&
             !_telemetry.value.isPlaying &&
             !autoResumeHandled) {
-            
+
+            // Помечаем сразу: повторный вход из другого коллектора/колбэка
+            // не запустит воспроизведение дважды.
             autoResumeHandled = true
+
+            // Без наушников на старте — не запускаем и НЕ показываем диалог
+            // (это автоматическое действие, а не ручной тап «воспроизвести»).
+            if (!BinauralPlaybackService.hasHeadset.value) {
+                android.util.Log.d("BinauralViewModel", "Auto-resume skipped: headphones not connected")
+                return
+            }
+
             android.util.Log.d("BinauralViewModel", "Auto-resuming playback on app start for preset: ${state.activePreset.name}")
-            
-            // Запускаем воспроизведение с fade-in
-            playbackService?.resumeWithFade()
+
+            // Реально ЗАПУСКАЕМ воспроизведение активного пресета. Нельзя
+            // resumeWithFade(): на холодном старте активного потока нет, он
+            // ничего не сделает. startPreset строит конфиг и стартует движок.
+            startPreset(state.activePreset.id, curveOverride = null, relaxationOverride = null)
         }
     }
 
