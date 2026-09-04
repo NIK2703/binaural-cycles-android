@@ -26,6 +26,7 @@ import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.navArgument
 import com.binauralcycles.ui.components.BatteryOptimizationPromptDialog
 import com.binauralcycles.ui.components.BottomPlaybackPanel
@@ -70,6 +71,34 @@ fun BinauralNavigation(
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // СКРАБ: страховка возврата прослушивания к реальному «сейчас».
+    //
+    // Сдвинутая ось времени суток — принадлежность редактора: она обязана
+    // жить ровно столько, сколько открыт экран редактора. Штатные выходы
+    // (стрелка «назад», системный «назад», сохранение) снимают её сами, и для
+    // них этот наблюдатель ничего не делает — releaseEditorScrub идемпотентна.
+    // Он нужен для ВСЕГО остального: любого перехода, который уводит с
+    // маршрута редактора, но не проходит через его собственные обработчики
+    // выхода (сегодня таких нет, однако требования «предусмотреть все случаи»
+    // ровно про них).
+    //
+    // ПОЧЕМУ НЕ УХОД ЭКРАНА ИЗ КОМПОЗИЦИИ. onDispose в PresetEditScreen
+    // срабатывает и на повороте, и при уничтожении Activity в фоне — то есть
+    // когда редактор НЕ закрыт и пользователь продолжает слушать выбранное
+    // время. Состояние back-stack таких ложных срабатываний не даёт: пока
+    // редактор в стеке, он остаётся текущим и после пересоздания Activity.
+    val editorOnScreen = navController.currentBackStackEntryAsState().value
+        ?.destination
+        ?.route
+        ?.let { route -> route == Screen.PresetEdit.route || route == Screen.PresetNew.route }
+        ?: false
+    LaunchedEffect(editorOnScreen) {
+        if (!editorOnScreen) {
+            android.util.Log.d("ScrubLifecycle", "nav: редактор не на экране -> releaseEditorScrub")
+            viewModel.releaseEditorScrub()
+        }
     }
 
     // Панель отображается только когда есть активный пресет

@@ -27,6 +27,7 @@ import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 import android.graphics.Paint
+import java.util.Locale
 
 /**
  * Параметры мини-графика
@@ -289,9 +290,10 @@ private fun computeGraphGeometry(
         val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toFloat()) {
             point.beatFrequency.toLong().toString()
         } else {
-            point.beatFrequency.toString()
+            // Локале-зависимый разделитель (запятая в RU/DE и т.п.) вместо жёсткой точки
+            String.format(Locale.getDefault(), "%.1f", point.beatFrequency)
         }
-        labelTexts.add("%.0f(%s)".format(point.carrierFrequency, beatStr))
+        labelTexts.add("%.0f(%s)".format(Locale.getDefault(), point.carrierFrequency, beatStr))
     }
     
     // Позиции виртуальных точек (не используются в SMOOTH режиме)

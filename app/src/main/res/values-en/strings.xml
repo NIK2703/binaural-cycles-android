@@ -184,13 +184,19 @@
 
     <!-- Gesture help (preset editor) -->
     <string name="gestures_help">Gesture help</string>
-    <string name="gestures_help_title">Editor gestures</string>
+    <string name="gestures_help_title">Editor controls</string>
     <string name="gesture_add_point">Double-tap an empty spot on the graph to add a point.</string>
     <string name="gesture_select_point">Tap a point to open its editing popup.</string>
     <string name="gesture_drag_point">Move a point: right-left to change its time, up-down to change the carrier frequency.</string>
     <string name="gesture_swipe_fields">Swipe up or down across the fields of the point editing popup to increase/decrease their values.</string>
     <string name="gesture_range_labels">Tap the frequency limit labels (%1$s and %2$s) to change the graph scale.</string>
+    <string name="gesture_scrub_handle">Drag the ◀|▶ handle on the red indicator to preview how the preset sounds at another time of day. The sound is rebuilt once you release the handle.</string>
+    <string name="gesture_scrub_reset">Tap the reset button next to the handle (or drag the handle back onto the grey line) to return playback to the current moment.</string>
     <string name="got_it">Got it</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Preview another time of day</string>
+    <string name="scrub_reset_description">Return playback to the current moment</string>
 
     <!-- Frequencies -->
     <string name="beat_frequency">Beats</string>

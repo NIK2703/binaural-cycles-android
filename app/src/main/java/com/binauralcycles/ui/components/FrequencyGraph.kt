@@ -1,14 +1,22 @@
 package com.binauralcycles.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -20,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -32,6 +41,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -39,11 +49,15 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import android.graphics.Paint
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
 import com.binaural.core.audio.model.CardinalTension
 import com.binauralcycles.ui.theme.Spacing
 import com.binaural.core.audio.model.FrequencyMath
@@ -55,6 +69,7 @@ import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binauralcycles.R
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.datetime.Clock
 import kotlinx.datetime.LocalTime
@@ -250,6 +265,18 @@ fun FrequencyGraph(
     onDismissPopup: () -> Unit = {},
     // НОВОЕ: внешнее время (например, виртуальное из uiState). null => свои часы.
     externalCurrentTime: LocalTime? = null,
+    // СКРАБ: РЕАЛЬНЫЙ момент времени суток (без сдвига предпросмотра) — серая
+    // линия. Приходит из того же источника, что и ось (менеджер публикует их
+    // парой), поэтому вычитать сдвиг из оси здесь больше не нужно: два
+    // StateFlow доезжали в непредсказуемом порядке, и «ось − сдвиг» залипало
+    // на величину сдвига (§14.7 плана). null — у вызывающего нет скраба,
+    // тогда реальным считается сама ось.
+    realTimeOfDay: LocalTime? = null,
+    // СКРАБ: ручку отпустили на времени [LocalTime] — перестроить ось.
+    // Звук меняется ОДИН раз по отпускании, а не на каждом шаге жеста.
+    onScrubTo: (LocalTime) -> Unit = {},
+    // СКРАБ: вернуть прослушивание к реальному текущему моменту.
+    onScrubReset: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // УДАЛЕНО: `val sortedPoints = points.sortedBy { ... }` вычислялось на каждой
@@ -272,6 +299,54 @@ fun FrequencyGraph(
     val currentLocalTime = externalCurrentTime
         ?: Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).time
     val density = LocalDensity.current
+
+    // СКРАБ: на графике три времени, и путать их нельзя.
+    //
+    //  axisTime    — ось движка (уже со сдвигом): где звук находится на самом
+    //                деле. Красная линия.
+    //  realTime    — реальное «сейчас», серая линия-призрак. Приходит ГОТОВЫМ
+    //                из менеджера (§14.7 плана), а не считается здесь.
+    //  previewTime — красная линия: под пальцем это цель перетаскивания.
+    //
+    // Ни одно из трёх не считается из положения пальца: иначе во время
+    // перетаскивания серая линия поехала бы вместе с ручкой — ровно наоборот
+    // тому, что нужно (§5.1 плана).
+    val axisTime = currentLocalTime
+    //
+    // РАНЬШЕ здесь было `remember(axisTime) { scrubOffsetSeconds }` и
+    // `realTime = ось − этот_сдвиг`. Залипало: ось и сдвиг — два StateFlow,
+    // порядок их прихода не гарантирован, и remember, однажды посчитанный на
+    // «оси без сдвига», уже не пересчитывался до следующего ИЗМЕНЕНИЯ оси.
+    // Если ось приезжала первой, серая линия вставала на цель перетаскивания
+    // и висела там до минуты. Теперь реальное время публикует менеджер.
+    val realTime = realTimeOfDay ?: axisTime
+    // Цель перетаскивания живёт, пока палец на ручке.
+    var scrubDragTime by remember { mutableStateOf<LocalTime?>(null) }
+    // Цель, которую палец уже отпустил, а ось до неё ЕЩЁ НЕ ДОЕХАЛА.
+    //
+    // Между отпусканием и приходом новой оси проходит до секунды (опрос 1 Гц),
+    // и ось в UI всё это время СТАРАЯ. Если отдать красную линию оси сразу,
+    // она на это окно отскочит к реальному «сейчас»: жест выглядит
+    // отменённым — линия возвращается и через мгновение снова уезжает на цель.
+    var scrubPendingTarget by remember { mutableStateOf<LocalTime?>(null) }
+    val previewTime = scrubDragTime ?: scrubPendingTarget ?: axisTime
+
+    // Ось доехала до цели — можно снова вести красную линию осью.
+    //
+    // Ключ — ось: именно её приход и есть сигнал «доехала». Допуск
+    // [SCRUB_AXIS_SETTLE_TOL_SEC] перекрывает квантование телеметрии до 60 с
+    // (§11.5 плана). [SCRUB_SETTLE_TIMEOUT_MS] — страховка: если скраб не
+    // состоялся (звук встал, сменился пресет, сдвиг так и остался 0), линия
+    // обязана вернуться на ось, а не замереть на цели навсегда.
+    LaunchedEffect(axisTime, scrubPendingTarget) {
+        val target = scrubPendingTarget ?: return@LaunchedEffect
+        if (abs(circularDiffSeconds(axisTime, target)) <= SCRUB_AXIS_SETTLE_TOL_SEC) {
+            scrubPendingTarget = null
+            return@LaunchedEffect
+        }
+        delay(SCRUB_SETTLE_TIMEOUT_MS)
+        scrubPendingTarget = null
+    }
 
     // Используем кэшированные sortedPoints если доступны (оптимизация)
     val displayPoints = remember(points) { points.sortedBy { it.time.toSecondOfDay() } }
@@ -452,12 +527,61 @@ fun FrequencyGraph(
                     // зависит от времени и частот, и он же самый дешёвый.
                     .drawBehind {
                         if (isPlaying) {
+                            // Серая линия — «призрак» реального сейчас. Рисуется
+                            // ДО красной, то есть ПОД ней: при совпадении она
+                            // просто прячется под красной, а не спорит с ней.
+                            // Полосы биений на ней намеренно нет — это только
+                            // положение.
+                            //
+                            // Видимость решает ГЕОМЕТРИЯ, а не состояние
+                            // скраба (§14.8 плана). Раньше здесь стояло
+                            // `scrubOffsetSeconds != 0 || scrubDragTime != null
+                            // || scrubPendingTarget != null`, и ровно в тот
+                            // момент, когда серая линия нужнее всего, все три
+                            // условия были ложны: палец уже отпущен (цель
+                            // перетаскивания пуста), ось доехала до цели и
+                            // сняла [scrubPendingTarget], а StateFlow сдвига
+                            // ещё не долетел — сдвиг по-прежнему 0. Линия
+                            // пропадала на отпускании и возвращалась позже.
+                            //
+                            // Теперь решает только расстояние между красной
+                            // линией ([previewTime]) и реальным «сейчас»
+                            // ([realTime]): пока они разошлись — серая видна,
+                            // неважно, чем вызвано расхождение: пальцем,
+                            // недоехавшей осью или уже применённым сдвигом.
+                            // Оба времени приходят готовыми (§14.7), разность
+                            // берётся по кругу суток — иначе около полуночи
+                            // пара 23:59 / 00:01 дала бы всю ширину графика.
+                            val ghostGapPx =
+                                offNowGapPx(previewTime, realTime, graphParams.widthPx)
+                            if (ghostGapPx > GHOST_LINE_MIN_GAP_PX) {
+                                val realX = graphParams.timeToX(realTime)
+                                drawLine(
+                                    color = axisLabelColor.copy(alpha = 0.35f),
+                                    start = Offset(realX, 0f),
+                                    end = Offset(realX, size.height),
+                                    // Та же толщина, что у красной линии: её
+                                    // основные сегменты нарисованы шириной 2f
+                                    // (только полоса биений — 3f). Прежние
+                                    // `2.dp.toPx()` давали в 2–3 раза больше,
+                                    // и серая выглядела жирнее красной.
+                                    strokeWidth = 2f
+                                )
+                            }
                             drawCurrentTimeIndicator(
                                 graphParams = graphParams,
-                                currentLocalTime = currentLocalTime,
+                                currentLocalTime = previewTime,
                                 currentCarrierFrequency = currentCarrierFrequency,
                                 currentBeatFrequency = currentBeatFrequency,
-                                indicatorColor = errorColor
+                                indicatorColor = errorColor,
+                                // СКРАБ (§14.12): на время жеста и оседания
+                                // оси снимаем яркого выделения с линии, НО не
+                                // оставляем на его месте дырки — линия остаётся
+                                // сплошной полупрозрачной. Выделение возвращаем,
+                                // только когда ручку отпустили и ось доехала до
+                                // цели — тогда частоты в ней соответствуют новой
+                                // красной линии.
+                                showBeatBand = scrubDragTime == null && scrubPendingTarget == null
                             )
                         }
                     }
@@ -674,6 +798,59 @@ fun FrequencyGraph(
                         }
                 ) {}
 
+                // СКРАБ: ручка ◀|▶ и кнопка сброса объявлены ПОСЛЕДНИМИ детьми
+                // Box-а области графика, то есть выше маркеров точек (§7 плана).
+                // Появляются только во время воспроизведения: без звука
+                // «прослушать другое время суток» невозможно.
+                if (isPlaying) {
+                    ScrubHandle(
+                        time = previewTime,
+                        // Кнопка сброса видна ПО ГЕОМЕТРИИ (§14.10 плана):
+                        // пока красная линия ([previewTime]) разошлась с
+                        // реальным «сейчас» ([realTime]) дальше порога — то
+                        // есть ровно пока видна серая линия, тем же порогом.
+                        //
+                        // Не `scrubOffsetSeconds != 0`: флаг описывает СОСТОЯНИЕ
+                        // скраба, а не положение линии, и в окно сразу после
+                        // отпускания ручки он ещё 0 (§14.8) — кнопка мигала бы.
+                        // Геометрия же честно отвечает на вопрос «мы сейчас не
+                        // на текущем моменте?» при ЛЮБОМ источнике расхождения:
+                        // палец, недоехавшая ось или уже применённый сдвиг.
+                        //
+                        // Исключение одно — пока палец на ручке кнопки нет:
+                        // их тактильные зоны пересекаются, и кнопка отбирала бы
+                        // захват (см. комментарий в ScrubHandle).
+                        showReset = offNowGapPx(previewTime, realTime, graphParams.widthPx) >
+                            GHOST_LINE_MIN_GAP_PX && scrubDragTime == null,
+                        graphParams = graphParams,
+                        indicatorColor = errorColor,
+                        realTimeOfDay = realTimeOfDay,
+                        onDrag = { scrubDragTime = it },
+                        onCommit = { target ->
+                            scrubDragTime = null
+                            // Красная линия остаётся на цели, пока ось не
+                            // доедет: иначе она на кадр-два (а с учётом опроса
+                            // 1 Гц — до секунды) отскочит к «сейчас».
+                            scrubPendingTarget = target
+                            onScrubTo(target)
+                        },
+                        onCancel = {
+                            scrubDragTime = null
+                            scrubPendingTarget = null
+                        },
+                        onReset = {
+                            // СКРАБ: сброс к «сейчас» И очистка локальных целей
+                            // жеста, чтобы красная линия сразу встала на ось
+                            // (она и есть текущий момент). Без очистки линия
+                            // залипла бы на застывшей цели, а серая уползла бы
+                            // вперёд (§14.11). Вызывается и кнопкой сброса, и
+                            // «магнитом» при отпускании у «сейчас».
+                            scrubDragTime = null
+                            scrubPendingTarget = null
+                            onScrubReset()
+                        }
+                    )
+                }
             }
 
             // Контекстное окно редактирования точки — всплывающий слой
@@ -1194,7 +1371,16 @@ private fun DrawScope.drawCurrentTimeIndicator(
     currentLocalTime: LocalTime,
     currentCarrierFrequency: Float,
     currentBeatFrequency: Float,
-    indicatorColor: Color
+    indicatorColor: Color,
+    // СКРАБ (§14.12): яркий сегмент внутри полосы биений — «выделенная
+    // область пересечения» с графиком. Пока ручку тащат или ось ещё доезжает
+    // до цели, выделения нет, но и дырки не остаётся: сегмент рисуется той же
+    // полупрозрачной линией, что и остальная красная (линия сплошная).
+    // Частоты в ярком сегменте взяты из телеметрии движка (реальная позиция
+    // звука), а не из цели пальца, поэтому на время жеста они не
+    // соответствовали бы красной линии. Показываем выделение снова, когда
+    // скраб отпущен и ось доехала до цели.
+    showBeatBand: Boolean = true
 ) {
     val height = size.height
     val currentX = graphParams.timeToX(currentLocalTime)
@@ -1210,8 +1396,19 @@ private fun DrawScope.drawCurrentTimeIndicator(
     val indicatorAlpha = 0.3f
     drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, 0f), end = Offset(currentX, currentUpperY), strokeWidth = 2f)
     drawLine(color = indicatorColor.copy(alpha = indicatorAlpha), start = Offset(currentX, currentLowerY), end = Offset(currentX, height), strokeWidth = 2f)
-    // Вертикальная линия показывающая диапазон частот каналов
-    drawLine(color = indicatorColor.copy(alpha = 0.5f), start = Offset(currentX, currentUpperY), end = Offset(currentX, currentLowerY), strokeWidth = 3f)
+    // Вертикальная линия показывающая диапазон частот каналов. В покое это
+    // ЯРКИЙ сегмент (выделенная область пересечения с полосой биений).
+    // Во время перетаскивания ручки выделения НЕТ, но и ДЫРКИ на его месте
+    // не остаётся: сегмент рисуется той же полупрозрачной линией, что и
+    // остальная красная (alpha 0.3, width 2), — линия СПЛОШНАЯ и однородная
+    // на весь период жеста. Яркое выделение возвращается только когда скраб
+    // отпущен и ось доехала до цели (§14.12, уточнение пользователя).
+    drawLine(
+        color = indicatorColor.copy(alpha = if (showBeatBand) 0.5f else indicatorAlpha),
+        start = Offset(currentX, currentUpperY),
+        end = Offset(currentX, currentLowerY),
+        strokeWidth = if (showBeatBand) 3f else 2f
+    )
 }
 
 private data class BeatPaths(
@@ -1505,6 +1702,434 @@ fun DraggablePoint(
         }
         Box(modifier = Modifier.size(beatIndicatorSize).background(Color.White.copy(alpha = 0.6f), CircleShape).align(Alignment.Center))
     }
+}
+
+// ===== СКРАБ: ручка предпросмотра на указателе текущего момента =====
+// docs/plan_playback_scrub_handle.md §5.2 (геометрия), §6 (состояние), §7 (жесты).
+
+/** Чип ручки: 28×18 dp, скругление 8 dp. */
+private val SCRUB_CHIP_WIDTH = 28.dp
+private val SCRUB_CHIP_HEIGHT = 18.dp
+
+/**
+ * Тактильная зона 48×40 dp — заметно больше визуала и выступает на 8 dp выше
+ * области графика (внутрь 8 dp полей карточки, поэтому не обрезается).
+ */
+private val SCRUB_TOUCH_WIDTH = 48.dp
+private val SCRUB_TOUCH_HEIGHT = 40.dp
+
+/** Отступ чипа от верхней грани области графика. */
+private val SCRUB_CHIP_TOP = 3.dp
+
+/** Залитый треугольник 7×9 dp. */
+private val SCRUB_ARROW_WIDTH = 7.dp
+private val SCRUB_ARROW_HEIGHT = 9.dp
+
+/**
+ * Прозрачность заливки треугольников ползунка (§14.9).
+ *
+ * Совпадает с прозрачностью ОСНОВНОЙ части линии воспроизведения
+ * (`drawCurrentTimeIndicator`: вне полосы биений `indicatorColor.copy(0.3f)`).
+ * Полоса биений ярче (0.5f) — она здесь не рисуется, поэтому берём 0.3f,
+ * чтобы ползунок не выделялся ярче самой линии.
+ */
+private const val SCRUB_ARROW_ALPHA = 0.3f
+
+/**
+ * Запас вокруг тактильной зоны под тень. Тень рисуется ВНУТРИ `graphicsLayer`,
+ * а слой обрезает отрисовку по своим границам: без этого запаса масштаб 1.15
+ * срезал бы тень — ровно та же ловушка, что уже обойдена в `PointEditor.kt`.
+ */
+private val SCRUB_SHADOW_PAD = 8.dp
+
+/** Масштаб чипа на захвате. */
+private const val SCRUB_GRAB_SCALE = 1.15f
+
+/**
+ * Кнопка сброса: иконка 18 dp БЕЗ фона, тактильная зона 44 dp, зазор до ручки
+ * 4 dp (§14.10).
+ *
+ * Фона нет сознательно: кружок `surfaceContainerHighest` весил визуально
+ * больше самого ползунка и спорил с графиком под ним. Цвет и прозрачность
+ * кнопки — как у треугольников ручки ([SCRUB_ARROW_ALPHA]).
+ */
+private val SCRUB_RESET_ICON = 18.dp
+private val SCRUB_RESET_TOUCH = 44.dp
+private val SCRUB_RESET_GAP = 4.dp
+
+/** На сколько пузырь времени поднят над верхней гранью тактильной зоны. */
+private val SCRUB_BUBBLE_LIFT = 25.dp
+
+/**
+ * Ручка скраба: чип из двух залитых треугольников ◀|▶ на верхнем конце
+ * красной линии указателя, плюс кнопка возврата к реальному «сейчас».
+ *
+ * Звук перестраивается ОДИН раз, по отпускании ([onCommit]): каждый шаг жеста —
+ * это полный хэндофф с кроссфейдом ~1 с, и обновление «вживую» превратило бы
+ * звук в кашу. Пока палец идёт, звучит старая ось — это не ошибка, а норма:
+ * решение ещё не принято.
+ *
+ * @param time линия, на которой стоит ручка (цель перетаскивания или ось).
+ * @param showReset показывать ли кнопку сброса: воспроизведение идёт НЕ по
+ *   текущему моменту. Считает вызывающий по геометрии (§14.10).
+ */
+@Composable
+private fun BoxScope.ScrubHandle(
+    time: LocalTime,
+    showReset: Boolean,
+    graphParams: GraphParams,
+    indicatorColor: Color,
+    // Реальное «сейчас» для «магнита» (§14.11 плана): ручка прилипает к нему,
+    // если дотянуть ось в пределах ±15 мин. null — магнита нет (нет серой
+    // линии, не к чему прилипать).
+    realTimeOfDay: LocalTime?,
+    onDrag: (LocalTime) -> Unit,
+    onCommit: (LocalTime) -> Unit,
+    onCancel: () -> Unit,
+    onReset: () -> Unit
+) {
+    val density = LocalDensity.current
+    // px считаются один раз на density: внутри лямбд offset{} это был бы
+    // пересчёт на каждом кадре.
+    val chipWPx = with(density) { SCRUB_CHIP_WIDTH.roundToPx() }
+    val chipHPx = with(density) { SCRUB_CHIP_HEIGHT.roundToPx() }
+    val touchWPx = with(density) { SCRUB_TOUCH_WIDTH.roundToPx() }
+    val touchHPx = with(density) { SCRUB_TOUCH_HEIGHT.roundToPx() }
+    val padPx = with(density) { SCRUB_SHADOW_PAD.roundToPx() }
+    val topPx = with(density) { SCRUB_CHIP_TOP.roundToPx() }
+    val resetIconPx = with(density) { SCRUB_RESET_ICON.roundToPx() }
+    val resetTouchPx = with(density) { SCRUB_RESET_TOUCH.roundToPx() }
+    val gapPx = with(density) { SCRUB_RESET_GAP.roundToPx() }
+    val bubbleLiftPx = with(density) { (-SCRUB_BUBBLE_LIFT).roundToPx() }
+
+    var dragging by remember { mutableStateOf(false) }
+    // Цель жеста, ещё не зафиксированная. null — палец ни разу не сдвинулся.
+    var pendingTarget by remember { mutableStateOf<LocalTime?>(null) }
+    var startSeconds by remember { mutableStateOf(0) }
+    var accumulatedPx by remember { mutableStateOf(0f) }
+    // Жест читает АКТУАЛЬНОЕ время, но не пересоздаётся на каждом его
+    // изменении: `pointerInput` ключуется только геометрией графика.
+    val timeNow by rememberUpdatedState(time)
+    // Реальное «сейчас» для «магнита» (§14.11): берём свежее на каждом кадре
+    // жеста — иначе за время перетаскивания realTimeOfDay ушёл бы на секунду,
+    // и граница магнита «дышала» бы.
+    val realNow by rememberUpdatedState(realTimeOfDay)
+    // Флаг: текущий жест дотянул ручку в магнитную зону — по отпускании делаем
+    // сброс (onReset), а не скраб в замороженную секунду (§14.11).
+    var snappedToNow by remember { mutableStateOf(false) }
+
+    val handleDescription = stringResource(R.string.scrub_handle_description)
+
+    val scale by animateFloatAsState(
+        targetValue = if (dragging) SCRUB_GRAB_SCALE else 1f,
+        label = "scrubHandleScale"
+    )
+
+    // Чип ВСЕГДА сидит ровно на линии воспроизведения — даже у самого края
+    // графика, без клампа по половине чипа. Иначе у края чип «отрывается» от
+    // линии и упирается в границу, а его внутренняя красная линия перестаёт быть
+    // коллинеарной реальной (запрос на поведение ползунка у границ, 2026-09-03,
+    // §14.6). Область графика без клипа, поэтому у крайних значений времени чип
+    // чуть выступает в поля карточки — это плата за то, чтобы он был НА линии.
+    // `time` сам уже в [0; 86399] (§14.5), так что centerX лежит в [0; widthPx].
+    val halfChip = chipWPx / 2f
+    val centerX = graphParams.timeToX(time)
+    val touchLeft = (centerX - touchWPx / 2f).toInt()
+    // Чип стоит на SCRUB_CHIP_TOP, зона — по его центру (отсюда выступ на 8 dp).
+    val touchTop = (topPx + chipHPx / 2f - touchHPx / 2f).toInt()
+    val chipTopInTouch = (touchHPx - chipHPx) / 2
+
+    // Кнопка сброса: СПРАВА от ручки, пока справа хватает места; не хватает —
+    // переезжает ВЛЕВО (§14.10). Явное требование пользователя (2026-09-04):
+    // основное положение — справа. Запасной вариант слева нужен у правого
+    // края графика, где справа места уже нет (ручка упёрлась в край/полночь).
+    //
+    // Кламп по краям графика — по ВИЗУАЛУ кнопки (18 dp), как и раньше по
+    // кружку: тактильная зона 44 dp может выступать за область графика,
+    // визуал — нет.
+    val resetCenterX = run {
+        val left = centerX - halfChip - gapPx - resetIconPx / 2f
+        val right = centerX + halfChip + gapPx + resetIconPx / 2f
+        val half = resetIconPx / 2f
+        // СПРАВА в приоритете (§14.10, явное требование): берём right, если
+        // вся иконка влезает в график справа; иначе — запасной left.
+        val chosen = if (right + half <= graphParams.widthPx) right else left
+        chosen.coerceIn(half, (graphParams.widthPx - half).coerceAtLeast(half))
+    }
+    val resetLeft = (resetCenterX - resetTouchPx / 2f).toInt()
+    val resetTop = topPx + chipHPx / 2 - resetTouchPx / 2
+
+    // Кнопка сброса объявлена ДО ручки неслучайно: их тактильные зоны
+    // ПЕРЕСЕКАЮТСЯ (ручка 48 dp, кнопка 44 dp, а центры разнесены всего на
+    // 14 + 4 + 9 = 27 dp), и в зоне пересечения верх обязан забирать РУЧКА —
+    // она основное взаимодействие. Объявленная после, кнопка съедала бы
+    // захват ручки чуть в стороне от центра. Кнопке остаётся её сторо́нняя
+    // (непересекающаяся с ручкой) часть тактильной зоны — около 25×44 dp
+    // с той стороны, где она стоит (справа в основном случае, слева — в
+    // запасном у правого края графика).
+    AnimatedVisibility(
+        visible = showReset,
+        enter = fadeIn() + scaleIn(),
+        exit = fadeOut() + scaleOut(),
+        label = "scrubResetButton"
+    ) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(resetLeft, resetTop) }
+                .size(SCRUB_RESET_TOUCH)
+                // Индикация нажатия оставлена (.clickable без indication=null):
+                // кнопка без фона почти не видна, и без ряби нажатие на
+                // прозрачную иконку нечем подтвердить.
+                .clickable { onReset() },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = stringResource(R.string.scrub_reset_description),
+                modifier = Modifier.size(SCRUB_RESET_ICON),
+                // Цвет и прозрачность — как у треугольников ручки (§14.9),
+                // то есть та же альфа, что у основной части красной линии.
+                tint = indicatorColor.copy(alpha = SCRUB_ARROW_ALPHA)
+            )
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .offset { IntOffset(touchLeft - padPx, touchTop - padPx) }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            // Размер — ВМЕСТЕ с запасом под тень, содержимое сжимает padding.
+            .size(
+                SCRUB_TOUCH_WIDTH + SCRUB_SHADOW_PAD * 2f,
+                SCRUB_TOUCH_HEIGHT + SCRUB_SHADOW_PAD * 2f
+            )
+            .padding(SCRUB_SHADOW_PAD)
+            .semantics { contentDescription = handleDescription }
+            // Порядок как у DraggablePoint: `clickable` внешний и съедает тап,
+            // иначе родительский onDoubleTap добавил бы точку под ручкой.
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) { /* сам тап ничего не делает — ручку двигает drag */ }
+            .pointerInput(graphParams) {
+                // ТОЛЬКО горизонталь: вертикальный свайп, начатый на ручке,
+                // обязан уходить внешнему verticalScroll экрана.
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        accumulatedPx = 0f
+                        pendingTarget = null
+                        startSeconds = timeNow.toSecondOfDay()
+                        dragging = true
+                        snappedToNow = false
+                    },
+                    onDragEnd = {
+                        dragging = false
+                        // СКРАБ: если дотянули до «сейчас» (магнит), это сброс,
+                        // а не скраб в замороженную секунду. onReset() снимает и
+                        // локальные цели жеста (см. передачу onReset), поэтому
+                        // красная линия сразу ложится на ось = реальное «сейчас».
+                        if (snappedToNow) {
+                            onReset()
+                        } else {
+                            onCommit(pendingTarget ?: timeNow)
+                        }
+                        snappedToNow = false
+                        pendingTarget = null
+                    },
+                    onDragCancel = {
+                        // Палец ушёл за пределы или системный «назад»: звук
+                        // не трогаем, решение не принято.
+                        dragging = false
+                        pendingTarget = null
+                        onCancel()
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        // Накопление БЕЗ снапа: 1 px ≈ 80 с, и снап каждого шага
+                        // давал бы рваные скачки по 5 минут. Снапится только
+                        // отображаемое и фиксируемое значение.
+                        // Накопление НЕ клампуется: dragAmount может быть
+                        // отрицательным (тянуть влево), поэтому кламп накопления
+                        // к [0; widthPx] ЗАПРЕЩЕН — он ломал движение назад
+                        // (линия «не уходила» влево, только вправо). Граница
+                        // суток держится КЛАМПОМ ВРЕМЕНИ в snappedTimeFromDrag
+                        // (coerceIn 0..86399), а не круговой арифметикой, — так
+                        // ручка упирается в край и не перескакивает на другую
+                        // сторону (§14.5). Оверскролл за край ограничен самим
+                        // временем, а не накоплением.
+                        accumulatedPx += dragAmount
+                        val target =
+                            snappedTimeFromDrag(startSeconds, accumulatedPx, graphParams.widthPx)
+                        // СКРАБ «магнит к сейчас» (§14.11): если цель в пределах
+                        // ±15 мин от реального текущего момента — прилипаем к нему.
+                        // Сравниваем с realNow (свежее realTimeOfDay через
+                        // rememberUpdatedState), а не с осью: ось сама сдвинута
+                        // скрабом, и «прилипать к ней» было бы бессмысленно.
+                        val snap = realNow != null &&
+                            abs(circularDiffSeconds(target, realNow!!)) <= SCRUB_SNAP_TO_NOW_SECONDS
+                        val finalTarget = if (snap) realNow!! else target
+                        snappedToNow = snap
+                        pendingTarget = finalTarget
+                        onDrag(finalTarget)
+                    }
+                )
+            }
+    ) {
+        // Ползунок — ТОЛЬКО два залитых треугольника ◀|▶, без фона, обводки и
+        // средней линии между ними (§14.9). Цвет и прозрачность — как у
+        // основной части линии воспроизведения (SCRUB_ARROW_ALPHA).
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .offset { IntOffset(0, chipTopInTouch) }
+                .size(SCRUB_CHIP_WIDTH, SCRUB_CHIP_HEIGHT)
+        ) {
+            ScrubArrow(
+                modifier = Modifier.align(Alignment.CenterStart).padding(start = 4.dp),
+                pointRight = false,
+                color = indicatorColor.copy(alpha = SCRUB_ARROW_ALPHA)
+            )
+            ScrubArrow(
+                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
+                pointRight = true,
+                color = indicatorColor.copy(alpha = SCRUB_ARROW_ALPHA)
+            )
+        }
+
+        // Пузырь времени — только пока палец на ручке. В отпущенном состоянии
+        // о сдвинутом положении говорят серая линия и кнопка сброса.
+        if (dragging) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .offset { IntOffset(0, bubbleLiftPx) },
+                color = MaterialTheme.colorScheme.inverseSurface,
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text(
+                    text = "%02d:%02d".format(time.hour, time.minute),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.inverseOnSurface
+                )
+            }
+        }
+    }
+
+}
+
+/** Залитый треугольник ручки: [pointRight] = false — ◀, true — ▶. */
+@Composable
+private fun ScrubArrow(
+    modifier: Modifier = Modifier,
+    pointRight: Boolean,
+    color: Color
+) {
+    Canvas(modifier = modifier.size(SCRUB_ARROW_WIDTH, SCRUB_ARROW_HEIGHT)) {
+        val w = size.width
+        val h = size.height
+        val path = Path().apply {
+            moveTo(0f, h / 2f)
+            lineTo(w, 0f)
+            lineTo(w, h)
+            close()
+        }
+        rotate(if (pointRight) 180f else 0f) {
+            drawPath(path, color)
+        }
+    }
+}
+
+/**
+ * Время из перетаскивания ручки скраба: сдвиг от [startSeconds] в секундах,
+ * снап к сетке 5 минут и кламп по краям суток [0; 86399]. Ручку НЕЛЬЗЯ увести
+ * за полночь — за пределами графика она останавливается на границе, а не
+ * переходит на противоположную сторону (запрос на граничное поведение,
+ * 2026-09-03). Круговая нормализация убрана.
+ */
+/**
+ * Допуск «ось доехала до цели скраба», секунды.
+ *
+ * Слагаемые: квантование оси до 60 с (§11.5 плана) плюс снап ручки к сетке
+ * 5 минут — отпущенная «на серой линии» ручка всё равно даёт цель в пределах
+ * ±2.5 минут от настоящего «сейчас». Итого 5 минут с запасом; это 0.35 %
+ * ширины графика (2–3 px), то есть случай «скраб меньше допуска» неотличим
+ * от «ось уже на месте», а вот ложное «ещё не доехала» исключено.
+ */
+private const val SCRUB_AXIS_SETTLE_TOL_SEC = 300
+
+/**
+ * Страховка от зависшей цели скраба, мс: кроссфейд ~1 с плюс опрос 1 Гц.
+ * Если за это время ось не пришла, скраб не состоялся (звук встал, сменился
+ * пресет) — красная линия обязана вернуться на ось, а не замереть на цели.
+ */
+private const val SCRUB_SETTLE_TIMEOUT_MS = 2500L
+
+/**
+ * Минимальный зазор между красной линией и серой, при котором серую ЕЩЁ
+ * стоит рисовать, пиксели (§14.8 плана).
+ *
+ * Смысл порога — «красная линия уже на текущем моменте или ещё нет», и вопрос
+ * этот чисто визуальный, поэтому порог в пикселях, а не в секундах: на узком
+ * графике тот же час занимает меньше места, и секунды пришлось бы пересчитывать.
+ *
+ * 2 px — это ширина самой линии: при меньшем зазоре два штриха сливаются в
+ * один и спорить не о чем. Сверху порог ограничен квантованием телеметрии
+ * (60 с, §11.5): сутки на ~1000 px дают 0.7 px на минуту, так что «красная
+ * на сейчас» (расхождение 0…60 с) устойчиво попадает в мёртвую зону, а
+ * расхождение от трёх минут уже видно.
+ */
+private const val GHOST_LINE_MIN_GAP_PX = 2f
+
+/**
+ * СКРАБ: «магнит» к реальному «сейчас» при перетаскивании (§14.11 плана).
+ * Если под палец уходит время в пределах ±15 минут от настоящего текущего
+ * момента, ручка прилипает к нему — красная линия встаёт ровно на серую, а
+ * по отпускании происходит сброс (offset = 0), а не скраб в замороженную
+ * секунду. 15 минут — широкое, но ощутимое окно: дотянул близко к «сейчас»,
+ * и линия сама «щёлкнула» на него.
+ */
+private const val SCRUB_SNAP_TO_NOW_SECONDS = 15 * 60
+
+/**
+ * Расстояние между красной линией ([preview]) и реальным «сейчас» ([real]) в
+ * пикселях графика — мера того, «идёт ли воспроизведение по текущему моменту».
+ *
+ * Одна формула на двоих: по ней решается и видимость серой линии (§14.8), и
+ * видимость кнопки сброса (§14.10). Разность берётся по кругу суток
+ * ([circularDiffSeconds]): прямое сравнение координат сломалось бы у полуночи —
+ * пара 23:59 / 00:01 дала бы всю ширину графика.
+ */
+private fun offNowGapPx(preview: LocalTime, real: LocalTime, graphWidthPx: Int): Float =
+    abs(circularDiffSeconds(preview, real)) / (24f * 3600f) * graphWidthPx
+
+/**
+ * Кратчайшая разность двух моментов суток по кругу, секунды: результат всегда
+ * в (−43200; 43200], то есть пригоден для сравнения с допуском.
+ */
+private fun circularDiffSeconds(a: LocalTime, b: LocalTime): Int {
+    val raw = (a.toSecondOfDay() - b.toSecondOfDay()) % 86400
+    return when {
+        raw > 43200 -> raw - 86400
+        raw < -43200 -> raw + 86400
+        else -> raw
+    }
+}
+
+private fun snappedTimeFromDrag(startSeconds: Int, dragPx: Float, graphWidthPx: Int): LocalTime {
+    val stepSeconds = TIME_STEP_MINUTES * 60
+    val raw = startSeconds + (dragPx * 24f * 3600f / graphWidthPx)
+    val snapped = round(raw / stepSeconds) * stepSeconds
+    // Кламп по краям суток, БЕЗ круговой арифметики: ручка скраба не должна
+    // «перескакивать» через полночь на противоположный край графика. За
+    // пределами [0; 86399] она останавливается на границе (00:00 или 23:59:59).
+    // Круговой обход убран по запросу на граничное поведение (2026-09-03).
+    val clamped = snapped.coerceIn(0.0f, 86399.0f)
+    return LocalTime.fromSecondOfDay(clamped.toInt())
 }
 
 // Шаг перемещения по времени (в минутах)

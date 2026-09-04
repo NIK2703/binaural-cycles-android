@@ -151,6 +151,10 @@ class BinauralPreferencesRepository @Inject constructor(
         // Стартовое напоминание об исключении фонового энергосбережения уже показано
         private val BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY =
             booleanPreferencesKey("battery_optimization_prompt_shown")
+        // Справка по управлению в редакторе уже показана (закрыта по «Понятно»)
+        // — больше не открывать её автоматически при входе в редактор.
+        private val GESTURES_HELP_SHOWN_KEY =
+            booleanPreferencesKey("gestures_help_shown")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -559,6 +563,33 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveBatteryOptimizationPromptShown(shown: Boolean) {
         dataStore.edit { preferences ->
             preferences[BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY] = shown
+        }
+    }
+
+    // Методы для справки по управлению в редакторе (показ однократный)
+
+    /**
+     * Получить признак того, что справка по управлению в редакторе уже показана.
+     *
+     * Справка открывается автоматически только при первом входе в редактор;
+     * после закрытия по «Понятно» флаг сохраняется и окно больше не появляется
+     * само (пользователь всё ещё может открыть его кнопкой справки).
+     *
+     * @return true — справку больше не открывать автоматически
+     */
+    fun getGesturesHelpShown(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[GESTURES_HELP_SHOWN_KEY] ?: false
+        }
+    }
+
+    /**
+     * Сохранить признак того, что справка по управлению в редакторе отработала
+     * @param shown true — справку больше не показывать автоматически
+     */
+    suspend fun saveGesturesHelpShown(shown: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[GESTURES_HELP_SHOWN_KEY] = shown
         }
     }
     

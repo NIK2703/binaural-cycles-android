@@ -65,7 +65,36 @@ data class PlaybackTelemetry(
     val currentBeatFrequency: Float = 0.0f,
     val currentCarrierFrequency: Float = 0.0f,
     val isChannelsSwapped: Boolean = false,
-    val currentTime: LocalTime = LocalTime(12, 0)
+    val currentTime: LocalTime = LocalTime(12, 0),
+    /**
+     * СКРАБ: сдвиг оси времени суток, секунды [0, 86400). 0 — обычный режим.
+     *
+     * НЕ квантуется: это не время, а расстояние между [currentTime] и
+     * [realTime] на графике, и округление сделало бы его рваным.
+     */
+    val scrubOffsetSeconds: Int = 0,
+    /**
+     * СКРАБ: РЕАЛЬНЫЙ момент времени суток — без сдвига предпросмотра.
+     *
+     * Отдельное поле, а не «[currentTime] минус [scrubOffsetSeconds]»:
+     * ось и сдвиг доезжают до UI разными StateFlow в непредсказуемом
+     * порядке, и вычитание смешивало бы разновозрастные значения — серая
+     * линия уезжала на величину сдвига (§14.7 плана). Менеджер публикует
+     * оба времени из одной базы, в одном вызове.
+     *
+     * Квантуется до 60 с тем же правилом, что и [currentTime]: оба значения
+     * округляются вниз, поэтому расстояние между ними отличается от сдвига
+     * не более чем на минуту (≈0.2 px ширины графика) и не «дышит» —
+     * линии не дрожат друг относительно друга.
+     *
+     * `null` — «реальное сейчас ещё неизвестно» (сервис не подключён, поток
+     * ещё ничего не опубликовал). Намеренно НЕ `LocalTime(12, 0)`: у времени
+     * нет осмысленного значения по умолчанию, и любое такое значение
+     * ОТРИСОВЫВАЕТСЯ как настоящее — серая линия встала бы в середину графика
+     * и выглядела бы как правдоподобный момент, а не как отсутствие данных.
+     * Получатель в этом случае подставляет ось (линии совпадают, серой нет).
+     */
+    val realTime: LocalTime? = null
 )
 
 data class BinauralUiState(
@@ -82,6 +111,10 @@ data class BinauralUiState(
     val debugVirtualTimeRunning: Boolean = true,
     // Редактируемая кривая (для экрана редактирования)
     val editingFrequencyCurve: FrequencyCurve? = null,
+    // Исходный шаблон нового пресета: с ним сравнивается редактируемая кривая,
+    // чтобы «несохранённые изменения» не срабатывали, когда пользователь
+    // открыл создание пресета, но ничего не поменял в шаблоне. null — не новый пресет.
+    val newPresetBaselineCurve: FrequencyCurve? = null,
     // ID редактируемого пресета (null для нового пресета)
     val editingPresetId: String? = null,
     // Диапазоны частот для редактирования
@@ -115,7 +148,13 @@ data class BinauralUiState(
     // иначе у тех, кто уже его закрыл, диалог мелькнёт на старте.
     val batteryOptimizationPromptShown: Boolean? = null,
     // true — прямо сейчас нужно показать стартовое напоминание
-    val showBatteryOptimizationPrompt: Boolean = false
+    val showBatteryOptimizationPrompt: Boolean = false,
+    // Справка по управлению в редакторе уже показана (закрыта по «Понятно»).
+    // null — значение ещё не прочитано из DataStore: до чтения справку не открываем
+    // автоматически, чтобы диалог не мелькнул на старте экрана до загрузки флага.
+    // false — ещё не показана, открыть автоматически при первом входе.
+    // true — показана, больше не открывать автоматически.
+    val gesturesHelpShown: Boolean? = null
 )
 
 /**
@@ -526,6 +565,13 @@ class BinauralViewModel @Inject constructor(
                 updateBatteryOptimizationPromptVisibility()
             }
         }
+        // Признак «справка по управлению в редакторе уже показана» — чтобы больше
+        // не открывать её автоматически при входе в редактор.
+        viewModelScope.launch {
+            preferencesRepository.getGesturesHelpShown().collect { shown ->
+                _uiState.update { it.copy(gesturesHelpShown = shown) }
+            }
+        }
         // Автоматическое расширение границ графика при редактировании
         viewModelScope.launch {
             preferencesRepository.getAutoExpandGraphRange().collect { enabled ->
@@ -621,6 +667,20 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
+     * Пометить справку по управлению в редакторе как показанную.
+     *
+     * Вызывается при закрытии окна (кнопка «Понятно», системный «назад» или
+     * касание мимо). После этого окно больше не открывается автоматически при
+     * входе в редактор — пока пользователь не откроет его сам кнопкой справки.
+     */
+    fun markGesturesHelpShown() {
+        _uiState.update { it.copy(gesturesHelpShown = true) }
+        viewModelScope.launch {
+            preferencesRepository.saveGesturesHelpShown(true)
+        }
+    }
+
+    /**
      * Наблюдение за телеметрией сервиса.
      *
      * Раньше пять отдельных коллекторов писали каждый в свой `MutableStateFlow`
@@ -658,8 +718,128 @@ class BinauralViewModel @Inject constructor(
                 // Схлопываем повторы: на паузе сервис шлёт те же значения,
                 // и без этого StateFlow будил бы подписчиков впустую.
                 .distinctUntilChanged()
-                .collect { telemetry -> _telemetry.value = telemetry }
+                .collect { snapshot ->
+                    // ПОЛЯ СКРАБА ЭТОМУ КОЛЛЕКТОРУ НЕ ПРИНАДЛЕЖАТ: их пишут
+                    // два отдельных коллектора ниже (§14.7 плана) — у combine
+                    // нет перегрузки на шесть потоков, поэтому сдвиг и реальное
+                    // «сейчас» живут рядом, а не внутри.
+                    //
+                    // ПОЛНАЯ ЗАМЕНА ОБЪЕКТА ЗДЕСЬ НЕДОПУСТИМА. Раньше было
+                    // `_telemetry.value = telemetry`, и свежесобранный снимок
+                    // (выше) не задавал [PlaybackTelemetry.realTime] — он
+                    // принимал ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ. Combine тикает ~1 Гц
+                    // (частоты меняются каждую секунду), коллектор реального
+                    // времени — тоже ~1 Гц, и они чередовались: серая линия
+                    // мерцала между настоящим «сейчас» и 12:00. Ровно то же
+                    // стирало бы и [PlaybackTelemetry.scrubOffsetSeconds].
+                    //
+                    // distinctUntilChanged выше по-прежнему сравнивает только
+                    // «звуковую» часть снимка (оба её экземпляра содержат
+                    // дефолтное realTime), то есть дедупликация не сломана.
+                    _telemetry.update { current ->
+                        snapshot.copy(
+                            realTime = current.realTime,
+                            scrubOffsetSeconds = current.scrubOffsetSeconds
+                        )
+                    }
+                }
         }
+
+        // СКРАБ живёт отдельным коллектором, а не шестым потоком в combine
+        // выше: у combine нет перегрузки на шесть аргументов, а перевод всего
+        // блока на combine(Array<Flow>) потерял бы типы. Отдельный коллектор
+        // дешевле по эмиссиям: сдвиг меняется только по жесту пользователя,
+        // тогда как combine тикает каждую секунду.
+        // distinctUntilChanged здесь НЕ нужен и даже запрещён: StateFlow уже
+        // сам отсекает дубли (operator fusion), а применение оператора к
+        // StateFlow помечено устаревшим и роняет сборку.
+        viewModelScope.launch {
+            BinauralPlaybackService.scrubOffsetSeconds.collect { offset ->
+                _telemetry.update { it.copy(scrubOffsetSeconds = offset) }
+            }
+        }
+
+        // СКРАБ: реальное «сейчас» — своим коллектором ровно по тем же
+        // причинам, что и сдвиг (шестой поток в combine выше не влез).
+        // Отставание на одну эмиссию здесь безвредно: реальное время меняется
+        // плавно и медленно, а ошибка в одну секунду на графике суток — это
+        // сотая доля пикселя. Залипнуть оно не может: следующая эмиссия всё
+        // поправит, в отличие от вычитания сдвига из оси на стороне UI.
+        viewModelScope.launch {
+            BinauralPlaybackService.unshiftedTimeOfDaySeconds.collect { seconds ->
+                // null — менеджер ещё не публиковал реальное «сейчас». Поле
+                // НЕ трогаем: подставлять вместо него midnight или «текущее
+                // время по часам телефона» — значит снова выдать отсутствие
+                // данных за правдоподобный момент. График в этом случае
+                // считает реальным «сейчас» саму ось: линии совпадают, и
+                // серой просто нечего рисовать.
+                if (seconds == null) return@collect
+                val quantized = (seconds / 60) * 60
+                _telemetry.update {
+                    it.copy(realTime = LocalTime.fromSecondOfDay(quantized.coerceIn(0, 86399)))
+                }
+            }
+        }
+    }
+
+    // ============= Скраб: предпросмотр другого времени суток =============
+
+    /**
+     * СКРАБ: прослушать, как пресет звучит в момент [time], а не сейчас.
+     *
+     * Сдвигается ВСЯ ось времени суток, а не «позиция трека»: кривая
+     * продолжает эволюционировать, линия указателя едет вперёд со скоростью
+     * 1×, просто со сдвигом. Передаётся абсолютное время суток — сдвиг обязан
+     * считаться на нити актёра в момент применения, потому что «сейчас»
+     * успевает уехать между касанием и постом.
+     *
+     * Каждый вызов — полный хэндофф (кроссфейд ~1 с). Поэтому из UI этот
+     * метод вызывается по ОТПУСКАНИИ ручки, а не на каждом шаге жеста.
+     */
+    fun scrubTo(time: LocalTime) {
+        playbackService?.scrubTo(time.toSecondOfDay())
+    }
+
+    /**
+     * СКРАБ: вернуть прослушивание к реальному текущему моменту (кнопка
+     * сброса на графике). Возврат СЛЫШИМЫЙ — через хэндофф, как сам скраб.
+     */
+    fun scrubReset() {
+        playbackService?.scrubReset()
+    }
+
+    /**
+     * СКРАБ: снять сдвиг, не трогая звук. Для выходов из редактора: там
+     * состояние уже меняется другими путями, и лишний кроссфейд был бы
+     * слышен как щелчок на ровном месте.
+     *
+     * ВАЖНО: сам по себе этот вызов звук НЕ возвращает — он только стирает
+     * заданный сдвиг, а возврат разыгрывает попутный хэндофф (сохранение,
+     * восстановление кривой, смена пресета). Попутного хэндоффа может не
+     * быть (например, выход без правок кривой), поэтому каждый выход из
+     * редактора обязан завершаться [releaseEditorScrub] — слышимой проверкой
+     * «а вернулся ли звук».
+     */
+    private fun resetScrub() {
+        playbackService?.resetScrub()
+    }
+
+    /**
+     * СКРАБ: редактор закрыт — вернуть прослушивание к реальному «сейчас».
+     *
+     * ЕДИНАЯ точка возврата оси, идемпотентная: движок сам знает, сдвинута
+     * ось звука или нет, и без сдвига не делает ничего. Благодаря этому её
+     * можно (и нужно) вызывать из всех страховок сразу — явного выхода,
+     * наблюдателя навигации и жизненного цикла: лишнего кроссфейда всё
+     * равно не будет.
+     *
+     * ПОРЯДОК ВЫЗОВА ВАЖЕН: последним, ПОСЛЕ всей работы выхода
+     * (сохранение / восстановление кривой). Тогда хэндофф от этой работы
+     * успевает унести и обнулённый сдвиг (один кроссфейд вместо двух), а
+     * вызов лишь добирает случай, когда никакой работы не было.
+     */
+    fun releaseEditorScrub() {
+        playbackService?.scrubReset()
     }
 
     // ============= Методы для работы с пресетами =============
@@ -682,6 +862,11 @@ class BinauralViewModel @Inject constructor(
         // правкой опций в редакторе (например, переключение с гарнитуры во
         // время редактирования). Повтор того же значения отсекает менеджер.
         restoreUserBufferInterval()
+
+        // СКРАБ: смена пресета стирает сдвиг оси. Сдвиг имел смысл только для
+        // прослушивания конкретного пресета в конкретное время; на другом
+        // пресете та же ось — уже не «предпросмотр», а просто ложные часы.
+        resetScrub()
 
         // Устанавливаем активный пресет
         _uiState.update {
@@ -749,6 +934,7 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = preset.frequencyCurve,
+                newPresetBaselineCurve = null,
                 editingPresetId = presetId,
                 carrierRange = preset.frequencyCurve.carrierRange,
                 beatRange = preset.frequencyCurve.beatRange,
@@ -779,6 +965,7 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = defaultCurve,
+                newPresetBaselineCurve = defaultCurve,
                 editingPresetId = null,
                 carrierRange = defaultCurve.carrierRange,
                 beatRange = defaultCurve.beatRange,
@@ -805,6 +992,7 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
+                newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingRelaxationModeSettings = RelaxationModeSettings()
@@ -827,6 +1015,12 @@ class BinauralViewModel @Inject constructor(
      * Используется при выходе с экрана редактирования для плавной анимации.
      */
     fun cancelEditingInService() {
+        // СКРАБ: выход из редактора стирает сдвиг оси. Сдвиг был «ложью о
+        // времени» ради прослушивания правки; вне редактора про неё уже никто
+        // не помнит, а звук, уехавший от настоящего «сейчас», — это нарушение
+        // главного инварианта приложения. Снимаем ДО восстановления кривой:
+        // buildSpec() подставит 0, и тот же хэндофф вернёт звук на реальную ось.
+        resetScrub()
         // Сессия редактирования завершена: возвращаем пользовательский интервал
         // генерации буфера ДО восстановления кривой — пересборка после отмены
         // должна идти уже с ним.
@@ -845,9 +1039,12 @@ class BinauralViewModel @Inject constructor(
      */
     fun finishEditing() {
         pointIntent.clear()
+        // СКРАБ: см. cancelEditingInService — выход из редактора стирает сдвиг.
+        resetScrub()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
+                newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingRelaxationModeSettings = RelaxationModeSettings()
@@ -959,6 +1156,10 @@ class BinauralViewModel @Inject constructor(
                     beatRange = curve.beatRange
                 )
             }
+            // СКРАБ: сохранение — тоже выход из редактора, сдвиг оси стирается.
+            // Снимаем ДО updateAudioConfig(): его хэндофф и вернёт звук на
+            // реальное «сейчас» (иначе buildSpec() унаследовал бы сдвиг).
+            resetScrub()
             // Сессия редактирования завершена: возвращаем пользовательский
             // интервал генерации буфера ДО применения конфига, чтобы
             // кроссфейд-пересборка после сохранения сразу шла с ним.

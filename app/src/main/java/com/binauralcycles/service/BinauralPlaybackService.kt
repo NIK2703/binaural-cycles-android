@@ -82,7 +82,28 @@ class BinauralPlaybackService : Service() {
         // НОВОЕ: текущее время суток (для UI-индикатора), виртуальное в debug
         private val _currentTimeOfDaySeconds = MutableStateFlow(0)
         val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
-        
+
+        // СКРАБ: РЕАЛЬНЫЙ момент времени суток (без сдвига предпросмотра) —
+        // серая линия на графике. Публикуется менеджером в ПАРЕ с осью: иначе
+        // UI пришлось бы вычитать сдвиг из оси, а эти два значения доезжают
+        // разными StateFlow в непредсказуемом порядке — серая линия уезжала
+        // на величину сдвига (docs/plan_playback_scrub_handle.md §14.7).
+        //
+        // `null` — «менеджер ещё ничего не публиковал». Ноль здесь был бы
+        // полночью и ОТРИСОВАЛСЯ бы как настоящее время: ровно та же ловушка,
+        // что с дефолтом 12:00 в телеметрии (серая линия на краю графика в
+        // первую секунду после входа в редактор). У времени суток нет
+        // осмысленного «пустого» числа — только отсутствие значения.
+        private val _unshiftedTimeOfDaySeconds = MutableStateFlow<Int?>(null)
+        val unshiftedTimeOfDaySeconds: StateFlow<Int?> = _unshiftedTimeOfDaySeconds.asStateFlow()
+
+        // СКРАБ: сдвиг оси времени суток (секунды, [0, 86400)). 0 — обычный
+        // режим, звук привязан к реальному «сейчас». Неквантованный: линия на
+        // графике обязана совпадать с осью, на которой стоит поток, а не с
+        // округлённым временем телеметрии.
+        private val _scrubOffsetSeconds = MutableStateFlow(0)
+        val scrubOffsetSeconds: StateFlow<Int> = _scrubOffsetSeconds.asStateFlow()
+
         // НОВОЕ: включён ли debug-режим виртуального времени
         private val _debugTimeEnabled = MutableStateFlow(false)
         
@@ -269,7 +290,40 @@ class BinauralPlaybackService : Service() {
                 _elapsedSeconds.value = elapsed
             }
         }
-        
+
+        // СКРАБ: сдвиг оси — НЕ по ежесекундному опросу, а сразу по факту
+        // изменения. UI обязан показать новую ось в тот же кадр, когда
+        // пользователь отпустил ручку, иначе красная линия секунду висит на
+        // старом месте и выглядит как «не сработало».
+        serviceScope.launch {
+            audioEngine?.scrubOffsetSeconds?.collectLatest { offset ->
+                _scrubOffsetSeconds.value = offset
+            }
+        }
+
+        // СКРАБ: ось времени суток — тоже НЕ по ежесекундному опросу.
+        // Менеджер публикует новую ось в момент применения сдвига (см.
+        // BinauralStreamManager.applyScrub), и ждать следующего тика 1 Гц
+        // нельзя: серая и красная линии обязаны приехать в одном кадре со
+        // сдвигом, иначе до секунды они стоят на старых местах.
+        //
+        // Здесь копируется ТОЛЬКО время: замечание выше про вред collectLatest
+        // относится к частотам, а не к оси.
+        serviceScope.launch {
+            audioEngine?.currentTimeOfDaySeconds?.collectLatest { seconds ->
+                _currentTimeOfDaySeconds.value = seconds
+            }
+        }
+
+        // СКРАБ: реальное «сейчас» — тем же немедленным коллектором, что и
+        // ось. Оба значения обязан видеть UI в одном кадре: серая линия
+        // не имеет права ехать за красной.
+        serviceScope.launch {
+            audioEngine?.unshiftedTimeOfDaySeconds?.collectLatest { seconds ->
+                _unshiftedTimeOfDaySeconds.value = seconds
+            }
+        }
+
         // Периодическое обновление notification НЕ запускается здесь:
         // оно стартует/останавливается вместе с воспроизведением (см. коллектор
         // audioEngine.isPlaying выше), а не крутится вечно от onCreate().
@@ -824,6 +878,10 @@ class BinauralPlaybackService : Service() {
                 // чтобы указатель времени на экране был актуальным даже без воспроизведения.
                 audioEngine?.updateCurrentFrequencies()
                 audioEngine?.currentTimeOfDaySeconds?.value?.let { _currentTimeOfDaySeconds.value = it }
+                // СКРАБ: реальное «сейчас» копируется той же строкой, что и
+                // ось, даже если немедленный коллектор по какой-то причине не
+                // запустился (движок ещё не создан в onCreate).
+                audioEngine?.unshiftedTimeOfDaySeconds?.value?.let { _unshiftedTimeOfDaySeconds.value = it }
                 // Частоты обновляем только при воспроизведении или включённом debug-режиме времени
                 if (_isPlaying.value || _debugTimeEnabled.value) {
                     // Копируем значения из audioEngine в сервис для UI
@@ -1186,7 +1244,46 @@ class BinauralPlaybackService : Service() {
     }
     
     fun switchPresetWithFade(config: BinauralConfig) {
+        // СКРАБ: другой пресет — другая кривая, а сдвинутая ось была «ложью о
+        // времени» ради прослушивания КОНКРЕТНОЙ правки. Смена пресета её
+        // стирает; пауза и правки настроек — НЕТ (иначе слушать правку в 3 часа
+        // ночи было бы нельзя).
+        audioEngine?.resetScrub()
         audioEngine?.switchPresetWithFade(config)
+    }
+
+    // ============ Скраб: предпросмотр другого времени суток ============
+
+    /**
+     * Сдвинуть ось времени суток так, чтобы звук пошёл от момента
+     * [timeOfDaySeconds] — прослушать, как пресет звучит в другое время суток.
+     *
+     * Это НЕ «позиция трека»: ось остаётся живой и едет вперёд со скоростью 1×,
+     * просто со сдвигом. Кривая продолжает эволюционировать, знаковая
+     * раскладка каналов, scatter биений и режим расслабления считаются на той же
+     * сдвинутой оси — то есть слышно ровно то, что звучало бы в это время.
+     *
+     * Каждый вызов — это полный хэндофф (кроссфейд ~1 с), поэтому вызывать надо
+     * по ОТПУСКАНИИ ручки, а не на каждом шаге перетаскивания.
+     *
+     * docs/plan_playback_scrub_handle.md
+     */
+    fun scrubTo(timeOfDaySeconds: Int) {
+        audioEngine?.scrubTo(timeOfDaySeconds)
+    }
+
+    /** СКРАБ: вернуть прослушивание к реальному текущему моменту суток. */
+    fun scrubReset() {
+        audioEngine?.scrubReset()
+    }
+
+    /**
+     * СКРАБ: снять сдвиг БЕЗ пересборки потока — выход из редактора, смена
+     * пресета, полная остановка. Само состояние редактора уже меняется другими
+     * путями, и лишний хэндофф здесь был бы слышен.
+     */
+    fun resetScrub() {
+        audioEngine?.resetScrub()
     }
 
     /**
@@ -1299,7 +1396,12 @@ class BinauralPlaybackService : Service() {
         _isChannelsSwapped.value = false
         _elapsedSeconds.value = 0
         _currentTimeOfDaySeconds.value = 0
+        _unshiftedTimeOfDaySeconds.value = null
         _debugTimeEnabled.value = false
+        // СКРАБ: статический поток переживает сервис, а сдвиг оси — нет
+        // (он только в памяти менеджера). Без сброса после пересоздания сервиса
+        // редактор показал бы призрачную серую линию и кнопку сброса.
+        _scrubOffsetSeconds.value = 0
         
         super.onDestroy()
     }

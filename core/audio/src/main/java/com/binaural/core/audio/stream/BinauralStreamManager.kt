@@ -239,6 +239,58 @@ class BinauralStreamManager(private val context: Context) {
      */
     private var pausedSpecDirty = false
 
+    /**
+     * СКРАБ: сдвиг ОСИ времени суток в секундах, [0, 86400). 0 = звук следует
+     * за реальным моментом суток (обычный режим).
+     *
+     * Модель (docs/plan_playback_scrub_handle.md §2): сдвигается не «позиция
+     * трека», а ОСЬ — `ось(t) = normalize(реальное_сейчас + сдвиг)`. Кривая
+     * при этом продолжает эволюционировать под прослушиванием, а всё, что
+     * производно от времени суток (знаковая раскладка каналов, relaxation,
+     * beat scatter), остаётся консистентным. Замороженная позиция дала бы
+     * застывший звук — ровно то, чего слушать не надо.
+     *
+     * Сдвиг — СКАЛЯР, а не захваченный якорь: якорь устаревает за время
+     * фейд-аута и релиза старого потока, скаляр же применяется к «сейчас»
+     * уже внутри `prepare()` и устареть не может.
+     *
+     * Пишется и читается ТОЛЬКО на нити актёра.
+     */
+    private var scrubOffsetSec = 0
+
+    /**
+     * Сдвиг оси, замороженный на паузе. PAUSED держит ЖИВОЙ поток со СТАРОЙ
+     * осью, поэтому [scrubOffsetSec] (уже новый) к нему неприменим до
+     * возобновления; сравнивать приходится с этим снимком.
+     */
+    private var pausedScrubOffsetSec = 0
+
+    /**
+     * СКРАБ: живой (или замороженный на паузе) поток стоит на оси
+     * предпросмотра, хотя флаг [scrubOffsetSec] уже снят — то есть возврат к
+     * реальному «сейчас» ЗАКАЗАН, но ещё не воплощён в звуке.
+     *
+     * Зачем отдельный флаг, если сдвиг и так лежит в [scrubOffsetSec].
+     * Потому что тихий [resetScrub] стирает сдвиг, но сам поток не трогает:
+     * он рассчитан на то, что попутный хэндофф (сохранение, отмена правок
+     * кривой, смена пресета) подберёт обнулённый сдвиг и вернёт звук.
+     * Попутного хэндоффа может и не быть — тогда звук остаётся на оси
+     * предпросмотра навсегда, а все сторожи видят `scrubOffsetSec == 0` и
+     * считают, что делать нечего. Ровно это и происходило при выходе из
+     * редактора без правок кривой: ЛИНИЯ возвращалась на «сейчас», а
+     * ВОСПРОИЗВЕДЕНИЕ оставалось на времени предпросмотра.
+     *
+     * Флаг отвечает на другой вопрос: «ось того потока, который звучит,
+     * сдвинута?» — а не «какой сдвиг задан». Поэтому:
+     *  - `true` выставляет [clearScrubState], глядя на ось ЖИВОГО потока;
+     *  - `false` выставляет [launchStream], когда поток со спекой
+     *    материализовался (ось спеки — это и есть ось звука);
+     *  - `false` выставляет [resetSession], когда потока не стало вовсе.
+     *
+     * Пишется и читается ТОЛЬКО на нити актёра.
+     */
+    private var scrubNeedsRealignment = false
+
     // Сессия для resume
     private var sessionSpec: PlaybackSpec? = null
     private var accumulatedMs = 0L
@@ -341,8 +393,36 @@ class BinauralStreamManager(private val context: Context) {
     val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
     private val _currentTimeOfDaySeconds = MutableStateFlow(0)
     val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
+
+    /**
+     * СКРАБ: РЕАЛЬНЫЙ момент времени суток — без сдвига предпросмотра.
+     * Серая линия на графике (§5.1 плана).
+     *
+     * Зачем отдельный поток, если реальное время можно получить как
+     * `ось − сдвиг`: ось ([currentTimeOfDaySeconds]) и сдвиг
+     * ([scrubOffsetSeconds]) — это ДВА разных StateFlow, которые доезжают до
+     * UI в непредсказуемом порядке. Вычитание на стороне UI неизбежно
+     * смешивает разновозрастные значения, а пришедший первым сдвиг уже нельзя
+     * «приклеить» к пришедшей позже оси — серая линия уезжала на величину
+     * сдвига и висела на цели перетаскивания до следующего изменения оси
+     * (то есть до минуты, квантование телеметрии). docs/…scrub_handle.md §14.7.
+     *
+     * Здесь оба времени считаются в ОДНОМ вызове из ОДНОЙ базы — позиции
+     * потока, который реально звучит. Поэтому они гарантированно одной
+     * «свежести», а расстояние между красной и серой линиями в точности
+     * равно сдвигу, включая окно кроссфейда.
+     */
+    // null — «ещё ничего не публиковали». Ноль здесь означал бы полночь и был
+    // бы отрисован как настоящее время (проверено на устройстве: на старте
+    // серая линия вставала на 00:00). У времени суток нет осмысленного
+    // «пустого» числа — только отсутствие значения.
+    private val _unshiftedTimeOfDaySeconds = MutableStateFlow<Int?>(null)
+    val unshiftedTimeOfDaySeconds: StateFlow<Int?> = _unshiftedTimeOfDaySeconds.asStateFlow()
     private val _isChannelsSwapped = MutableStateFlow(false)
     val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
+    /** СКРАБ: активный сдвиг оси времени суток (0 = звук за реальным сейчас). */
+    private val _scrubOffsetSeconds = MutableStateFlow(0)
+    val scrubOffsetSeconds: StateFlow<Int> = _scrubOffsetSeconds.asStateFlow()
 
     /** Для совместимости со старым API сервиса. */
     fun initialize() { /* актор уже запущен в конструкторе */ }
@@ -392,6 +472,96 @@ class BinauralStreamManager(private val context: Context) {
     fun pauseWithFade() = actor.post { onPause() }
     fun resumeWithFade() = actor.post { onResume() }
     fun switchPresetWithFade(config: BinauralConfig) = updateConfig(config) // handoff автоматический
+
+    // ---------------- Скраб: предпросмотр другого времени суток ----------------
+
+    /**
+     * СКРАБ: сдвинуть ось времени суток так, чтобы звучало время [timeOfDaySeconds].
+     *
+     * Сдвиг считается от РЕАЛЬНОГО «сейчас» ([baseTimeOfDaySeconds]), а не от
+     * текущего сдвинутого положения: иначе повторный скраб на ту же цель
+     * накапливал бы дельту и ось уезжала бы всё дальше.
+     *
+     * docs/plan_playback_scrub_handle.md
+     */
+    fun scrubTo(timeOfDaySeconds: Int) = actor.post {
+        val target = ((timeOfDaySeconds % 86400) + 86400) % 86400
+        val delta = normalizeTimeOfDay(target - baseTimeOfDaySeconds()).toInt()
+        StreamLogger.d(TAG, "scrubTo ${formatTod(target)} (сдвиг=$delta с, " +
+            "прежний=${scrubOffsetSec} с, state=$state)")
+        applyScrub(delta)
+    }
+
+    /**
+     * СКРАБ: вернуть прослушивание к реальному текущему моменту суток.
+     *
+     * Идемпотентно, но «нечего делать» проверяется ШИРЕ, чем «сдвиг ноль».
+     * Тихий [resetScrub] стирает [scrubOffsetSec], но сам звук оставляет на
+     * оси предпросмотра — возврат разыгрывает попутный хэндофф, а его может
+     * не быть. Поэтому здесь три условия: заданный сдвиг, замороженный на
+     * паузе сдвиг и [scrubNeedsRealignment] (звук ещё на сдвинутой оси).
+     * Раньше сторож был `scrubOffsetSec == 0` и после тихого сброса молча
+     * отключался — из-за этого выход из редактора без правок кривой
+     * возвращал ЛИНИЮ, но не ВОСПРОИЗВЕДЕНИЕ.
+     */
+    fun scrubReset() = actor.post {
+        if (scrubOffsetSec == 0 && pausedScrubOffsetSec == 0 && !scrubNeedsRealignment) return@post
+        StreamLogger.d(TAG, "scrubReset (сдвиг=${scrubOffsetSec} с, замороженный=${pausedScrubOffsetSec} с, " +
+            "звукНаСдвинутойОси=$scrubNeedsRealignment, state=$state)")
+        applyScrub(0)
+        // Возврат заказан: хэндофф поднимется на оси 0, а [launchStream]
+        // пересчитает флаг по факту материализации потока. Снимаем здесь,
+        // чтобы повторный scrubReset (страховки навигации/жизненного цикла
+        // вызывают его по несколько раз) не заказал второй кроссфейд.
+        scrubNeedsRealignment = false
+    }
+
+    /**
+     * СКРАБ: сбросить сдвиг оси, не трогая сам поток.
+     *
+     * Сдвинутая ось — это осознанная ложь о времени, поэтому она обязана жить
+     * ровно столько, сколько пользователь про неё помнит: полный стоп, смена
+     * пресета и выход из редактора стирают её, а пауза и правки настроек —
+     * НЕТ (иначе править кривую под прослушивание было бы нельзя).
+     */
+    fun resetScrub() = actor.post {
+        if (scrubOffsetSec != 0 || pausedScrubOffsetSec != 0) {
+            StreamLogger.d(TAG, "resetScrub: сдвиг ${scrubOffsetSec} с снят (state=$state)")
+        }
+        clearScrubState()
+    }
+
+    private fun clearScrubState() {
+        // Сдвиг стирается, а звук остаётся где был: возврат на реальную ось
+        // сделает только хэндофф. Запоминаем, нужен ли он, по оси потока,
+        // который звучит (или заморожен на паузе) ПРЯМО СЕЙЧАС, — а не по
+        // заданному сдвигу, который сейчас обнуляем.
+        val live = current
+        scrubNeedsRealignment = live?.spec?.scrubOffsetSec?.let { it != 0 } ?: false
+        scrubOffsetSec = 0
+        pausedScrubOffsetSec = 0
+        _scrubOffsetSeconds.value = 0
+    }
+
+    /** Применить сдвиг на нити актёра и разыграть его через обычный маршрут спеки. */
+    private fun applyScrub(delta: Int) {
+        // PAUSED держит живой поток со СТАРОЙ осью: её и запоминаем, чтобы
+        // возобновление знало, где звучал замороженный пакет.
+        pausedScrubOffsetSec = if (state == ManagerState.PAUSED) scrubOffsetSec else delta
+        scrubOffsetSec = delta
+        _scrubOffsetSeconds.value = delta
+        // Ось UI обязана поехать ВМЕСТЕ со сдвигом, а не на следующем тике
+        // опроса (1 Гц): иначе красная линия на графике до секунды висела бы
+        // на старом «сейчас» и жест выглядел бы не сработавшим. Поправку §3.6
+        // считает сам updateCurrentFrequencies: старый поток ещё в слоте, его
+        // spec.scrubOffsetSec — прежний, поэтому поправка равна ровно новому
+        // сдвигу и ось UI встаёт на цель немедленно.
+        updateCurrentFrequencies()
+        onSpecChanged(SpecReason.SCRUB)
+    }
+
+    private fun formatTod(seconds: Int): String =
+        "%02d:%02d".format(seconds / 3600, (seconds % 3600) / 60)
 
     fun setVolume(volume: Float) {
         val v = volume.coerceIn(0f, 1f)
@@ -502,7 +672,19 @@ class BinauralStreamManager(private val context: Context) {
                 _currentBeatFrequency.value = it.first
                 _currentCarrierFrequency.value = it.second
             }
-            _currentTimeOfDaySeconds.value = s.getCurrentTimeOfDay()
+            // СКРАБ: оба времени UI считаются из ОДНОЙ базы — позиции потока,
+            // который реально звучит. Во время кроссфейда `current` — это ещё
+            // старый поток со старым сдвигом, поэтому снимать надо именно
+            // ЕГО сдвиг: тогда получается реальное «сейчас», а целевая ось =
+            // реальное «сейчас» + общий сдвиг менеджера. Разность сдвигов
+            // (прежняя формула оси) в этой записи содержится автоматически —
+            // но рядом с ней теперь публикуется и второе число, без которого
+            // UI приходилось вычитать одно из другого (§14.7 плана).
+            val realSec =
+                normalizeTimeOfDay(s.getCurrentTimeOfDay().toFloat() - s.spec.scrubOffsetSec).toInt()
+            _unshiftedTimeOfDaySeconds.value = realSec
+            _currentTimeOfDaySeconds.value =
+                normalizeTimeOfDay(realSec.toFloat() + scrubOffsetSec).toInt()
             // Часы сессии на паузе стоят: нативный elapsed считается по
             // wall-clock и иначе включил бы в себя всю длительность паузы.
             // (При возобновлении якорь переставляется — см. resumePausedStream.)
@@ -516,7 +698,30 @@ class BinauralStreamManager(private val context: Context) {
         } else {
             // Пауза/простой: держим замороженные значения (как и старый код — без воспроизведения не обновляли)
             _elapsedSeconds.value = pausedElapsedSeconds
-            if (pausedTimeOfDay > 0) _currentTimeOfDaySeconds.value = pausedTimeOfDay
+            if (pausedTimeOfDay > 0) {
+                // СКРАБ: замороженная точка снята на оси замороженного пакета
+                // ([pausedScrubOffsetSec]), а сдвиг с тех пор мог измениться —
+                // скраб на паузе легален. Показываем ЦЕЛЕВУЮ ось, иначе линия
+                // осталась бы там, где звук замер, и не отразила бы выбор.
+                // Реальное «сейчас» здесь тоже заморожено (звук стоит) —
+                // иначе расстояние между линиями перестало бы быть сдвигом.
+                val frozenRealSec =
+                    normalizeTimeOfDay(pausedTimeOfDay.toFloat() - pausedScrubOffsetSec).toInt()
+                _unshiftedTimeOfDaySeconds.value = frozenRealSec
+                _currentTimeOfDaySeconds.value =
+                    normalizeTimeOfDay(frozenRealSec.toFloat() + scrubOffsetSec).toInt()
+            } else {
+                // Нет потока: ось публикуем только если она куда-то сдвинута
+                // (звук встанет на неё при старте), а реальное «сейчас» —
+                // ВСЕГДА. Именно оно держит серую линию на месте с первого
+                // же кадра после скраба, пока ось ещё едет.
+                val baseSec = baseTimeOfDaySeconds().toInt()
+                _unshiftedTimeOfDaySeconds.value = baseSec
+                if (scrubOffsetSec != 0) {
+                    _currentTimeOfDaySeconds.value =
+                        normalizeTimeOfDay(baseSec.toFloat() + scrubOffsetSec).toInt()
+                }
+            }
         }
     }
 
@@ -569,6 +774,10 @@ class BinauralStreamManager(private val context: Context) {
         StreamLogger.d(TAG, "debugScrub ${timeSeconds}s")
         debugScrubPending = timeSeconds
         _currentTimeOfDaySeconds.value = timeSeconds
+        // Пара к оси: оператор переставил ось, значит «реальным сейчас» для
+        // графиков становится ось минус активный сдвиг предпросмотра.
+        _unshiftedTimeOfDaySeconds.value =
+            normalizeTimeOfDay(timeSeconds.toFloat() - scrubOffsetSec).toInt()
         if (isActiveState()) requestHandoff(buildSpec(SpecReason.DEBUG))
     }
     fun debugSetTimeScale(scale: Float) = actor.post {
@@ -600,6 +809,7 @@ class BinauralStreamManager(private val context: Context) {
             outgoing = null
             current?.stop(onFullyStopped = { /* утилизация */ })
             current = null; currentRef.set(null)
+            clearScrubState()
             resetSession()
             _isPlaying.value = false
             setState(ManagerState.IDLE)
@@ -620,8 +830,23 @@ class BinauralStreamManager(private val context: Context) {
         relaxation = relaxation,
         sampleRate = sampleRate,
         volume = volume,
-        reason = reason
+        reason = reason,
+        // Сдвиг оси — часть спеки: он переживает хэндофф и пересборку потока.
+        scrubOffsetSec = scrubOffsetSec
     )
+
+    /**
+     * Нужен ли РЕАЛЬНЫЙ хэндофф (новый поток), или можно ограничиться
+     * подстройкой громкости живого.
+     *
+     * [PlaybackSpec.audioEquals] сравнивает только то, что СЛЫШНО (кривая,
+     * relaxation, частота), поэтому скраб — та же кривая на другой оси — для
+     * него «ничего не изменилось». Без явного сравнения сдвига предпросмотр
+     * молча деградировал бы в `setVolume` и не применялся бы вовсе (ровно эта
+     * ловушка уже делает бесполезным `debugScrub`).
+     */
+    private fun needsHandoff(cur: BinauralStreamImpl, next: PlaybackSpec): Boolean =
+        !cur.spec.audioEquals(next) || cur.spec.scrubOffsetSec != next.scrubOffsetSec
 
     private fun setState(newState: ManagerState) {
         if (state != newState) {
@@ -642,7 +867,8 @@ class BinauralStreamManager(private val context: Context) {
                 // возобновление молча проигнорировало бы новую спеку.
                 val spec = buildSpec(reason)
                 sessionSpec = spec
-                if (current?.spec?.audioEquals(spec) != true) pausedSpecDirty = true
+                val cur = current
+                if (cur == null || needsHandoff(cur, spec)) pausedSpecDirty = true
             }
             ManagerState.FADE_OUT_PAUSE, ManagerState.FADE_OUT_STOP -> queue.offer(buildSpec(reason))
             else -> requestHandoff(buildSpec(reason))
@@ -652,7 +878,7 @@ class BinauralStreamManager(private val context: Context) {
     private fun requestHandoff(spec: PlaybackSpec) {
         // Быстрый путь: изменилась только громкость — потоки не пересоздаём.
         val cur = current
-        if (cur != null && cur.spec.audioEquals(spec) &&
+        if (cur != null && !needsHandoff(cur, spec) &&
             (state == ManagerState.RUNNING || state == ManagerState.FADE_IN || state == ManagerState.HANDOFF)
         ) {
             cur.setVolume(spec.volume); return
@@ -703,7 +929,7 @@ class BinauralStreamManager(private val context: Context) {
             StreamLogger.d(TAG, "tryAdvanceQueue: состояние $state — разберёт свой обработчик")
             return
         }
-        if (cur.spec.audioEquals(queued)) {
+        if (!needsHandoff(cur, queued)) {
             // За время ожидания успело совпасть с живым потоком — Nothing to do.
             queue.poll()
             cur.setVolume(volume)
@@ -1117,6 +1343,8 @@ class BinauralStreamManager(private val context: Context) {
 
     private fun onStop() {
         StreamLogger.d(TAG, "onStop state=${state.name}")
+        // СКРАБ: полный стоп возвращает прослушивание к реальному моменту суток.
+        clearScrubState()
         when (state) {
             ManagerState.RUNNING, ManagerState.FADE_IN -> {
                 queue.clear()
@@ -1413,11 +1641,20 @@ class BinauralStreamManager(private val context: Context) {
      * масштабом и могут быть перемотаны), поэтому настенные часы там не
      * источник истины; в обычном режиме это [realTimeOfDaySeconds].
      */
-    private fun targetTimeOfDaySeconds(): Float {
+    private fun baseTimeOfDaySeconds(): Float {
         if (!debugVirtualTime) return realTimeOfDaySeconds()
         val virtual = current?.virtualTimeOfDaySeconds() ?: 0f
         return if (virtual > 0f) virtual else realTimeOfDaySeconds()
     }
+
+    /**
+     * Тот же момент, но СО СДВИГОМ СКРАБА: на сдвинутой оси «сейчас» для
+     * слушателя — сдвинутое время, а не реальное. Решатель возобновления
+     * сравнивает с A0/F0 именно его: иначе он решил бы, что замороженный
+     * пакет «успел устареть» на величину сдвига, и зря пересобрал бы поток.
+     */
+    private fun targetTimeOfDaySeconds(): Float =
+        normalizeTimeOfDay(baseTimeOfDaySeconds() + scrubOffsetSec)
 
     /**
      * Мягкое возобновление: тот же поток и тот же пакет, но с перемоткой на
@@ -1584,6 +1821,14 @@ class BinauralStreamManager(private val context: Context) {
      * доигрывает, и снимок, сделанный до неё, отстал бы на длительность фейда.
      */
     private fun capturePauseMetrics() {
+        // СКРАБ: снимок оси замороженного пакета. PAUSED держит ЖИВОЙ поток со
+        // СТАРОЙ осью (его spec.scrubOffsetSec), поэтому общий [scrubOffsetSec]
+        // к замороженному пакету неприменим: `pausedTimeOfDay` снят на старой
+        // оси, и решать возобновление надо относительно НЕЁ. Это каноническое
+        // место снимка — на ВХОДЕ в паузу; в applyScrub поле пишется лишь на
+        // тот случай, что сдвиг меняется уже внутри паузы (там старая ось
+        // берётся из scrubOffsetSec, ещё не перезаписанного).
+        pausedScrubOffsetSec = current?.spec?.scrubOffsetSec ?: scrubOffsetSec
         current?.let {
             pausedElapsedSeconds = it.getElapsedSeconds()
             // СЛЫШИМАЯ позиция: где звук реально остановился (голова трека
@@ -1643,9 +1888,14 @@ class BinauralStreamManager(private val context: Context) {
         val tod = s.getCurrentCurveTimeSeconds()
         when {
             tod == null -> StreamLogger.w(TAG, "captureContinuity: позиция кривой недоступна")
-            !CurveAnchorRules.isPlausible(tod, realTimeOfDaySeconds()) ->
+            // ЦЕЛЬ — ось СО СДВИГОМ: при активном скрабе позиция кривой
+            // заведомо далека от РЕАЛЬНОГО now, и сравнение с ним дало бы
+            // ложный WARN на каждом хэндоффе (диагностика перестала бы
+            // отличать «звук уехал» от «слушаем другое время суток»).
+            !CurveAnchorRules.isPlausible(tod, targetTimeOfDaySeconds()) ->
                 StreamLogger.w(TAG, "captureContinuity: позиция кривой $tod далека от " +
-                    "now=${"%.1f".format(realTimeOfDaySeconds())} — как якорь она была бы " +
+                    "цели=${"%.1f".format(targetTimeOfDaySeconds())} (сдвиг скраба " +
+                    "=${scrubOffsetSec} с) — как якорь она была бы " +
                     "отвергнута валидацией (сейчас это только диагностика)")
         }
         StreamLogger.d(TAG, "captureContinuity spec#${s.spec.serial}: curveTod=$tod " +
@@ -1664,6 +1914,11 @@ class BinauralStreamManager(private val context: Context) {
         // Отладочный скраб — ЯВНАЯ установка времени оператором, непрерывность
         // её не перебивает: prepare() и так якорится по оси самого движка,
         // которую скраб уже переставил.
+        //
+        // ПРОДАКШЕН-СКРАБ (предпросмотр из редактора) сюда НЕ попадает и
+        // попадать не должен: это ДРУГАЯ переменная. Ему наследование фаз
+        // нужно — иначе NEXT стартует с фазы 0 и интерферирует с уходящим
+        // потоком (провал огибающей в кроссфейде).
         if (debugScrubPending != null) return spec
         return spec.copy(
             resumeElapsedMs = switchElapsedMs,
@@ -1737,6 +1992,11 @@ class BinauralStreamManager(private val context: Context) {
         // раздаёт только [onOutgoingReleased]; здесь — ТОЛЬКО сужение, иначе
         // этот вызов отменил бы явный запрет, поставленный [beginCrossfade].
         if (outgoing != null) stream.setPacketGrowthAllowed(false)
+        // СКРАБ: с этого мгновения ось звука — это ось спеки потока. Возврат на
+        // реальное «сейчас» нужен ровно тогда, когда эта ось ещё сдвинута.
+        // Флаг снимает зависимость от [scrubOffsetSec]: тихий сброс стирает
+        // заданный сдвиг раньше, чем звук реально вернётся.
+        scrubNeedsRealignment = stream.spec.scrubOffsetSec != 0
         current = stream
         currentRef.set(stream)
         sessionSpec = stream.spec
@@ -1839,6 +2099,7 @@ class BinauralStreamManager(private val context: Context) {
             onFullyStopped = {
                 current = null
                 currentRef.set(null)
+                clearScrubState()
                 resetSession()
                 setState(ManagerState.IDLE)
                 updateWakeLock()
@@ -1881,7 +2142,11 @@ class BinauralStreamManager(private val context: Context) {
         // на перемотку. Компенсированная [BinauralStreamImpl.audibleCurveSeconds]
         // скрыла бы настоящее отставание звука.
         val raw = s.audibleCurveSecondsRaw() ?: return 0L
-        val now = realTimeOfDaySeconds()
+        // ЦЕЛЬ — ось СО СДВИГОМ СКРАБА. Иначе легальный предпросмотр другого
+        // времени суток выглядел бы как нарушение сути приложения: Δ равнялась
+        // бы величине сдвига, и сторож перестал бы отличать «звук уехал» от
+        // «оператор слушает другое время».
+        val now = normalizeTimeOfDay(realTimeOfDaySeconds() + scrubOffsetSec)
         val delta = CurveAnchorRules.circularDistance(raw, now)
         if (delta <= WATCHDOG_TOL_SEC) {
             if (breachSinceMs != 0L) {
@@ -1897,7 +2162,8 @@ class BinauralStreamManager(private val context: Context) {
                 "отличается от now=${"%.1f".format(now)} на ${"%.2f".format(delta)}с " +
                 "уже ${held}мс (порог ${WATCHDOG_TOL_SEC}с / ${WATCHDOG_SUSTAIN_MS}мс); " +
                 "state=$state spec#${s.spec.serial} reason=${s.spec.reason} " +
-                "anchor=${s.spec.resumeAnchor} frontier=${"%.1f".format(s.frontierCurveSeconds())}")
+                "anchor=${s.spec.resumeAnchor} frontier=${"%.1f".format(s.frontierCurveSeconds())} " +
+                "scrub=${s.spec.scrubOffsetSec}/${scrubOffsetSec}")
         }
         return since
     }
@@ -1920,10 +2186,12 @@ class BinauralStreamManager(private val context: Context) {
         val s = currentRef.get()
         if (s == null) return "нет активного потока (state=$state)"
         val raw = s.audibleCurveSecondsRaw()
-        val now = realTimeOfDaySeconds()
+        val base = realTimeOfDaySeconds()
+        val now = normalizeTimeOfDay(base + scrubOffsetSec)
         val delta = raw?.let { CurveAnchorRules.circularDistance(it, now) }
         return "state=$state spec#${s.spec.serial} reason=${s.spec.reason} " +
             "anchor=${s.spec.resumeAnchor} now=${"%.2f".format(now)} " +
+            "realtime=${"%.2f".format(base)} scrub=${s.spec.scrubOffsetSec}/${scrubOffsetSec} " +
             "audibleraw=${raw?.let { "%.2f".format(it) } ?: "н/д"} " +
             "Δ=${delta?.let { "%.2f".format(it) } ?: "н/д"}с " +
             "порог=${WATCHDOG_TOL_SEC}с/${WATCHDOG_SUSTAIN_MS}мс " +
@@ -2032,6 +2300,8 @@ class BinauralStreamManager(private val context: Context) {
         pendingResume = false
         pendingPlaySpec = null
         pendingHandoff = false
+        // СКРАБ: потока не стало — возвращать на реальную ось больше нечего.
+        scrubNeedsRealignment = false
         resumeInFlight = false
         lastResumeAccuracy = null
         resetContinuity()

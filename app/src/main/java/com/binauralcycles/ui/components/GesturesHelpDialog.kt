@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.UnfoldMore
@@ -41,14 +43,18 @@ private data class GestureHint(
 )
 
 /**
- * Справка по жестам редактора пресета: открывается кнопкой в верхней панели
- * рядом с сохранением.
+ * Справка по управлению в редакторе пресета.
+ *
+ * Открывается автоматически при первом входе в редактор (пока пользователь не
+ * закроет её по «Понятно» — флаг в DataStore фиксирует, что показано, и
+ * окно больше не появляется само), а также в любой момент — кнопкой справки
+ * в верхней панели рядом с сохранением.
  *
  * Порядок пунктов — «от графика к окну точки»: сначала как получить точку
- * (двойное нажатие), потом как с ней работать (нажатие, перетаскивание),
- * затем как править её значения (свайп по полям) и в конце — как подвинуть
- * сам график (метки границ). Каждый следующий пункт относится к объекту,
- * полученному предыдущим.
+ * (двойное нажатие), потом как с ней работать (перетаскивание, затем
+ * нажатие), затем как править её значения (свайп по полям) и в конце — как
+ * подвинуть сам график (метки границ). Каждый следующий пункт относится к
+ * объекту, полученному предыдущим.
  *
  * Диалог, а не экран и не подсказка-«пузырь»: список короткий, читается целиком
  * и не требует навигации. Закрывается и кнопкой, и системным «назад»,
@@ -71,8 +77,8 @@ fun GesturesHelpDialog(
     // а не перечитываются при каждой перерисовке диалога.
     val hints = listOf(
         GestureHint(Icons.Filled.TouchApp, stringResource(R.string.gesture_add_point)),
-        GestureHint(Icons.Filled.RadioButtonChecked, stringResource(R.string.gesture_select_point)),
         GestureHint(Icons.Filled.OpenWith, stringResource(R.string.gesture_drag_point)),
+        GestureHint(Icons.Filled.RadioButtonChecked, stringResource(R.string.gesture_select_point)),
         GestureHint(Icons.Filled.SwapVert, stringResource(R.string.gesture_swipe_fields)),
         GestureHint(
             Icons.Filled.UnfoldMore,
@@ -83,7 +89,12 @@ fun GesturesHelpDialog(
                 hzFormat.format(carrierRange.max),
                 hzFormat.format(carrierRange.min)
             )
-        )
+        ),
+        // СКРАБ: как подвинуть само прослушивание. Иконка жеста «тяни
+        // влево-вправо» повторяет форму ручки ◀|▶, а кнопка сброса — та же
+        // иконка, что и на графике: справка и экран не должны расходиться.
+        GestureHint(Icons.Filled.SwapHoriz, stringResource(R.string.gesture_scrub_handle)),
+        GestureHint(Icons.Filled.Refresh, stringResource(R.string.gesture_scrub_reset))
     )
 
     AlertDialog(

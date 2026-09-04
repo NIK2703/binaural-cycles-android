@@ -108,6 +108,11 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "swapfade" -> setSwapFade(arg)
             "vtime" -> setVirtualTime(arg)
             "scrub" -> scrub(arg)
+            // СКРАБ ПРЕДПРОСМОТРА — продакшен-путь (то же, что ручка в редакторе).
+            "pscrub" -> productionScrub(arg)
+            "pscrubreset" -> productionScrubReset()
+            // Выход из редактора пресета: точная последовательность вызовов UI.
+            "editexit" -> editorExit()
             "scale" -> setScale(arg)
             "vrun" -> setVirtualRunning(arg)
             "realtime" -> resetToRealTime()
@@ -296,9 +301,17 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             if (d < -43200.0) d += 86400.0
             d
         } else Double.NaN
+        // СКРАБ: со сдвинутой осью «now» часов и «now» звука РАЗНЫЕ по
+        // замыслу, а не из-за рассинхрона. Без этой строки любой `clock` при
+        // активном скрабе выглядел бы как поломка привязки к времени.
+        val scrub = BinauralPlaybackService.scrubOffsetSeconds.value
+        val scrubLine = if (scrub == 0) "scrub=0 (ось = реальное сейчас)" else
+            "scrub=${scrub}с — ось звука сдвинута на ${LocalTime.fromSecondOfDay(scrub)}; " +
+                "audible должен быть ~${LocalTime.fromSecondOfDay(((kTod.toInt() + scrub) % 86400))}"
         return "kotlin: offset=${kOffset}мс now=${DebugClock.formatTimeOfDay(kTod.toFloat())}\n" +
             "native: offset=${nOffset}мс now=${DebugClock.formatTimeOfDay(nTod.toFloat())} " +
             "(available=${DebugNativeClock.available})\n" +
+            "$scrubLine\n" +
             "drift=${"%.3f".format(drift)}с ${if (!drift.isNaN() && kotlin.math.abs(drift) < 1.0) "OK" else "РАСХОЖДЕНИЕ"}"
     }
 
@@ -322,24 +335,37 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
      *   frontier   — F0, конец сгенерированного аудио, сек;
      *   lag        — now − audibleraw по кругу: главная метрика (должен → 0);
      *   window     — F0 − audible по кругу: окно, внутри которого пакет ещё жив;
-     *   warped     — сдвиг часов, мс (0 == реальное время).
+     *   warped     — сдвиг часов, мс (0 == реальное время);
+     *   scrub      — сдвиг оси времени суток, сек (0 == обычный режим).
+     *
+     * ЧИСЛА — СТРОГО `Locale.US`. `String.format` без локали берёт системную,
+     * и на русской локали снимок печатал `now=83991,88` с ЗАПЯТОЙ. awk (а
+     * значит все стенды) читает такое как 83991, то есть молча теряет дробь:
+     * машинный снимок становится на секунду грубее, чем claiming его формат.
      */
     private fun verifySnapshot(): String {
         val s = service
         val now = nowTodSeconds()
+        // Разделитель — точка ВСЕГДА, независимо от локали устройства.
+        fun f2(v: Double): String = String.format(Locale.US, "%.2f", v)
         if (s == null) {
-            return "state=NONE playing=0 now=${"%.2f".format(now)} audible=0 audibleraw=0 " +
-                "frontier=0 lag=0.00 window=0.00 warped=${DebugClock.offsetMs()}"
+            return "state=NONE playing=0 now=${f2(now)} audible=0 audibleraw=0 " +
+                "frontier=0 lag=0.00 window=0.00 warped=${DebugClock.offsetMs()} scrub=0"
         }
         val audible = s.audibleTimeOfDaySeconds().toDouble()
         val raw = s.audibleTimeOfDaySecondsRaw().toDouble()
         val frontier = s.frontierTimeOfDaySeconds().toDouble()
+        // СКРАБ: без поля сдвига снимок неотличим от «звук уехал от часов» —
+        // обе ситуации выглядят как audible != now. Стенд tools/dbgscrub.sh
+        // проверяет именно audible ≈ now + scrub, поэтому сдвиг обязан быть
+        // в машинной строке, а не только в человекочитаемом `clock`.
+        val scrub = BinauralPlaybackService.scrubOffsetSeconds.value
         return "state=${s.managerState()} playing=${if (BinauralPlaybackService.isPlaying.value) 1 else 0} " +
-            "now=${"%.2f".format(now)} audible=${"%.2f".format(audible)} " +
-            "audibleraw=${"%.2f".format(raw)} frontier=${"%.2f".format(frontier)} " +
-            "lag=${"%.2f".format(circularDelta(now, raw))} " +
-            "window=${"%.2f".format(circularDelta(frontier, audible))} " +
-            "warped=${DebugClock.offsetMs()}"
+            "now=${f2(now)} audible=${f2(audible)} " +
+            "audibleraw=${f2(raw)} frontier=${f2(frontier)} " +
+            "lag=${f2(circularDelta(now, raw))} " +
+            "window=${f2(circularDelta(frontier, audible))} " +
+            "warped=${DebugClock.offsetMs()} scrub=$scrub"
     }
 
     /**
@@ -440,10 +466,17 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
     /**
      * Смена пресета — ровно тот же путь, что в UI: `updateConfig()` уходит в
      * `requestHandoff()` и поднимает NEXT параллельно с fade-out CURRENT.
+     *
+     * СКРАБ: повторяем `resetScrub()` из `BinauralViewModel.playPreset()`.
+     * Без него CLI-смена пресета расходилась бы с реальным UI: там сдвиг оси
+     * стирается, здесь выживал бы и на новом пресете превращался бы из
+     * предпросмотра в просто ложные часы. Эта же разница делала бы
+     * невоспроизводимым сценарий V9 стенда tools/dbgscrub.sh.
      */
     private fun applyPreset(preset: BinauralPreset, st: GlobalSettings): String {
         val s = service
             ?: return "Сервис не запущен — воспроизведение не активно. Сначала `play`"
+        s.resetScrub()
         s.setPresetIds(st.presets.map { it.id })
         s.setCurrentPresetName(preset.name)
         s.setCurrentPresetId(preset.id)
@@ -668,6 +701,58 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         val sec = (arg.toIntOrNull() ?: 0).coerceIn(0, 86399)
         service?.debugScrub(sec) ?: return "Сервис не запущен"
         return "Перемотка на $sec с (${LocalTime.fromSecondOfDay(sec)})"
+    }
+
+    /**
+     * `pscrub <сек|HH:MM>` — СКРАБ ПРЕДПРОСМОТРА: сдвиг оси времени суток,
+     * ровно тот путь, который в редакторе делает ручка ◀|▶.
+     *
+     * Отличается от `scrub`: тот — перемотка ВИРТУАЛЬНОГО времени (только
+     * debug, без пересборки потока), этот — продакшен-маршрут через
+     * `SpecReason.SCRUB` с полным хэндоффом. Проверять им надо то же, что
+     * слышит пользователь (см. §12 docs/plan_playback_scrub_handle.md).
+     */
+    private fun productionScrub(arg: String): String {
+        val raw = parseTimeOfDay(arg)
+            ?: return "Не понял время суток \"$arg\". Примеры: 3600, 01:00, 23:55"
+        val sec = ((raw.toInt() % 86400) + 86400) % 86400
+        val s = service ?: return "Сервис не запущен — скраб без звука бессмысленен"
+        s.scrubTo(sec)
+        val now = nowTodSeconds().toInt()
+        return "pscrub: цель=${LocalTime.fromSecondOfDay(sec)} (${sec} с), " +
+            "now=${LocalTime.fromSecondOfDay(now.coerceIn(0, 86399))}. " +
+            "Проверьте `audible` через 1-2 с (время кроссфейда) и `invcheck`."
+    }
+
+    /** `pscrubreset` — вернуть прослушивание к реальному текущему моменту. */
+    private fun productionScrubReset(): String {
+        val s = service ?: return "Сервис не запущен"
+        s.scrubReset()
+        return "pscrubreset: сдвиг оси снят, ждите кроссфейд (~1 с) и проверьте `audible`"
+    }
+
+    /**
+     * `editexit` — ВЫХОД ИЗ РЕДАКТОРА ПРЕСЕТА: ровно та последовательность
+     * вызовов, которую делает UI (BinauralViewModel + PresetEditScreen):
+     *
+     *   resetScrub()   — тихо снимает заданный сдвиг (его унесёт попутный
+     *                    хэндофф сохранения/восстановления кривой);
+     *   scrubReset()   — слышимый добор: если попутного хэндоффа не было,
+     *                    именно он возвращает ЗВУК на реальное «сейчас».
+     *
+     * Команда существует потому, что ключевая ошибка этого пути была НЕ в UI:
+     * тихий сброс стирал `scrubOffsetSec`, и сторож слышимого сброса решал,
+     * что делать нечего. Линия возвращалась на «сейчас», а воспроизведение
+     * оставалось на времени предпросмотра (docs/plan_playback_scrub_handle.md).
+     * Проверять это стендом обязательно: значение в StateFlow сходится и без
+     * звука.
+     */
+    private fun editorExit(): String {
+        val s = service ?: return "Сервис не запущен"
+        s.resetScrub()
+        s.scrubReset()
+        return "editexit: сдвиг снят + запрошен слышимый возврат. Ждите кроссфейд (~1 с) " +
+            "и проверьте `vsnap`: audible == now, scrub=0"
     }
 
     private fun setScale(arg: String): String {

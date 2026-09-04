@@ -14,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -21,7 +22,11 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.pointerInput
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import com.binaural.core.audio.model.FrequencyRange
+import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binauralcycles.ui.components.*
 import com.binauralcycles.ui.theme.Spacing
 import com.binauralcycles.viewmodel.BinauralViewModel
@@ -70,13 +75,38 @@ fun PresetEditScreen(
             viewModel.startNewPreset()
         }
     }
+
+    // Автопоказ справки по управлению при первом входе в редактор.
+    // Ключ эффекта — сам флаг: пока он null (ещё не прочитан из DataStore) или
+    // уже true, окно не трогаем; как только прочиталось значение false —
+    // открываем ровно один раз. После закрытия флаг становится true, эффект
+    // перезапускается, но повторно не открывает.
+    LaunchedEffect(uiState.gesturesHelpShown) {
+        if (uiState.gesturesHelpShown == false) {
+            showGesturesHelp = true
+        }
+    }
     
     // Проверяем наличие изменений
     hasChanges = editingPreset?.let { preset ->
         preset.name != presetName || 
         uiState.editingFrequencyCurve != preset.frequencyCurve ||
         uiState.editingRelaxationModeSettings != preset.relaxationModeSettings
-    } ?: (presetName != newPresetName || uiState.editingFrequencyCurve != null)
+    } ?: run {
+        // Новый пресет: сравниваем с исходным шаблоном, а не с «не-null».
+        // Если пользователь ничего не поменял в шаблоне, изменений нет —
+        // диалог «несохранённые изменения» при выходе не показываем.
+        val baseline = uiState.newPresetBaselineCurve
+        if (baseline == null) {
+            // Шаблон ещё не инициализирован (первый кадр до startNewPreset):
+            // трактуем как «без изменений», чтобы диалог не мелькал ложно.
+            false
+        } else {
+            presetName != newPresetName ||
+            uiState.editingFrequencyCurve != baseline ||
+            uiState.editingRelaxationModeSettings != RelaxationModeSettings()
+        }
+    }
     
     fun saveAndNavigateBack() {
         // Предотвращаем повторный вызов во время навигации
@@ -88,6 +118,11 @@ fun PresetEditScreen(
         // состояния перенесены ПОСЛЕ навигации, чтобы главный поток был свободен
         // в первые кадры перехода — иначе shared-анимация «съедается» этой работой.
         onNavigateBack()
+        // Порядок: сначала анимация, потом вся работа выхода, и ПОСЛЕДНИМ —
+        // возврат оси прослушивания. releaseEditorScrub обязана идти в конце:
+        // хэндофф от сохранения уже унёс обнулённый сдвиг (один кроссфейд
+        // вместо двух), а вызов добирает только случай, когда работа выхода
+        // не породила хэндоффа вовсе.
         if (presetId == null) {
             // Создаём новый пресет
             viewModel.createPreset(
@@ -106,6 +141,7 @@ fun PresetEditScreen(
         }
         // editingFrequencyCurve намеренно НЕ очищаем: это состояние перезапишется
         // при следующем входе в редактор, а сейчас оно не мешает списку.
+        viewModel.releaseEditorScrub()
     }
 
     fun navigateBackWithCheck() {
@@ -119,9 +155,10 @@ fun PresetEditScreen(
         } else {
             // СНАЧАЛА анимация, потом восстановление кривой активного пресета
             // в сервисе — чтобы работа на главном потоке не откладывала старт
-            // shared-перехода.
+            // shared-перехода. Возврат оси — последним (см. saveAndNavigateBack).
             onNavigateBack()
             viewModel.cancelEditingInService()
+            viewModel.releaseEditorScrub()
         }
     }
     
@@ -146,7 +183,38 @@ fun PresetEditScreen(
             navigateBackWithCheck()
         }
     }
-    
+
+    // СКРАБ: страховка на случай ухода экрана, который не прошёл ни через один
+    // штатный выход (cancelEditingInService / saveEditingPreset). Штатные пути
+    // сами вызывают releaseEditorScrub — здесь только добор «непредусмотренного».
+    //
+    // ПОЧЕМУ НЕЛЬЗЯ СБРАСЫВАТЬ БЕЗ ПРОВЕРКИ (так было раньше). onDispose здесь
+    // срабатывает НЕ только при закрытии редактора, а ещё и когда:
+    //   • поворот / смена темы / локали / размера шрифта — Activity
+    //     пересоздаётся, но редактор остаётся на экране, а сессия
+    //     восстанавливается из SavedStateHandle (maybeRestoreEditingSession);
+    //   • приложение свёрнуто и система уничтожила Activity — при возврате она
+    //     будет воссоздана вместе с редактором;
+    //   • пользователь ушёл в «режим разделённого экрана» и т.п.
+    // Во всех этих случаях сдвинутая ось — осознанный выбор, который
+    // пользователь продолжает слушать, и стирать её нельзя. Поэтому сбрасываем
+    // только когда Activity действительно ЗАВЕРШАЕТСЯ (isFinishing) и не
+    // пересоздаётся ради новой конфигурации (isChangingConfigurations).
+    val activity = LocalContext.current.findActivity()
+    val activityRef by rememberUpdatedState(activity)
+    DisposableEffect(Unit) {
+        onDispose {
+            val a = activityRef
+            val finishing = a != null && a.isFinishing && !a.isChangingConfigurations
+            android.util.Log.d(
+                "ScrubLifecycle",
+                "editor disposed: isFinishing=${a?.isFinishing}, " +
+                    "isChangingConfigurations=${a?.isChangingConfigurations} -> release=$finishing"
+            )
+            if (finishing) viewModel.releaseEditorScrub()
+        }
+    }
+
     with(sharedTransitionScope) {
         Scaffold(
             topBar = {
@@ -268,6 +336,17 @@ fun PresetEditScreen(
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         // НОВОЕ: единое время (реальное/виртуальное) для указателя на графике
                         externalCurrentTime = telemetry.currentTime,
+                        // СКРАБ: ручка прослушивания другого времени суток.
+                        // Появляется только для АКТИВНОГО пресета — это уже
+                        // заложено в [isPlaying] выше: сдвинутая ось —
+                        // осознанная ложь о времени ради прослушивания правки,
+                        // и для чужого пресета она бессмысленна.
+                        // СКРАБ: реальное «сейчас» для серой линии — парой к
+                        // оси, из того же источника (§14.7 плана). График по
+                        // нему же решает, показывать ли кнопку сброса (§14.10).
+                        realTimeOfDay = telemetry.realTime,
+                        onScrubTo = { time -> viewModel.scrubTo(time) },
+                        onScrubReset = { viewModel.scrubReset() },
                         // Параметры точки редактируются во всплывающем окне прямо
                         // на графике, отдельного раздела в списке опций больше нет.
                         autoExpandGraphRange = uiState.autoExpandGraphRange,
@@ -332,7 +411,12 @@ fun PresetEditScreen(
         GesturesHelpDialog(
             carrierRange = uiState.editingFrequencyCurve?.carrierRange
                 ?: FrequencyRange.DEFAULT_CARRIER,
-            onDismiss = { showGesturesHelp = false }
+            onDismiss = {
+                showGesturesHelp = false
+                // Закрытие любым способом (Понятно / назад / мимо) фиксирует
+                // флаг: окно больше не откроется автоматически при входе.
+                viewModel.markGesturesHelpShown()
+            }
         )
     }
 
@@ -364,6 +448,7 @@ fun PresetEditScreen(
                         // СНАЧАЛА анимация, потом восстановление кривой в сервисе
                         onNavigateBack()
                         viewModel.cancelEditingInService()
+                        viewModel.releaseEditorScrub()
                     },
                     enabled = !isNavigating
                 ) {
@@ -372,4 +457,18 @@ fun PresetEditScreen(
             }
         )
     }
+}
+
+/**
+ * Ближайшая Activity по цепочке контекстов.
+ *
+ * Нужна ровно для одного решения: экран ушёл из композиции потому, что
+ * закрылся редактор, или потому, что пересоздаётся Activity (поворот) либо
+ * уничтожается системой в фоне. По самому факту ухода экрана эти случаи не
+ * различить — только по состоянию Activity.
+ */
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }

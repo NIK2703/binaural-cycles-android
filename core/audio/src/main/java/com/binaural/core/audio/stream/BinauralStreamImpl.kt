@@ -726,10 +726,30 @@ class BinauralStreamImpl(
                     "отвергнут (далеко от now=${"%.1f".format(realTimeOfDaySeconds())}) — " +
                     "беру текущий момент суток $engineNow")
             }
-            StreamLogger.d(TAG, "prepare spec#${spec.serial}: якорь кривой=${resolved.valueSec} " +
-                "(источник=${resolved.source}, заявленный=${spec.resumeAnchor})")
-            engine.setCurveTime(resolved.valueSec)
-            if (spec.resumeAnchorMs > 0) {
+            // СКРАБ (docs/plan_playback_scrub_handle.md §3.3). Сдвиг оси
+            // применяется К РАЗРЕШЁННОМУ ЯКОРЮ, а не вместо него: «сейчас»
+            // всё ещё решает, откуда начинать, смещение лишь указывает, какое
+            // время суток звучит. Нормализация обязательна — сдвиг свободно
+            // уводит ось через полночь.
+            val scrubOffset = spec.scrubOffsetSec
+            val anchorSec = if (scrubOffset != 0) {
+                normalizeTimeOfDay(resolved.valueSec + scrubOffset.toFloat()).toInt()
+            } else {
+                resolved.valueSec
+            }
+            StreamLogger.d(TAG, "prepare spec#${spec.serial}: якорь кривой=$anchorSec " +
+                "(источник=${resolved.source}, заявленный=${spec.resumeAnchor}, сдвиг скраба=$scrubOffset)")
+            engine.setCurveTime(anchorSec)
+            if (scrubOffset != 0) {
+                // Сдвинутая ось ОБЯЗАНА играть с preserveTimeline: обычный
+                // play() вызывает generator.resetState() и переякоривает
+                // m_curveTimeSeconds на realTimeOfDaySeconds(), стирая только
+                // что поставленный setCurveTime — сдвиг молча исчез бы.
+                // elapsed-часы наследуем, если они уже накоплены (пауза на
+                // сдвинутой оси — легальный сценарий V8).
+                engine.setPlaybackStartTime(System.currentTimeMillis() - spec.resumeElapsedMs)
+                engine.play(preserveTimeline = true)
+            } else if (spec.resumeAnchorMs > 0) {
                 engine.setPlaybackStartTime(spec.resumeAnchorMs)
                 engine.play(preserveTimeline = true)     // не переякоряет таймлайн
             } else if (spec.resumeElapsedMs > 0) {

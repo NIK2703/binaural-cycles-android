@@ -21,7 +21,7 @@
     <string name="preset_gamma_productivity">Гамма-продуктивность</string>
     <string name="preset_daily_cycle">Суточный цикл</string>
     <string name="edit_preset">Редактирование</string>
-    <string name="preset_name">Название пресета</string>
+    <string name="preset_name">Название предустановки</string>
     <string name="import_preset">Импортировать</string>
     <string name="save">Сохранить</string>
     <string name="do_not_save">Не сохранять</string>
@@ -142,7 +142,7 @@
     <string name="resume_on_headset_connect_desc">Автоматически возобновлять воспроизведение при подключении гарнитуры, если оно было остановлено из-за её отключения</string>
     
     <!-- Auto Resume on App Start -->
-    <string name="auto_resume_on_app_start">Автовозобновление при запуске</string>
+    <string name="auto_resume_on_app_start">Возобновление при запуске</string>
     <string name="auto_resume_on_app_start_desc">Автоматически возобновлять воспроизведение при запуске приложения</string>
     
     <!-- Battery optimization exemption -->
@@ -184,13 +184,19 @@
 
     <!-- Gesture help (preset editor) -->
     <string name="gestures_help">Справка по жестам</string>
-    <string name="gestures_help_title">Жесты в редакторе</string>
+    <string name="gestures_help_title">Управление в редакторе</string>
     <string name="gesture_add_point">Дважды нажмите на пустом месте графика, чтобы добавить точку.</string>
     <string name="gesture_select_point">Нажмите на точку, чтобы открыть окно её редактирования.</string>
     <string name="gesture_drag_point">Переместите точку: вправо-влево — для изменения времени, вверх-вниз — для изменения частоты несущей.</string>
     <string name="gesture_swipe_fields">Проведите вверх-вниз по полям окна редактирования точки, чтобы увеличить/уменьшить их значения.</string>
-    <string name="gesture_range_labels">Нажмите на граничные метки частот (%1$s и %2$s), чтобы изменить масштаб графика.</string>
+    <string name="gesture_range_labels">Нажмите на граничные метки частот (%1$s и %2$s), чтобы изменить границы графика.</string>
+    <string name="gesture_scrub_handle">Перетащите ручку ◀|▶ на красном указателе, чтобы послушать, как пресет звучит в другое время суток. Звук перестроится, когда вы отпустите ручку.</string>
+    <string name="gesture_scrub_reset">Нажмите кнопку сброса рядом с ручкой (или перетащите ручку на серую линию), чтобы вернуть прослушивание к текущему моменту.</string>
     <string name="got_it">Понятно</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Прослушать другое время суток</string>
+    <string name="scrub_reset_description">Вернуть прослушивание к текущему моменту</string>
 
     <!-- Frequencies -->
     <string name="beat_frequency">Биения</string>

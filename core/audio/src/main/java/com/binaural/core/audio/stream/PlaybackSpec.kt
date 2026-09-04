@@ -6,7 +6,15 @@ import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.RelaxationModeSettings
 import java.util.concurrent.atomic.AtomicReference
 
-enum class SpecReason { PLAY, SETTINGS, PRESET_SWITCH, SAMPLE_RATE, RESUME, DEBUG }
+enum class SpecReason {
+    PLAY, SETTINGS, PRESET_SWITCH, SAMPLE_RATE, RESUME, DEBUG,
+    /**
+     * Предпросмотр другого времени суток из редактора пресета (см.
+     * docs/plan_playback_scrub_handle.md). По звуку спек может быть полностью
+     * равен живому — сравнение обязано идти не через [PlaybackSpec.audioEquals].
+     */
+    SCRUB
+}
 
 /**
  * Неизменяемый снимок всего, что нужно для построения потока.
@@ -39,7 +47,27 @@ data class PlaybackSpec(
     val resumeAnchor: CurveAnchor = CurveAnchor.NONE,
     /** ФИКС RC-2: фаза несущих для бесшовного кроссфейда (null = свежий старт, фаза 0). */
     val resumeLeftPhase: Float? = null,
-    val resumeRightPhase: Float? = null
+    val resumeRightPhase: Float? = null,
+    /**
+     * СКРАБ: сдвиг ОСИ времени суток в секундах, [0, 86400).
+     *
+     * Звучит не «позиция трека», а «какое сейчас время суток»: ось =
+     * `normalize(реальное_сейчас + scrubOffsetSec)`. Кривая при этом
+     * продолжает эволюционировать под прослушиванием, а все производные от
+     * времени (знаковая раскладка каналов, relaxation, beat scatter) остаются
+     * консистентны — в отличие от замороженной позиции.
+     *
+     * Сдвиг — СКАЛЯР, а не захваченный [CurveAnchor]: якорь устаревает за
+     * время фейд-аута и релиза старого потока, скаляр применяется к «сейчас»
+     * уже внутри `prepare()` и устареть не может.
+     *
+     * 0 = звук следует за реальным моментом суток (обычный режим).
+     *
+     * ВАЖНО: [audioEquals] это поле сознательно НЕ учитывает — иначе
+     * предпросмотр невозможно было бы отличить от живого спека. Сравнение
+     * делается на вызывающей стороне (см. [SpecReason.SCRUB]).
+     */
+    val scrubOffsetSec: Int = 0
 ) {
     /** Звучат ли два спека одинаково (нужен ли вообще handoff). */
     fun audioEquals(other: PlaybackSpec): Boolean =
