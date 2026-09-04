@@ -46,6 +46,7 @@ fun PresetSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.interpolation_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -147,6 +148,7 @@ fun VolumeNormalizationSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             // Подсказка в зависимости от выбранного типа
             Text(
                 text = when (volumeNormalizationSettings.type) {
@@ -270,6 +272,7 @@ fun ChannelSwapSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             // Подсказка в зависимости от выбора
             Text(
                 text = stringResource(
@@ -488,6 +491,7 @@ fun PowerSettingsCard(
                 text = stringResource(R.string.buffer_generation_minutes),
                 style = MaterialTheme.typography.bodyLarge
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.buffer_generation_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -511,6 +515,7 @@ fun PowerSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.audio_quality_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -869,6 +874,7 @@ fun RelaxationModeCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             // Описание текущего режима под заголовком
             Text(
                 text = when {
@@ -1083,6 +1089,7 @@ fun SettingsSwitchRow(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,

@@ -99,10 +99,10 @@
     <string name="beat_reduction_description">Percentage of beat frequency reduction during relaxation periods</string>
     <string name="reduction_percent_format">%d%%</string>
     <string name="relaxation_mode_type">Mode</string>
-    <string name="relaxation_mode_step">Step</string>
+    <string name="relaxation_mode_step">Uniform</string>
     <string name="relaxation_mode_smooth">Smooth</string>
-    <string name="relaxation_mode_step_desc">Periodic reduction on schedule with smooth transitions</string>
-    <string name="relaxation_mode_smooth_desc">Alternating base and reduced frequencies with adjustable interval</string>
+    <string name="relaxation_mode_step_desc">Uniform frequency reduction throughout the interval</string>
+    <string name="relaxation_mode_smooth_desc">Smooth frequency reduction followed by increase throughout the interval</string>
     <string name="smooth_interval">Interval between points</string>
     <string name="gap_between_relaxation">Gap between periods</string>
     <string name="relaxation_duration">Relaxation duration</string>

@@ -430,11 +430,10 @@ fun FrequencyGraph(
             val axisLabelBottomPx = with(density) { 11.dp.toPx() }
             val axisLabelLeftPx = with(density) { 3.dp.toPx() }
             val errorColor = MaterialTheme.colorScheme.error
-            // Серая линия-призрак (реальное «сейчас» при скрабе): теперь цвет
-            // из динамической темы (Monet), а не серый onSurfaceVariant.
-            // tertiary выбран, чтобы не совпадать ни с primary (кривая), ни с
-            // error (красная линия воспроизведения).
-            val ghostLineColor = MaterialTheme.colorScheme.tertiary
+            // Линия-призрак (реальное «сейчас» при скрабе): цвет primary
+            // из динамической темы (Monet) с такой же прозрачностью,
+            // как у линии воспроизведения (SCRUB_ARROW_ALPHA = 0.3f).
+            val ghostLineColor = MaterialTheme.colorScheme.primary
 
             // Границы контекстного окна точки в координатах области графика.
             // Нужны, чтобы касание по самому окну его не закрывало.
