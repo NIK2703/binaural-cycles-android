@@ -2147,7 +2147,7 @@ private fun circularDiffSeconds(a: LocalTime, b: LocalTime): Int {
 }
 
 private fun snappedTimeFromDrag(startSeconds: Int, dragPx: Float, graphWidthPx: Int): LocalTime {
-    val stepSeconds = TIME_STEP_MINUTES * 60
+    val stepSeconds = SCRUB_STEP_MINUTES * 60
     val raw = startSeconds + (dragPx * 24f * 3600f / graphWidthPx)
     val snapped = round(raw / stepSeconds) * stepSeconds
     // Кламп по краям суток, БЕЗ круговой арифметики: ручка скраба не должна
@@ -2158,8 +2158,11 @@ private fun snappedTimeFromDrag(startSeconds: Int, dragPx: Float, graphWidthPx: 
     return LocalTime.fromSecondOfDay(clamped.toInt())
 }
 
-// Шаг перемещения по времени (в минутах)
+// Шаг перемещения по времени (в минутах) — для точек
 private const val TIME_STEP_MINUTES = 5
+
+// Шаг перемещения скраб-ручки (в минутах) — тоньше, чем у точек
+private const val SCRUB_STEP_MINUTES = 1
 
 /**
  * Какую границу несущей правит диалог: нижнюю ([MIN]) или верхнюю ([MAX]).

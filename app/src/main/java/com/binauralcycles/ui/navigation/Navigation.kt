@@ -30,6 +30,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.navArgument
 import com.binauralcycles.ui.components.BatteryOptimizationPromptDialog
 import com.binauralcycles.ui.components.BottomPlaybackPanel
+import com.binauralcycles.ui.components.HeadphoneRequiredDialog
 import com.binauralcycles.ui.screens.PresetEditScreen
 import com.binauralcycles.ui.screens.PresetListScreen
 import com.binauralcycles.ui.screens.SettingsScreen
@@ -265,6 +266,14 @@ fun BinauralNavigation(
             BatteryOptimizationPromptDialog(
                 onConfirm = { viewModel.requestBatteryOptimizationExemption() },
                 onCancel = { viewModel.dismissBatteryOptimizationPrompt() }
+            )
+        }
+
+        // Диалог «Подключите наушники» при попытке запуска без гарнитуры
+        if (uiState.showHeadphoneDialog) {
+            HeadphoneRequiredDialog(
+                onPlayAnyway = { viewModel.playPresetAnyway() },
+                onDismiss = { viewModel.dismissHeadphoneDialog() }
             )
         }
     }

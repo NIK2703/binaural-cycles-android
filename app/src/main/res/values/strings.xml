@@ -214,4 +214,10 @@
     <string name="action_pause">Пауза</string>
     <string name="action_stop">Стоп</string>
     <string name="action_exit">Выход</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Подключите наушники</string>
+    <string name="headphone_required_message">Бинауральные ритмы работают только при прослушивании через наушники</string>
+    <string name="headphone_required_play_anyway">Запустить</string>
+    <string name="headphone_required_dismiss">Понятно</string>
 </resources>

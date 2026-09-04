@@ -214,4 +214,10 @@
     <string name="action_pause">Pause</string>
     <string name="action_stop">Stop</string>
     <string name="action_exit">Exit</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Connect headphones</string>
+    <string name="headphone_required_message">Binaural beats only work when listening through headphones</string>
+    <string name="headphone_required_play_anyway">Play anyway</string>
+    <string name="headphone_required_dismiss">Got it</string>
 </resources>

@@ -106,7 +106,11 @@ class BinauralPlaybackService : Service() {
 
         // НОВОЕ: включён ли debug-режим виртуального времени
         private val _debugTimeEnabled = MutableStateFlow(false)
-        
+
+        // Наушники подключены (для диалога проверки перед воспроизведением)
+        private val _hasHeadset = MutableStateFlow(false)
+        val hasHeadset: StateFlow<Boolean> = _hasHeadset.asStateFlow()
+
         private val _currentPresetName = MutableStateFlow<String?>(null)
         val currentPresetName: StateFlow<String?> = _currentPresetName.asStateFlow()
         
@@ -732,6 +736,7 @@ class BinauralPlaybackService : Service() {
                     audioManager?.let { am ->
                         val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
                         hasHeadset = devices.any { isHeadsetDevice(it) }
+                        _hasHeadset.value = hasHeadset
                         android.util.Log.d("BinauralPlaybackService", "Headset available: $hasHeadset")
                     }
                 }
@@ -756,6 +761,7 @@ class BinauralPlaybackService : Service() {
                         else -> false
                     }
                 }
+                _hasHeadset.value = hasHeadset
             }
         }
     }

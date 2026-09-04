@@ -149,6 +149,10 @@ data class BinauralUiState(
     val batteryOptimizationPromptShown: Boolean? = null,
     // true — прямо сейчас нужно показать стартовое напоминание
     val showBatteryOptimizationPrompt: Boolean = false,
+    // Диалог «подключите наушники»
+    val showHeadphoneDialog: Boolean = false,
+    // ID пресета, который нужно запустить после подтверждения
+    val pendingPresetId: String? = null,
     // Справка по управлению в редакторе уже показана (закрыта по «Понятно»).
     // null — значение ещё не прочитано из DataStore: до чтения справку не открываем
     // автоматически, чтобы диалог не мелькнул на старте экрана до загрузки флага.
@@ -624,6 +628,23 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
+     * «Понятно» в диалоге «Подключите наушники»: закрыть диалог без запуска.
+     */
+    fun dismissHeadphoneDialog() {
+        _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+    }
+
+    /**
+     * «Запустить» в диалоге «Подключите наушники»: запустить воспроизведение
+     * несмотря на отсутствие гарнитуры.
+     */
+    fun playPresetAnyway() {
+        val presetId = _uiState.value.pendingPresetId ?: return
+        _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+        startPreset(presetId, curveOverride = null, relaxationOverride = null)
+    }
+
+    /**
      * Переключатель «Бесперебойное воспроизведение в фоне» в настройках.
      *
      * Переключатель не хранит собственного состояния — оно целиком определяется
@@ -780,6 +801,17 @@ class BinauralViewModel @Inject constructor(
                 }
             }
         }
+
+        // Автоскрытие диалога «подключите наушники» при подключении гарнитуры
+        viewModelScope.launch {
+            BinauralPlaybackService.hasHeadset.collect { connected ->
+                if (connected && _uiState.value.showHeadphoneDialog) {
+                    val presetId = _uiState.value.pendingPresetId ?: return@collect
+                    _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+                    startPreset(presetId, curveOverride = null, relaxationOverride = null)
+                }
+            }
+        }
     }
 
     // ============= Скраб: предпросмотр другого времени суток =============
@@ -848,6 +880,11 @@ class BinauralViewModel @Inject constructor(
      * Воспроизвести пресет
      */
     fun playPreset(presetId: String) {
+        // Проверяем подключение наушников (если сервис подключён)
+        if (playbackService != null && !BinauralPlaybackService.hasHeadset.value) {
+            _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = presetId) }
+            return
+        }
         startPreset(presetId, curveOverride = null, relaxationOverride = null)
     }
 
@@ -1249,6 +1286,18 @@ class BinauralViewModel @Inject constructor(
             // пресета.
             playbackService?.pauseWithFade()
         } else {
+            // Проверяем подключение наушников при попытке запуска воспроизведения
+            if (playbackService != null && !BinauralPlaybackService.hasHeadset.value) {
+                // Определяем, какой пресет пытаются запустить
+                val pendingId = state.editingPresetId
+                    ?: state.activePreset?.id
+                    ?: lastActivePresetId
+                if (pendingId != null) {
+                    _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = pendingId) }
+                    return
+                }
+            }
+
             // РЕДАКТОР: «продолжить» внутри редактора — это ПЕРЕКЛЮЧЕНИЕ на
             // редактируемую предустановку, а не возврат к звучавшей ранее.
             //
