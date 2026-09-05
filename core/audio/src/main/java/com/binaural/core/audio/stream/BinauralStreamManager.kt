@@ -397,9 +397,11 @@ class BinauralStreamManager(private val context: Context) {
      *
      * Признак ставится в [requestHandoff]: предыдущий жест ещё ждёт своего
      * окна ([settleAtMs] в будущем) либо переход уже в полёте ([outgoing] или
-     * [pendingSilentSwitch] непусты). Снимается в [tryAdvanceQueue] ровно в
-     * тот момент, когда спеку наконец разыгрывают: если следующий жест
-     * одиночный, он снова платит только базовое окно.
+     * [pendingSilentSwitch] непусты). Снимается ТАМ ЖЕ, в [requestHandoff],
+     * но только если пришедший жест ИЗОЛИРОВАН (окно истекло и ничего не
+     * летит): одиночный жест платит базовое окно, а серия — продлённое.
+     * НЕ снимается на старте перехода (см. §4.4-1): иначе шторм настройки
+     * разваливался бы на 3 перехода вместо 1–2.
      *
      * Смысл: не штрафовать одиночный жест окном, достаточным для схлопывания
      * серии. См. [HANDOFF_STORM_EXTEND_MS].
@@ -1138,13 +1140,14 @@ class BinauralStreamManager(private val context: Context) {
         // а 150 мс меньше длительности самого перехода ([TRANSITION_FADE_MS]),
         // то есть поверх него и не слышны.
         val now = System.currentTimeMillis()
-        // Серия == предыдущий жест ещё не разыгран: его окно не истекло, либо
-        // переход уже в полёте и следующий жест ждёт релиза уходящего.
-        // Одиночный жест этого не увидит и заплатит только базовое окно.
-        if (settleAtMs > now || outgoing != null || pendingSilentSwitch != null) {
-            stormDetected = true
-        }
-        settleAtMs = now + if (stormDetected) HANDOFF_STORM_EXTEND_MS else HANDOFF_STORM_SETTLE_MS
+        // ВОЛНА 5: коалесценция (окно ожидания 150/300 мс) УДАЛЕНА. Спека
+        // разыгрывается немедленно — tryAdvanceQueue сразу видит wait<=0 и
+        // начинает переход. Серия жестов всё равно схлопывается в ≤2 перехода:
+        // очередь из одного слота (latest-wins, PlaybackQueue) держит только
+        // последнюю спеку, а страховка по outgoing/pendingSilentSwitch в
+        // tryAdvanceQueue не даёт поднять второй поток одновременно.
+        settleAtMs = 0L
+        stormDetected = false
         // Новый жест — свежий бюджет повторов: если прошлый хэндофф выбил
         // лимит и ушёл последовательным путём, следующий снова начнёт с
         // переоткладывания (причина отказа — временная нехватка кучи).
@@ -1207,16 +1210,13 @@ class BinauralStreamManager(private val context: Context) {
             cur.setVolume(volume)
             return
         }
-        // ШТОРМ: каждый жест — полный переход, а в перекрытии звучат два тона.
-        // Ждём, пока поток жестов стихнет, и берём последнюю спеку: серия любой
-        // длины стоит один-два перехода. Побочная выгода — если серия
-        // закончилась там же, откуда началась (магнит «к сейчас» у скраба),
-        // [needsHandoff] выше снимет спеку вовсе и звук не шелохнётся.
-        //
-        // Окно отсчитывается от ПОСЛЕДНЕГО жеста, поэтому проверка здесь
-        // работает и на догоне: переход, разыгранный сразу после релиза
-        // уходящего, тоже ждёт, если за время перехода пришли новые жесты
-        // (§4.3 — «отложенный старт»).
+        // ВОЛНА 5: окно коалесценции удалено (settleAtMs=0 в requestHandoff),
+        // поэтому сюда мы попадаем сразу, без ожидания. Серия жестов всё равно
+        // схлопывается в ≤2 перехода: очередь из одного слота (latest-wins)
+        // держит только последнюю спеку, а страховка по outgoing/
+        // pendingSilentSwitch выше не даёт поднять второй поток одновременно.
+        // Блок «wait>0» ниже теперь недостижим — оставлен как is, чтобы не
+        // трогать логику разбора очереди.
         val wait = settleAtMs - System.currentTimeMillis()
         if (wait > 0) {
             if (!settleScheduled) {
@@ -1228,9 +1228,9 @@ class BinauralStreamManager(private val context: Context) {
                 (if (stormDetected) "серия" else "одиночный жест"))
             return
         }
-        // Спеку разыгрываем: серия (если была) стихла. Следующий одиночный
-        // жест снова получит базовое окно, а не продлённое.
-        stormDetected = false
+        // Спеку разыгрываем: окно этого жеста истекло. Флаг серии НЕ сбрасываем
+        // здесь — его снимет только изолированный жест в requestHandoff, иначе
+        // шторм настройки разваливался бы на 3 перехода (§4.4-1, вариант (а)+).
         beginTransition(queue.poll() ?: return)
     }
 
@@ -1365,7 +1365,7 @@ class BinauralStreamManager(private val context: Context) {
         // поверх сценария с интервалом ~1 с) раздувают счётчик чужими
         // хэндоффами (грабли волн 3–4, §4.4).
         StreamLogger.d(TAG, "beginSilentSwitch: spec#${old.spec.serial} гаснет " +
-            "(${ZERO_OVERLAP_LEG_MS}мс), spec#${enriched.serial} ждёт нуля " +
+            "(${ZERO_OVERLAP_LEG_MS}мс), spec#${enriched.serial} стартует на нуле " +
             "(причина=${spec.reason}, сдвиг=${spec.scrubOffsetSec} с, elapsed=${switchElapsedMs}мс)")
 
         old.stopWithSilentHook(
@@ -1376,6 +1376,11 @@ class BinauralStreamManager(private val context: Context) {
             fadeOutMsOverride = ZERO_OVERLAP_LEG_MS,
             onSilent = { startPendingSilentSwitch() }
         )
+        // ВОЛНА 5: NEXT стартует ровно на нуле амплитуды CURRENT (rampMs ==
+        // ZERO_OVERLAP_LEG_MS), без ожидания хука тишины — устраняет мёртвую
+        // паузу 10–25 мс. onSilent оставлен как идемпотентная страховка:
+        // startPendingSilentSwitch защищён по pendingSilentSwitch/current.
+        actor.postDelayed({ startPendingSilentSwitch() }, ZERO_OVERLAP_LEG_MS)
     }
 
     /**
