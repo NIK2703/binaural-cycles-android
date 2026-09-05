@@ -23,7 +23,6 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 import android.graphics.Paint
@@ -237,17 +236,10 @@ private fun computeGraphGeometry(
     
     val finalParams = params.copy(maxBeat = maxBeat)
     
-    // Определяем точки для интерполяции
+    // В режиме расслабления кривая идёт ТОЛЬКО по виртуальным точкам,
+    // иначе — по базовым.
     val pointsForInterpolation = when {
-        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP && virtualPoints.isNotEmpty() -> {
-            virtualPoints
-        }
-        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH && virtualPoints.isNotEmpty() -> {
-            virtualPoints
-        }
-        relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> {
-            (sortedPoints + virtualPoints).sortedBy { it.time.toSecondOfDay() }
-        }
+        relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> virtualPoints
         else -> sortedPoints
     }
     
@@ -267,9 +259,8 @@ private fun computeGraphGeometry(
     val carrierPath = computeCarrierPath(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
     val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
     
-    // Вычисляем путь базовой кривой (по основным точкам) для режимов STEP и SMOOTH
-    val baseCarrierPath = if (relaxationModeSettings.enabled && 
-        (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+    // Путь базовой кривой (по основным точкам) для пунктира
+    val baseCarrierPath = if (relaxationModeSettings.enabled &&
         relaxationModeSettings.carrierReductionPercent > 0 &&
         sortedPoints.size >= 2) {
         computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension, baseWeights)
@@ -296,7 +287,7 @@ private fun computeGraphGeometry(
         labelTexts.add("%.0f(%s)".format(Locale.getDefault(), point.carrierFrequency, beatStr))
     }
     
-    // Позиции виртуальных точек (не используются в SMOOTH режиме)
+    // Позиции виртуальных точек (мини-график их не отрисовывает)
     val virtualPointPositions = FloatArray(0)
     
     return CachedGraphGeometry(

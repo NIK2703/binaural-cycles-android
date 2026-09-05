@@ -99,7 +99,6 @@ data class GraphCacheKey(
     val interpolationType: InterpolationType,
     val splineTension: Float,
     val relaxationEnabled: Boolean,
-    val relaxationMode: Int,
     val relaxationSettingsHash: Int,
     val widthPx: Int,
     val heightPx: Int,
@@ -181,7 +180,6 @@ object MiniGraphCache {
             interpolationType = interpolationType,
             splineTension = splineTension,
             relaxationEnabled = relaxationModeSettings.enabled,
-            relaxationMode = relaxationModeSettings.mode.ordinal,
             relaxationSettingsHash = computeRelaxationSettingsHash(relaxationModeSettings),
             widthPx = widthPx,
             heightPx = heightPx,
@@ -209,7 +207,6 @@ object MiniGraphCache {
         hash = 31 * hash + settings.transitionPeriodMinutes
         hash = 31 * hash + settings.relaxationDurationMinutes
         hash = 31 * hash + settings.gapBetweenRelaxationMinutes
-        hash = 31 * hash + settings.smoothIntervalMinutes
         return hash
     }
 }

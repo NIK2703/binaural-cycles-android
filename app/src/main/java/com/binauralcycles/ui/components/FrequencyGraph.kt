@@ -69,7 +69,6 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binauralcycles.R
 import kotlinx.coroutines.coroutineScope
@@ -1212,10 +1211,9 @@ private fun buildGraphStaticPaths(
         null
     }
 
-    // В режимах STEP и SMOOTH — пунктирная линия базовой кривой (через основные точки)
+    // Пунктирная линия базовой кривой (через основные точки), когда включены
+    // периоды расслабления и несущая реально снижается
     val showDashedBase = relaxationModeSettings.enabled &&
-        (relaxationModeSettings.mode == RelaxationMode.STEP ||
-            relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
         relaxationModeSettings.carrierReductionPercent > 0 &&
         realPoints.size >= 2
     val dashedBase = if (showDashedBase) {

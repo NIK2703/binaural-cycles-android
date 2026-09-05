@@ -72,7 +72,10 @@ data class SerializableVolumeNormalizationSettings(
 )
 
 /**
- * Сериализуемые настройки режима расслабления
+ * Сериализуемые настройки периодов расслабления.
+ *
+ * Поле mode — устаревший выбор UI-режима (STEP/SMOOTH): механизмы объединены,
+ * поле читается из старых JSON, но при маппинге в модель не используется.
  */
 @Serializable
 data class SerializableRelaxationModeSettings(
@@ -83,8 +86,6 @@ data class SerializableRelaxationModeSettings(
     val gapBetweenRelaxationMinutes: Int = 24,
     val transitionPeriodMinutes: Int = 3,
     val relaxationDurationMinutes: Int = 15,
-    // Интервал между точками для SMOOTH режима
-    val smoothIntervalMinutes: Int = 30,
     // Для обратной совместимости со старыми пресетами
     val relaxationIntervalMinutes: Int? = null
 )
@@ -769,13 +770,11 @@ class BinauralPreferencesRepository @Inject constructor(
                 ),
                 relaxationModeSettings = SerializableRelaxationModeSettings(
                     enabled = preset.relaxationModeSettings.enabled,
-                    mode = preset.relaxationModeSettings.mode.name,
                     carrierReductionPercent = preset.relaxationModeSettings.carrierReductionPercent,
                     beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent,
                     gapBetweenRelaxationMinutes = preset.relaxationModeSettings.gapBetweenRelaxationMinutes,
                     transitionPeriodMinutes = preset.relaxationModeSettings.transitionPeriodMinutes,
-                    relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes,
-                    smoothIntervalMinutes = preset.relaxationModeSettings.smoothIntervalMinutes
+                    relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes
                 ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
@@ -823,17 +822,11 @@ class BinauralPreferencesRepository @Inject constructor(
                         
                         RelaxationModeSettings(
                             enabled = it.enabled,
-                            mode = try { 
-                                com.binaural.core.audio.model.RelaxationMode.valueOf(it.mode) 
-                            } catch (e: Exception) { 
-                                com.binaural.core.audio.model.RelaxationMode.SMOOTH 
-                            },
                             carrierReductionPercent = it.carrierReductionPercent,
                             beatReductionPercent = it.beatReductionPercent,
                             gapBetweenRelaxationMinutes = gapMinutes,
                             transitionPeriodMinutes = it.transitionPeriodMinutes,
-                            relaxationDurationMinutes = it.relaxationDurationMinutes,
-                            smoothIntervalMinutes = it.smoothIntervalMinutes
+                            relaxationDurationMinutes = it.relaxationDurationMinutes
                         )
                     } ?: RelaxationModeSettings(),
                     createdAt = serializable.createdAt,

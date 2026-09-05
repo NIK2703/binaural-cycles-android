@@ -9,7 +9,6 @@ import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import java.util.concurrent.atomic.AtomicLong
 

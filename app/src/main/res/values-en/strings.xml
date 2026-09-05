@@ -88,23 +88,16 @@
     <string name="temporal_normalization_description">Balance volume between graph points for consistent sound throughout the rhythm</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Relaxation period modes</string>
+    <string name="relaxation_mode">Relaxation periods</string>
     <string name="relaxation_mode_description">Periodic frequency reduction for brain rest</string>
-    <string name="relaxation_mode_disabled">Disabled</string>
-    <string name="relaxation_mode_enabled_desc">Frequency reduction in the middle of intervals between points</string>
+    <string name="relaxation_mode_enabled_desc">The curve dips according to the relaxation period schedule</string>
     <string name="relaxation_mode_disabled_desc">Frequencies follow the graph without reduction</string>
     <string name="carrier_reduction">Carrier frequency reduction</string>
     <string name="carrier_reduction_description">Percentage of carrier frequency reduction during relaxation periods</string>
     <string name="beat_reduction">Beat frequency reduction</string>
     <string name="beat_reduction_description">Percentage of beat frequency reduction during relaxation periods</string>
     <string name="reduction_percent_format">%d%%</string>
-    <string name="relaxation_mode_type">Mode</string>
-    <string name="relaxation_mode_step">Uniform</string>
-    <string name="relaxation_mode_smooth">Smooth</string>
-    <string name="relaxation_mode_step_desc">Uniform frequency reduction throughout the interval</string>
-    <string name="relaxation_mode_smooth_desc">Smooth frequency reduction followed by increase throughout the interval</string>
-    <string name="smooth_interval">Interval between points</string>
-    <string name="gap_between_relaxation">Gap between periods</string>
+    <string name="gap_between_relaxation">Pause between periods</string>
     <string name="relaxation_duration">Relaxation duration</string>
     <string name="transition_period">Transition period</string>
     <string name="transition_period_description">Time for smooth transition to reduced frequencies and back</string>

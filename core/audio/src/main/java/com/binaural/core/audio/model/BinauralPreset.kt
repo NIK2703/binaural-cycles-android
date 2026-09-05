@@ -571,7 +571,15 @@ data class ChannelSwapSettings(
 )
 
 /**
- * Режим периодов расслабления
+ * Режим периодов расслабления.
+ *
+ * УСТАРЕВШЕЕ: исторически UI выбирал между STEP (трапецеидальные впадины по
+ * расписанию) и SMOOTH (чередующиеся точки). Оба режима объединены в единый
+ * параметрический механизм [RelaxationModeSettings]: форма впадины задаётся
+ * тремя слайдерами, а SMOOTH стал вырожденным случаем при большом периоде
+ * перехода. Перечисление сохранено только для совместимости со старым JSON
+ * пресетов: поле [RelaxationModeSettings.mode] продолжает сериализоваться,
+ * но логикой больше не используется.
  */
 @Serializable
 enum class RelaxationMode {
@@ -580,7 +588,15 @@ enum class RelaxationMode {
 }
 
 /**
- * Настройки режима расслабления для пресета
+ * Настройки периодов расслабления для пресета.
+ *
+ * Единый параметрический механизм (см. [generateVirtualPoints]): каждый период
+ * — трапеция (переход → плато сниженных частот → переход), периоды идут от
+ * 00:00 с шагом `2 * transition + duration + gap`. Нулевые параметры дают
+ * корректные пределы: duration = 0 — треугольная впадина без плато,
+ * transition = 0 — мгновенный вход/выход, transition = gap = 0 — кривая
+ * снижена везде. Поле [mode] — устаревший выбор UI-режима, хранится ради
+ * совместимости старого JSON и логикой не используется.
  */
 @Serializable
 data class RelaxationModeSettings(
@@ -612,12 +628,10 @@ data class RelaxationModeSettings(
      * Знак имеет смысл только благодаря знаковой семантике beat = right − left.
      */
     val beatReductionPercent: Int = 50,      // 0-200%
-    // Параметры для расширенного режима
-    val gapBetweenRelaxationMinutes: Int = 45,  // Интервал МЕЖДУ периодами расслабления: 0-120 минут
-    val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 1-10 минут
-    val relaxationDurationMinutes: Int = 15,    // Длительность периода расслабления: 10-60 минут
-    // Параметры для плавного режима
-    val smoothIntervalMinutes: Int = 30         // Интервал между точками: 5-60 минут
+    // Параметры формы впадины (единый механизм, см. generateVirtualPoints)
+    val gapBetweenRelaxationMinutes: Int = 45,  // Пауза МЕЖДУ периодами расслабления: 0-120 минут
+    val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 0-60 минут
+    val relaxationDurationMinutes: Int = 15     // Длительность периода расслабления: 0-60 минут
 ) {
     companion object {
         /**
@@ -646,16 +660,14 @@ data class RelaxationModeSettings(
         require(beatReductionPercent in 0..MAX_BEAT_REDUCTION_PERCENT) {
             "Снижение частоты биений должно быть от 0% до $MAX_BEAT_REDUCTION_PERCENT%"
         }
-        require(gapBetweenRelaxationMinutes in 0..120) { "Интервал между периодами расслабления должен быть от 0 до 120 минут" }
-        require(transitionPeriodMinutes in 1..10) { "Период перехода должен быть от 1 до 10 минут" }
-        require(relaxationDurationMinutes in 5..60) { "Длительность периода расслабления должна быть от 5 до 60 минут" }
-        require(smoothIntervalMinutes in 5..120) { "Интервал между точками должен быть от 5 до 120 минут" }
+        require(gapBetweenRelaxationMinutes in 0..120) { "Пауза между периодами расслабления должна быть от 0 до 120 минут" }
+        require(transitionPeriodMinutes in 0..60) { "Период перехода должен быть от 0 до 60 минут" }
+        require(relaxationDurationMinutes in 0..60) { "Длительность периода расслабления должна быть от 0 до 60 минут" }
     }
     
     /**
-     * Генерирует виртуальные точки режима расслабления по кривой.
-     * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
-     * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
+     * Генерирует виртуальные точки периодов расслабления по кривой.
+     * По 4 точки на период, образующие трапецию (см. перегрузку ниже).
      *
      * @param curve Базовая кривая частот (из основных точек)
      */
@@ -771,54 +783,63 @@ data class RelaxationModeSettings(
             splineTension = splineTension
         )
 
-        return when (mode) {
-            RelaxationMode.STEP -> generateStepVirtualPoints(baseCurve)
-            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(baseCurve)
-        }
+        return generateRelaxationTrapezoidPoints(baseCurve)
     }
     
     
     /**
-     * Ступенчатый режим: генерация виртуальных точек по расписанию.
-     * Создаётся группа из 4 точек для каждого периода расслабления:
-     * - Точка 1: на базовой кривой (начало периода)
-     * - Точка 2: сниженные частоты (после перехода)
-     * - Точка 3: сниженные частоты (конец расслабления)
-     * - Точка 4: на базовой кривой (после выхода)
-     * 
-     * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
-     * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+     * Единый генератор виртуальных точек периодов расслабления.
+     *
+     * Каждый период — трапеция из 4 точек; периоды начинаются от 00:00 и идут
+     * с шагом `2 * transitionSeconds + durationSeconds + gapSeconds`:
+     * - t1: базовая кривая (вход в период);
+     * - t2: сниженные частоты (после перехода);
+     * - t3: сниженные частоты (конец плато расслабления);
+     * - t4: базовая кривая (после выхода).
+     *
+     * ДЕДУПЛИКАЦИЯ «ПОСЛЕДНЯЯ ПОБЕЖДАЕТ»: точки собираются в порядке t1→t4
+     * в LinkedHashMap по времени суток, поздняя запись перезаписывает раннюю.
+     * Это даёт корректные пределы при нулевых параметрах БЕЗ спец-кейсов:
+     * - transition = 0: t1 == t2, побеждает сниженная → мгновенный вход;
+     * - duration = 0: t2 == t3, остаётся одна сниженная → треугольная впадина;
+     * - transition = 0 и gap = 0: t4 периода N совпадает с t1/t2 периода N+1,
+     *   побеждает сниженная → кривая снижена везде (предел «всегда расслаблен»);
+     * - все параметры нулевые: periodStepSeconds = 0 → пустой список, кривая
+     *   откатывается к базовой (fallback есть и в движке, и в графиках).
+     *
+     * Итог отсортирован по времени суток; кривая строится ТОЛЬКО по этим
+     * виртуальным точкам.
      */
-    private fun generateStepVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
-        val virtualPoints = mutableListOf<FrequencyPoint>()
-        
+    private fun generateRelaxationTrapezoidPoints(curve: FrequencyCurve): List<FrequencyPoint> {
         val carrierReduction = carrierReductionPercent / 100.0f
         val beatReduction = beatReductionPercent / 100.0f
-        
+
         val gapSeconds = gapBetweenRelaxationMinutes * 60L
         val transitionSeconds = transitionPeriodMinutes * 60L
         val durationSeconds = relaxationDurationMinutes * 60L
-        
+
         // Полный период расслабления = 2 * переход + длительность
         val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-
-        // Генерируем периоды расслабления от 00:00
         val daySeconds = 24 * 3600L
 
         // Guard от бесконечного цикла при неположительном шаге
         val periodStepSeconds = fullPeriodSeconds + gapSeconds
         if (periodStepSeconds <= 0L) return emptyList()
 
+        // Совпадающие по времени точки: поздняя в порядке генерации
+        // перезаписывает раннюю — см. док-комментарий.
+        val pointsBySecondOfDay = LinkedHashMap<Int, FrequencyPoint>()
+
         var periodStartSeconds = 0L
-        
+
         while (periodStartSeconds < daySeconds) {
             // Точка 1: начало периода (на базовой кривой)
             val t1 = periodStartSeconds
             val time1 = LocalTime.fromSecondOfDay((t1 % daySeconds).toInt())
-            val carrier1 = curve.getCarrierFrequencyAt(time1)
-            val beat1 = curve.getBeatFrequencyAt(time1)
-            virtualPoints.add(FrequencyPoint(time1, carrier1, beat1))
-            
+            pointsBySecondOfDay[time1.toSecondOfDay()] = FrequencyPoint(
+                time1, curve.getCarrierFrequencyAt(time1), curve.getBeatFrequencyAt(time1)
+            )
+
             // Точка 2: после перехода (сниженные частоты)
             val t2 = periodStartSeconds + transitionSeconds
             if (t2 < daySeconds) {
@@ -830,9 +851,9 @@ data class RelaxationModeSettings(
                     beatReduction,
                     curve.carrierRange.min
                 )
-                virtualPoints.add(FrequencyPoint(time2, carrier2, beat2))
+                pointsBySecondOfDay[time2.toSecondOfDay()] = FrequencyPoint(time2, carrier2, beat2)
             }
-            
+
             // Точка 3: конец расслабления (сниженные частоты)
             val t3 = periodStartSeconds + transitionSeconds + durationSeconds
             if (t3 < daySeconds) {
@@ -844,74 +865,25 @@ data class RelaxationModeSettings(
                     beatReduction,
                     curve.carrierRange.min
                 )
-                virtualPoints.add(FrequencyPoint(time3, carrier3, beat3))
+                pointsBySecondOfDay[time3.toSecondOfDay()] = FrequencyPoint(time3, carrier3, beat3)
             }
-            
+
             // Точка 4: после выхода (на базовой кривой)
             val t4 = periodStartSeconds + fullPeriodSeconds
             if (t4 < daySeconds) {
                 val time4 = LocalTime.fromSecondOfDay((t4 % daySeconds).toInt())
-                val carrier4 = curve.getCarrierFrequencyAt(time4)
-                val beat4 = curve.getBeatFrequencyAt(time4)
-                virtualPoints.add(FrequencyPoint(time4, carrier4, beat4))
+                pointsBySecondOfDay[time4.toSecondOfDay()] = FrequencyPoint(
+                    time4, curve.getCarrierFrequencyAt(time4), curve.getBeatFrequencyAt(time4)
+                )
             }
-            
+
             // Переходим к следующему периоду: полный период + пауза между периодами
             periodStartSeconds += periodStepSeconds
         }
-        
-        // Сортируем по времени
-        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+
+        return pointsBySecondOfDay.values.sortedBy { it.time.toSecondOfDay() }
     }
     
-    /**
-     * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
-     * Интервал между точками регулируется параметром smoothIntervalMinutes.
-     * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
-     */
-    private fun generateSmoothVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
-        val virtualPoints = mutableListOf<FrequencyPoint>()
-        
-        val carrierReduction = carrierReductionPercent / 100.0f
-        val beatReduction = beatReductionPercent / 100.0f
-        val intervalSeconds = smoothIntervalMinutes * 60L
-        // Guard от бесконечного цикла: неположительный интервал → дефолт 5 минут
-        val safeIntervalSeconds = if (intervalSeconds > 0L) intervalSeconds else 5 * 60L
-        val daySeconds = 24 * 3600L
-
-        // Генерируем точки от 00:00 до 23:59 с заданным интервалом
-        // Чётные индексы (0, 2, 4...) - точки на базовой кривой
-        // Нечётные индексы (1, 3, 5...) - снижающие точки
-
-        var currentSeconds = 0L
-        var index = 0
-
-        while (currentSeconds < daySeconds) {
-            val time = LocalTime.fromSecondOfDay((currentSeconds % daySeconds).toInt())
-
-            if (index % 2 == 0) {
-                // Чётный индекс - точка на базовой кривой
-                val carrier = curve.getCarrierFrequencyAt(time)
-                val beat = curve.getBeatFrequencyAt(time)
-                virtualPoints.add(FrequencyPoint(time, carrier, beat))
-            } else {
-                // Нечётный индекс - снижающая точка (знак beat сохраняется)
-                val (carrier, beat) = reduceFrequencies(
-                    curve.getCarrierFrequencyAt(time),
-                    curve.getBeatFrequencyAt(time),
-                    carrierReduction,
-                    beatReduction,
-                    curve.carrierRange.min
-                )
-                virtualPoints.add(FrequencyPoint(time, carrier, beat))
-            }
-
-            currentSeconds += safeIntervalSeconds
-            index++
-        }
-        
-        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
-    }
 }
 
 /**
@@ -942,34 +914,29 @@ data class BinauralPreset(
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     /**
-     * Кэшированная кривая с виртуальными точками расслабления
+     * Кэшированная кривая с виртуальными точками расслабления.
      * Вычисляется лениво при первом обращении.
-     * 
-     * Для SIMPLE режима: объединяются реальные и виртуальные точки.
-     * Для ADVANCED режима: используются ТОЛЬКО виртуальные точки
-     * (реальные точки нужны только для расчёта базовой кривой).
+     *
+     * При включённых периодах расслабления используются ТОЛЬКО виртуальные
+     * точки (реальные нужны только для расчёта базовой кривой).
      */
     @kotlinx.serialization.Transient
     val curveWithRelaxation: FrequencyCurve by lazy {
         if (relaxationModeSettings.enabled) {
             val virtualPoints = relaxationModeSettings.generateVirtualPoints(frequencyCurve)
-            
-            when (relaxationModeSettings.mode) {
-                RelaxationMode.STEP, RelaxationMode.SMOOTH -> {
-                    // Ступенчатый и плавный режимы: ТОЛЬКО виртуальные точки
-                    // Если виртуальных точек меньше 2, используем базовую кривую
-                    if (virtualPoints.size >= 2) {
-                        FrequencyCurve(
-                            points = virtualPoints,
-                            carrierRange = frequencyCurve.carrierRange,
-                            beatRange = frequencyCurve.beatRange,
-                            interpolationType = frequencyCurve.interpolationType,
-                            splineTension = frequencyCurve.splineTension
-                        )
-                    } else {
-                        frequencyCurve
-                    }
-                }
+
+            // Если виртуальных точек меньше 2, кривая по ним не построится —
+            // используем базовую.
+            if (virtualPoints.size >= 2) {
+                FrequencyCurve(
+                    points = virtualPoints,
+                    carrierRange = frequencyCurve.carrierRange,
+                    beatRange = frequencyCurve.beatRange,
+                    interpolationType = frequencyCurve.interpolationType,
+                    splineTension = frequencyCurve.splineTension
+                )
+            } else {
+                frequencyCurve
             }
         } else {
             frequencyCurve

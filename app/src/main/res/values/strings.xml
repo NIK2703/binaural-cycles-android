@@ -94,23 +94,16 @@
     <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Режим периодов расслабления</string>
+    <string name="relaxation_mode">Периоды расслабления</string>
     <string name="relaxation_mode_description">Периодическое снижение частот для отдыха мозга</string>
-    <string name="relaxation_mode_disabled">Отключены</string>
-    <string name="relaxation_mode_enabled_desc">Снижение частот в серединах интервалов между точками</string>
+    <string name="relaxation_mode_enabled_desc">Кривая снижается по расписанию периодов расслабления</string>
     <string name="relaxation_mode_disabled_desc">Частоты следуют графику без снижения</string>
     <string name="carrier_reduction">Снижение несущей частоты</string>
     <string name="carrier_reduction_description">Процент снижения несущей частоты в периоды расслабления</string>
     <string name="beat_reduction">Снижение частоты биений</string>
     <string name="beat_reduction_description">Процент снижения частоты биений в периоды расслабления</string>
     <string name="reduction_percent_format">%d%%</string>
-    <string name="relaxation_mode_type">Режим</string>
-    <string name="relaxation_mode_step">Равномерные</string>
-    <string name="relaxation_mode_smooth">Плавный</string>
-    <string name="relaxation_mode_step_desc">Равномерное снижение частот на протяжении всего интервала</string>
-    <string name="relaxation_mode_smooth_desc">Плавное снижение, а затем повышение частот на протяжении всего интервала</string>
-    <string name="smooth_interval">Интервал между точками</string>
-    <string name="gap_between_relaxation">Интервал между периодами</string>
+    <string name="gap_between_relaxation">Пауза между периодами</string>
     <string name="relaxation_duration">Длительность расслабления</string>
     <string name="transition_period">Период перехода</string>
     <string name="transition_period_description">Время плавного перехода к сниженным частотам и обратно</string>

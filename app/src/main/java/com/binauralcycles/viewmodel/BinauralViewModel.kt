@@ -26,7 +26,6 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.core.audio.stream.PacketMemoryBudget
@@ -1043,7 +1042,7 @@ class BinauralViewModel @Inject constructor(
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val isActivePreset = _uiState.value.activePreset?.id == presetId
         
-        android.util.Log.d("BinauralViewModel", "startEditingPreset: presetId=$presetId, relaxationModeSettings=${preset.relaxationModeSettings}, smoothInterval=${preset.relaxationModeSettings.smoothIntervalMinutes}")
+        android.util.Log.d("BinauralViewModel", "startEditingPreset: presetId=$presetId, relaxationModeSettings=${preset.relaxationModeSettings}")
         
         _uiState.update { 
             it.copy(
@@ -1225,7 +1224,7 @@ class BinauralViewModel @Inject constructor(
         curve: FrequencyCurve, 
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
-        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings, smoothInterval=${relaxationModeSettings.smoothIntervalMinutes}")
+        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings")
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
@@ -1910,19 +1909,6 @@ class BinauralViewModel @Inject constructor(
         pushEditingRelaxationToService()
     }
     
-    /**
-     * Установить режим расслабления (SIMPLE или ADVANCED)
-     */
-    fun setEditingRelaxationMode(mode: RelaxationMode) {
-        val state = _uiState.value
-        android.util.Log.d("BinauralViewModel", "setEditingRelaxationMode: mode=$mode, current smoothInterval=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
-        _uiState.update { 
-            it.copy(
-                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(mode = mode)
-            )
-        }
-        pushEditingRelaxationToService()
-    }
     
     /**
      * Установить паузу между периодами расслабления (в минутах)
@@ -1943,7 +1929,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingRelaxationDurationMinutes(minutes: Int) {
         val state = _uiState.value
-        val clampedMinutes = minutes.coerceIn(5, 60)
+        val clampedMinutes = minutes.coerceIn(0, 60)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(relaxationDurationMinutes = clampedMinutes)
@@ -1957,7 +1943,7 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingTransitionPeriodMinutes(minutes: Int) {
         val state = _uiState.value
-        val clampedMinutes = minutes.coerceIn(1, 15)
+        val clampedMinutes = minutes.coerceIn(0, 60)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(transitionPeriodMinutes = clampedMinutes)
@@ -1966,19 +1952,6 @@ class BinauralViewModel @Inject constructor(
         pushEditingRelaxationToService()
     }
     
-    /**
-     * Установить интервал между точками для SMOOTH режима (в минутах)
-     */
-    fun setEditingSmoothIntervalMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(5, 120)
-        _uiState.update { state ->
-            android.util.Log.d("BinauralViewModel", "setEditingSmoothIntervalMinutes: minutes=$minutes, clamped=$clampedMinutes, current=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
-            state.copy(
-                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(smoothIntervalMinutes = clampedMinutes)
-            )
-        }
-        pushEditingRelaxationToService()
-    }
 
     // ============= Методы для управления общими настройками приложения =============
     
