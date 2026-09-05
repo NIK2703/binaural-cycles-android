@@ -3,6 +3,9 @@
 #include "Config.h"
 #include <cmath>
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
 
 namespace binaural {
 
@@ -619,9 +622,166 @@ inline void FrequencyCurve::buildTrendCrossings() {
  * стать отрицательными (и быть обрезаны до 0), что приведёт к неправильному
  * вычислению minChannelFreq = 0 и потере звука при временной нормализации.
  */
+/**
+ * ОТПЕЧАТОК КРИВОЙ: ровно всё, от чего зависит содержимое lookup-таблицы.
+ *
+ * Таблица — функция только от (точки, тип интерполяции, натяжение, веса
+ * касательных). Частота дискретизации, громкость, перестановка каналов и
+ * нормализация в неё НЕ входят и в отпечаток не идут: иначе смена громкости
+ * выглядела бы сменой кривой и выбивала бы кэш на каждом шаге слайдера.
+ */
+inline uint64_t curveFingerprint(const FrequencyCurve& c) {
+    // FNV-1a, 64 бит.
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, std::size_t n) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) {
+            h ^= static_cast<uint64_t>(b[i]);
+            h *= 1099511628211ull;
+        }
+    };
+    // Поля смешиваются ПО ОДНОМУ, а не целой структурой: в FrequencyPoint
+    // есть выравнивающие пропуски, и их содержимое не определено — смешивание
+    // структуры целиком делало бы отпечаток нестабильным.
+    for (const auto& p : c.points) {
+        mix(&p.timeSeconds, sizeof(p.timeSeconds));
+        mix(&p.carrierFrequency, sizeof(p.carrierFrequency));
+        mix(&p.beatFrequency, sizeof(p.beatFrequency));
+    }
+    const int itype = static_cast<int>(c.interpolationType);
+    mix(&itype, sizeof(itype));
+    mix(&c.splineTension, sizeof(c.splineTension));
+    if (!c.tensionWeights.empty()) {
+        mix(c.tensionWeights.data(), c.tensionWeights.size() * sizeof(float));
+    }
+    // Размеры — последними и отдельно: без них «4 точки (1,2)+(3,4)» и «8
+    // точек» с одинаковым байтовым потоком выглядели бы одной кривой.
+    const uint64_t n = static_cast<uint64_t>(c.points.size());
+    const uint64_t w = static_cast<uint64_t>(c.tensionWeights.size());
+    mix(&n, sizeof(n));
+    mix(&w, sizeof(w));
+    return h;
+}
+
+/**
+ * КЭШ ТАБЛИЦ КРИВОЙ: один слот на процесс, таблицы по СЛАБЫМ ссылкам.
+ *
+ * ЗАЧЕМ. Каждый скраб в редакторе — это полный хэндофф, то есть новый
+ * нативный движок и полная пересборка lookup-таблицы (0.69 МБ и ~4 мс в
+ * типичном случае, до 6.6 МБ и ~37 мс при шаге 100 мс) плюс сканирование
+ * сетки ≥17 280 узлов на нули тренда. И всё это НА НИТИ АКТЁРА ради кривой,
+ * которая НЕ ИЗМЕНИЛАСЬ. docs/analysis_scrub_storm_click_risk.md (R3).
+ *
+ * ПОЧЕМУ СЛАБЫЕ ССЫЛКИ. Держать таблицы сильно — значит навсегда
+ * зарезервировать до 6.6 МБ нативной памяти, а её дефицит здесь не
+ * гипотеза, а documented причина отказа createTrack_l (-12). Слабая ссылка
+ * даёт ровно то, что нужно: в момент скраба УХОДЯЩИЙ поток ещё жив (он
+ * гаснет 250 мс), его таблицы ещё в куче, и свежий движок забирает их
+ * БЕСПЛАТНО. Когда ни одного потока нет — кэш пуст и память свободна.
+ *
+ * ПОЧЕМУ ОДИН СЛОТ. Рабочий сценарий — «предыдущая кривая → та же кривая».
+ * Набор пресетов с несколькими живыми кривыми кэшу не выгоден, а один слот
+ * делает промах детерминированным.
+ *
+ * Таблицы неизменяемы (shared_ptr<const ...>), поэтому отдавать их нескольким
+ * движкам одновременно безопасно: писатель, держащий копию конфига, видит
+ * тот же снимок, что и до пересборки.
+ */
+class CurveTableCache {
+public:
+    struct Entry {
+        uint64_t fingerprint = 0;
+        std::size_t points = 0;
+        std::size_t weights = 0;
+        int32_t tableIntervalMs = 0;
+        std::weak_ptr<const std::vector<float>> lower;
+        std::weak_ptr<const std::vector<float>> upper;
+        std::vector<TrendCrossing> crossings;
+        float minLower = 0.0f, maxLower = 0.0f;
+        float minUpper = 0.0f, maxUpper = 0.0f;
+        float minChannel = 0.0f;
+    };
+
+    static CurveTableCache& instance() {
+        static CurveTableCache c;
+        return c;
+    }
+
+    /**
+     * @param outLower/outUpper сильные ссылки на таблицы (lock внутри):
+     *        пока вызывающий их держит, таблицы гарантированно живы.
+     * @param out метаданные (шаг таблицы, экстремумы, min/max).
+     * @return true — попали: данные сложены в аргументы.
+     *         false — держателя больше нет или кривая другая.
+     */
+    bool lookup(uint64_t fp, std::size_t points, std::size_t weights,
+                std::shared_ptr<const std::vector<float>>& outLower,
+                std::shared_ptr<const std::vector<float>>& outUpper,
+                Entry& out) {
+        std::lock_guard<std::mutex> g(mtx);
+        if (slot.fingerprint != fp || slot.points != points ||
+            slot.weights != weights) return false;
+        outLower = slot.lower.lock();   // nullptr — все держатели умерли
+        outUpper = slot.upper.lock();
+        if (!outLower || !outUpper) return false;
+        out.fingerprint = fp;
+        out.points = points;
+        out.weights = weights;
+        out.tableIntervalMs = slot.tableIntervalMs;
+        out.crossings = slot.crossings;
+        out.minLower = slot.minLower;
+        out.maxLower = slot.maxLower;
+        out.minUpper = slot.minUpper;
+        out.maxUpper = slot.maxUpper;
+        out.minChannel = slot.minChannel;
+        return true;
+    }
+
+    void publish(const Entry& e) {
+        // Список экстремумов — единственное, что хранится ПО ЗНАЧЕНИЮ и потому
+        // переживает смерть всех держателей. На типовых кривых их единицы;
+        // предел страхует от патологической кривой с тысячами экстремумов.
+        if (e.crossings.size() > kMaxCachedCrossings) return;
+        std::lock_guard<std::mutex> g(mtx);
+        slot = e;
+    }
+
+private:
+    CurveTableCache() = default;
+    static constexpr std::size_t kMaxCachedCrossings = 4096;
+    std::mutex mtx;
+    Entry slot;
+};
+
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
-    
+
+    // БЫСТРЫЙ ПУТЬ: кривая та же — переиспользуем готовые таблицы.
+    //
+    // Экономит 0.69…6.6 МБ аллокаций и ~4…37 мс на нити актёра на КАЖДОМ
+    // скрабе, а заодно снимает давление на кучу — ту самую, из-за которой
+    // второй трек иногда не создаётся (-12) и скраб уходит в разрыв (R1).
+    // Проверка дешевле сборки на порядки: отпечаток — один проход по точкам,
+    // а сборка — это таблица плюс скан сетки.
+    const uint64_t fp = curveFingerprint(*this);
+    cachedHash = static_cast<int32_t>(fp & 0xFFFFFFFFu);
+    CurveTableCache::Entry hit;
+    // Сильные ссылки живут в lookup() ровно до присваивания в поля — присваиваем
+    // сразу, без промежуточного хранения: двойной lock() не нужен.
+    if (CurveTableCache::instance().lookup(
+            fp, points.size(), tensionWeights.size(),
+            lowerFreqTable, upperFreqTable, hit)) {
+        tableIntervalMs = hit.tableIntervalMs;
+        trendCrossings = std::move(hit.crossings);
+        trendCrossingsValid = true;
+        minLowerFreq = hit.minLower;
+        maxLowerFreq = hit.maxLower;
+        minUpperFreq = hit.minUpper;
+        maxUpperFreq = hit.maxUpper;
+        minChannelFreq = hit.minChannel;
+        return;
+    }
+
     // Сначала строим lookup table
     buildLookupTable();
 
@@ -659,6 +819,23 @@ inline void FrequencyCurve::updateCache() {
         const float minFreqAtPoint = p.carrierFrequency - std::abs(p.beatFrequency) / 2.0f;
         minChannelFreq = std::min(minChannelFreq, minFreqAtPoint);
     }
+
+    // Публикуем результат: следующий движок с той же кривой возьмёт его
+    // бесплатно — если этот к тому моменту ещё жив (отсюда слабые ссылки).
+    CurveTableCache::Entry e;
+    e.fingerprint = fp;
+    e.points = points.size();
+    e.weights = tensionWeights.size();
+    e.tableIntervalMs = tableIntervalMs;
+    e.lower = lowerFreqTable;
+    e.upper = upperFreqTable;
+    e.crossings = trendCrossings;
+    e.minLower = minLowerFreq;
+    e.maxLower = maxLowerFreq;
+    e.minUpper = minUpperFreq;
+    e.maxUpper = maxUpperFreq;
+    e.minChannel = minChannelFreq;
+    CurveTableCache::instance().publish(e);
 }
 
 /**

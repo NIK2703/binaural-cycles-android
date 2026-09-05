@@ -142,6 +142,8 @@ data class BinauralUiState(
     val resumeOnHeadsetConnect: Boolean = false,
     // Автовозобновление воспроизведения при запуске приложения
     val autoResumeOnAppStart: Boolean = false,
+    // Напоминание о необходимости подключения наушников (по умолчанию включено)
+    val headphoneReminderEnabled: Boolean = true,
     // Приложение уже добавлено в исключения фонового энергосбережения (состояние системы,
     // а не настройка: перечитывается при каждом возврате приложения на экран)
     val isIgnoringBatteryOptimizations: Boolean = false,
@@ -318,7 +320,8 @@ class BinauralViewModel @Inject constructor(
         BUFFER_MINUTES,
         CHANNEL_SWAP,
         NORMALIZATION,
-        HEADSET_RESUME
+        HEADSET_RESUME,
+        HEADPHONE_REMINDER
     }
 
     /**
@@ -588,6 +591,13 @@ class BinauralViewModel @Inject constructor(
                 tryAutoResumeOnAppStart()
             }
         }
+        // Напоминание о необходимости подключения наушников
+        viewModelScope.launch {
+            preferencesRepository.getHeadphoneReminderEnabled().collect { enabled ->
+                _uiState.update { it.copy(headphoneReminderEnabled = enabled) }
+                onSettingLoaded(Setting.HEADPHONE_REMINDER)
+            }
+        }
         // Признак «стартовое напоминание об энергосбережении уже показано»
         viewModelScope.launch {
             preferencesRepository.getBatteryOptimizationPromptShown().collect { shown ->
@@ -677,7 +687,7 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
-     * Переключатель «Бесперебойное воспроизведение в фоне» в настройках.
+     * Переключатель «Воспроизведение в фоне» в настройках.
      *
      * Переключатель не хранит собственного состояния — оно целиком определяется
      * системой, а выдать или отозвать исключение может только пользователь.
@@ -925,7 +935,8 @@ class BinauralViewModel @Inject constructor(
         // в observePlaybackState, когда воспроизведение останавливается.
         if (playbackService != null &&
             !BinauralPlaybackService.hasHeadset.value &&
-            !headphoneBypassActive) {
+            !headphoneBypassActive &&
+            _uiState.value.headphoneReminderEnabled) {
             _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = presetId) }
             return
         }
@@ -1331,7 +1342,8 @@ class BinauralViewModel @Inject constructor(
             playbackService?.pauseWithFade()
         } else {
             // Проверяем подключение наушников при попытке запуска воспроизведения
-            if (playbackService != null && !BinauralPlaybackService.hasHeadset.value) {
+            if (playbackService != null && !BinauralPlaybackService.hasHeadset.value
+                && state.headphoneReminderEnabled) {
                 // Определяем, какой пресет пытаются запустить
                 val pendingId = state.editingPresetId
                     ?: state.activePreset?.id
@@ -2220,6 +2232,16 @@ class BinauralViewModel @Inject constructor(
         playbackService?.setResumeOnHeadsetConnect(enabled)
         viewModelScope.launch {
             preferencesRepository.saveResumeOnHeadsetConnect(enabled)
+        }
+    }
+
+    /**
+     * Включить/выключить напоминание о необходимости подключения наушников.
+     */
+    fun setHeadphoneReminderEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(headphoneReminderEnabled = enabled) }
+        viewModelScope.launch {
+            preferencesRepository.saveHeadphoneReminderEnabled(enabled)
         }
     }
     

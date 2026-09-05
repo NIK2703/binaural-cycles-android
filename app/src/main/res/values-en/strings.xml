@@ -144,6 +144,10 @@
     <!-- Auto Resume on App Start -->
     <string name="auto_resume_on_app_start">Auto-resume on start</string>
     <string name="auto_resume_on_app_start_desc">Automatically resume playback when app starts</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Headphone connection</string>
+    <string name="headphone_reminder_desc">Remind to connect headphones for listening to binaural beats</string>
     
     <!-- Battery optimization exemption -->
     <string name="uninterrupted_background_playback">Uninterrupted background playback</string>
@@ -159,8 +163,8 @@
     
     <!-- Frequency Graph -->
     <string name="frequency_hz">Frequency (Hz)</string>
-    <string name="min_carrier_frequency">Min. carrier frequency</string>
-    <string name="max_carrier_frequency">Max. carrier frequency</string>
+    <string name="min_channel_frequency">Minimum channel frequency</string>
+    <string name="max_channel_frequency">Maximum channel frequency</string>
     <string name="ok">OK</string>
     <string name="minutes_short">min</string>
     <string name="hours_short">h</string>

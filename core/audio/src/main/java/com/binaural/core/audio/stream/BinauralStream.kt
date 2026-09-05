@@ -15,7 +15,7 @@ enum class FadeMode { NONE, IN, OUT }
  * в эфире один поток, equal-power не даёт ничего, кроме более крутого хвоста:
  * терминальный наклон −π/2 ≈ −1.57 против −1 у прямой, то есть та же ошибка
  * в миллисекундах даёт на 57 % больший остаточный шаг. Поэтому пары обязаны
- * назначаться вместе — см. BinauralStreamManager.beginCrossfade.
+ * назначаться вместе — см. BinauralStreamManager.beginSilentSwitch.
  */
 enum class FadeShape { LINEAR, EQUAL_POWER }
 
@@ -31,8 +31,19 @@ interface BinauralStream {
     /** Создать движок/трек/буфер и сгенерировать ПЕРВЫЙ пакет. Звука нет. Синхронно. */
     fun prepare(): Boolean
 
-    /** play() трека + рампа 0→1 (фикс 1.1: шейпер до play и до первой записи). */
-    fun start(onFullyStarted: () -> Unit, shape: FadeShape = FadeShape.LINEAR): Boolean
+    /**
+     * play() трека + рампа 0→1 (фикс 1.1: шейпер до play и до первой записи).
+     *
+     * @param fadeInMsOverride длительность рампы вместо штатной (≤ 0 — брать
+     *        штатную). Парный параметр к `fadeOutMsOverride` у
+     *        [stopWithSilentHook]: оба плеча перехода с нулевым перекрытием
+     *        задаются одной константой, чтобы «приседание» не растягивалось.
+     */
+    fun start(
+        onFullyStarted: () -> Unit,
+        shape: FadeShape = FadeShape.LINEAR,
+        fadeInMsOverride: Long = 0L
+    ): Boolean
 
     /**
      * Рампа до 0, затем полная утилизация. Идемпотентен.
@@ -41,8 +52,40 @@ interface BinauralStream {
      *        трек снят, движок уничтожен, пакет отдан. До этого момента поток
      *        остаётся ЕДИНСТВЕННЫМ загруженным — менеджер не создаёт следующий
      *        поток, пока не пришёл этот колбэк.
+     * @param fadeOutMsOverride длительность рампы вместо штатной (≤ 0 — брать
+     *        штатную). Парный параметр к `fadeInMsOverride` у [start]: менеджер
+     *        задаёт оба плеча одной константой, чтобы слышимая длина перехода
+     *        была одна для всех маршрутов (docs/analysis_scrub_storm_click_risk.md
+     *        §4.3).
      */
-    fun stop(onFullyStopped: () -> Unit, shape: FadeShape = FadeShape.LINEAR)
+    fun stop(
+        onFullyStopped: () -> Unit,
+        shape: FadeShape = FadeShape.LINEAR,
+        fadeOutMsOverride: Long = 0L
+    )
+
+    /**
+     * [stop] с хуком тишины и своей длительностью рампы.
+     *
+     * @param onSilent вызывается в момент, когда огибающая РЕАЛЬНО дошла до
+     *        нуля, — заметно РАНЬШЕ [onFullyStopped]: между ними лежат пауза
+     *        трека, выход писателя и разбор буфера (десятки миллисекунд).
+     *        Нужен переходам с НУЛЕВЫМ ПЕРЕКРЫТИЕМ — например скрабу, где два
+     *        когерентных тона в перекрытии дают случайный провал: поднимать
+     *        следующий поток надо именно здесь, иначе вместо бесшовного стыка
+     *        получится слышимая пауза. Ровно один вызов, гарантированно на
+     *        тишине.
+     * @param fadeOutMsOverride длительность рампы вместо штатной (≤ 0 — брать
+     *        штатную). Короткий уход нужен там же, где [onSilent]: общая длина
+     *        «приседания» складывается из ухода и прихода, и штатные 250 мс на
+     *        каждое плечо дают лишнюю половину секунды ямы.
+     */
+    fun stopWithSilentHook(
+        onFullyStopped: () -> Unit,
+        shape: FadeShape,
+        fadeOutMsOverride: Long,
+        onSilent: (() -> Unit)?
+    )
 
     /** Разворот рампы: идущий fade-out превращается в fade-in с текущего значения. */
     fun reverseFadeToPlaying(onFullyStarted: () -> Unit): Boolean
@@ -103,4 +146,18 @@ interface BinauralStream {
 
     fun isChannelsSwapped(): Boolean
     fun getFrequenciesAtCurrentTime(): Pair<Float, Float>?
+
+    /**
+     * Рампа УХОДА реально дошла до нуля, то есть в эфире от потока ничего нет
+     * и снимать трек/движок можно без щелчка.
+     *
+     * Осмысленно ТОЛЬКО для fade-out ([stop] с `shape` ухода, [pause]):
+     * при fade-in «доехать до нуля» не требуется, и ответ meaningless.
+     *
+     * `false` означает, что шейпер залип на ненулевом множителе — снятие трека
+     * в этот момент даёт СТУПЕНЬКУ амплитуды, то есть слышимый щелчок.
+     * Вызывающий обязан подождать, а не рубить (см. BinauralStreamManager
+     * сторож уходящего потока, docs/analysis_scrub_storm_click_risk.md R6/R7).
+     */
+    fun isFadedToSilent(): Boolean
 }

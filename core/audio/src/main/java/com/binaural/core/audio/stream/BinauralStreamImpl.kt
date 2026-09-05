@@ -71,6 +71,23 @@ class BinauralStreamImpl(
          * отдельным WARN — а не происходит молча на каждой смене пресета.
          */
         private const val FADE_SETTLE_CEILING_MS = 400L
+        /**
+         * Дополнительная отсрочка сверх [FADE_SETTLE_CEILING_MS], которую
+         * опрос даёт рампе, ПОКА ОНА ДВИЖЕТСЯ к цели.
+         *
+         * Прежний код снимал поток ровно по мягкому пределу, не разбирая двух
+         * совершенно разных ситуаций:
+         *  * рампа ИДЁТ, просто медленно (загружен микшер, длинный период
+         *    HAL) — здесь принудительный `setVolume(0)` из finalizeStop и есть
+         *    настоящий ЩЕЛЧОК: скачок с недогашенного множителя сразу в ноль;
+         *  * рампа СТОИТ (трек не рендерит, шейпер не стартовал) — здесь ждать
+         *    бессмысленно, зато шаг безвреден: звука всё равно нет.
+         *
+         * Поэтому по мягкому пределу смотрим, изменилось ли значение с прошлого
+         * опроса: изменилось — продлеваем до жёсткого предела, не изменилось —
+         * снимаем сразу. docs/analysis_scrub_storm_click_risk.md (R6).
+         */
+        private const val FADE_STALL_GRACE_MS = 1500L
         /** Байт в кадре: стерео × ENCODING_PCM_FLOAT. */
         private const val frameBytes = 2 * 4
         /**
@@ -373,7 +390,7 @@ class BinauralStreamImpl(
                 // Инвариант: 1 в покое, 2 только на время кроссфейда —
                 // уходящий поток ещё держит СВОЙ дорощенный пакет, входящий
                 // живёт на стартовом (750 КБ). Третьего быть не может:
-                // beginCrossfade не поднимает NEXT, пока [outgoing] не пуст.
+                // менеджер не поднимает NEXT, пока [outgoing] не пуст.
                 append("holders=${livePacketHolders.get()} peak=${peakPacketHolders.get()} (инвариант: <=2)\n")
                 append("budget=${packetsBudgetUsed.get() / mb}МБ " +
                     "peak=${peakPacketsBudgetUsed.get() / mb}МБ " +
@@ -528,7 +545,7 @@ class BinauralStreamImpl(
     // Раньше здесь же висел второй колбэк ровно в конце рампы («точка
     // тишины») — из него менеджер повышал заранее подготовленный NEXT и
     // получал бесшовный кроссфейд. Схема вернулась (см.
-    // BinauralStreamManager.beginCrossfade), но теперь NEXT стартует ДО
+    // BinauralStreamManager.beginSilentSwitch), NEXT подготовлен ДО
     // фейд-аута: колбэк нужен только чтобы утилизировать уходящий поток, и
     // находится он уже ПОД звучащим новым.
     private fun cancelFadeCallbacks() {
@@ -550,23 +567,42 @@ class BinauralStreamImpl(
      *        когда кривая дошла, иначе возврат к базе даст шаг).
      */
     private fun scheduleFadeCompletion(rampMs: Long, toZero: Boolean, completion: Runnable) {
-        val deadline = System.currentTimeMillis() + rampMs + FADE_SETTLE_CEILING_MS
+        val startMs = System.currentTimeMillis()
+        val softDeadline = startMs + rampMs + FADE_SETTLE_CEILING_MS
+        // Жёсткий предел: рампу, которая всё ещё движется, можно подождать и
+        // дольше мягкого предела — шага при этом не будет. Но не бесконечно:
+        // уходящий поток держит трек и пакет, а менеджер ждёт его релиза.
+        val hardDeadline = softDeadline + FADE_STALL_GRACE_MS
+        var lastV: Float? = null
         val poll = object : Runnable {
             override fun run() {
                 val v = liveShaperVolume()      // null — шейпера нет, ждать нечего
                 val settled = v == null ||
                     if (toZero) v <= FADE_ZERO_EPSILON else v >= 1f - FADE_ZERO_EPSILON
-                if (settled || System.currentTimeMillis() >= deadline) {
-                    if (!settled) {
-                        StreamLogger.w(TAG, "fade spec#${spec.serial}: шейпер не дошёл до " +
-                            "цели за ${rampMs + FADE_SETTLE_CEILING_MS}мс (v=$v, toZero=$toZero) — " +
-                            "снимаем принудительно, шаг неизбежен")
-                    }
+                if (settled) {
                     cancelFadeCallbacks()
                     completion.run()
-                } else {
-                    controlHandler.postDelayed(this, FADE_POLL_MS)
+                    return
                 }
+                val now = System.currentTimeMillis()
+                // Рампа ДВИЖЕТСЯ к цели (prev == null — первый опрос, судить
+                // рано) — значит это не залипание, а медленный микшер:
+                // продлеваем опрос. Стоит на месте — ждать бессмысленно.
+                val prev = lastV
+                lastV = v
+                // `v == null` здесь не проверяется: выше `settled` уже отсёк
+                // «шейпера нет», то есть `v` непусто (смарт-каст компилятора).
+                val progressing = prev == null || if (toZero) v < prev else v > prev
+                if (now < softDeadline || (progressing && now < hardDeadline)) {
+                    controlHandler.postDelayed(this, FADE_POLL_MS)
+                    return
+                }
+                val reason = if (progressing) "двигалась, но не успела" else "не двигалась вовсе"
+                StreamLogger.w(TAG, "fade spec#${spec.serial}: шейпер не дошёл до цели " +
+                    "(v=$v, toZero=$toZero, ${now - startMs}мс, рампа $reason) — " +
+                    "снимаем принудительно, шаг неизбежен")
+                cancelFadeCallbacks()
+                completion.run()
             }
         }
         fadeCompletion = poll
@@ -581,6 +617,18 @@ class BinauralStreamImpl(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null
         val shaper = volumeShaper ?: return null
         return try { shaper.volume.coerceIn(0f, 1f) } catch (_: Exception) { null }
+    }
+
+    /**
+     * См. [BinauralStream.isFadedToSilent].
+     *
+     * `null` от [liveShaperVolume] — шейпера нет, а значит громкость держится
+     * базой трека; при уходе база погашена в [finalizeStop]/[applyShaper] до
+     * нуля, то есть тишина гарантирована и ждать нечего.
+     */
+    override fun isFadedToSilent(): Boolean {
+        val v = liveShaperVolume() ?: return true
+        return v <= FADE_ZERO_EPSILON
     }
 
     // -------------------------------------------------- мягкая пауза (состояние)
@@ -1108,7 +1156,11 @@ class BinauralStreamImpl(
 
     // ------------------------------------------------------------------ start
 
-    override fun start(onFullyStarted: () -> Unit, shape: FadeShape): Boolean {
+    override fun start(
+        onFullyStarted: () -> Unit,
+        shape: FadeShape,
+        fadeInMsOverride: Long
+    ): Boolean {
         if (!lifecycleRef.compareAndSet(StreamLifecycle.PREPARED, StreamLifecycle.PLAYING)) {
             StreamLogger.w(TAG, "start spec#${spec.serial}: не PREPARED (lc=${lifecycleRef.get()})")
             return false
@@ -1137,7 +1189,8 @@ class BinauralStreamImpl(
             }
             preparedPrefilled = true
 
-            val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = shape)
+            val fadeMs = if (fadeInMsOverride > 0L) fadeInMsOverride else fadeInMs
+            val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeMs, shape = shape)
             track.play()
             // §E: верификация RC-1 без осциллографа (underrun-окно + позиция).
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -1170,15 +1223,50 @@ class BinauralStreamImpl(
 
     // ------------------------------------------------------------------ stop
 
-    override fun stop(onFullyStopped: () -> Unit, shape: FadeShape) {
+    override fun stop(onFullyStopped: () -> Unit, shape: FadeShape, fadeOutMsOverride: Long) =
+        stopWithSilentHook(onFullyStopped, shape, fadeOutMsOverride, onSilent = null)
+
+    override fun stopWithSilentHook(
+        onFullyStopped: () -> Unit,
+        shape: FadeShape,
+        fadeOutMsOverride: Long,
+        onSilent: (() -> Unit)?
+    ) {
+        // Хук «дошли до нуля» обязан сработать РОВНО ОДИН РАЗ и только на
+        // реальной тишине. Он reachable из четырёх мест (мгновенные ветки ниже,
+        // пауза, колбэк рампы), поэтому флаг один на весь вызов stop(): без
+        // него сторож утилизации (onOutgoingReleased) и хук нуля могли бы
+        // поднять следующий поток дважды.
+        //
+        // Отсчёт для маркера тишины: менеджер поднимает NEXT ровно из этого
+        // хука, и инвариант «фейд-ин начинается строго ПОСЛЕ полного
+        // затухания» проверяется по логу только по разнице меток
+        // «fade-out(…)» → «ТИШИНА» → «SWAP по нулю». Без этой точки в логе
+        // нечем подтвердить, что стык пришёлся на нулевую амплитуду, а не на
+        // остаток рампы (docs/analysis_scrub_storm_click_risk.md §4.4).
+        var rampStartMs = System.currentTimeMillis()
+        val silent: (() -> Unit)? = onSilent?.let { hook ->
+            val once = java.util.concurrent.atomic.AtomicBoolean(false)
+            val onceOnly: () -> Unit = {
+                if (once.compareAndSet(false, true)) {
+                    StreamLogger.d(TAG, "stop spec#${spec.serial}: ТИШИНА — v=${currentMultiplier()} " +
+                        "через ${System.currentTimeMillis() - rampStartMs}мс от старта рампы, " +
+                        "поднимаем NEXT")
+                    hook()
+                }
+            }
+            onceOnly
+        }
         when (lifecycleRef.get()) {
             StreamLifecycle.RELEASED, StreamLifecycle.FAILED -> {
                 StreamLogger.d(TAG, "stop spec#${spec.serial}: уже RELEASED/FAILED — мгновенный колбэк")
+                silent?.invoke()
                 onFullyStopped(); return
             }
             // Поток ещё НЕ звучал — утилизация бесшумна (кейс "остановлен в очереди").
             StreamLifecycle.CREATED, StreamLifecycle.PREPARED -> {
                 StreamLogger.d(TAG, "stop spec#${spec.serial}: не играл — тихий abort")
+                silent?.invoke()
                 abort(); onFullyStopped(); return
             }
             StreamLifecycle.STOPPING -> { StreamLogger.d(TAG, "stop spec#${spec.serial}: уже STOPPING (идемпотентно)"); return }
@@ -1195,6 +1283,7 @@ class BinauralStreamImpl(
             StreamLogger.d(TAG, "stop spec#${spec.serial}: на мягкой паузе — утилизация без рампы")
             cancelFadeCallbacks()
             fadeMode = FadeMode.OUT
+            silent?.invoke()
             finalizeStop(onFullyStopped)
             return
         }
@@ -1202,9 +1291,16 @@ class BinauralStreamImpl(
         cancelFadeCallbacks()   // снять фейд-ин, если был
 
         // Текущее значение рампы: если остановили посреди fade-in — фейд-аут короткий.
+        // Длительность берётся из переопределения, если оно задано: переходам с
+        // нулевым перекрытием обе рампы (уход и приход) складываются в общую
+        // длину «приседания», и штатные fadeOutMs на каждое плечо дают лишние
+        // сотни миллисекунд ямы.
+        val fadeMs = if (fadeOutMsOverride > 0L) fadeOutMsOverride else fadeOutMs
         val cur = currentMultiplier()
-        val dur = if (cur <= 0.001f) 0L else (fadeOutMs * cur).toLong().coerceAtLeast(40L)
-        StreamLogger.d(TAG, "stop spec#${spec.serial}: fade-out($shape) cur=$cur dur=${dur}ms")
+        val dur = if (cur <= 0.001f) 0L else (fadeMs * cur).toLong().coerceAtLeast(40L)
+        rampStartMs = System.currentTimeMillis()
+        StreamLogger.d(TAG, "stop spec#${spec.serial}: fade-out($shape) cur=$cur dur=${dur}ms " +
+            "(штатные ${fadeOutMs}мс, переопределение ${fadeOutMsOverride}мс, onSilent=${silent != null})")
         if (dur > 0) {
             applyShaper(from = cur, to = 0f, durationMs = dur, shape = shape)
         } else {
@@ -1219,10 +1315,18 @@ class BinauralStreamImpl(
         //
         // Раньше отсюда и начинался РАЗРЫВ ЗВУКА при смене пресета: менеджер не
         // создавал новый поток, пока этот не утилизирован. Теперь NEXT стартует
-        // ДО этого фейда (см. BinauralStreamManager.beginCrossfade), поэтому
+        // ДО этого фейда (см. BinauralStreamManager.beginSilentSwitch), поэтому
         // всё, что происходит ниже — пауза трека, опрос писателя, релиз — идёт
         // под уже звучащим новым потоком и в эфире не присутствует вовсе.
-        val completion = Runnable { finalizeStop(onFullyStopped) }
+        // ПОРЯДОК КРИТИЧЕН: сначала хук нуля, ПОТОМ утилизация. Переход с
+        // нулевым перекрытием поднимает следующий поток именно из хука — то
+        // есть до паузы трека, выхода писателя и разбора буфера, — и стык
+        // выходит бесшовным. Через [onFullyStopped] тот же подъём приехал бы
+        // на десятки миллисекунд позже, и вместо стыка слышна была бы пауза.
+        val completion = Runnable {
+            silent?.invoke()
+            finalizeStop(onFullyStopped)
+        }
         fadeCompletion = completion
         scheduleFadeCompletion(dur, toZero = true, completion = completion)
     }

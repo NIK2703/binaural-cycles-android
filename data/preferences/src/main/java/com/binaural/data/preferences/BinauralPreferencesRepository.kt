@@ -148,6 +148,9 @@ class BinauralPreferencesRepository @Inject constructor(
         private val RESUME_ON_HEADSET_CONNECT_KEY = booleanPreferencesKey("resume_on_headset_connect")
         // Автовозобновление воспроизведения при запуске приложения
         private val AUTO_RESUME_ON_APP_START_KEY = booleanPreferencesKey("auto_resume_on_app_start")
+        // Напоминание о необходимости подключения наушников при воспроизведении
+        // (включено по умолчанию)
+        private val HEADPHONE_REMINDER_ENABLED_KEY = booleanPreferencesKey("headphone_reminder_enabled")
         // Стартовое напоминание об исключении фонового энергосбережения уже показано
         private val BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY =
             booleanPreferencesKey("battery_optimization_prompt_shown")
@@ -536,6 +539,29 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveAutoResumeOnAppStart(enabled: Boolean) {
         dataStore.edit { preferences ->
             preferences[AUTO_RESUME_ON_APP_START_KEY] = enabled
+        }
+    }
+
+    // Методы для напоминания о необходимости подключения наушников
+
+    /**
+     * Получить настройку напоминания о подключении наушников.
+     * @return true — при запуске воспроизведения без гарнитуры показывать
+     *         диалог «Подключите наушники» (по умолчанию включено)
+     */
+    fun getHeadphoneReminderEnabled(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[HEADPHONE_REMINDER_ENABLED_KEY] ?: true // По умолчанию включено
+        }
+    }
+
+    /**
+     * Сохранить настройку напоминания о подключении наушников.
+     * @param enabled true — показывать диалог «Подключите наушники»
+     */
+    suspend fun saveHeadphoneReminderEnabled(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[HEADPHONE_REMINDER_ENABLED_KEY] = enabled
         }
     }
 

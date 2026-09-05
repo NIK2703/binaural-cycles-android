@@ -87,7 +87,7 @@
     <string name="normalization_temporal">Временная</string>
     <string name="normalization_none_description">Громкость не выравнивается</string>
     <string name="normalization_channel_description">Выравнивание громкости между левым и правым каналом по соотношению частот их тонов</string>
-    <string name="normalization_temporal_description">Вырванивание громкости каналов по наименьшей частоте каналов воспроизводимой предустановки</string>
+    <string name="normalization_temporal_description">Выравнивание громкости каналов по наименьшей частоте канала воспроизводимой предустановки</string>
     
     <!-- Temporal Normalization (deprecated, kept for compatibility) -->
     <string name="temporal_normalization">Временная нормализация</string>
@@ -150,9 +150,13 @@
     <!-- Auto Resume on App Start -->
     <string name="auto_resume_on_app_start">Возобновление при запуске</string>
     <string name="auto_resume_on_app_start_desc">Автоматически возобновлять воспроизведение при запуске приложения</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Подключение наушников</string>
+    <string name="headphone_reminder_desc">Напоминать о необходимости подключения наушников для прослушивания бинауральных ритмов</string>
     
     <!-- Battery optimization exemption -->
-    <string name="uninterrupted_background_playback">Бесперебойное воспроизведение в фоне</string>
+    <string name="uninterrupted_background_playback">Воспроизведение в фоне</string>
     <string name="uninterrupted_background_playback_desc">Добавьте приложение в исключения фонового энергосбережения для бесперебойного воспроизведения ритмов в фоне</string>
     <string name="battery_optimization_prompt_title">Бесперебойная работа в фоне</string>
     <string name="battery_optimization_prompt_message">Система может приостанавливать фоновую работу приложения для экономии заряда — из-за этого воспроизведение ритмов будет прерываться. Добавьте приложение в исключения фонового энергосбережения, чтобы звук не останавливался.</string>
@@ -165,8 +169,8 @@
     
     <!-- Frequency Graph -->
     <string name="frequency_hz">Частота (Гц)</string>
-    <string name="min_carrier_frequency">Мин. несущая частота</string>
-    <string name="max_carrier_frequency">Макс. несущая частота</string>
+    <string name="min_channel_frequency">Минимальная частота канала</string>
+    <string name="max_channel_frequency">Максимальная частота канала</string>
     <string name="ok">OK</string>
     <string name="minutes_short">мин</string>
     <string name="hours_short">ч</string>

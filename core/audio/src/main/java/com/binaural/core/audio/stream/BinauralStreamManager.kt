@@ -11,7 +11,11 @@ import com.binaural.core.audio.engine.NativeAudioEngine
 import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralConfig
 import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.RelaxationModeSettings
+import kotlinx.datetime.LocalTime
+import java.util.Locale
+import kotlin.math.abs
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -80,7 +84,7 @@ class BinauralStreamManager(private val context: Context) {
          * витке, движок уничтожается: единицы — десятки миллисекунд. Плохой
          * случай — писатель застрял в generate/write, и [finalizeStop] опрашивает
          * латч до `WRITE_CHUNK_MS + 2 с` (≈ 10 с). Всё это время [outgoing] не
-         * `null`, а значит [beginCrossfade] не поднимает NEXT: пользователь жал
+         * `null`, а значит [tryAdvanceQueue] не поднимает NEXT: пользователь жал
          «сменить пресет», а звук не меняется десять секунд.
          *
          * Поэтому по истечении срока уходящий снимается принудительно.
@@ -90,6 +94,166 @@ class BinauralStreamManager(private val context: Context) {
         private const val OUTGOING_RELEASE_TIMEOUT_MS = 1_200L
         /** Как часто проверяем застрявший релиз уходящего потока. */
         private const val OUTGOING_REAPER_PERIOD_MS = 200L
+
+        /**
+         * ЖЁСТКИЙ предел сторожа уходящего потока, мс.
+         *
+         * [OUTGOING_RELEASE_TIMEOUT_MS] — это срок, после которого релиз считается
+         * застрявшим. Но снимать поток, чья рампа ещё НЕ дошла до нуля, — значит
+         * рубить амплитуду, то есть дать щелчок (docs/analysis_scrub_storm_click_risk.md
+         * R7). Поэтому при «релиз застрял, но рампа не в нуле» сторож ждёт до
+         * этого второго предела — и только потом снимает принудительно в любом
+         * состоянии. Предел обязан остаться конечным: трек и пакет обязаны
+         * вернуться в кучу, иначе кроссфейды встанут навсегда.
+         */
+        private const val OUTGOING_REAPER_HARD_TIMEOUT_MS = 2_500L
+
+        /**
+         * ШТОРМ: окно успокоения после последнего жеста, мс — БАЗОВОЕ.
+         *
+         * Распространяется на ВСЕ причины ([SpecReason]): серия жестов
+         * осмысленна у любой из них, а промежуточные состояния не имеют
+         * ценности (слушать нужно итог, а не каждый шаг). Для SCRUB это серия
+         * коротких фликов «чик-чик-чик» ([FrequencyGraph] вызывает `onCommit`
+         * только из `onDragEnd`), для PRESET_SWITCH — «листание» пресета
+         * кнопкой next/prev, для SETTINGS — «прокрутка» ползунка, которая
+         * тоже стреляет десятками жестов.
+         *
+         * Каждый такой жест — ПОЛНЫЙ хэндофф: новый `AudioTrack`, новый
+         * нативный движок, пересборка таблиц кривой, [TRANSITION_FADE_MS]
+         * перекрытия. Очередь из одного слота уже не даст материализоваться
+         * больше двух потокам, но она НЕ схлопывает цепочку: каждый жест,
+         * пришедший во время перехода, разыгрывается сразу после релиза
+         * уходящего. Поэтому спека ждёт, пока поток жестов стихнет. Окно
+         * отсчитывается от ПОСЛЕДНЕГО жеста.
+         *
+         * Цена — причина применяется на это время позже. 150 мс меньше одного
+         * перехода ([TRANSITION_FADE_MS]) и не воспринимается как задержка.
+         *
+         * docs/analysis_scrub_storm_click_risk.md (R2, §4.2, §4.3)
+         */
+        private const val HANDOFF_STORM_SETTLE_MS = 150L
+
+        /**
+         * ШТОРМ: окно успокоения, когда серия УЖЕ ОПОЗНАНА, мс.
+         *
+         * docs/analysis_scrub_storm_click_risk.md (§4.3) — закрытие открытого
+         * вопроса третьей волны.
+         *
+         * Базовая величина ([HANDOFF_STORM_SETTLE_MS], 150 мс) схлопывает
+         * серию лишь наполовину: 10 жестов с реальным интервалом ~250 мс
+         * давали 5–6 переходов. Причина арифметическая — после релиза
+         * уходящего код ждёт остаток окна, и жест с интервалом `S` успевает
+         * продлить ожидание только если `S < W`:
+         *
+         * ```
+         * жест в ожидании ⟺ lastGesture + S < lastGesture + W ⟺ S < W
+         * ```
+         *
+         * При `W = 150` и `S = 250` каждый второй жест проскакивает в
+         * переход — отсюда «5 переходов на 10 жестов».
+         *
+         * Подымать базовое окно до 300 мс нельзя: это штраф ОДИНОЧНОМУ жесту
+         * (скраб отзывался бы на 300 мс позже), а одиночный жест — главный
+         * сценарий. Поэтому окно ДВУХУРОВНЕВОЕ: как только обнаружено, что
+         * жест не первый (предыдущий ещё не разыгран либо переход в полёте),
+         * ожидание продлевается до этого значения. При `S = 250` серия любой
+         * длины схлопывается в 1–2 перехода, а одиночный жест по-прежнему
+         * платит только [HANDOFF_STORM_SETTLE_MS].
+         *
+         * Значение выбрано с запасом к измеренному интервалу доставки жестов
+         * (~250 мс в `tools/dbgstorm.sh`, где каждый жест — это `am broadcast`)
+         * и к верхней границе человеческого «чик-чик-чик» (~150 мс).
+         */
+        private const val HANDOFF_STORM_EXTEND_MS = 300L
+
+        /**
+         * ЕДИНАЯ длительность перехода, мс.
+         *
+         * docs/analysis_scrub_storm_click_risk.md (§4.3).
+         *
+         * Слышимая длина перехода обязана быть одной и той же для смены
+         * пресета, правки настройки, смены частоты дискретизации и скраба:
+         * иначе один и тот же жест пользователя звучит по-разному в
+         * зависимости от причины, и это читается как «иногда щёлкает».
+         * Равно [BinauralStreamImpl.DEFAULT_FADE_MS]: перекрытие — 250 мс
+         * сразу, а «приседание» без перекрытия — два плеча по
+         * [ZERO_OVERLAP_LEG_MS] = 125 мс, в сумме те же 250 мс.
+         *
+         * Отличается только ХАРАКТЕР (смешение против приседания), и это
+         * различие физически неустранимо: когерентные тоны нельзя смешивать
+         * вовсе (§4.1).
+         */
+        private const val TRANSITION_FADE_MS = 250L
+
+        /**
+         * ШТОРМ: пауза перед повторной попыткой поднять NEXT, мс.
+         *
+         * `prepare()` чаще всего не удаётся из-за кучи клиента AudioFlinger
+         * (`createTrack_l -12`): второй трек не влезает, пока предыдущий ещё
+         * не отпущен. Она освобождается почти сразу, поэтому имеет смысл
+         * попробовать снова, а не платить разрывом.
+         *
+         * Повтор — для ВСЕХ причин, не только скраба: разрыв 100–200 мс
+         * ([beginHandoffSequential]) не нужен ни смене пресета, ни правке
+         * настройки, если через 400 мс `prepare()` почти наверняка пройдёт.
+         */
+        private const val HANDOFF_RETRY_DELAY_MS = 400L
+
+        /**
+         * ШТОРМ: сколько раз переоткладывать неудавшийся хэндофф.
+         *
+         * Без предела вечный отказ `prepare()` дал бы бесконечный цикл попыток.
+         * После лимита спека всё-таки идёт последовательным путём: настройка
+         * обязана примениться, пусть и с разрывом. Счётчик сбрасывается КАЖДЫМ
+         * новым жестом — у пользователя всегда свежий бюджет.
+         */
+        private const val HANDOFF_RETRY_MAX = 3
+
+        /**
+         * ПОРОГ КОГЕРЕНТНОСТИ, Гц: расстройка каналов CURRENT и NEXT, при
+         * которой переход обязан идти с НУЛЕВЫМ ПЕРЕКРЫТИЕМ.
+         *
+         * docs/analysis_scrub_storm_click_risk.md (§4.1, §4.2).
+         *
+         * Если тоны различаются меньше чем на этот порог, они КОГЕРЕНТНЫ: за
+         * время перекрытия ([TRANSITION_FADE_MS] = 250 мс) разность фаз уходит не
+         * больше чем на `Δf · T = 4 · 0.25 = 1` цикл, то есть фазы успевают
+         * разойтись, но не успевают УСРЕДНИТЬСЯ. Складываются не мощности, а
+         * амплитуды: сумма равна √2·|cos(φ/2)|, где φ — разность фаз в момент
+         * стыка, а она СЛУЧАЙНА — [BinauralStream.getPhases] читает фазу
+         * ФРОНТИРА генерации, обгоняющего слышимое на глубину кольца
+         * AudioTrack (2 МиБ = 5.46 с @48 кГц ⇒ 400–2200 циклов несущей).
+         * Итог: от ПОЛНОЙ взаимной компенсации до +3 дБ. Никакая форма рампы
+         * этого не лечит: при когерентности провал дают и линейная, и
+         * равносильная кривые.
+         *
+         * Поэтому когерентный хэндофф не кроссфейдится: NEXT поднимается
+         * только когда CURRENT реально ушёл в ноль (хук тишины).
+         *
+         * 4 Гц выбраны как «один цикл биений на перекрытие». Ниже порога
+         * лежат самые частые случаи: скраб (Δf ≈ 0.3 Гц), правка настройки
+         * (Δf = 0 — кривая та же!), смена пресета на пресет с той же
+         * несущей. Выше — смена пресета на другой звук, там перекрытие
+         * честно работает по мощности и звучит мягче приседания.
+         */
+        private const val COHERENT_DETUNE_HZ = 4.0f
+
+        /**
+         * Длительность одного плеча «приседания» при нулевом перекрытии, мс.
+         *
+         * Стык приходится на нулевую амплитуду: интерференции нет в принципе,
+         * а ступеньки нет по построению. Платим «приседанием» из двух плеч
+         * по 125 мс — в сумме те же [TRANSITION_FADE_MS], что и у перехода
+         * с перекрытием: слышимая длина перехода одна для всех маршрутов
+         * (§4.3). Провал плавный, а не обрыв, поэтому паузой не читается.
+         *
+         * Раньше было 120 мс на плечо (240 в сумме) — величина, ничем не
+         * связанная с длительностью кроссфейда.
+         *
+         * docs/analysis_scrub_storm_click_risk.md (§4.1, §4.2, §4.3)
+         */
+        private const val ZERO_OVERLAP_LEG_MS = TRANSITION_FADE_MS / 2
     }
 
     private enum class FadeTarget { SWITCH, PAUSE, STOP }
@@ -177,7 +341,7 @@ class BinauralStreamManager(private val context: Context) {
      *  - треков по-прежнему не больше ДВУХ (кольцо 2 МБ × 2 влезает в кучу
      *    клиента AudioFlinger — проверено на устройстве; при 3 МБ второй трек
      *    не создавался вовсе, `createTrack_l -12`); третьего не бывает:
-     *    [beginCrossfade] отказывается поднимать NEXT, пока [outgoing] не пуст;
+     *    [tryAdvanceQueue] отказывается поднимать NEXT, пока [outgoing] не пуст;
      *  - очередь по-прежнему один слот latest-wins: шторм A→B→C→D
      *    материализует два потока, а не четыре;
      *  - NEXT живёт на СТАРТОВОМ пакете (750 КБ) — доращивание запрещено до
@@ -199,7 +363,7 @@ class BinauralStreamManager(private val context: Context) {
      * равноправный поток: он не получает ни команд, ни громкости, ни пауз —
      * единственное, что с ним делают, это ждут [onOutgoingReleased].
      *
-     * Пока он не `null`, [beginCrossfade] не поднимает следующий NEXT — тем
+     * Пока он не `null`, [tryAdvanceQueue] не поднимает следующий NEXT — тем
      * самым держится жёсткий предел «не больше двух AudioTrack». Если release
      * затягивается сверх [OUTGOING_RELEASE_TIMEOUT_MS] (писатель застрял в
      * write()), поток снимается принудительно: к тому моменту он давным-давно
@@ -216,6 +380,67 @@ class BinauralStreamManager(private val context: Context) {
 
     /** Wall-момент начала кроссфейда — для детекта застрявшего релиза. */
     private var outgoingStartWallMs = 0L
+
+    /**
+     * ШТОРМ: момент, до которого спеку разыгрывать рано — для ЛЮБОЙ причины.
+     * Переставляется КАЖДЫМ жестом, то есть серия любой длины стоит один-два
+     * перехода. См. [HANDOFF_STORM_SETTLE_MS], [HANDOFF_STORM_EXTEND_MS] и
+     * docs/analysis_scrub_storm_click_risk.md (R2, §4.2, §4.3).
+     */
+    private var settleAtMs = 0L
+    /** ШТОРМ: отложенный перебор очереди уже заказан (не постим по сто раз). */
+    private var settleScheduled = false
+
+    /**
+     * ШТОРМ: серия ОПОЗНАНА — как минимум один жест догнал предыдущий,
+     * который ещё не успел разыграться.
+     *
+     * Признак ставится в [requestHandoff]: предыдущий жест ещё ждёт своего
+     * окна ([settleAtMs] в будущем) либо переход уже в полёте ([outgoing] или
+     * [pendingSilentSwitch] непусты). Снимается в [tryAdvanceQueue] ровно в
+     * тот момент, когда спеку наконец разыгрывают: если следующий жест
+     * одиночный, он снова платит только базовое окно.
+     *
+     * Смысл: не штрафовать одиночный жест окном, достаточным для схлопывания
+     * серии. См. [HANDOFF_STORM_EXTEND_MS].
+     */
+    private var stormDetected = false
+
+    private val settleRunnable = Runnable {
+        settleScheduled = false
+        if (isActiveState()) tryAdvanceQueue()
+    }
+
+    /** ШТОРМ: повторная попытка после неудачного `prepare()` (все причины). */
+    private var handoffRetryScheduled = false
+    private var handoffRetryAttempts = 0
+
+    private val handoffRetryRunnable = Runnable {
+        handoffRetryScheduled = false
+        if (isActiveState()) tryAdvanceQueue()
+    }
+
+    private fun scheduleHandoffRetry() {
+        if (handoffRetryScheduled) return
+        handoffRetryScheduled = true
+        actor.postDelayed(handoffRetryRunnable, HANDOFF_RETRY_DELAY_MS)
+    }
+
+    /**
+     * NEXT, подготовленный и ждущий старта, — вторая половина перехода
+     * с НУЛЕВЫМ ПЕРЕКРЫТИЕМ (см. [ZERO_OVERLAP_LEG_MS]).
+     *
+     * Поток уже прошёл `prepare()`: трек создан, первый пакет сгенерирован на
+     * НОВОЙ оси, но `start()` ещё не звался — звука от него нет вовсе. Слот
+     * [current] при этом продолжает занимать уходящий поток, поэтому пауза,
+     * стоп и UI-геттеры работают со звучащим звуком, а не с тишиной.
+     * Старт происходит из хука тишины: см. [startPendingSilentSwitch].
+     *
+     * Непустое значение == переход в полёте, и [tryAdvanceQueue] обязан его
+     * учитывать: второй NEXT поднимать нельзя ни по памяти (два трека), ни по
+     * смыслу (подъём раньше нуля вернул бы интерференцию).
+     */
+    private var pendingSilentSwitch: BinauralStreamImpl? = null
 
     private val queue = PlaybackQueue()
     private var serialSeq = 0L
@@ -804,7 +1029,23 @@ class BinauralStreamManager(private val context: Context) {
             // актёра сейчас будет остановлена, и отложенный колбэк релиза не
             // исполнился бы вовсе, оставив трек и пакет в куче навсегда.
             actor.removeCallbacks(outgoingReaper)
+            // ШТОРМ: отложенный перебор очереди тоже снимаем — нить
+            // актёра останавливается, отложенный колбэк не исполнился бы.
+            actor.removeCallbacks(settleRunnable)
+            actor.removeCallbacks(handoffRetryRunnable)
+            settleScheduled = false
+            handoffRetryScheduled = false
+            handoffRetryAttempts = 0
+            settleAtMs = 0L
+            stormDetected = false
             pendingAfterOutgoing = null
+            // СКРАБ с нулевым перекрытием: NEXT уже подготовлен, но ещё не
+            // стартовал и слот [current] не занимает — владельца у него нет.
+            // Нить актёра сейчас остановится, хук тишины не исполнится
+            // никогда, поэтому утилизуем явно: иначе созданный трек и пакет
+            // остались бы в куче навсегда.
+            pendingSilentSwitch?.abort()
+            pendingSilentSwitch = null
             outgoing?.releaseNow()
             outgoing = null
             current?.stop(onFullyStopped = { /* утилизация */ })
@@ -886,8 +1127,30 @@ class BinauralStreamManager(private val context: Context) {
         // Коалесценция: один слот, побеждает новейший. Шторм A→B→C→D
         // материализуется не более чем в два потока (текущий + один NEXT).
         queue.offer(spec)
+        // ШТОРМ: окно переставляется КАЖДЫМ жестом, поэтому серия любой длины
+        // стоит один-два перехода (см. [HANDOFF_STORM_SETTLE_MS]).
+        // Порядок важен: сначала окно, потом попытка разыграть — иначе первый
+        // жест серии прошёл бы немедленно, а это как раз тот переход, который
+        // тут же перебивается следующим.
+        //
+        // Окно — для ВСЕХ причин (§4.3): серия жестов осмысленна у любой из
+        // них (ползунок настройки стреляет ими так же, как флики скраба),
+        // а 150 мс меньше длительности самого перехода ([TRANSITION_FADE_MS]),
+        // то есть поверх него и не слышны.
+        val now = System.currentTimeMillis()
+        // Серия == предыдущий жест ещё не разыгран: его окно не истекло, либо
+        // переход уже в полёте и следующий жест ждёт релиза уходящего.
+        // Одиночный жест этого не увидит и заплатит только базовое окно.
+        if (settleAtMs > now || outgoing != null || pendingSilentSwitch != null) {
+            stormDetected = true
+        }
+        settleAtMs = now + if (stormDetected) HANDOFF_STORM_EXTEND_MS else HANDOFF_STORM_SETTLE_MS
+        // Новый жест — свежий бюджет повторов: если прошлый хэндофф выбил
+        // лимит и ушёл последовательным путём, следующий снова начнёт с
+        // переоткладывания (причина отказа — временная нехватка кучи).
+        handoffRetryAttempts = 0
         StreamLogger.d(TAG, "requestHandoff: spec#${spec.serial} в очередь (state=$state, " +
-            "outgoing=${outgoing?.spec?.serial})")
+            "reason=${spec.reason}, outgoing=${outgoing?.spec?.serial})")
         tryAdvanceQueue()
     }
 
@@ -909,6 +1172,15 @@ class BinauralStreamManager(private val context: Context) {
         if (outgoing != null) {
             StreamLogger.d(TAG, "tryAdvanceQueue: кроссфейд идёт (outgoing " +
                 "spec#${outgoing?.spec?.serial}) — разыграем после его релиза")
+            return
+        }
+        // Переход с нулевым перекрытием: NEXT подготовлен и ждёт, пока CURRENT
+        // уйдёт в ноль. Второй NEXT поднимать нельзя: это уже третий трек
+        // (отказ AudioFlinger -12) и, главное, перекрытие — ровно то, чего
+        // этот переход избегает. Спека дождётся [onOutgoingReleased].
+        if (pendingSilentSwitch != null) {
+            StreamLogger.d(TAG, "tryAdvanceQueue: переход без перекрытия в полёте " +
+                "(spec#${pendingSilentSwitch?.spec?.serial}) — разыграем после его старта")
             return
         }
         val queued = queue.peek() ?: return
@@ -935,7 +1207,31 @@ class BinauralStreamManager(private val context: Context) {
             cur.setVolume(volume)
             return
         }
-        beginCrossfade(queue.poll() ?: return)
+        // ШТОРМ: каждый жест — полный переход, а в перекрытии звучат два тона.
+        // Ждём, пока поток жестов стихнет, и берём последнюю спеку: серия любой
+        // длины стоит один-два перехода. Побочная выгода — если серия
+        // закончилась там же, откуда началась (магнит «к сейчас» у скраба),
+        // [needsHandoff] выше снимет спеку вовсе и звук не шелохнётся.
+        //
+        // Окно отсчитывается от ПОСЛЕДНЕГО жеста, поэтому проверка здесь
+        // работает и на догоне: переход, разыгранный сразу после релиза
+        // уходящего, тоже ждёт, если за время перехода пришли новые жесты
+        // (§4.3 — «отложенный старт»).
+        val wait = settleAtMs - System.currentTimeMillis()
+        if (wait > 0) {
+            if (!settleScheduled) {
+                settleScheduled = true
+                actor.postDelayed(settleRunnable, wait)
+            }
+            StreamLogger.d(TAG, "tryAdvanceQueue: ждём ${wait}мс (${queued.reason}, " +
+                "spec#${queued.serial}, сдвиг=${queued.scrubOffsetSec} с, " +
+                (if (stormDetected) "серия" else "одиночный жест"))
+            return
+        }
+        // Спеку разыгрываем: серия (если была) стихла. Следующий одиночный
+        // жест снова получит базовое окно, а не продлённое.
+        stormDetected = false
+        beginTransition(queue.poll() ?: return)
     }
 
     // Дополнительное runtime-поле (продолжение): запрос НА СТАРТ для паттерна
@@ -943,132 +1239,187 @@ class BinauralStreamManager(private val context: Context) {
     private var pendingPlaySpec: PlaybackSpec? = null
 
     /**
-     * КРОССФЕЙД С ОПЕРЕЖЕНИЕМ (основной путь смены пресета/настроек/частоты).
+     * ЕДИНЫЙ ПЕРЕХОД: КАК БЫ ни изменилась спека, CURRENT уходит в ноль,
+     * и только после полного затухания поднимается NEXT.
      *
-     * Порядок — вся суть. NEXT готовится и СТАРТУЕТ, пока CURRENT ещё звучит на
-     * полной громкости, и лишь после этого CURRENT уходит фейд-аутом:
+     * docs/analysis_scrub_storm_click_risk.md (§4.3, §4.4).
      *
-     * ```
-     *   prepare(NEXT)  ──  только стартовый пакет (750 КБ), роста нет
-     *   start(NEXT)    ──  прайминг трека + шейпер 0→1 + play + писатель
-     *   SWAP           ──  current := NEXT, outgoing := old   (атомарно на актёре)
-     *   stop(old)      ──  шейпер 1→0, потом утилизация… ПОД УЖЕ ЗВУЧАЩИМ NEXT
-     * ```
+     * Смена пресета, правка настройки, смена частоты дискретизации и скраб
+     * идут через ОДИН метод: у пользователя это один и тот же жест
+     * «изменилось что-то, зазвучи по-новому», и звучать он обязан одинаково.
      *
-     * Что это даёт по сравнению с прежним последовательным хэндоффом:
+     * **Перекрытия нет ни при каких условиях.** Раньше часть переходов
+     * кроссфейдилась (решение принимала [logCoherenceVerdict]): считалось,
+     * что ДАЛЬНИЕ по частоте тоны складываются по мощности и смешивать их
+     * безопасно. Это верно по ЭНЕРГИИ, но не по восприятию: в перекрытии
+     * звучат ДВА разных звука одновременно, и при перестановке каналов
+     * (правка настройки) уши меняются местами внутри перекрытия — оба тона
+     * в обоих ушах, модуляция на |beat| (§4.2-2). Когерентный же случай
+     * вообще давал случайный провал до нуля (§4.1). Отказ от перекрытия
+     * убирает оба класса дефекта сразу и не зависит от вердикта.
      *
-     *  1. **Разрыв звука исчезает.** Раньше между «старый утих» и «новый
-     *     зазвучал» лежало 100–200 мс тишины: 60 мс стражи шейпера + опрос
-     *     писателя + `prepare()` нового потока. Теперь `prepare()` происходит
-     *     ДО фейд-аута (под звуком старого), а всё остальное — ПОД звуком
-     *     нового. На критическом пути звука не остаётся ничего.
-     *  2. **Путь утилизации уходит из эфира.** Пауза трека, опрос латча
-     *     писателя (до 10 с!), `releaseInternal()` и его 250-мс `await` на нити
-     *     актёра — всё это теперь происходит, когда звучит уже NEXT. Раньше
-     *     именно отсюда росли «случайные» многосекундные провалы при смене.
-     *  3. **Провал энергии закрыт честно.** Обе рампы — EQUAL_POWER (cos-уход и
-     *     sin-приход, sin²+cos²=1), и это впервые ПРАВИЛЬНО: перекрытие теперь
-     *     есть. Раньше equal-power на уходе был пережитком: второго потока не
-     *     было, а более крутой хвост (−π/2 против −1) только превращал лаг
-     *     шейпера в больший остаточный шаг.
-     *  4. **Меньше щёлчков от HAL на смене частоты динамика.** При
-     *     последовательной схеме старый трек освобождался, и выход AudioFlinger
-     *     мог уйти в простой (HAL suspend) перед открытием нового — аппаратный
-     *     хлопок. Теперь выход не простаивает никогда.
+     * Цена — «приседание» вместо смешения: [ZERO_OVERLAP_LEG_MS] вниз,
+     * стык на нулевой амплитуде, [ZERO_OVERLAP_LEG_MS] вверх. Ступеньки нет
+     * (обе рампы идут до/из нуля), интерференции нечему возникать.
      *
-     * Почему можно держать два трека. Кольцо каждого урезано до 2 МиБ
-     * ([BinauralStreamImpl] MAX_TRACK_BUFFER_BYTES) именно под два живых трека
-     * в куче клиента AudioFlinger (~7 МиБ) — это проверено на устройстве, и
-     * при 3 МиБ второй трек не создавался вовсе (`createTrack_l -12`). Третьего
-     * трека не бывает: пока [outgoing] не `null`, [tryAdvanceQueue] не поднимает
-     * следующий NEXT.
-     *
-     * Почему можно держать два пакета. NEXT живёт на стартовом пакете:
-     * [BinauralStreamImpl.setPacketGrowthAllowed](false) до релиза [outgoing].
-     * 750 КБ против до 230 МБ у уходящего — второй большой буфер не возникает,
-     * а значит не срабатывает храповик `PacketMemoryBudget` и не поднимается
-     * принудительный GC на актёре в момент, который обязан быть незаметным.
-     *
-     * Аварийный путь: если `prepare()` NEXT не удался (куча AudioFlinger,
-     * OOM), CURRENT НЕ ТРОГАЕТСЯ ВОВСЕ — звук продолжается, а смена уходит в
-     * [beginHandoffSequential], прежний последовательный путь с разрывом, но
-     * гарантированно применяющий настройку.
+     * @param spec уже изъята из очереди: дожила до своего окна и победила
+     *             (очередь из одного слота, новейшая вытесняет прежнюю).
      */
-    private fun beginCrossfade(spec: PlaybackSpec) {
+    private fun beginTransition(spec: PlaybackSpec) {
         val old = current
         if (old == null) {
-            // Гасить нечего — это не кроссфейд, а обычный запуск.
-            StreamLogger.d(TAG, "beginCrossfade: current==null — обычный запуск spec#${spec.serial}")
+            // Гасить нечего — это не переход, а обычный запуск.
+            StreamLogger.d(TAG, "beginTransition: current==null — обычный запуск spec#${spec.serial}")
             launchSpec(spec)
             return
         }
-        // Захватываем живые координаты CURRENT ДО его fade-out: часы сессии и
-        // фазы несущих. Позицию кривой НЕ наследуем — NEXT встанет на «сейчас»
-        // в prepare() (см. комментарий к [switchElapsedMs]).
+        // Расстройка CURRENT/NEXT больше НИЧЕГО не маршрутизирует: переход
+        // один и всегда без перекрытия. Замер остался как диагностика — по
+        // Δf в логе видно, чем грозил бы кроссфейд на этом жесте (§4.4).
+        logCoherenceVerdict(old, spec)
+        beginSilentSwitch(old, spec)
+    }
+
+    /**
+     * ПЕРЕХОД С НУЛЕВЫМ ПЕРЕКРЫТИЕМ — для КОГЕРЕНТНОГО хэндоффа
+     * (решение принимает [isCoherentHandoff]).
+     *
+     * Почему когерентный переход нельзя кроссфейдить. Когерентность значит,
+     * что CURRENT и NEXT играют ПОЧТИ ОДИНАКОВУЮ частоту (скраб: сдвиг на
+     * 5 минут при точках кривой в 3 часах друг от друга даёт Δf ≈ 0.3 Гц;
+     * правка настройки: Δf = 0 ровно). Такие тоны складываются не мощностями,
+     * а амплитудами: сумма равна √2·|cos(φ/2)|, где φ — разность фаз. А φ
+     * случайна: фазы наследуются от ФРОНТИРА генерации CURRENT, который
+     * обгоняет слышимое на величину кольца AudioTrack (2 МиБ = 5.46 с @48 кГц,
+     * чанк 3.46 с), то есть на 400–2200 циклов несущей; дробная часть
+     * равномерна. Итог — от полной взаимной компенсации (провал до нуля,
+     * примерно каждый шестой скраб) до +3 дБ. Формы рампы это не лечит: при
+     * когерентности провал дают и линейная, и равносильная кривые.
+     *
+     * Решение: NEXT не звучит, пока CURRENT не ушёл в ноль. Перекрытия нет —
+     * интерференции нечему возникать, а стык приходится на нулевую амплитуду,
+     * поэтому скачка тоже нет. Слышимо как короткое «приседание» длиной
+     * 2×[ZERO_OVERLAP_LEG_MS] = [TRANSITION_FADE_MS] — ровно столько же,
+     * сколько длится переход с перекрытием, — а не как щелчок и не как пауза.
+     *
+     * Почему NEXT готовится ЗАРАНЕЕ, а не после релиза (как в
+     * [beginHandoffSequential]): между «утих» и «зазвучал» тогда лежат пауза
+     * трека, выход писателя и разбор буфера — те самые 100–200 мс разрыва.
+     * Здесь трек, движок и первый пакет готовы ЕЩЁ ДО начала ухода, а старт
+     * (запись подготовленного пакета + play) занимает единицы миллисекунд.
+     *
+     * Почему старт из хука тишины, а не из [onOutgoingReleased]: последний
+     * приходит уже ПОСЛЕ паузы трека и выхода писателя — то есть с той же
+     * задержкой, от которой этот переход и избавляет.
+     */
+    private fun beginSilentSwitch(old: BinauralStreamImpl, spec: PlaybackSpec) {
+        // Координаты непрерывности: часы сессии
+        // и фазы несущих читаются ДО fade-out, иначе читать их будет нечего.
         captureContinuity()
         handoffStartWallMs = System.currentTimeMillis()
         val enriched = enrichForContinuity(spec)
         val next = createStream(enriched)
 
         if (!next.prepare()) {
-            // NEXT не родился. Важно: CURRENT мы НЕ гасили, поэтому звук идёт
-            // дальше как ни в чём не бывало — худший исход здесь «настройка не
-            // применилась», а не «тишина». Дожимаем прежним путём.
-            StreamLogger.e(TAG, "beginCrossfade: prepare NEXT spec#${enriched.serial} не удался — " +
-                "переход на последовательный хэндофф (CURRENT spec#${old.spec.serial} не тронут)")
+            // Тот же порядок: CURRENT не тронут, звук
+            // идёт дальше, хэндофф переоткладывается.
             next.abort()
+            if (handoffRetryAttempts < HANDOFF_RETRY_MAX) {
+                handoffRetryAttempts++
+                StreamLogger.e(TAG, "beginSilentSwitch: prepare NEXT spec#${enriched.serial} " +
+                    "не удался (${spec.reason}, попытка $handoffRetryAttempts/$HANDOFF_RETRY_MAX) — " +
+                    "переоткладываем на ${HANDOFF_RETRY_DELAY_MS}мс, CURRENT spec#${old.spec.serial} " +
+                    "продолжает играть")
+                resetContinuity()
+                queue.offer(spec)
+                scheduleHandoffRetry()
+                return
+            }
+            StreamLogger.e(TAG, "beginSilentSwitch: prepare NEXT spec#${enriched.serial} не удался — " +
+                "переход на последовательный хэндофф (CURRENT spec#${old.spec.serial} не тронут)")
             beginHandoffSequential(spec)
             return
         }
 
-        // Порядок критичен: сначала NEXT зазвучит, потом CURRENT гаснет.
-        // Если start() не удался — CURRENT вообще не трогали, разрыва нет.
         pendingHandoff = true
-        accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
-        // NEXT обязан НЕ расти, пока уходящий держит свой пакет.
+        // NEXT обязан НЕ расти, пока уходящий держит свой пакет (тот же мотив,
+        // два больших буфера = отказ PacketMemoryBudget).
         next.setPacketGrowthAllowed(false)
-        // Слепок на случай неудачи: launchStream забирает слот current и при
-        // отказе start() уводит автомат в IDLE. Старый поток при этом НИКУДА не
-        // девался — он звучит, и его владельца надо вернуть.
-        val prevState = state
-        val prevPlaying = _isPlaying.value
-        if (!launchStream(next)) {
-            StreamLogger.e(TAG, "beginCrossfade: start NEXT spec#${enriched.serial} не удался — " +
-                "CURRENT spec#${old.spec.serial} продолжает играть (откат владения)")
-            next.abort()
-            pendingHandoff = false
-            resetContinuity()
-            current = old
-            currentRef.set(old)
-            _isPlaying.value = prevPlaying
-            setState(prevState)
-            updateWakeLock()
-            queue.offer(spec)       // не теряем намерение: попробуем ещё раз
-            return
-        }
-
-        // SWAP. С этого мгновения NEXT считается CURRENT: UI-геттеры, сторож
-        // инварианта, pause/resume/stop — всё работает с ним. [old] больше не
-        // получает НИЧЕГО, кроме ожидания релиза.
+        // Владение передаётся СРАЗУ, а не по хуку нуля. Между «уходящий начал
+        // гаснуть» и «NEXT зазвучал» лежит [ZERO_OVERLAP_LEG_MS] — на интервале,
+        // где актёр принимает и другие сообщения. Оставь мы [current] на
+        // уходящем потоке, пауза/стоп по жесту пользователя достались бы ему
+        // (а его судьба уже решена: stop() идемпотентен и колбэк не пришёл бы
+        // вовсе — автомат залип бы в FADE_OUT_*), а NEXT остался бы без
+        // владельца: трек создан, пакет в куче, стартовать некому.
+        current = next
+        currentRef.set(next)
+        sessionSpec = enriched
+        pendingSilentSwitch = next
         outgoing = old
         outgoingStartWallMs = System.currentTimeMillis()
         setState(ManagerState.HANDOFF)
         scheduleOutgoingReaper()
-        StreamLogger.d(TAG, "beginCrossfade: SWAP spec#${old.spec.serial} (уходит) → " +
-            "spec#${enriched.serial} (CURRENT, elapsed=${switchElapsedMs}ms, " +
-            "phase=$switchLeftPhase/$switchRightPhase)")
+        // Причина в строке обязательна: штормовые прогоны считают переходы
+        // ПО ПРИЧИНЕ — иначе посторонние SETTINGS-пуши ViewModel (идущие
+        // поверх сценария с интервалом ~1 с) раздувают счётчик чужими
+        // хэндоффами (грабли волн 3–4, §4.4).
+        StreamLogger.d(TAG, "beginSilentSwitch: spec#${old.spec.serial} гаснет " +
+            "(${ZERO_OVERLAP_LEG_MS}мс), spec#${enriched.serial} ждёт нуля " +
+            "(причина=${spec.reason}, сдвиг=${spec.scrubOffsetSec} с, elapsed=${switchElapsedMs}мс)")
 
-        // Рампа ухода. EQUAL_POWER здесь снова осмысленна: входящий поднимается
-        // sin-ветвью, сумма квадратов даёт постоянную энергию в перекрытии.
-        // Утилизация ([onOutgoingReleased]) произойдёт, когда шейпер реально
-        // дойдёт до нуля — не по таймеру (см. [BinauralStreamImpl] FADE_POLL_MS).
-        old.stop(onFullyStopped = { onOutgoingReleased(old) }, shape = FadeShape.EQUAL_POWER)
+        old.stopWithSilentHook(
+            onFullyStopped = { onOutgoingReleased(old) },
+            // Форма уже не влияет на интерференцию (перекрытия нет), но
+            // cos-уход согласован с sin-входом NEXT: набор и спад симметричны.
+            shape = FadeShape.EQUAL_POWER,
+            fadeOutMsOverride = ZERO_OVERLAP_LEG_MS,
+            onSilent = { startPendingSilentSwitch() }
+        )
+    }
+
+    /**
+     * Вторая половина [beginSilentSwitch]: CURRENT ушёл в ноль — поднимаем NEXT.
+     *
+     * Исполняется на нити актёра из хука тишины, то есть ВНУТРИ завершения
+     * рампы уходящего потока, до его паузы и утилизации. Стык выходит на
+     * нулевой амплитуде, а всё тяжёлое (трек, движок, пакет) готово заранее.
+     */
+    private fun startPendingSilentSwitch() {
+        val next = pendingSilentSwitch ?: return
+        pendingSilentSwitch = null
+        if (next !== current) {
+            // Пока ждали нуля, поток успели снять: пауза/стоп по жесту
+            // пользователя утилизировали NEXT вместе со слотом [current]
+            // (stop() на нестартовавшем потоке — это abort). Стартовать нечего.
+            StreamLogger.w(TAG, "startPendingSilentSwitch: spec#${next.spec.serial} уже не CURRENT " +
+                "— старт отменён (поток снят во время приседания)")
+            return
+        }
+        accumulatedMs = switchElapsedMs + (System.currentTimeMillis() - handoffStartWallMs)
+        if (!launchStream(next, fadeInShape = FadeShape.EQUAL_POWER, fadeInMsOverride = ZERO_OVERLAP_LEG_MS)) {
+            // Откат владения НЕ нужен: [launchStream] уже занулил слот, а
+            // уходящий поток в этот момент гасится и скоро освободится.
+            // Намерение кладём обратно в очередь — [onOutgoingReleased]
+            // поднимет поток заново.
+            StreamLogger.e(TAG, "startPendingSilentSwitch: start NEXT spec#${next.spec.serial} " +
+                "не удался — намерение возвращено в очередь")
+            next.abort()
+            pendingHandoff = false
+            resetContinuity()
+            queue.offer(next.spec)
+            return
+        }
+        // Переход состоялся — бюджет повторов больше не нужен.
+        handoffRetryAttempts = 0
+        StreamLogger.d(TAG, "startPendingSilentSwitch: SWAP по нулю — spec#${next.spec.serial} " +
+            "поднимается (${ZERO_OVERLAP_LEG_MS}мс, причина=${next.spec.reason}), перекрытия не было")
     }
 
     /**
      * ПОСЛЕДОВАТЕЛЬНЫЙ хэндофф — аварийный путь, сохранённый из прежней схемы.
      *
-     * Отличается от [beginCrossfade] одним: NEXT создаётся ТОЛЬКО после полного
+     * Отличается от [beginSilentSwitch] одним: NEXT создаётся ТОЛЬКО после полного
      * релиза CURRENT, поэтому между «утих» и «зазвучал» лежит разрыв ~100–200 мс.
      * Живёт ровно один поток, поэтому требования к памяти минимальны — это и
      * делает его надёжной запасной ветвью, когда кроссфейд не влез.
@@ -1138,6 +1489,15 @@ class BinauralStreamManager(private val context: Context) {
      * `null`, то есть смена пресета BLOCKируется. По истечении срока снимаем
      * принудительно: к этому моменту поток в нуле по громкости, услышать его
      * невозможно, а владение движком [releaseInternal] разрулит сам.
+     *
+     * ОГОВОРКА ПРО «в нуле» (docs/analysis_scrub_storm_click_risk.md R6/R7).
+     * Нуль гарантирован рампой, но не расписанием: если VolumeShaper ЗАЛИП на
+     * ненулевом множителе, `releaseNow()` снимает трек на полной амплитуде —
+     * это ступенька, то есть настоящий щелчок. Поэтому прежде чем рубить,
+     * проверяем [BinauralStream.isFadedToSilent] и, пока есть запас, ждём.
+     * Ждать бесконечно нельзя (трек и пакет надо отдать), поэтому второй,
+     * более длинный предел [OUTGOING_REAPER_HARD_TIMEOUT_MS] снимает поток
+     * в любом состоянии — но уже с честным логом «шаг неизбежен».
      */
     private val outgoingReaper = object : Runnable {
         override fun run() {
@@ -1147,8 +1507,18 @@ class BinauralStreamManager(private val context: Context) {
                 actor.postDelayed(this, OUTGOING_REAPER_PERIOD_MS)
                 return
             }
+            // Рампа ещё не дошла до нуля — снятие сейчас даст ступеньку. Ждём
+            // до жёсткого предела: шейпер почти всегда доезжает.
+            if (waited < OUTGOING_REAPER_HARD_TIMEOUT_MS && !s.isFadedToSilent()) {
+                StreamLogger.w(TAG, "outgoingReaper: spec#${s.spec.serial} за ${waited}мс ещё " +
+                    "не в нуле по рампе — жду, снятие сейчас дало бы щелчок")
+                actor.postDelayed(this, OUTGOING_REAPER_PERIOD_MS)
+                return
+            }
+            val stepped = !s.isFadedToSilent()
             StreamLogger.w(TAG, "outgoingReaper: spec#${s.spec.serial} не освободился за " +
-                "${waited}мс — принудительный релиз (поток уже в нуле, щелчка нет)")
+                "${waited}мс — принудительный релиз" +
+                if (stepped) " (рама НЕ дошла до нуля — шаг неизбежен)" else " (поток уже в нуле, щелчка нет)")
             outgoing = null
             val pending = pendingAfterOutgoing
             pendingAfterOutgoing = null
@@ -1277,9 +1647,9 @@ class BinauralStreamManager(private val context: Context) {
 
             FadeTarget.SWITCH -> {
                 // ПОСЛЕДОВАТЕЛЬНЫЙ хэндофф — только аварийная ветвь
-                // ([beginHandoffSequential]), когда кроссфейд не влез по памяти.
+                // ([beginHandoffSequential]), когда переход не влез по памяти.
                 // Штатная смена пресета сюда больше не приходит: там NEXT
-                // стартует ДО fade-out CURRENT (см. [beginCrossfade]).
+                // готовится ДО fade-out CURRENT (см. [beginSilentSwitch]).
                 //
                 // Старый поток к этой точке ПОЛНОСТЬЮ утилизирован: трек снят,
                 // движок уничтожен, пакет отдан. current занулён выше, поэтому
@@ -1867,6 +2237,129 @@ class BinauralStreamManager(private val context: Context) {
      * которому баг был найден. Ошибкой воспроизведения она больше не является:
      * поле в спеку не уезжает, поэтому рассинхрон исключён по построению.
      */
+    /**
+     * ДИАГНОСТИКА: насколько расстроены тоны CURRENT и NEXT (Δf по
+     * неупорядоченной паре ушей). docs/analysis_scrub_storm_click_risk.md
+     * (§4.1, §4.2, §4.4).
+     *
+     * С §4.4 метод НИЧЕГО не маршрутизирует: любой переход идёт без
+     * перекрытия ([beginTransition]), какой бы ни была расстройка. Замер
+     * оставлен затем, чтобы в логе каждого перехода было видно, чем грозил
+     * бы кроссфейд на этом жесте, — иначе вердикт «а было ли нельзя»
+     * невозможно проверить задним числом.
+     *
+     * Что даёт величина Δf:
+     *
+     *  - **Δf < [COHERENT_DETUNE_HZ]** — тоны КОГЕРЕНТНЫ: в перекрытии они
+     *    сложились бы амплитудами, `√2·|cos(φ/2)|` со случайным φ (фаза
+     *    фронтира генерации обгоняет слышимое на кольцо AudioTrack — 400–2200
+     *    циклов). Итог перекрытия: от полной взаимной компенсации до +3 дБ.
+     *  - **Δf ≫ порога** — энергия в перекрытии складывалась бы корректно,
+     *    но звучать стали бы ДВА разных звука разом, а при перестановке
+     *    каналов — с обменом ушей внутри окна (модуляция на |beat|).
+     *
+     * РАСКЛАДКА КАНАЛОВ (§4.3): сравнение идёт НЕУПОРЯДОЧЕННОЙ парой ушей
+     * `{min(L,R), max(L,R)}`, а не «левый с левым, правый с правым».
+     *
+     * Причина. Частоты CURRENT приходят из живого движка и уже учитывают
+     * перестановку каналов (там же их берут осцилляторы), а частоты NEXT — из
+     * номинальной кривой, которая о раскладке не знает. Измерение третьей
+     * волны сравнивало каналы поимённо, и каждая правка настройки давала
+     * `Δf = |beat|` ровно (`L 409→391, R 391→409`) при НЕИЗМЕННОЙ кривой:
+     * истинная расстройка нулевая, вердикт — «разные тоны». Слышимая цена —
+     * на каждой правке настройки уши менялись местами ВНУТРИ перекрытия: оба
+     * тона звучат в обоих ушах, и перекрытие модулируется на |beat| (18 Гц
+     * × 250 мс = 4.5 цикла — слышимый «трепет», а не мягкое смешение).
+     *
+     * Перестановка — это то же МНОЖЕСТВО тонов в других ушах: неупорядоченная
+     * пара инвариантна к перестановке ЛЮБОГО из потоков.
+     */
+    private fun logCoherenceVerdict(old: BinauralStreamImpl, spec: PlaybackSpec) {
+        val live = old.getFrequenciesAtCurrentTime()
+        if (live == null) {
+            // Движка живого потока уже нет — читать нечего. Это не ошибка:
+            // NEXT всё равно стартует с нуля.
+            StreamLogger.d(TAG, "когерентность: ${spec.reason} частоты CURRENT недоступны " +
+                "(движок spec#${old.spec.serial} разрушен) — замер пропущен")
+            return
+        }
+        // Измерение идёт по КАНАЛАМ, а не по «несущая/биения»: гасить друг
+        // друга будут тоны в каждом ухе по отдельности, а не их полусумма.
+        // Каналы тут же СВОРАЧИВАЮТСЯ в неупорядоченную пару (см. KDoc):
+        // «левый→левый, правый→правый» ломается на перестановке ушей.
+        val (oldBeat, oldCarrier) = live
+        val oldLeft = FrequencyMath.leftChannelFrequency(oldCarrier, oldBeat)
+        val oldRight = FrequencyMath.rightChannelFrequency(oldCarrier, oldBeat)
+        val (oldLo, oldHi) = earPair(oldLeft, oldRight)
+
+        try {
+            val (l0, r0) = spec.config.getChannelFrequenciesAt(localTimeOfDay(axisSecondsFor(spec)))
+            // Секунда округляется вниз И вверх, берётся МЕНЬШАЯ расстройка:
+            // если внутри этой секунды кривая делает скачок (STEP), консервативно
+            // считаем, что «почти совпадает» (до §4.4 это склоняло вердикт к
+            // нулевому перекрытию — более безопасной стороне).
+            val (l1, r1) = spec.config.getChannelFrequenciesAt(
+                localTimeOfDay(axisSecondsFor(spec) + 1f)
+            )
+            val pair0 = earPair(l0, r0)
+            val pair1 = earPair(l1, r1)
+            val detune = minOf(
+                maxOf(abs(oldLo - pair0.first), abs(oldHi - pair0.second)),
+                maxOf(abs(oldLo - pair1.first), abs(oldHi - pair1.second))
+            )
+            val coherent = detune < COHERENT_DETUNE_HZ
+            // В лог пишутся и каналы, и свёрнутая пара: «Δf = |beat| ровно при
+            // каналах-зеркалах» — это и есть признак перестановки ушей, его
+            // надо видеть в логе, а не гадать (§4.2-2, §4.3).
+            StreamLogger.d(TAG, "когерентность: ${spec.reason} Δf=${fmt(detune)}Гц " +
+                "(уши {${fmt(oldLo)}; ${fmt(oldHi)}} → {${fmt(pair0.first)}; ${fmt(pair0.second)}}, " +
+                "каналы L ${fmt(oldLeft)}→${fmt(l0)}, R ${fmt(oldRight)}→${fmt(r0)}) — " +
+                (if (coherent) "когерентно (перекрытие дало бы провал до нуля)"
+                 else "разные тоны (перекрытие дало бы смесь двух звуков)")
+            )
+        } catch (e: Exception) {
+            // Оценка — диагностика, а не функциональность: любая ошибка здесь
+            // не должна мешать переходу.
+            StreamLogger.w(TAG, "когерентность: ${spec.reason} частоты NEXT не оценены " +
+                "(${e.message}) — замер пропущен")
+        }
+    }
+
+    /**
+     * Неупорядоченная пара ушей: `{min(L,R), max(L,R)}`.
+     *
+     * Перестановка каналов — это те же два тона в других ушах. Для решения
+     * «смешивать или приседать» важен НАБОР частот, а не то, какая из них в
+     * каком ухе: см. KDoc [logCoherenceVerdict] (§4.3).
+     */
+    private fun earPair(left: Float, right: Float): Pair<Float, Float> =
+        if (left <= right) left to right else right to left
+
+    /** Герцы в лог: `Locale.US` обязателен — в ru-локаль это `83991,88`. */
+    private fun fmt(hz: Float): String = String.format(Locale.US, "%.2f", hz)
+
+    /**
+     * Ось времени суток, на которую встанет NEXT по этой спеке: реальное
+     * «сейчас» + её собственный сдвиг скраба.
+     *
+     * Ось — `Float` (см. правило в памяти проекта): дробная доля секунды здесь
+     * не теряется, в целые секунды значение переводится только на входе в
+     * `LocalTime`, то есть уже внутри оценки когерентности.
+     */
+    private fun axisSecondsFor(spec: PlaybackSpec): Float =
+        normalizeTimeOfDay(baseTimeOfDaySeconds() + spec.scrubOffsetSec)
+
+    /**
+     * Секунды суток → `LocalTime` для оценки кривой.
+     *
+     * Дробная доля здесь теряется сознательно: дальше идёт сравнение с
+     * порогом [COHERENT_DETUNE_HZ] (единицы герц), где ошибка в одну секунду
+     * хода кривой неразличима. Сама ось при этом остаётся `Float` — см.
+     * правило проекта (время суток — только `float`).
+     */
+    private fun localTimeOfDay(seconds: Float): LocalTime =
+        LocalTime.fromSecondOfDay(normalizeTimeOfDay(seconds).toLong().toInt().coerceIn(0, 86_399))
+
     private fun captureContinuity() {
         val s = current ?: return
         if (!continuityCaptureAllowed()) {
@@ -1971,13 +2464,26 @@ class BinauralStreamManager(private val context: Context) {
      *
      * @return true — трек стартовал; false — старт не удался, поток утилизирован.
      *
-     * ВАЖНО для [beginCrossfade]: при неудаче слот current зануляется и автомат
-     * уходит в IDLE. Если до вызова в слоте был ЖИВОЙ поток (он как раз гасится
-     * кроссфейдом), вызывающий обязан вернуть его на место — иначе старый поток
+     * ВАЖНО для [beginSilentSwitch]: при неудаче слот current зануляется и
+     * автомат уходит в IDLE. Если до вызова в слоте был ЖИВОЙ поток, вызывающий
+     * обязан вернуть его на место — иначе старый поток
      * останется без владельца и будет звучать вечно.
+     *
+     * @param fadeInShape форма рампы входа. LINEAR по умолчанию — для
+     *   одиночного запуска (PLAY/RESUME) второго потока нет, и equal-power
+     *   нечего делить (см. KDoc [FadeShape.EQUAL_POWER]). [beginSilentSwitch]
+     *   передаёт [FadeShape.EQUAL_POWER]: плечо входа согласовано с cos-плечом
+     *   ухода, набор и спад симметричны по мощности. Раньше форма сюда не
+     *   передавалась вовсе, и NEXT поднимался ЛИНЕЙНО — при перекрытии пара
+     *   «cos-уход + линейный вход» давала провал энергии до ~1.5 дБ около
+     *   p≈0.75 (R4 документа).
      */
-    private fun launchStream(stream: BinauralStreamImpl): Boolean {
-        StreamLogger.d(TAG, "launchStream spec#${stream.spec.serial} sr=${stream.spec.sampleRate} beat=${stream.spec.config.frequencyCurve.getBeatFrequencyAt(kotlinx.datetime.LocalTime(0, 0))}")
+    private fun launchStream(
+        stream: BinauralStreamImpl,
+        fadeInShape: FadeShape = FadeShape.LINEAR,
+        fadeInMsOverride: Long = 0L
+    ): Boolean {
+        StreamLogger.d(TAG, "launchStream spec#${stream.spec.serial} sr=${stream.spec.sampleRate} beat=${stream.spec.config.frequencyCurve.getBeatFrequencyAt(kotlinx.datetime.LocalTime(0, 0))} shape=$fadeInShape")
         // Не-handoff запуск (PLAY/RESUME) — новый сегмент без непрерывности; сбрасываем
         // якорь. При handoff (PRESET_SWITCH/SETTINGS) якорь захвачен в beginHandoff и
         // должен дожить до старта NEXT — continuity применится в enrichForContinuity.
@@ -1990,7 +2496,7 @@ class BinauralStreamManager(private val context: Context) {
         // доращивает свой: два больших буфера одновременно — это ровно тот
         // отказ PacketMemoryBudget, ради которого и введён флаг. Разрешение
         // раздаёт только [onOutgoingReleased]; здесь — ТОЛЬКО сужение, иначе
-        // этот вызов отменил бы явный запрет, поставленный [beginCrossfade].
+        // этот вызов отменил бы явный запрет, поставленный [beginSilentSwitch].
         if (outgoing != null) stream.setPacketGrowthAllowed(false)
         // СКРАБ: с этого мгновения ось звука — это ось спеки потока. Возврат на
         // реальное «сейчас» нужен ровно тогда, когда эта ось ещё сдвинута.
@@ -2007,7 +2513,12 @@ class BinauralStreamManager(private val context: Context) {
         // ФИКС: применяем громкость ДО start() — шейпер fade-in стартует с базы
         // userVolume, и первый кадр пишется уже на нужной громкости.
         stream.setVolume(volume)
-        if (!stream.start(onFullyStarted = { setState(ManagerState.RUNNING) })) {
+        if (!stream.start(
+                onFullyStarted = { setState(ManagerState.RUNNING) },
+                shape = fadeInShape,
+                fadeInMsOverride = fadeInMsOverride
+            )
+        ) {
             // Старт трека не удался: поток не успел зазвучать
             StreamLogger.e(TAG, "launchStream: start spec#${stream.spec.serial} не удался")
             stream.abort()

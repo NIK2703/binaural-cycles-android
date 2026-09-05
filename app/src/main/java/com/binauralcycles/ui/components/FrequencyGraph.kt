@@ -52,6 +52,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
@@ -289,7 +293,7 @@ fun FrequencyGraph(
     // фиксированы, метки не разъезжаются при перетаскивании/добавлении точек.
     var showRangeDialog by remember { mutableStateOf(false) }
     var editingRangeType by remember { mutableStateOf<RangeType?>(null) }
-    var tempRangeValue by remember { mutableStateOf("") }
+    var tempRangeValue by remember { mutableStateOf(TextFieldValue("")) }
 
     // Локализованный формат Гц - объявляем здесь для использования во всём компоненте
     val hzFormat = stringResource(R.string.hz_value_format)
@@ -767,7 +771,8 @@ fun FrequencyGraph(
                             indication = null
                         ) {
                             editingRangeType = RangeType.MAX
-                            tempRangeValue = "%.0f".format(carrierRange.max)
+                            val maxText = "%.0f".format(carrierRange.max)
+                            tempRangeValue = TextFieldValue(maxText, selection = TextRange(maxText.length))
                             showRangeDialog = true
                         }
                 ) {}
@@ -785,7 +790,8 @@ fun FrequencyGraph(
                             indication = null
                         ) {
                             editingRangeType = RangeType.MIN
-                            tempRangeValue = "%.0f".format(carrierRange.min)
+                            val minText = "%.0f".format(carrierRange.min)
+                            tempRangeValue = TextFieldValue(minText, selection = TextRange(minText.length))
                             showRangeDialog = true
                         }
                 ) {}
@@ -1065,8 +1071,8 @@ fun FrequencyGraph(
         
     }
     
-    val minCarrierTitle = stringResource(R.string.min_carrier_frequency)
-    val maxCarrierTitle = stringResource(R.string.max_carrier_frequency)
+    val minCarrierTitle = stringResource(R.string.min_channel_frequency)
+    val maxCarrierTitle = stringResource(R.string.max_channel_frequency)
     val frequencyLabel = stringResource(R.string.frequency_hz)
     val okLabel = stringResource(R.string.ok)
     val cancelLabel = stringResource(R.string.cancel)
@@ -1078,14 +1084,31 @@ fun FrequencyGraph(
             text = {
                 OutlinedTextField(
                     value = tempRangeValue,
-                    onValueChange = { tempRangeValue = it },
+                    onValueChange = { newValue ->
+                        // Оставляем только цифры и одну десятичную точку
+                        val filtered = buildString {
+                            var dotSeen = false
+                            for (ch in newValue.text) {
+                                if (ch.isDigit()) append(ch)
+                                else if (ch == '.' && !dotSeen) {
+                                    append(ch)
+                                    dotSeen = true
+                                }
+                            }
+                        }
+                        tempRangeValue = newValue.copy(
+                            text = filtered,
+                            selection = TextRange(filtered.length)
+                        )
+                    },
                     label = { Text(frequencyLabel) },
-                    singleLine = true
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val value = tempRangeValue.toFloatOrNull()
+                    val value = tempRangeValue.text.toFloatOrNull()
                     // Вместо молчаливого отказа при выходе за допустимые границы
                     // ЗАЖИМАЕМ значение в пределы: нижний предел не может быть
                     // меньше слышимого минимума (20 Гц), верхний — больше

@@ -49,7 +49,7 @@ cmd() {
 logsize() { adb shell stat -c '%s' "$LOG" 2>/dev/null | tr -d '\r'; }
 
 # Все маркеры, по которым потом считаются тайминги
-MARKERS='beginCrossfade|onOutgoingReleased|outgoingReaper|afterOutgoingReleased|onPause|onPausedFully|resumePausedStream|beginHandoff|requestHandoff|fadeOutCurrent|fade-out\(|fade-in|start spec|prepare |releaseInternal|writerLoop exit|onStreamReleased|onStreamFullyStopped|createAudioTrack|VolumeShaper|RC1|growPacketBuffer|launchSpec|launchStream|discardPausedCurrent|resumeFromPaused|onResumeFromPaused|switch #'
+MARKERS='beginTransition|beginOverlapSwitch|beginSilentSwitch|startPendingSilentSwitch|onOutgoingReleased|outgoingReaper|afterOutgoingReleased|onPause|onPausedFully|resumePausedStream|beginHandoff|requestHandoff|fadeOutCurrent|fade-out\(|fade-in|start spec|prepare |releaseInternal|writerLoop exit|onStreamReleased|onStreamFullyStopped|createAudioTrack|VolumeShaper|RC1|growPacketBuffer|launchSpec|launchStream|discardPausedCurrent|resumeFromPaused|onResumeFromPaused|switch #'
 
 # Холодный старт процесса: иначе прогон наследует runtime-override'ы от
 # прошлых экспериментов (packetdiv/packetgdiv/packetmax/buffer живут в
