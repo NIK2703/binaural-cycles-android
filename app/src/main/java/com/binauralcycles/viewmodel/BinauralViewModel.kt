@@ -43,6 +43,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlin.math.round
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -870,10 +871,27 @@ class BinauralViewModel @Inject constructor(
                 // это время). Debug-панель времени берёт отдельный неквантованный
                 // поток (см. debugCurrentTime), поэтому её слайдер не страдает.
                 val quantizedSeconds = (timeSeconds / 60) * 60
+                // U3: частоты квантуются до ТОЧНОСТИ ОТОБРАЖЕНИЯ. Движок
+                // отдаёт сырые float, которые меняются каждую секунду, поэтому
+                // distinctUntilChanged ниже не мог схлопнуть ни одной эмиссии и
+                // телеметрия тикала ~1 Гц постоянно — даже на паузе и в фоне.
+                //
+                // Шаги квантования выбраны по форматам единственного
+                // потребителя (BottomPlaybackPanel): биения печатаются как
+                // %.1f, несущая — как %.0f. Округлённое значение форматируется
+                // РОВНО в ту же строку, что и исходное (%.1f от числа с шагом
+                // 0.1 — тождество; %.0f от целого — тоже), поэтому картинка не
+                // меняется ни на один символ, а эмиссии падают с ~1/с до
+                // ~1/мин (дальше упираемся в квант времени выше).
+                //
+                // Debug-панель частот не страдает: она читает потоки сервиса
+                // напрямую (см. DebugCommandExecutor), а не телеметрию.
+                val quantizedBeat = round(beat * 10f) / 10f
+                val quantizedCarrier = round(carrier)
                 PlaybackTelemetry(
                     isPlaying = playing,
-                    currentBeatFrequency = beat,
-                    currentCarrierFrequency = carrier,
+                    currentBeatFrequency = quantizedBeat,
+                    currentCarrierFrequency = quantizedCarrier,
                     isChannelsSwapped = swapped,
                     currentTime = LocalTime.fromSecondOfDay(quantizedSeconds.coerceIn(0, 86399))
                 )

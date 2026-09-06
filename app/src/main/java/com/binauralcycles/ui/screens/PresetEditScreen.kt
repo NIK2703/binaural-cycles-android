@@ -350,8 +350,9 @@ fun PresetEditScreen(
                     FrequencyGraph(
                         points = editingCurve.points,
                         selectedPointIndex = uiState.selectedPointIndex,
-                        currentCarrierFrequency = telemetry.currentCarrierFrequency,
-                        currentBeatFrequency = telemetry.currentBeatFrequency,
+                        // currentCarrierFrequency / currentBeatFrequency не
+                        // передаются: граф их не читает, а их тик ~1 раз в
+                        // секунду зря инвалидировал статический слой отрисовки.
                         carrierRange = editingCurve.carrierRange,
                         beatRange = editingCurve.beatRange,
                         interpolationType = editingCurve.interpolationType,

@@ -146,7 +146,12 @@ inline bool channelSwapStateAt(const BinauralConfig& cfg, float curvePosSec) {
         // все сутки.
         if (cfg.channelSwapTrendPoints == ChannelSwapTrendPoints::BOTH) {
             const float delta0 = trendBeatDeltaAt(cfg.curve, 0.0f);
-            if (delta0 < 0.0f) swapped = !swapped;
+            // Та же мёртвая зона, что в детекторе нулей: иначе знак ШУМА
+            // округления (дельта на плато ~1e-4 Гц) решал бы, перевёрнута
+            // раскладка в начале суток или нет, — и на кривой с постоянными
+            // биениями раскладка после каждой пересборки потока (а в редакторе
+            // это каждое движение точки) получалась бы случайной.
+            if (delta0 < -trendDeltaEpsilonHz(cfg.curve)) swapped = !swapped;
         }
         return swapped;
     }

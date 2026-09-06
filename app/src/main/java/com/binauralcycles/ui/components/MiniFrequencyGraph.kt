@@ -77,9 +77,11 @@ fun MiniFrequencyGraph(
     primaryColor: Color = MaterialTheme.colorScheme.primary,
     indicatorColor: Color = MaterialTheme.colorScheme.error,
     isPlaying: Boolean = false,
+    // Частоты намеренно НЕ передаются: мини-график их не рисует (зона
+    // пересечения указателя с полосой биений вырезана), а «живые» значения
+    // меняются ~1 раз в секунду и заставляли активную карточку целиком
+    // перекомпоновываться и перерисовываться ради пустого места.
     currentTime: LocalTime = LocalTime(12, 0),
-    currentCarrierFrequency: Float = 0.0f,
-    currentBeatFrequency: Float = 0.0f,
     relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
 ) {
     val density = LocalDensity.current
@@ -155,8 +157,6 @@ fun MiniFrequencyGraph(
                         height = size.height,
                         isPlaying = false,
                         currentTime = currentTime,
-                        currentCarrierFrequency = currentCarrierFrequency,
-                        currentBeatFrequency = currentBeatFrequency,
                         relaxationModeSettings = relaxationModeSettings,
                         labelPaint = labelPaint,
                         axisPaint = axisPaint,
@@ -180,8 +180,6 @@ fun MiniFrequencyGraph(
                         height = size.height,
                         isPlaying = isPlaying,
                         currentTime = currentTime,
-                        currentCarrierFrequency = currentCarrierFrequency,
-                        currentBeatFrequency = currentBeatFrequency,
                         relaxationModeSettings = relaxationModeSettings,
                         labelPaint = labelPaint,
                         axisPaint = axisPaint,
@@ -316,8 +314,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
     height: Float,
     isPlaying: Boolean,
     currentTime: LocalTime,
-    currentCarrierFrequency: Float,
-    currentBeatFrequency: Float,
     relaxationModeSettings: RelaxationModeSettings,
     labelPaint: Paint,
     axisPaint: Paint,

@@ -17,7 +17,11 @@ import com.binaural.core.audio.model.SampleRate
 import com.binaural.core.audio.model.BinauralPreset
 import com.binaural.core.audio.model.ChannelSwapMode
 import com.binaural.core.audio.model.ChannelSwapSettings
+import com.binaural.core.audio.model.FrequencyCurve
+import com.binaural.core.audio.model.FrequencyMath
+import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.NormalizationType
+import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.data.preferences.BinauralPreferencesRepository
 import com.binauralcycles.MainActivity
@@ -56,6 +60,26 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
 
     @Volatile
     private var switchRunnable: Runnable? = null
+
+    @Volatile
+    private var swapWatchRunnable: Runnable? = null
+
+    /**
+     * Черновик редактора — headless-зеркало `BinauralUiState.editingFrequencyCurve`.
+     *
+     * Нужен, потому что фантомная смена каналов в TREND-режиме воспроизводится
+     * только на пути редактора (`startDraft` + `updateEditingCurve`), а тыкать
+     * пальцем в Compose-график через `input tap` нельзя: координаты точки
+     * зависят от масштаба, и «добавить вторую точку» вслепую не выходит.
+     * Здесь тот же самый набор вызовов сервиса, что делает ViewModel, но без UI.
+     * docs/analysis_trend_swap_editor_phantom.md
+     */
+    @Volatile
+    private var draftCurve: FrequencyCurve? = null
+
+    /** Режим расслабления черновика (зеркало `editingRelaxationModeSettings`). */
+    @Volatile
+    private var draftRelaxation: RelaxationModeSettings = RelaxationModeSettings()
 
     private val repo: BinauralPreferencesRepository by lazy {
         EntryPointAccessors.fromApplication(app, DebugRepositoryEntryPoint::class.java)
@@ -113,6 +137,16 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
             "pscrubreset" -> productionScrubReset()
             // Выход из редактора пресета: точная последовательность вызовов UI.
             "editexit" -> editorExit()
+            // --- ЧЕРНОВИК РЕДАКТОРА (headless-зеркало пути BinauralViewModel) ---
+            // docs/analysis_trend_swap_editor_phantom.md
+            "dn" -> draftInit()
+            "dstart" -> draftStart()
+            "dadd" -> draftAddPoint(arg)
+            "drelax" -> draftRelaxation(arg)
+            "dsave" -> draftSave(arg)
+            "dshow" -> draftShow()
+            "dstop" -> draftStop()
+            "swapwatch" -> swapWatch(arg)
             "scale" -> setScale(arg)
             "vrun" -> setVirtualRunning(arg)
             "realtime" -> resetToRealTime()
@@ -616,6 +650,262 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         } catch (e: Throwable) {
             "Импорт не удался: ${e.javaClass.simpleName}: ${e.message}"
         }
+    }
+
+    // ============= Черновик редактора (headless) =============
+    //
+    // Зеркало пути `PresetEditScreen → BinauralViewModel` для расследования
+    // фантомной смены каналов в TREND-режиме (docs/analysis_trend_swap_editor_phantom.md).
+    // Повторяются вызовы СЕРВИСА один в один; состояние UI не эмулируется —
+    // оно в этом баге и так одинаковое (одна и та же кривая, одни и те же
+    // глобальные channelSwapSettings).
+
+    /** `dn` — новая предустановка: ровно то, что даёт `FrequencyCurve.newPresetCurve()`. */
+    private fun draftInit(): String {
+        draftCurve = FrequencyCurve.newPresetCurve()
+        draftRelaxation = RelaxationModeSettings()
+        val c = draftCurve!!
+        return "Черновик создан: ${c.points.size} т., ${c.interpolationType}, " +
+            "carrier=${c.carrierRange}, beat=${c.beatRange}, " +
+            "relaxation=${onOff(draftRelaxation.enabled)}"
+    }
+
+    /**
+     * `dstart` — зеркало `BinauralViewModel.startDraft()`: зазвучать черновиком.
+     *
+     * Отличие от сохранённого пресета ровно два: `presetId = __draft__` и
+     * позже — минутный интервал буфера предпросмотра. Конфиг собирается той же
+     * `buildPlaybackConfig()`, что и для сохранённого пресета.
+     */
+    private fun draftStart(): String {
+        val curve = draftCurve ?: return "Черновика нет — сначала `dn`"
+        val s = service
+            ?: return "Сервис не запущен: ${startService()}. Повторите `dstart` после старта."
+        val st = settings()
+        // Как в startDraft: старт явный, интервал буфера — пользовательский.
+        s.setFrequencyUpdateInterval(st.bufferMinutes * 60 * 1000)
+        s.setCurrentPresetName("Черновик (debug)")
+        s.setCurrentPresetId(DRAFT_PRESET_ID)
+        s.updateConfig(
+            buildPlaybackConfig(
+                frequencyCurve = curve,
+                volume = st.volume,
+                channelSwap = st.swap,
+                normalization = st.normalization
+            ),
+            draftRelaxation
+        )
+        if (!BinauralPlaybackService.isPlaying.value) s.play()
+        return "Черновик звучит: ${curve.points.size} т., swap=${st.swap.mode}, " +
+            "interval=${st.swap.intervalSeconds}с, relaxation=${onOff(draftRelaxation.enabled)}. " +
+            "Смотрите logcat SWAPCFG"
+    }
+
+    /**
+     * `dadd <сек> <несущая> <биения>` — зеркало `addEditingPoint()` +
+     * `updateEditingCurve()`: кламп → сортировка → живой пуш в звучащий поток.
+     *
+     * Живой пуш — ключевая деталь бага: каждое движение точки в редакторе
+     * уходит как `updateFrequencyCurve()` = полный zero-overlap хэндофф.
+     */
+    private fun draftAddPoint(arg: String): String {
+        val curve = draftCurve ?: return "Черновика нет — сначала `dn`"
+        val t = arg.split(Regex("\\s+"))
+        val sec = t.getOrNull(0)?.toIntOrNull()
+            ?: return "Формат: dadd <секСуток|HH:MM> <несущая> <биения>"
+        val carrier = t.getOrNull(1)?.toFloatOrNull()
+            ?: return "Формат: dadd <сек> <несущая> <биения>"
+        val beat = t.getOrNull(2)?.toFloatOrNull()
+            ?: return "Формат: dadd <сек> <несущая> <биения>"
+        val time = LocalTime.fromSecondOfDay(((sec % 86400) + 86400) % 86400)
+
+        val clampedCarrier = curve.carrierRange.clamp(carrier)
+        val clampedBeat = FrequencyMath.clampBeat(
+            clampedCarrier, beat, carrierRange = curve.carrierRange
+        )
+
+        val points = (curve.points + FrequencyPoint(time, clampedCarrier, clampedBeat))
+            .sortedBy { it.time.toSecondOfDay() }
+        val newCurve = FrequencyCurve(
+            points = points,
+            carrierRange = curve.carrierRange,
+            beatRange = curve.beatRange,
+            interpolationType = curve.interpolationType,
+            splineTension = curve.splineTension,
+            stepFadeDurationMs = curve.stepFadeDurationMs
+        )
+        draftCurve = newCurve
+
+        // Пуш в звук — только если черновик звучит (гейт `isEditingSounding`).
+        val s = service
+        if (s == null || !BinauralPlaybackService.isPlaying.value) {
+            return "Точка добавлена (звук не звучит): ${points.size} т., " +
+                "запрошено c=$carrier b=$beat → c=$clampedCarrier b=$clampedBeat"
+        }
+        // armEditorPreviewBufferInterval(): минутный буфер на время правки.
+        s.setFrequencyUpdateInterval(EDITOR_PREVIEW_BUFFER_INTERVAL_MS)
+        s.updateFrequencyCurve(newCurve)
+        return "Точка ${LocalTime.fromSecondOfDay(((sec % 86400) + 86400) % 86400)} " +
+            "c=${fmt(clampedCarrier, 1)} b=${fmt(clampedBeat, 2)} → " +
+            "push в звук (буфер ${EDITOR_PREVIEW_BUFFER_INTERVAL_MS / 1000} с): ${points.size} т. " +
+            "Смотрите logcat SWAPCFG"
+    }
+
+    /**
+     * `drelax <on|off>` — включить режим расслабления у черновика.
+     *
+     * Проверка гипотезы №1: `NativeAudioEngine.updateConfig()` подменяет точки
+     * кривой виртуальными при `relaxation.enabled && points.size >= 2` — ровно
+     * на второй точке. Виртуальные точки создают регулярные провалы биений,
+     * а значит — десятки экстремумов в сутки и частые смены каналов в TREND.
+     */
+    private fun draftRelaxation(arg: String): String {
+        val on = parseBool(arg)
+        draftRelaxation = draftRelaxation.copy(enabled = on)
+        val curve = draftCurve ?: return "Режим расслабления: ${onOff(on)} (черновика нет)"
+        val s = service ?: return "Режим расслабления черновика: ${onOff(on)} (в звук не ушло)"
+        val st = settings()
+        // Как `updateRelaxationModeSettings` в редакторе: конфиг целиком,
+        // потому что relaxation входит в `onSpecChanged` и пересобирает поток.
+        s.updateConfig(
+            buildPlaybackConfig(
+                frequencyCurve = curve,
+                volume = st.volume,
+                channelSwap = st.swap,
+                normalization = st.normalization
+            ),
+            draftRelaxation
+        )
+        return "Режим расслабления черновика: ${onOff(on)} (${curve.points.size} т.). " +
+            "Смотрите logcat SWAPCFG"
+    }
+
+    /**
+     * `dsave <имя>` — зеркало `createPreset(activate = true)`.
+     *
+     * Конфиг тот же самый (кривая — тот же объект), меняются только имя и id:
+     * именно это отличие пользователь называет «после сохранения — правильно».
+     * Плюс возвращается пользовательский интервал буфера.
+     */
+    private fun draftSave(arg: String): String {
+        val curve = draftCurve ?: return "Черновика нет — сначала `dn`"
+        val name = arg.ifEmpty { "Черновик" }
+        val preset = BinauralPreset(
+            name = name,
+            frequencyCurve = curve,
+            relaxationModeSettings = draftRelaxation
+        )
+        io {
+            repo.addPreset(preset)
+            repo.saveActivePresetId(preset.id)
+        }
+        val s = service
+            ?: return "Пресет сохранён: ${preset.name} (${preset.id}), но в звук не ушло"
+        val st = settings()
+        s.setCurrentPresetName(preset.name)
+        s.setCurrentPresetId(preset.id)
+        s.setFrequencyUpdateInterval(st.bufferMinutes * 60 * 1000)
+        s.updateConfig(
+            buildPlaybackConfig(
+                frequencyCurve = curve,
+                volume = st.volume,
+                channelSwap = st.swap,
+                normalization = st.normalization
+            ),
+            draftRelaxation
+        )
+        return "Сохранён и активирован: ${preset.name} (${preset.id}), ${curve.points.size} т. " +
+            "Смотрите logcat SWAPCFG и сравните с черновиком"
+    }
+
+    /** `dshow` — что сейчас в черновике и с какими настройками он ушёл бы в звук. */
+    private fun draftShow(): String {
+        val curve = draftCurve ?: return "Черновика нет — сначала `dn`"
+        val st = settings()
+        return buildString {
+            append("Черновик: ${curve.points.size} т., ${curve.interpolationType}, ")
+            append("carrier=[${fmt(curve.carrierRange.min, 1)};${fmt(curve.carrierRange.max, 1)}] ")
+            append("beat=[${fmt(curve.beatRange.min, 1)};${fmt(curve.beatRange.max, 1)}]\n")
+            curve.points.forEachIndexed { i, p ->
+                append("  ${i + 1}. ${p.time} c=${fmt(p.carrierFrequency, 1)} ")
+                append("b=${fmt(p.beatFrequency, 2)} (L=${fmt(p.leftChannelFrequency, 1)} ")
+                append("R=${fmt(p.rightChannelFrequency, 1)})\n")
+            }
+            append("relaxation=${onOff(draftRelaxation.enabled)}\n")
+            append("swap=${st.swap.enabled} mode=${st.swap.mode} ")
+            append("interval=${st.swap.intervalSeconds}с trendPoints=${st.swap.trendPoints} ")
+            append("fade=${st.swap.fadeEnabled}\n")
+            append("нормализация=${st.normalization.type} буфер=${st.bufferMinutes} мин")
+        }
+    }
+
+    /** `dstop` — остановить звук (черновик при этом остаётся в памяти). */
+    private fun draftStop(): String {
+        stopSwapWatch()
+        return fadeStop()
+    }
+
+    /**
+     * `swapwatch <сек>` — прямое измерение «каналы меняются каждые N секунд».
+     *
+     * Опрашивает знак эффективной частоты биений (sign = фактическая раскладка
+     * каналов) каждые 200 мс и печатает ВСЕ переходы в logcat тегом SWAPWATCH:
+     * время, знак, `isChannelsSwapped`. Это и есть разница между «расписание
+     * пересечений корректно» и «звук действительно меняет раскладку» —
+     * SWAPCFG показывает первое, swapwatch — второе.
+     */
+    private fun swapWatch(arg: String): String {
+        stopSwapWatch()
+        val seconds = arg.toIntOrNull()?.coerceIn(1, 600) ?: 30
+        if (!BinauralPlaybackService.isPlaying.value) {
+            return "Воспроизведение не идёт — считать нечего"
+        }
+        val deadline = System.currentTimeMillis() + seconds * 1000L
+        var lastSign = 0
+        var flips = 0
+        var samples = 0
+        val startedAt = System.currentTimeMillis()
+        val runnable = object : Runnable {
+            override fun run() {
+                val beat = BinauralPlaybackService.currentBeatFrequency.value
+                val swapped = BinauralPlaybackService.isChannelsSwapped.value
+                val sign = when {
+                    beat > 0.0001f -> 1
+                    beat < -0.0001f -> -1
+                    else -> 0
+                }
+                samples++
+                if (sign != 0) {
+                    if (lastSign == 0) {
+                        lastSign = sign
+                        Log.i("SWAPWATCH", "старт: знак=$sign swapped=$swapped beat=${
+                            fmt(beat, 3)} (t=${System.currentTimeMillis() - startedAt} мс)")
+                    } else if (sign != lastSign) {
+                        flips++
+                        lastSign = sign
+                        Log.i("SWAPWATCH",
+                            "СМЕНА #$flips: знак=$sign swapped=$swapped beat=${fmt(beat, 3)} " +
+                                "(t=${System.currentTimeMillis() - startedAt} мс)")
+                    }
+                }
+                if (System.currentTimeMillis() >= deadline) {
+                    swapWatchRunnable = null
+                    Log.i("SWAPWATCH",
+                        "итог за ${System.currentTimeMillis() - startedAt} мс: " +
+                            "смен=$flips, опросов=$samples, знак=$sign, swapped=$swapped")
+                    return
+                }
+                handler.postDelayed(this, 200L)
+            }
+        }
+        swapWatchRunnable = runnable
+        handler.post(runnable)
+        return "swapwatch: $seconds с, опрос 200 мс, лог — logcat SWAPWATCH"
+    }
+
+    private fun stopSwapWatch() {
+        swapWatchRunnable?.let { handler.removeCallbacks(it) }
+        swapWatchRunnable = null
     }
 
     // ============= Настройки =============
@@ -1149,5 +1439,8 @@ class DebugCommandExecutor(private val app: Application) : DebugCommandTarget {
         const val MB = 1024L * 1024L
         const val DEFAULT_SWITCH_DELAY_MS = 400L
         const val STREAM_LOG_NAME = "binaural_stream.log"
+        // Те же значения, что в BinauralViewModel (там они приватные).
+        const val DRAFT_PRESET_ID = "__draft__"
+        const val EDITOR_PREVIEW_BUFFER_INTERVAL_MS = 60_000
     }
 }

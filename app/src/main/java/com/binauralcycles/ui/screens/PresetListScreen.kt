@@ -167,18 +167,16 @@ fun PresetListScreen(
                 ) {
                     items(uiState.presets, key = { it.id }) { preset ->
                         val isActivePreset = uiState.activePreset?.id == preset.id
-                        // U1: только активная карточка получает «живое» время и частоты.
+                        // U1: только активная карточка получает «живое» время.
                         // Остальные получают константу, поэтому при каждом тике телеметрии
                         // Compose пропускает их перекомпозицию (параметры не меняются).
                         // У неактивных карточек индикатор всё равно скрыт (isPlaying = false),
                         // так что график визуально идентичен — экономим 6 из 7 перерисовок.
+                        // Частоты карточке НЕ передаются: мини-график их всё равно не рисует
+                        // (зона пересечения указателя с полосой биений вырезана), а «живые»
+                        // значения меняются ~1 раз в секунду и заставляли активную карточку
+                        // целиком перекомпоновываться и перерисовываться ради пустого места.
                         val cardTime = if (isActivePreset) telemetry.currentTime else INACTIVE_CARD_TIME
-                        val (lowerFreq, upperFreq) = if (isActivePreset)
-                            preset.getChannelFrequenciesAt(telemetry.currentTime)
-                        else
-                            (0.0f to 0.0f)
-                        val carrierFreq = (lowerFreq + upperFreq) / 2.0f
-                        val beatFreq = upperFreq - lowerFreq
 
                         PresetCard(
                             presetId = preset.id,
@@ -187,8 +185,6 @@ fun PresetListScreen(
                             relaxationModeSettings = preset.relaxationModeSettings,
                             isActive = isActivePreset,
                             isPlaying = isActivePreset && telemetry.isPlaying,
-                            currentCarrierFrequency = if (isActivePreset) carrierFreq else 0.0f,
-                            currentBeatFrequency = if (isActivePreset) beatFreq else 0.0f,
                             currentTime = cardTime,
                             sharedTransitionScope = sharedTransitionScope,
                             animatedVisibilityScope = animatedVisibilityScope,
@@ -219,8 +215,8 @@ private fun PresetCard(
     relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
     isActive: Boolean,
     isPlaying: Boolean,
-    currentCarrierFrequency: Float,
-    currentBeatFrequency: Float,
+    // Частоты намеренно отсутствуют в сигнатуре: мини-график их не рисует,
+    // а их «живая» подача инвалидировала кэш отрисовки каждый тик.
     currentTime: LocalTime, // Получаем от родителя
     sharedTransitionScope: SharedTransitionScope,
     animatedVisibilityScope: AnimatedVisibilityScope,
@@ -283,8 +279,6 @@ private fun PresetCard(
                         modifier = Modifier.fillMaxSize(),
                         isPlaying = isPlaying,
                         currentTime = currentTime,
-                        currentCarrierFrequency = currentCarrierFrequency,
-                        currentBeatFrequency = currentBeatFrequency,
                         relaxationModeSettings = relaxationModeSettings
                     )
                     

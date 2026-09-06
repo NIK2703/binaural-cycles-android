@@ -27,7 +27,7 @@ cd "$(git rev-parse --show-toplevel)" || { echo "ERROR: not a git repo"; exit 1;
 # helper: persist both loose refs after a successful push, sync tree only if clean
 write_refs() {
   local tip="$1"
-  mkdir -p ".git/refs/heads" ".git/refs/remotes/$REMOTE"
+  mkdir -p "$(dirname ".git/refs/heads/$BRANCH")" "$(dirname ".git/refs/remotes/$REMOTE/$BRANCH")"
   printf '%s\n' "$tip" > ".git/refs/heads/$BRANCH"
   printf '%s\n' "$tip" > ".git/refs/remotes/$REMOTE/$BRANCH"
   if git diff --quiet HEAD -- && [[ -z "$(git status --porcelain)" ]]; then
@@ -80,19 +80,22 @@ if [[ $AUTO_COMMIT -eq 1 ]]; then
 fi
 
 # ---- robust local tip resolution -------------------------------------------
-# Prefer the loose ref file (we maintain it), then rev-parse, then reflog.
+# In this sandbox the branch loose-ref gets reset to the packed base, but the
+# reflog keeps the true tip (the reset bypasses the reflog). Use reflog -1 as
+# the primary source, then fall back to the loose-ref file, then rev-parse.
 resolve_local() {
-  local b="$1"
+  local b="$1" h
+  h="$(git reflog -1 --format=%H "$b" 2>/dev/null)"
+  if [[ -n "$h" ]] && git rev-parse -q --verify "$h" >/dev/null 2>&1; then
+    echo "$h"; return
+  fi
   if [[ -f ".git/refs/heads/$b" ]]; then
-    local sha; sha="$(cat ".git/refs/heads/$b" 2>/dev/null)"
-    if [[ -n "$sha" ]] && git rev-parse -q --verify "$sha" >/dev/null 2>&1; then
-      echo "$sha"; return
+    h="$(cat ".git/refs/heads/$b" 2>/dev/null)"
+    if [[ -n "$h" ]] && git rev-parse -q --verify "$h" >/dev/null 2>&1; then
+      echo "$h"; return
     fi
   fi
-  local r
-  r="$(git rev-parse -q --verify "$b" 2>/dev/null)" && { echo "$r"; return; }
-  r="$(git reflog -1 --format=%H "$b" 2>/dev/null)" && [[ -n "$r" ]] && { echo "$r"; return; }
-  git reflog -1 --format=%H HEAD 2>/dev/null
+  git rev-parse -q --verify "$b" 2>/dev/null
 }
 LOCAL="$(resolve_local "$BRANCH")"
 if [[ -z "$LOCAL" ]]; then echo "ERROR: cannot resolve local tip for $BRANCH"; exit 1; fi

@@ -42,6 +42,44 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Обёртка над [BottomPlaybackPanel], держащая подписку на телеметрию ВНУТРИ
+ * панели — у единственного её потребителя.
+ *
+ * Раньше `telemetry` собирался в корне [BinauralNavigation] рядом с
+ * `uiState`. Частоты и время тикают ~1 раз в секунду, поэтому каждый тик
+ * перекомпоновывал не панель, а весь Scaffold вместе с NavHost: список
+ * пресетов, экран редактирования, графики. Разделение `uiState` /
+ * `telemetry` придумано ровно против этого, но корневая подписка сводила его
+ * на нет. Теперь тик телеметрии перекомпонует только панель.
+ *
+ * Всё остальное приходит параметром из корня и пересчитывается с прежней
+ * частотой, поэтому поведение и внешний вид не меняются.
+ */
+@Composable
+private fun TelemetryDrivenPlaybackPanel(
+    viewModel: BinauralViewModel,
+    presetName: String?,
+    volume: Float,
+    onPlayClick: () -> Unit,
+    onVolumeChange: (Float) -> Unit,
+    onVolumeSave: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val telemetry by viewModel.telemetry.collectAsState()
+    BottomPlaybackPanel(
+        presetName = presetName,
+        beatFrequency = telemetry.currentBeatFrequency,
+        carrierFrequency = telemetry.currentCarrierFrequency,
+        isPlaying = telemetry.isPlaying,
+        volume = volume,
+        onPlayClick = onPlayClick,
+        onVolumeChange = onVolumeChange,
+        onVolumeSave = onVolumeSave,
+        modifier = modifier
+    )
+}
+
 sealed class Screen(val route: String) {
     object PresetList : Screen("presets")
     object PresetEdit : Screen("preset/{presetId}") {
@@ -60,7 +98,11 @@ fun BinauralNavigation(
     val uiState by viewModel.uiState.collectAsState()
     // Телеметрия намеренно отдельным потоком: частоты меняются 1-2 раза в секунду,
     // и подмешивать их в uiState значило бы перекомпоновывать весь NavHost.
-    val telemetry by viewModel.telemetry.collectAsState()
+    // U4: но и читать её ЗДЕСЬ, в корне, нельзя ровно по той же причине —
+    // корневая подписка перекомпоновывает Scaffold и NavHost вместе со всеми
+    // экранами, то есть разделение потоков не давало ничего. Единственный
+    // потребитель — нижняя панель, поэтому подписка живёт внутри
+    // [TelemetryDrivenPlaybackPanel] ниже.
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -337,13 +379,13 @@ fun BinauralNavigation(
         // navigationBarsPadding применяется внутри BottomPlaybackPanel только к контенту
         // чтобы фон Surface заходил под navigation bar
         if (showBottomPanel) {
-            BottomPlaybackPanel(
+            // Имя считано в корне (как и раньше) — оно зависит от uiState, а
+            // не от телеметрии; частота его пересчёта не изменилась.
+            TelemetryDrivenPlaybackPanel(
                 // Черновик звучит под своей подписью («Черновик» или имя из
                 // редактора), а не под именем прежнего активного пресета.
                 presetName = viewModel.soundingPresetName(),
-                beatFrequency = telemetry.currentBeatFrequency,
-                carrierFrequency = telemetry.currentCarrierFrequency,
-                isPlaying = telemetry.isPlaying,
+                viewModel = viewModel,
                 volume = uiState.volume,
                 onPlayClick = { viewModel.togglePlayback() },
                 onVolumeChange = { viewModel.setVolumeImmediate(it) },

@@ -246,8 +246,11 @@ fun generateRelaxationVirtualPoints(
 fun FrequencyGraph(
     points: List<FrequencyPoint>,
     selectedPointIndex: Int?,
-    currentCarrierFrequency: Float,
-    currentBeatFrequency: Float,
+    // Текущие частоты намеренно НЕ передаются: этот граф их не рисует ни
+    // в статическом, ни в динамическом слое. Раньше они приходили «живыми»
+    // (~1 раз в секунду) и инвалидировали параметры статического слоя —
+    // сетка, 9 часовых и 5 частотных подписей и 5 путей по ~800–1000
+    // сегментов перерисовывались каждую секунду ради ничего.
     carrierRange: FrequencyRange,
     beatRange: FrequencyRange,
     interpolationType: InterpolationType = InterpolationType.LINEAR,
@@ -500,36 +503,81 @@ fun FrequencyGraph(
                 )
             }
 
+            // Статичный слой вынесен в remember-модификатор.
+            //
+            // Сетка, 9 часовых и 5 частотных подписей и 5 путей (~5 тыс.
+            // сегментов) от времени НЕ зависят, но раньше модификатор
+            // создавался заново при каждой перекомпозиции графа — а граф
+            // перекомпонуется на каждом тике телеметрии (время, скраб).
+            // Пересоздание = инвалидация узла отрисовки = вся эта геометрия
+            // перерисовывалась ~1 раз в секунду впустую.
+            //
+            // Запомненный экземпляр модификатора между перекомпозициями
+            // один и тот же, поэтому Compose его не обновляет и отрисовку
+            // не инвалидирует. Картинка ровно та же, меняется только то,
+            // как часто она перерисовывается. Ключи remember — все входы
+            // лямбды, иначе слой «застынет» при правке кривой или смене темы.
+            // Соответствие «точка → её индекс в ИСХОДНОМ списке».
+            //
+            // Раньше внутри цикла по displayPoints вызывался
+            // `points.indexOf(point)`: это линейный поиск на КАЖДУЮ точку,
+            // то есть O(n²) на каждой перекомпозиции графа (а он
+            // перекомпонуется на каждом тике телеметрии). Карта строится
+            // один раз на смену списка.
+            //
+            // Обход в обратном порядке — чтобы при равных точках победил
+            // НАИМЕНЬШИЙ индекс: ровно то, что давал indexOf. Расхождение
+            // здесь означало бы, что выделяется другая точка.
+            val originalIndices = remember(points) {
+                val map = HashMap<FrequencyPoint, Int>(points.size)
+                for (i in points.indices.reversed()) map[points[i]] = i
+                map
+            }
+
+            val staticDrawModifier = remember(
+                staticPaths,
+                graphParams,
+                primaryColor,
+                gridLabelColor,
+                cardSurfaceColor,
+                axisLabelPaint,
+                axisLabelBottomPx,
+                axisLabelLeftPx,
+                hzFormat
+            ) {
+                Modifier.drawBehind {
+                    val width = size.width
+                    val height = size.height
+                    drawGrid(primaryColor)
+                    // ВСЕ метки — ДО кривой, то есть в фоне, ПОД графиком.
+                    drawHourAxisLabels(
+                        width = width,
+                        height = height,
+                        paint = axisLabelPaint,
+                        textColor = gridLabelColor,
+                        bgColor = cardSurfaceColor.copy(alpha = 0.75f),
+                        bottomPx = axisLabelBottomPx
+                    )
+                    drawFrequencyAxisLabels(
+                        width = width,
+                        height = height,
+                        graphParams = graphParams,
+                        paint = axisLabelPaint,
+                        edgeTextColor = primaryColor,
+                        edgeBgColor = primaryColor.copy(alpha = 0.1f),
+                        midTextColor = gridLabelColor,
+                        midBgColor = cardSurfaceColor.copy(alpha = 0.75f),
+                        hzFormat = hzFormat,
+                        leftPx = axisLabelLeftPx
+                    )
+                    drawGraphPaths(staticPaths, primaryColor)
+                }
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .drawBehind {
-                        val width = size.width
-                        val height = size.height
-                        drawGrid(primaryColor)
-                        // ВСЕ метки — ДО кривой, то есть в фоне, ПОД графиком.
-                        drawHourAxisLabels(
-                            width = width,
-                            height = height,
-                            paint = axisLabelPaint,
-                            textColor = gridLabelColor,
-                            bgColor = cardSurfaceColor.copy(alpha = 0.75f),
-                            bottomPx = axisLabelBottomPx
-                        )
-                        drawFrequencyAxisLabels(
-                            width = width,
-                            height = height,
-                            graphParams = graphParams,
-                            paint = axisLabelPaint,
-                            edgeTextColor = primaryColor,
-                            edgeBgColor = primaryColor.copy(alpha = 0.1f),
-                            midTextColor = gridLabelColor,
-                            midBgColor = cardSurfaceColor.copy(alpha = 0.75f),
-                            hzFormat = hzFormat,
-                            leftPx = axisLabelLeftPx
-                        )
-                        drawGraphPaths(staticPaths, primaryColor)
-                    }
+                    .then(staticDrawModifier)
                     // Отдельный слой под динамичный указатель: он единственный
                     // зависит от времени и частот, и он же самый дешёвый.
                     .drawBehind {
@@ -654,7 +702,10 @@ fun FrequencyGraph(
                     }
             ) {
                 displayPoints.forEachIndexed { sortedIndex, point ->
-                    val originalIndex = points.indexOf(point)
+                    // originalIndices вместо points.indexOf(point) — см. комментарий
+                    // у самой карты: тот же результат (включая -1 для отсутствующей
+                    // точки), но за O(1) вместо O(n) на каждую точку.
+                    val originalIndex = originalIndices[point] ?: -1
                     val isSelected = selectedPointIndex == originalIndex
                     
                     val prevPoint = displayPoints.getOrNull(sortedIndex - 1)
@@ -1885,24 +1936,21 @@ private fun BoxScope.ScrubHandle(
     // никаких «дополнительных отступов сверху» не появляется (§запрос
     // 2026-09-04 — «над графиком, но без отступов»).
     //
-    // По горизонтали — центр ручки, с клампом по ВИЗУАЛУ иконки (как раньше
-    // клампился кружок): тактильная зона 40 dp может выступать за область
-    // графика, визуал — нет.
-    val resetHalf = resetIconPx / 2f
-    val resetCenterX = centerX.coerceIn(
-        resetHalf,
-        (graphParams.widthPx - resetHalf).coerceAtLeast(resetHalf)
-    )
+    // По горизонтали — строго центр ручки, БЕЗ клампа по краям графика.
+    // Раньше иконка клампилась «по визуалу» и у 00:00 / 23:59 упиралась в
+    // границу, переставая быть центром над линией воспроизведения (запрос
+    // 2026-09-06). Область графика без клипа, поэтому у крайних значений
+    // иконка чуть заходит в поля карточки — как и сама ручка (§14.6).
+    val resetCenterX = centerX
     val resetIconTop = topPx - resetGapPx - resetIconPx
     val resetTouchLeft = (resetCenterX - resetTouchPx / 2f).toInt()
     val resetTouchTop = (resetIconTop + resetIconPx / 2f - resetTouchPx / 2f).toInt()
 
-    // Слот бейджа: по центру ручки, НАД кнопкой сброса. Кламп по краям
-    // графика — чтобы у 00:00 и 23:59 бейдж не уезжал за экран.
-    val slotLeft = (centerX - slotWPx / 2f).coerceIn(
-        0f,
-        (graphParams.widthPx - slotWPx).coerceAtLeast(0).toFloat()
-    )
+    // Слот бейджа: строго НАД линией воспроизведения, БЕЗ клампа по краям
+    // графика. Раньше у 00:00 / 23:59 бейдж упирался в границы и переставал
+    // быть центром над линией (запрос 2026-09-06). Контейнер без клипа — у
+    // края бейдж чуть заходит в поля карточки, как и ручка.
+    val slotLeft = centerX - slotWPx / 2f
     // Нижняя грань слота — на [SCRUB_BUBBLE_GAP] выше верхней грани иконки
     // сброса. Позиция НЕ зависит от showReset: иначе в момент, когда ось ещё
     // на «сейчас», бейдж при появлении кнопки подпрыгивал бы.

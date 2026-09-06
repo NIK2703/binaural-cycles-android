@@ -561,6 +561,49 @@ TEST(TrendSwapPureTest, TrendBeatDeltaSign) {
     EXPECT_TRUE(trendDesiredSwapped(true, 0.0f));
 }
 
+/**
+ * РЕГРЕССИЯ: ПОСТОЯННЫЕ БИЕНИЯ — ЭТО НЕ ТРЕНД.
+ *
+ * Две точки с одинаковым beat — ровно то, что получается двойным тапом в
+ * редакторе: новая точка наследует интерполированную частоту биений, поэтому
+ * сначала она почти всегда совпадает с уже звучащей. Теоретически Δbeat ≡ 0,
+ * но на float32 это не так: каналы интерполируются ПОРОЗНЬ (upper и lower),
+ * а их разность теряет точность — остаётся «дребезг» ~1e-4 Гц.
+ *
+ * Детектор нулей без мёртвой зоны принимал этот дребезг за смены знака и
+ * находил больше 5000 «экстремумов» за сутки: каналы менялись местами каждые
+ * 5–30 с на кривой, где биения вообще не меняются.
+ * docs/analysis_trend_swap_editor_phantom.md
+ */
+TEST(TrendSwapPureTest, ConstantBeatHasNoTrendCrossings) {
+    // Несущая меняется, биения — нет: тренда по beat нет в принципе.
+    FrequencyCurve flat;
+    FrequencyPoint a, b;
+    a.timeSeconds = 43200; a.carrierFrequency = 200.0f; a.beatFrequency = 16.0f;
+    b.timeSeconds = 50400; b.carrierFrequency = 300.0f; b.beatFrequency = 16.0f;
+    flat.points.push_back(a);
+    flat.points.push_back(b);
+    flat.interpolationType = InterpolationType::MONOTONE;
+    flat.updateCache();
+
+    EXPECT_TRUE(flat.trendCrossingsValid);
+    EXPECT_TRUE(flat.trendCrossings.empty());
+
+    // Порог: не ниже абсолютного пола и заведомо меньше реального суточного
+    // хода биений (осмысленные кривые дают Δbeat 0.01…0.2 Гц).
+    const float eps = trendDeltaEpsilonHz(flat);
+    EXPECT_GE(eps, TREND_DELTA_EPSILON_HZ);
+    EXPECT_LT(eps, 0.01f);
+
+    // Раскладка одна и та же в любой момент суток и НЕ зависит от того, в
+    // какую сторону «качнулся» шум в начале суток (поправка midnightPhase).
+    BinauralConfig cfg =
+        makeTrendConfig(flat, ChannelSwapMode::TREND, ChannelSwapTrendPoints::BOTH);
+    EXPECT_FALSE(channelSwapStateAt(cfg, 0.0f));
+    EXPECT_FALSE(channelSwapStateAt(cfg, 12345.0f));
+    EXPECT_FALSE(channelSwapStateAt(cfg, 86399.0f));
+}
+
 TEST(TrendSwapPureTest, NearestSwapTime_TIMER) {
     BinauralConfig cfg = createTestConfig(200.0f, 8.0f, true, 5, 1000);
     cfg.channelSwapMode = ChannelSwapMode::TIMER;

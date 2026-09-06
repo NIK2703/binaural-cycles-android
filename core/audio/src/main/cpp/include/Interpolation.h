@@ -452,6 +452,27 @@ inline float trendBeatDeltaAt(const FrequencyCurve& curve, float tSec) {
     return (plus.upperFreq - plus.lowerFreq) - (minus.upperFreq - minus.lowerFreq);
 }
 
+/**
+ * Порог значимости трендовой дельты (мёртвая зона) для ЭТОЙ кривой, Гц.
+ *
+ * Величина масштабируется по максимальной частоте канала: шум вычитания двух
+ * канальных частот растёт вместе с ними (float32, ~1e-7 относительных).
+ * Константы — TREND_DELTA_EPSILON_HZ / TREND_DELTA_RELATIVE_EPSILON (Config.h).
+ *
+ * Зачем вообще порог: см. комментарий к TREND_DELTA_EPSILON_HZ. Коротко —
+ * без него постоянные биения выглядят как тысячи знакопеременных
+ * микроизменений, и режим TREND меняет раскладку каналов каждые несколько
+ * секунд на кривой, где биения вообще не меняются.
+ */
+inline float trendDeltaEpsilonHz(const FrequencyCurve& curve) {
+    float maxChannelHz = 0.0f;
+    for (const FrequencyPoint& p : curve.points) {
+        const float halfBeat = 0.5f * std::fabs(p.beatFrequency);
+        maxChannelHz = std::max(maxChannelHz, std::fabs(p.carrierFrequency) + halfBeat);
+    }
+    return std::max(TREND_DELTA_EPSILON_HZ, TREND_DELTA_RELATIVE_EPSILON * maxChannelHz);
+}
+
 namespace TrendScanDetail {
 
 inline float trendDeltaSample(const FrequencyCurve& curve, float tSec) {
@@ -465,11 +486,15 @@ inline float trendDeltaSample(const FrequencyCurve& curve, float tSec) {
  * бракета не гарантирована, но смена знака есть — бисекция сходится всегда.
  * Точность ~1e-4 c (0.1 мс оси кривой).
  */
-inline float refineZero(const FrequencyCurve& curve, float lo, float hi) {
+inline float refineZero(const FrequencyCurve& curve, float lo, float hi, float eps) {
     const float loSign = trendDeltaSample(curve, lo);
     for (int it = 0; it < 40 && (hi - lo) > 1e-4f; ++it) {
         const float mid = 0.5f * (lo + hi);
-        if ((trendDeltaSample(curve, mid) > 0.0f) == (loSign > 0.0f)) {
+        const float dMid = trendDeltaSample(curve, mid);
+        // Середина внутри мёртвой зоны: знак там определяет шум, а не кривая.
+        // Уточнять дальше нечего — бракет уже короче разрешения тренда.
+        if (std::fabs(dMid) <= eps) break;
+        if ((dMid > 0.0f) == (loSign > 0.0f)) {
             lo = mid;
         } else {
             hi = mid;
@@ -590,6 +615,12 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
     const int gridN = static_cast<int>(std::ceil(dayF / coarseStep));
     const float step = dayF / static_cast<float>(gridN);
 
+    // МЁРТВАЯ ЗОНА: |Δbeat| ниже порога — не тренд, а шум округления канальных
+    // частот (см. trendDeltaEpsilonHz). Узлы внутри зоны знак не обновляют —
+    // ровно как прежние точные нули, только теперь в зону попадает и «дребезг»
+    // вокруг постоянных биений. Без этого плато даёт тысячи ложных экстремумов.
+    const float deltaEps = trendDeltaEpsilonHz(curve);
+
     // Обход узлов 0..gridN (узел gridN ≡ узел 0 через полночь). Нулевые узлы
     // не участвуют в сравнении знаков напрямую: экстремум может попасть РОВНО
     // на узел (симметричные кривые), и тогда соседние пары дают «+→0»/«0→−»
@@ -614,14 +645,16 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
         TrendCrossing crossing;
         // hiIdx может быть gridN+dayWrap-расширенным: бракет через полночь
         crossing.timeSec = std::fmod(
-            TrendScanDetail::refineZero(curve, timeAt(loIdx), timeAt(hiIdx)), dayF);
+            TrendScanDetail::refineZero(curve, timeAt(loIdx), timeAt(hiIdx), deltaEps), dayF);
         if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
         crossing.toSwapped = (dHi < 0.0f); // после пика тренд убывает
         out.push_back(crossing);
     };
     for (int i = 0; i <= gridN; ++i) {
         const float d = sampleAt(i);
-        if (d == 0.0f) continue; // нулевой узел: знак не обновляется
+        // Нулевой ИЛИ шумовой узел: знак не обновляется, плато переходов
+        // не создаёт (прежде проверялось только точное d == 0).
+        if (std::fabs(d) <= deltaEps) continue;
         if (lastSignedIdx >= 0 && ((d > 0.0f) != (lastSign > 0.0f))) {
             pushCrossing(lastSignedIdx, i, d);
         }
@@ -651,7 +684,7 @@ inline void computeTrendCrossings(const FrequencyCurve& curve,
         if (hiT - loT <= dayF * 0.5f) {
             TrendCrossing crossing;
             crossing.timeSec = std::fmod(
-                TrendScanDetail::refineZero(curve, loT, hiT), dayF);
+                TrendScanDetail::refineZero(curve, loT, hiT, deltaEps), dayF);
             if (crossing.timeSec < 0.0f) crossing.timeSec += dayF;
             crossing.toSwapped = (firstSign < 0.0f); // знак начала суток после перехода
             out.push_back(crossing);

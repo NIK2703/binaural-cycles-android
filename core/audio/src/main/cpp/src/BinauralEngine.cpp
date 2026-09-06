@@ -7,6 +7,8 @@
 #include <atomic>
 #include <shared_mutex>
 #include <mutex>
+#include <string>
+#include <cstdio>
 
 #ifdef AUDIO_TEST_BUILD
 #include "../tests/android_stub.h"
@@ -121,7 +123,47 @@ void BinauralEngine::setConfig(const BinauralConfig& config) {
     // читает min/max-кэш кривой — без него амплитуды обнуляются (тишина).
     BinauralConfig newConfig = config;
     newConfig.curve.updateCache();
-    
+
+    // ДИАГНОСТИКА TREND (только debug): что именно видит планировщик
+    // перестановки каналов после пересборки кэша кривой. Держится за
+    // AUDIO_DEBUG, а не за ANDROID, — в release на каждый пуш конфига лился
+    // бы многострочный лог.
+    // docs/analysis_trend_swap_editor_phantom.md
+#if defined(AUDIO_DEBUG) && defined(ANDROID) && !defined(AUDIO_TEST_BUILD)
+    {
+        const BinauralConfig& c = newConfig;
+        std::string xs;
+        char buf[40];
+        for (size_t i = 0; i < c.curve.trendCrossings.size() && i < 32; ++i) {
+            std::snprintf(buf, sizeof(buf), "%.2f%s ",
+                          static_cast<double>(c.curve.trendCrossings[i].timeSec),
+                          c.curve.trendCrossings[i].toSwapped ? "P" : "T");
+            xs += buf;
+        }
+        // Выборка Δbeat по суткам: видно плато (точные нули) и знак тренда.
+        std::string ds;
+        for (int k = 0; k < 12; ++k) {
+            std::snprintf(buf, sizeof(buf), "%.4f ",
+                          static_cast<double>(trendBeatDeltaAt(c.curve, static_cast<float>(k) * 7200.0f)));
+            ds += buf;
+        }
+        __android_log_print(ANDROID_LOG_INFO, "SWAPCFG",
+            "enabled=%d mode=%s trendPoints=%d interval=%d pts=%zu valid=%d tableMs=%d "
+            "nCross=%zu beat0=%.4f eps=%.5f d(0,2h..22h)=[%s] cross=[%s]",
+            static_cast<int>(c.channelSwapEnabled),
+            (c.channelSwapMode == ChannelSwapMode::TREND) ? "TREND" : "TIMER",
+            static_cast<int>(c.channelSwapTrendPoints),
+            c.channelSwapIntervalSec,
+            c.curve.points.size(),
+            static_cast<int>(c.curve.trendCrossingsValid),
+            c.curve.tableIntervalMs,
+            c.curve.trendCrossings.size(),
+            static_cast<double>(trendBeatDeltaAt(c.curve, 0.0f)),
+            static_cast<double>(trendDeltaEpsilonHz(c.curve)),
+            ds.c_str(), xs.c_str());
+    }
+#endif
+
     // Эксклюзивная блокировка для записи
     std::unique_lock<std::shared_mutex> lock(m_configMutex);
     m_config = std::move(newConfig);

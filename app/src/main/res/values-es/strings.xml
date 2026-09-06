@@ -217,7 +217,7 @@
     <string name="notification_channel_description">Control de la reproducción de ritmos binaurales</string>
     <string name="notification_playing">Reproduciendo</string>
     <string name="notification_paused">En pausa</string>
-    <string name="notification_title">Batidos: %.1f Hz | Portadora: %.0f Hz</string>
+    <string name="notification_title">Batido: %.1f Hz | Portadora: %.0f Hz</string>
     <string name="action_play">Reproducir</string>
     <string name="action_pause">Pausa</string>
     <string name="action_stop">Detener</string>

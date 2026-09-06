@@ -76,9 +76,9 @@ class BinauralPlaybackService : Service() {
         private val _isChannelsSwapped = MutableStateFlow(false)
         val isChannelsSwapped: StateFlow<Boolean> = _isChannelsSwapped.asStateFlow()
         
-        private val _elapsedSeconds = MutableStateFlow(0)
-        val elapsedSeconds: StateFlow<Int> = _elapsedSeconds.asStateFlow()
-        
+        // U5: состояния «прошедшее время» здесь больше нет — см. комментарий
+        // в startPlaybackStateObservation().
+
         // НОВОЕ: текущее время суток (для UI-индикатора), виртуальное в debug
         private val _currentTimeOfDaySeconds = MutableStateFlow(0)
         val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
@@ -289,11 +289,14 @@ class BinauralPlaybackService : Service() {
             }
         }
         
-        serviceScope.launch {
-            audioEngine?.elapsedSeconds?.collectLatest { elapsed ->
-                _elapsedSeconds.value = elapsed
-            }
-        }
+        // U5: подписка на audioEngine.elapsedSeconds УДАЛЕНА.
+        // «Прошедшее время» писалось в [_elapsedSeconds] каждую секунду, но
+        // это значение не читал НИ ОДИН потребитель: ни экран, ни панель, ни
+        // уведомление, ни debug-панель (grep по проекту даёт только запись).
+        // Это был чистый расход: лишняя корутина на всё время жизни сервиса
+        // и лишнее пробуждение в секунду ради значения, которое никто не
+        // показывает. [BinauralStreamManager.elapsedSeconds] не тронут —
+        // он часть состояния движка и потенциально нужен дальше.
 
         // СКРАБ: сдвиг оси — НЕ по ежесекундному опросу, а сразу по факту
         // изменения. UI обязан показать новую ось в тот же кадр, когда
@@ -892,6 +895,16 @@ class BinauralPlaybackService : Service() {
                 // Экран выключен — уведомление никто не читает, а пробуждение
                 // CPU ради binder-транзакции в system_server стоит батареи.
                 if (!isScreenInteractive()) continue
+                // U6: пока жив ежесекундный UI-джоб, этот джоб делает ровно
+                // ту же работу (те же условия: экран включён + воспроизведение,
+                // тот же порядок: updateCurrentFrequencies → копирование
+                // частот → updateMediaMetadata → updateNotificationSilently),
+                // только чаще. Публикация всё равно отсекается по содержимому,
+                // поэтому визуально ничего не меняется, а лишний JNI-вызов
+                // updateCurrentFrequencies() раз в 30 с исчезает.
+                // Когда приложение ушло в фон (UI-джоб остановлен из
+                // onAppBackground), этот джоб продолжает работать как раньше.
+                if (uiFrequencyUpdateJob?.isActive == true) continue
                 // O(1) получение частот из lookup table
                 audioEngine?.updateCurrentFrequencies()
                 // Копируем значения из audioEngine в сервис для UI
@@ -1461,7 +1474,6 @@ class BinauralPlaybackService : Service() {
         _currentBeatFrequency.value = 0.0f
         _currentCarrierFrequency.value = 0.0f
         _isChannelsSwapped.value = false
-        _elapsedSeconds.value = 0
         _currentTimeOfDaySeconds.value = 0
         _unshiftedTimeOfDaySeconds.value = null
         _debugTimeEnabled.value = false

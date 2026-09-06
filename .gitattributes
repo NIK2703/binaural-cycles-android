@@ -1,0 +1,14 @@
+# Normalize all text files to LF on checkout and commit.
+#
+# The committed tree is already uniformly LF. The working tree was being
+# checked out as CRLF by the system-level `core.autocrlf=true`, which made
+# `git rebase` / `cherry-pick` / `am` fail with spurious "unstaged changes".
+#
+# With `core.autocrlf=false` (set via `git config --local core.autocrlf false`)
+# and `* text=auto eol=lf`, Git writes LF to the working tree, matching the
+# committed blobs. This keeps `git status` clean and makes rebase work WITHOUT
+# any history-rewrite / normalization commit.
+#
+# Binary assets are auto-detected by `text=auto` (NUL-byte check) and left
+# untouched, so no explicit `binary` declarations are required.
+* text=auto eol=lf
