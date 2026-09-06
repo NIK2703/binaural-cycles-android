@@ -1,5 +1,7 @@
 package com.binauralcycles.ui.components
 
+import kotlin.math.roundToInt
+
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -18,7 +20,6 @@ import com.binaural.core.audio.model.ChannelSwapSettings
 import com.binaural.core.audio.model.ChannelSwapTrendPoints
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.core.audio.stream.PacketMemoryBudget
@@ -33,7 +34,9 @@ import com.binauralcycles.ui.theme.Spacing
 @Composable
 fun PresetSettingsCard(
     interpolationType: InterpolationType,
-    onInterpolationTypeChange: (InterpolationType) -> Unit
+    onInterpolationTypeChange: (InterpolationType) -> Unit,
+    stepFadeDurationMs: Long,
+    onStepFadeDurationChange: (Long) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -46,6 +49,7 @@ fun PresetSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.interpolation_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -122,6 +126,44 @@ fun PresetSettingsCard(
                 }
             }
         }
+
+        // Длительность затухания на ступеньках: только для ступенчатой
+        // интерполяции. У остальных типов частота меняется непрерывно —
+        // провал громкости там был бы ни на чём.
+        if (interpolationType == InterpolationType.STEP) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                // Локальное состояние для мгновенного отклика UI (как у
+                // затухания смены каналов): значение в пресете обновляется
+                // при отпускании слайдера.
+                var localSeconds by remember(stepFadeDurationMs) {
+                    mutableStateOf(stepFadeDurationMs / 1000f)
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = stringResource(R.string.step_fade_duration),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = formatFadeDurationLabel(localSeconds.toLong() * 1000L),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                Slider(
+                    value = localSeconds,
+                    onValueChange = { localSeconds = (it + 0.5f).toInt().toFloat() },
+                    onValueChangeFinished = {
+                        onStepFadeDurationChange(localSeconds.toInt().toLong() * 1000L)
+                    },
+                    valueRange = 1f..15f,
+                    steps = 0,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
     }
 }
 
@@ -147,6 +189,7 @@ fun VolumeNormalizationSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             // Подсказка в зависимости от выбранного типа
             Text(
                 text = when (volumeNormalizationSettings.type) {
@@ -270,6 +313,7 @@ fun ChannelSwapSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             // Подсказка в зависимости от выбора
             Text(
                 text = stringResource(
@@ -488,6 +532,7 @@ fun PowerSettingsCard(
                 text = stringResource(R.string.buffer_generation_minutes),
                 style = MaterialTheme.typography.bodyLarge
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.buffer_generation_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -511,6 +556,7 @@ fun PowerSettingsCard(
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = stringResource(R.string.audio_quality_description),
                 style = MaterialTheme.typography.bodySmall,
@@ -623,7 +669,7 @@ fun DiscreteSlider(
         Slider(
             value = localIndex.toFloat(),
             onValueChange = { index ->
-                localIndex = index.toInt().coerceIn(0, values.lastIndex)
+                localIndex = index.roundToInt().coerceIn(0, values.lastIndex)
             },
             onValueChangeFinished = {
                 onValueChange(values[localIndex])
@@ -669,7 +715,7 @@ fun DiscreteSliderLong(
         Slider(
             value = localIndex.toFloat(),
             onValueChange = { index ->
-                localIndex = index.toInt().coerceIn(0, values.lastIndex)
+                localIndex = index.roundToInt().coerceIn(0, values.lastIndex)
             },
             onValueChangeFinished = {
                 onValueChange(values[localIndex])
@@ -850,138 +896,106 @@ fun formatWavetableSize(size: Int): String {
 fun RelaxationModeCard(
     relaxationModeSettings: RelaxationModeSettings,
     onRelaxationModeEnabledChange: (Boolean) -> Unit,
-    onRelaxationModeChange: (RelaxationMode) -> Unit,
     onCarrierReductionChange: (Int) -> Unit,
     onBeatReductionChange: (Int) -> Unit,
     onRelaxationGapChange: (Int) -> Unit,
     onTransitionPeriodChange: (Int) -> Unit,
     onRelaxationDurationChange: (Int) -> Unit,
-    onSmoothIntervalChange: (Int) -> Unit = {}
+    onFadeByRangePositionChange: (Boolean) -> Unit
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(Spacing.md)
     ) {
-        // Выбор режима расслабления: 3 чипа в одной строке
-        Column(modifier = Modifier.fillMaxWidth()) {
-            Text(
-                text = stringResource(R.string.relaxation_mode),
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            // Описание текущего режима под заголовком
-            Text(
-                text = when {
-                    !relaxationModeSettings.enabled -> stringResource(R.string.relaxation_mode_disabled_desc)
-                    relaxationModeSettings.mode == RelaxationMode.STEP -> stringResource(R.string.relaxation_mode_step_desc)
-                    else -> stringResource(R.string.relaxation_mode_smooth_desc)
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
-            Spacer(modifier = Modifier.height(Spacing.sm))
-            // Одна строка: Выкл, Расширенный, Плавный
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+        // Выбор: отключены / включены (единый параметрический механизм)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(Spacing.xs)
             ) {
-                FilterChip(
-                    selected = !relaxationModeSettings.enabled,
-                    onClick = { onRelaxationModeEnabledChange(false) },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_disabled),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
+                Text(
+                    text = stringResource(R.string.relaxation_mode),
+                    style = MaterialTheme.typography.bodyLarge
                 )
-                FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP,
-                    onClick = { 
-                        onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.STEP)
-                    },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_step),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                FilterChip(
-                    selected = relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH,
-                    onClick = { 
-                        onRelaxationModeEnabledChange(true)
-                        onRelaxationModeChange(RelaxationMode.SMOOTH)
-                    },
-                    label = { 
-                        Text(
-                            text = stringResource(R.string.relaxation_mode_smooth),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        ) 
-                    },
-                    modifier = Modifier.weight(1f)
+                Text(
+                    text = stringResource(R.string.relaxation_mode_description),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Switch(
+                checked = relaxationModeSettings.enabled,
+                onCheckedChange = onRelaxationModeEnabledChange
+            )
         }
         
         // Настройки режима (показываем только когда режим включен)
         if (relaxationModeSettings.enabled) {
-            
-            // Настройки ступенчатого режима
-            if (relaxationModeSettings.mode == RelaxationMode.STEP) {
-                
-                // Интервал между периодами расслабления
-                DiscreteSlider(
-                    label = stringResource(R.string.gap_between_relaxation),
-                    value = relaxationModeSettings.gapBetweenRelaxationMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
-                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
-                    onValueChange = onRelaxationGapChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                
-                // Длительность расслабления
-                DiscreteSlider(
-                    label = stringResource(R.string.relaxation_duration),
-                    value = relaxationModeSettings.relaxationDurationMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60),
-                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
-                    onValueChange = onRelaxationDurationChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-                
-                // Период перехода
-                DiscreteSlider(
-                    label = stringResource(R.string.transition_period),
-                    value = relaxationModeSettings.transitionPeriodMinutes,
-                    values = listOf(1, 2, 3, 5, 7, 10),
-                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
-                    onValueChange = onTransitionPeriodChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
+
+            // Угасание по диапазону. Держим сразу под переключателем режима и
+            // выше всех слайдеров глубины: опция управляет смыслом снижения.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs)
+                ) {
+                    Text(
+                        text = stringResource(R.string.relaxation_range_fade),
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Text(
+                        text = stringResource(R.string.relaxation_range_fade_description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = relaxationModeSettings.fadeByRangePosition,
+                    onCheckedChange = onFadeByRangePositionChange
                 )
             }
-            
-            // Настройки плавного режима
-            if (relaxationModeSettings.mode == RelaxationMode.SMOOTH) {
-                // Интервал между точками
-                DiscreteSlider(
-                    label = stringResource(R.string.smooth_interval),
-                    value = relaxationModeSettings.smoothIntervalMinutes,
-                    values = listOf(5, 10, 15, 20, 30, 45, 60, 90, 120),
-                    formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
-                    onValueChange = onSmoothIntervalChange,
-                    modifier = Modifier.padding(horizontal = 16.dp)
-                )
-            }
+
+            // Интервал между периодами расслабления
+            DiscreteSlider(
+                label = stringResource(R.string.gap_between_relaxation),
+                value = relaxationModeSettings.gapBetweenRelaxationMinutes,
+                values = listOf(0, 5, 10, 15, 20, 30, 45, 60, 90, 120),
+                formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                onValueChange = onRelaxationGapChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+
+            // Длительность периода расслабления
+            DiscreteSlider(
+                label = stringResource(R.string.relaxation_duration),
+                value = relaxationModeSettings.relaxationDurationMinutes,
+                values = listOf(0, 5, 10, 15, 20, 30, 45, 60),
+                formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                onValueChange = onRelaxationDurationChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
+
+            // Длительность переходов
+            DiscreteSlider(
+                label = stringResource(R.string.transition_period),
+                value = relaxationModeSettings.transitionPeriodMinutes,
+                values = listOf(1, 3, 5, 10, 15, 20, 30, 45, 60),
+                formatValue = { mins -> stringResource(R.string.minutes_format, mins) },
+                onValueChange = onTransitionPeriodChange,
+                modifier = Modifier.padding(horizontal = 16.dp)
+            )
             
             // Слайдер снижения несущей частоты
             // Локальное состояние для мгновенного отклика UI
@@ -1083,6 +1097,7 @@ fun SettingsSwitchRow(
                 text = title,
                 style = MaterialTheme.typography.bodyLarge
             )
+            Spacer(modifier = Modifier.height(Spacing.xs))
             Text(
                 text = description,
                 style = MaterialTheme.typography.bodySmall,

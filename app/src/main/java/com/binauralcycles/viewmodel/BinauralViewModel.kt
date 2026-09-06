@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
+import java.io.File
 import android.os.IBinder
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -25,7 +26,6 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import com.binaural.core.audio.model.VolumeNormalizationSettings
 import com.binaural.core.audio.stream.PacketMemoryBudget
@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalTime
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import javax.inject.Inject
@@ -65,7 +66,36 @@ data class PlaybackTelemetry(
     val currentBeatFrequency: Float = 0.0f,
     val currentCarrierFrequency: Float = 0.0f,
     val isChannelsSwapped: Boolean = false,
-    val currentTime: LocalTime = LocalTime(12, 0)
+    val currentTime: LocalTime = LocalTime(12, 0),
+    /**
+     * СКРАБ: сдвиг оси времени суток, секунды [0, 86400). 0 — обычный режим.
+     *
+     * НЕ квантуется: это не время, а расстояние между [currentTime] и
+     * [realTime] на графике, и округление сделало бы его рваным.
+     */
+    val scrubOffsetSeconds: Int = 0,
+    /**
+     * СКРАБ: РЕАЛЬНЫЙ момент времени суток — без сдвига предпросмотра.
+     *
+     * Отдельное поле, а не «[currentTime] минус [scrubOffsetSeconds]»:
+     * ось и сдвиг доезжают до UI разными StateFlow в непредсказуемом
+     * порядке, и вычитание смешивало бы разновозрастные значения — серая
+     * линия уезжала на величину сдвига (§14.7 плана). Менеджер публикует
+     * оба времени из одной базы, в одном вызове.
+     *
+     * Квантуется до 60 с тем же правилом, что и [currentTime]: оба значения
+     * округляются вниз, поэтому расстояние между ними отличается от сдвига
+     * не более чем на минуту (≈0.2 px ширины графика) и не «дышит» —
+     * линии не дрожат друг относительно друга.
+     *
+     * `null` — «реальное сейчас ещё неизвестно» (сервис не подключён, поток
+     * ещё ничего не опубликовал). Намеренно НЕ `LocalTime(12, 0)`: у времени
+     * нет осмысленного значения по умолчанию, и любое такое значение
+     * ОТРИСОВЫВАЕТСЯ как настоящее — серая линия встала бы в середину графика
+     * и выглядела бы как правдоподобный момент, а не как отсутствие данных.
+     * Получатель в этом случае подставляет ось (линии совпадают, серой нет).
+     */
+    val realTime: LocalTime? = null
 )
 
 data class BinauralUiState(
@@ -82,6 +112,10 @@ data class BinauralUiState(
     val debugVirtualTimeRunning: Boolean = true,
     // Редактируемая кривая (для экрана редактирования)
     val editingFrequencyCurve: FrequencyCurve? = null,
+    // Исходный шаблон нового пресета: с ним сравнивается редактируемая кривая,
+    // чтобы «несохранённые изменения» не срабатывали, когда пользователь
+    // открыл создание пресета, но ничего не поменял в шаблоне. null — не новый пресет.
+    val newPresetBaselineCurve: FrequencyCurve? = null,
     // ID редактируемого пресета (null для нового пресета)
     val editingPresetId: String? = null,
     // Диапазоны частот для редактирования
@@ -107,6 +141,8 @@ data class BinauralUiState(
     val resumeOnHeadsetConnect: Boolean = false,
     // Автовозобновление воспроизведения при запуске приложения
     val autoResumeOnAppStart: Boolean = false,
+    // Напоминание о необходимости подключения наушников (по умолчанию включено)
+    val headphoneReminderEnabled: Boolean = true,
     // Приложение уже добавлено в исключения фонового энергосбережения (состояние системы,
     // а не настройка: перечитывается при каждом возврате приложения на экран)
     val isIgnoringBatteryOptimizations: Boolean = false,
@@ -115,7 +151,17 @@ data class BinauralUiState(
     // иначе у тех, кто уже его закрыл, диалог мелькнёт на старте.
     val batteryOptimizationPromptShown: Boolean? = null,
     // true — прямо сейчас нужно показать стартовое напоминание
-    val showBatteryOptimizationPrompt: Boolean = false
+    val showBatteryOptimizationPrompt: Boolean = false,
+    // Диалог «подключите наушники»
+    val showHeadphoneDialog: Boolean = false,
+    // ID пресета, который нужно запустить после подтверждения
+    val pendingPresetId: String? = null,
+    // Справка по управлению в редакторе уже показана (закрыта по «Понятно»).
+    // null — значение ещё не прочитано из DataStore: до чтения справку не открываем
+    // автоматически, чтобы диалог не мелькнул на старте экрана до загрузки флага.
+    // false — ещё не показана, открыть автоматически при первом входе.
+    // true — показана, больше не открывать автоматически.
+    val gesturesHelpShown: Boolean? = null
 )
 
 /**
@@ -125,6 +171,21 @@ data class BinauralUiState(
  * «stopWithFade -> play», но там это время звучал не старый поток, а тишина.
  */
 private const val SETTINGS_FADE_DEBOUNCE_MS = 300L
+
+/**
+ * Интервал генерации буфера для потоков, пересобираемых правкой опций в
+ * редакторе пресета: фиксированная 1 минута вместо пользовательской настройки.
+ *
+ * Правка опций редактируемого активного пресета слышна сразу — движок
+ * пересобирает звучащий поток кроссфейдом на каждое изменение. При быстрой
+ * смене опций (перетаскивание точки, слайдеры расслабления) каждая пересборка
+ * генерировала бы буфер на весь пользовательский интервал (десять минут по
+ * умолчанию — сотни мегабайт PCM и тяжёлая подготовка на каждый тик слайдера).
+ * Минутный пакет делает такую пересборку дешёвой. Пользовательское значение
+ * возвращается при завершении сессии редактирования
+ * ([BinauralViewModel.restoreUserBufferInterval]) и никуда не сохраняется.
+ */
+private const val EDITOR_PREVIEW_BUFFER_INTERVAL_MS = 60_000
 
 /**
  * Сборка [BinauralConfig] из кривой пресета и ГЛОБАЛЬНЫХ настроек — тех, что
@@ -154,6 +215,14 @@ internal fun buildPlaybackConfig(
     volumeNormalizationStrength = normalization.strength
 )
 
+/**
+ * Пресет, подготовленный к экспорту: лежит в файле кэша, пока открыт SAF-пикер
+ * (см. [BinauralViewModel.prepareExport]). Имя нужно, чтобы после записи
+ * показать пользователю, какая именно предустановка экспортирована.
+ */
+@Serializable
+private data class PendingExport(val presetName: String, val json: String)
+
 @HiltViewModel
 class BinauralViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -176,7 +245,12 @@ class BinauralViewModel @Inject constructor(
         private const val KEY_EDITING_TARGET = "editing_target"
         /** Специальное значение цели: создаётся новый пресет (presetId отсутствует). */
         private const val EDITING_TARGET_NEW = "NEW"
+        /** Имя временного файла (в cacheDir) с JSON, подготовленным к экспорту. */
+        private const val KEY_PENDING_EXPORT = "pending_export.json"
     }
+
+    /** Файл в кэше, куда кладётся JSON пресета до открытия SAF-пикера. */
+    private fun pendingExportFile(): File = File(context.cacheDir, KEY_PENDING_EXPORT)
 
     private val _uiState = MutableStateFlow(BinauralUiState())
     val uiState: StateFlow<BinauralUiState> = _uiState.asStateFlow()
@@ -226,6 +300,12 @@ class BinauralViewModel @Inject constructor(
     
     // Флаг для отслеживания, было ли обработано автовозобновление
     private var autoResumeHandled = false
+
+    // Пользователь подтвердил запуск БЕЗ наушников («Запустить» в диалоге) —
+    // при переключении пресетов во время воспроизведения диалог больше не
+    // показываем. Сбрасывается, когда воспроизведение останавливается, чтобы
+    // при следующей попытке запуска без наушников диалог снова показался.
+    private var headphoneBypassActive = false
     
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
@@ -239,7 +319,8 @@ class BinauralViewModel @Inject constructor(
         BUFFER_MINUTES,
         CHANNEL_SWAP,
         NORMALIZATION,
-        HEADSET_RESUME
+        HEADSET_RESUME,
+        HEADPHONE_REMINDER
     }
 
     /**
@@ -394,6 +475,10 @@ class BinauralViewModel @Inject constructor(
                         }
                         // Устанавливаем название пресета для уведомления
                         playbackService?.setCurrentPresetName(activePreset.name)
+                        // Активный пресет готов — возможно, теперь выполнены
+                        // все условия автовозобновления (если сервис уже
+                        // подключён и опция загружена).
+                        tryAutoResumeOnAppStart()
                     }
                 }
                 // Отмечаем «пресеты прочитаны» ВСЕГДА (независимо от наличия
@@ -423,6 +508,20 @@ class BinauralViewModel @Inject constructor(
                     else -> SampleRate.MEDIUM
                 }
                 _uiState.update { it.copy(sampleRate = sampleRate) }
+                // Страховка на старте: интервал буфера из хранилища мог быть
+                // сохранён для ДРУГОЙ частоты (старая версия приложения или
+                // сбой между двумя сохранениями) и не влезать в бюджет новой.
+                // Усекаем до максимальной стопы загруженной частоты. Хранилище
+                // не переписываем — усечение страховочное, честно сохранит
+                // пользовательский setSampleRate. В сервис-менеджер интервал
+                // уйдёт и из коллектора самих минут, здесь пушим только при
+                // реальном усечении (дедупликацию менеджера не дёргаем).
+                val stored = _uiState.value.bufferGenerationMinutes
+                val clamped = PacketMemoryBudget.coerceMinutes(sampleRate.value, stored)
+                if (clamped != stored) {
+                    _uiState.update { it.copy(bufferGenerationMinutes = clamped) }
+                    playbackService?.setFrequencyUpdateInterval(clamped * 60 * 1000)
+                }
                 playbackService?.setSampleRate(sampleRate)
                 onSettingLoaded(Setting.SAMPLE_RATE)
             }
@@ -486,6 +585,16 @@ class BinauralViewModel @Inject constructor(
         viewModelScope.launch {
             preferencesRepository.getAutoResumeOnAppStart().collect { enabled ->
                 _uiState.update { it.copy(autoResumeOnAppStart = enabled) }
+                // Опция загружена — возможно, теперь выполнены все условия
+                // автовозобновления (если пресет и сервис уже готовы).
+                tryAutoResumeOnAppStart()
+            }
+        }
+        // Напоминание о необходимости подключения наушников
+        viewModelScope.launch {
+            preferencesRepository.getHeadphoneReminderEnabled().collect { enabled ->
+                _uiState.update { it.copy(headphoneReminderEnabled = enabled) }
+                onSettingLoaded(Setting.HEADPHONE_REMINDER)
             }
         }
         // Признак «стартовое напоминание об энергосбережении уже показано»
@@ -495,6 +604,13 @@ class BinauralViewModel @Inject constructor(
                 // Видимость напоминания зависит от двух источников (система + этот флаг),
                 // поэтому пересчитываем её при каждом изменении любого из них
                 updateBatteryOptimizationPromptVisibility()
+            }
+        }
+        // Признак «справка по управлению в редакторе уже показана» — чтобы больше
+        // не открывать её автоматически при входе в редактор.
+        viewModelScope.launch {
+            preferencesRepository.getGesturesHelpShown().collect { shown ->
+                _uiState.update { it.copy(gesturesHelpShown = shown) }
             }
         }
         // Автоматическое расширение границ графика при редактировании
@@ -549,7 +665,28 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
-     * Переключатель «Бесперебойное воспроизведение в фоне» в настройках.
+     * «Понятно» в диалоге «Подключите наушники»: закрыть диалог без запуска.
+     */
+    fun dismissHeadphoneDialog() {
+        _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+    }
+
+    /**
+     * «Запустить» в диалоге «Подключите наушники»: запустить воспроизведение
+     * несмотря на отсутствие гарнитуры.
+     */
+    fun playPresetAnyway() {
+        val presetId = _uiState.value.pendingPresetId ?: return
+        _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+        // Пользователь подтвердил запуск без наушников: последующие
+        // переключения пресетов во время воспроизведения не должны снова
+        // показывать диалог (см. playPreset / headphoneBypassActive).
+        headphoneBypassActive = true
+        startPreset(presetId, curveOverride = null, relaxationOverride = null)
+    }
+
+    /**
+     * Переключатель «Воспроизведение в фоне» в настройках.
      *
      * Переключатель не хранит собственного состояния — оно целиком определяется
      * системой, а выдать или отозвать исключение может только пользователь.
@@ -592,6 +729,20 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
+     * Пометить справку по управлению в редакторе как показанную.
+     *
+     * Вызывается при закрытии окна (кнопка «Понятно», системный «назад» или
+     * касание мимо). После этого окно больше не открывается автоматически при
+     * входе в редактор — пока пользователь не откроет его сам кнопкой справки.
+     */
+    fun markGesturesHelpShown() {
+        _uiState.update { it.copy(gesturesHelpShown = true) }
+        viewModelScope.launch {
+            preferencesRepository.saveGesturesHelpShown(true)
+        }
+    }
+
+    /**
      * Наблюдение за телеметрией сервиса.
      *
      * Раньше пять отдельных коллекторов писали каждый в свой `MutableStateFlow`
@@ -629,8 +780,145 @@ class BinauralViewModel @Inject constructor(
                 // Схлопываем повторы: на паузе сервис шлёт те же значения,
                 // и без этого StateFlow будил бы подписчиков впустую.
                 .distinctUntilChanged()
-                .collect { telemetry -> _telemetry.value = telemetry }
+                .collect { snapshot ->
+                    // Воспроизведение остановлено — сбрасываем байпас диалога
+                    // наушников. При следующей попытке запуска без наушников
+                    // диалог «Подключите наушники» снова покажется (см. playPreset
+                    // / headphoneBypassActive).
+                    if (!snapshot.isPlaying) headphoneBypassActive = false
+
+                    // ПОЛЯ СКРАБА ЭТОМУ КОЛЛЕКТОРУ НЕ ПРИНАДЛЕЖАТ: их пишут
+                    // два отдельных коллектора ниже (§14.7 плана) — у combine
+                    // нет перегрузки на шесть потоков, поэтому сдвиг и реальное
+                    // «сейчас» живут рядом, а не внутри.
+                    //
+                    // ПОЛНАЯ ЗАМЕНА ОБЪЕКТА ЗДЕСЬ НЕДОПУСТИМА. Раньше было
+                    // `_telemetry.value = telemetry`, и свежесобранный снимок
+                    // (выше) не задавал [PlaybackTelemetry.realTime] — он
+                    // принимал ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ. Combine тикает ~1 Гц
+                    // (частоты меняются каждую секунду), коллектор реального
+                    // времени — тоже ~1 Гц, и они чередовались: серая линия
+                    // мерцала между настоящим «сейчас» и 12:00. Ровно то же
+                    // стирало бы и [PlaybackTelemetry.scrubOffsetSeconds].
+                    //
+                    // distinctUntilChanged выше по-прежнему сравнивает только
+                    // «звуковую» часть снимка (оба её экземпляра содержат
+                    // дефолтное realTime), то есть дедупликация не сломана.
+                    _telemetry.update { current ->
+                        snapshot.copy(
+                            realTime = current.realTime,
+                            scrubOffsetSeconds = current.scrubOffsetSeconds
+                        )
+                    }
+                }
         }
+
+        // СКРАБ живёт отдельным коллектором, а не шестым потоком в combine
+        // выше: у combine нет перегрузки на шесть аргументов, а перевод всего
+        // блока на combine(Array<Flow>) потерял бы типы. Отдельный коллектор
+        // дешевле по эмиссиям: сдвиг меняется только по жесту пользователя,
+        // тогда как combine тикает каждую секунду.
+        // distinctUntilChanged здесь НЕ нужен и даже запрещён: StateFlow уже
+        // сам отсекает дубли (operator fusion), а применение оператора к
+        // StateFlow помечено устаревшим и роняет сборку.
+        viewModelScope.launch {
+            BinauralPlaybackService.scrubOffsetSeconds.collect { offset ->
+                _telemetry.update { it.copy(scrubOffsetSeconds = offset) }
+            }
+        }
+
+        // СКРАБ: реальное «сейчас» — своим коллектором ровно по тем же
+        // причинам, что и сдвиг (шестой поток в combine выше не влез).
+        // Отставание на одну эмиссию здесь безвредно: реальное время меняется
+        // плавно и медленно, а ошибка в одну секунду на графике суток — это
+        // сотая доля пикселя. Залипнуть оно не может: следующая эмиссия всё
+        // поправит, в отличие от вычитания сдвига из оси на стороне UI.
+        viewModelScope.launch {
+            BinauralPlaybackService.unshiftedTimeOfDaySeconds.collect { seconds ->
+                // null — менеджер ещё не публиковал реальное «сейчас». Поле
+                // НЕ трогаем: подставлять вместо него midnight или «текущее
+                // время по часам телефона» — значит снова выдать отсутствие
+                // данных за правдоподобный момент. График в этом случае
+                // считает реальным «сейчас» саму ось: линии совпадают, и
+                // серой просто нечего рисовать.
+                if (seconds == null) return@collect
+                val quantized = (seconds / 60) * 60
+                _telemetry.update {
+                    it.copy(realTime = LocalTime.fromSecondOfDay(quantized.coerceIn(0, 86399)))
+                }
+            }
+        }
+
+        // Автоскрытие диалога «подключите наушники» при подключении гарнитуры
+        viewModelScope.launch {
+            BinauralPlaybackService.hasHeadset.collect { connected ->
+                if (connected && _uiState.value.showHeadphoneDialog) {
+                    val presetId = _uiState.value.pendingPresetId ?: return@collect
+                    _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
+                    startPreset(presetId, curveOverride = null, relaxationOverride = null)
+                }
+            }
+        }
+    }
+
+    // ============= Скраб: предпросмотр другого времени суток =============
+
+    /**
+     * СКРАБ: прослушать, как пресет звучит в момент [time], а не сейчас.
+     *
+     * Сдвигается ВСЯ ось времени суток, а не «позиция трека»: кривая
+     * продолжает эволюционировать, линия указателя едет вперёд со скоростью
+     * 1×, просто со сдвигом. Передаётся абсолютное время суток — сдвиг обязан
+     * считаться на нити актёра в момент применения, потому что «сейчас»
+     * успевает уехать между касанием и постом.
+     *
+     * Каждый вызов — полный хэндофф (кроссфейд ~1 с). Поэтому из UI этот
+     * метод вызывается по ОТПУСКАНИИ ручки, а не на каждом шаге жеста.
+     */
+    fun scrubTo(time: LocalTime) {
+        playbackService?.scrubTo(time.toSecondOfDay())
+    }
+
+    /**
+     * СКРАБ: вернуть прослушивание к реальному текущему моменту (кнопка
+     * сброса на графике). Возврат СЛЫШИМЫЙ — через хэндофф, как сам скраб.
+     */
+    fun scrubReset() {
+        playbackService?.scrubReset()
+    }
+
+    /**
+     * СКРАБ: снять сдвиг, не трогая звук. Для выходов из редактора: там
+     * состояние уже меняется другими путями, и лишний кроссфейд был бы
+     * слышен как щелчок на ровном месте.
+     *
+     * ВАЖНО: сам по себе этот вызов звук НЕ возвращает — он только стирает
+     * заданный сдвиг, а возврат разыгрывает попутный хэндофф (сохранение,
+     * восстановление кривой, смена пресета). Попутного хэндоффа может не
+     * быть (например, выход без правок кривой), поэтому каждый выход из
+     * редактора обязан завершаться [releaseEditorScrub] — слышимой проверкой
+     * «а вернулся ли звук».
+     */
+    private fun resetScrub() {
+        playbackService?.resetScrub()
+    }
+
+    /**
+     * СКРАБ: редактор закрыт — вернуть прослушивание к реальному «сейчас».
+     *
+     * ЕДИНАЯ точка возврата оси, идемпотентная: движок сам знает, сдвинута
+     * ось звука или нет, и без сдвига не делает ничего. Благодаря этому её
+     * можно (и нужно) вызывать из всех страховок сразу — явного выхода,
+     * наблюдателя навигации и жизненного цикла: лишнего кроссфейда всё
+     * равно не будет.
+     *
+     * ПОРЯДОК ВЫЗОВА ВАЖЕН: последним, ПОСЛЕ всей работы выхода
+     * (сохранение / восстановление кривой). Тогда хэндофф от этой работы
+     * успевает унести и обнулённый сдвиг (один кроссфейд вместо двух), а
+     * вызов лишь добирает случай, когда никакой работы не было.
+     */
+    fun releaseEditorScrub() {
+        playbackService?.scrubReset()
     }
 
     // ============= Методы для работы с пресетами =============
@@ -639,6 +927,36 @@ class BinauralViewModel @Inject constructor(
      * Воспроизвести пресет
      */
     fun playPreset(presetId: String) {
+        // Проверяем подключение наушников (если сервис подключён).
+        // headphoneBypassActive: пользователь уже подтвердил запуск без
+        // наушников («Запустить») — при переключении пресетов во время
+        // воспроизведения диалог НЕ показываем повторно. Байпас сбрасывается
+        // в observePlaybackState, когда воспроизведение останавливается.
+        if (playbackService != null &&
+            !BinauralPlaybackService.hasHeadset.value &&
+            !headphoneBypassActive &&
+            _uiState.value.headphoneReminderEnabled) {
+            _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = presetId) }
+            return
+        }
+        startPreset(presetId, curveOverride = null, relaxationOverride = null)
+    }
+
+    /**
+     * Запуск пресета с возможной подменой кривой и настроек расслабления.
+     *
+     * @param curveOverride кривая, которая должна зазвучать ВМЕСТО сохранённой
+     *   в пресете. Единственный сценарий — несохранённые правки из редактора:
+     *   график на экране и звук обязаны совпасть в момент переключения, а не
+     *   только после первой же следующей правки. `null` — звучит пресет как
+     *   сохранён (обычный запуск из списка).
+     * @param relaxationOverride то же для настроек расслабления.
+     */
+    private fun startPreset(
+        presetId: String,
+        curveOverride: FrequencyCurve?,
+        relaxationOverride: RelaxationModeSettings?
+    ) {
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val state = _uiState.value
         
@@ -648,12 +966,27 @@ class BinauralViewModel @Inject constructor(
             return
         }
 
+        // Явный запуск пресета — не «редакторский» перезапуск: возвращаем
+        // пользовательский интервал генерации буфера, если он был зафиксирован
+        // правкой опций в редакторе (например, переключение с гарнитуры во
+        // время редактирования). Повтор того же значения отсекает менеджер.
+        restoreUserBufferInterval()
+
+        // Кривая, которая реально зазвучит: подменённая (несохранённые правки
+        // из редактора) или сохранённая в пресете.
+        val soundingCurve = curveOverride ?: preset.frequencyCurve
+
+        // СКРАБ: смена пресета стирает сдвиг оси. Сдвиг имел смысл только для
+        // прослушивания конкретного пресета в конкретное время; на другом
+        // пресете та же ось — уже не «предпросмотр», а просто ложные часы.
+        resetScrub()
+
         // Устанавливаем активный пресет
         _uiState.update {
             it.copy(
                 activePreset = preset,
-                carrierRange = preset.frequencyCurve.carrierRange,
-                beatRange = preset.frequencyCurve.beatRange
+                carrierRange = soundingCurve.carrierRange,
+                beatRange = soundingCurve.beatRange
             )
         }
         
@@ -665,13 +998,13 @@ class BinauralViewModel @Inject constructor(
         
         // Формируем конфиг из глобальных настроек каналов и нормализации
         val config = buildPlaybackConfig(
-            frequencyCurve = preset.frequencyCurve,
+            frequencyCurve = soundingCurve,
             volume = state.volume,
             channelSwap = state.channelSwapSettings,
             normalization = state.volumeNormalizationSettings
         )
 
-        val relaxationSettings = preset.relaxationModeSettings
+        val relaxationSettings = relaxationOverride ?: preset.relaxationModeSettings
 
         // ПЕРЕКЛЮЧЕНИЕ = КРОССФЕЙД, а не «стоп, потом старт».
         //
@@ -709,11 +1042,12 @@ class BinauralViewModel @Inject constructor(
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val isActivePreset = _uiState.value.activePreset?.id == presetId
         
-        android.util.Log.d("BinauralViewModel", "startEditingPreset: presetId=$presetId, relaxationModeSettings=${preset.relaxationModeSettings}, smoothInterval=${preset.relaxationModeSettings.smoothIntervalMinutes}")
+        android.util.Log.d("BinauralViewModel", "startEditingPreset: presetId=$presetId, relaxationModeSettings=${preset.relaxationModeSettings}")
         
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = preset.frequencyCurve,
+                newPresetBaselineCurve = null,
                 editingPresetId = presetId,
                 carrierRange = preset.frequencyCurve.carrierRange,
                 beatRange = preset.frequencyCurve.beatRange,
@@ -740,10 +1074,11 @@ class BinauralViewModel @Inject constructor(
      */
     fun startNewPreset() {
         savedStateHandle[KEY_EDITING_TARGET] = EDITING_TARGET_NEW
-        val defaultCurve = FrequencyCurve.defaultCurve()
+        val defaultCurve = FrequencyCurve.newPresetCurve()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = defaultCurve,
+                newPresetBaselineCurve = defaultCurve,
                 editingPresetId = null,
                 carrierRange = defaultCurve.carrierRange,
                 beatRange = defaultCurve.beatRange,
@@ -770,12 +1105,18 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
+                newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingRelaxationModeSettings = RelaxationModeSettings()
             )
         }
         
+        // Сессия редактирования завершена: возвращаем пользовательский интервал
+        // генерации буфера ДО восстановления кривой — пересборка после отмены
+        // должна идти уже с ним.
+        restoreUserBufferInterval()
+
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
             playbackService?.updateFrequencyCurve(activePreset.frequencyCurve)
@@ -787,6 +1128,17 @@ class BinauralViewModel @Inject constructor(
      * Используется при выходе с экрана редактирования для плавной анимации.
      */
     fun cancelEditingInService() {
+        // СКРАБ: выход из редактора стирает сдвиг оси. Сдвиг был «ложью о
+        // времени» ради прослушивания правки; вне редактора про неё уже никто
+        // не помнит, а звук, уехавший от настоящего «сейчас», — это нарушение
+        // главного инварианта приложения. Снимаем ДО восстановления кривой:
+        // buildSpec() подставит 0, и тот же хэндофф вернёт звук на реальную ось.
+        resetScrub()
+        // Сессия редактирования завершена: возвращаем пользовательский интервал
+        // генерации буфера ДО восстановления кривой — пересборка после отмены
+        // должна идти уже с ним.
+        restoreUserBufferInterval()
+
         val activePreset = _uiState.value.activePreset
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
@@ -800,9 +1152,12 @@ class BinauralViewModel @Inject constructor(
      */
     fun finishEditing() {
         pointIntent.clear()
+        // СКРАБ: см. cancelEditingInService — выход из редактора стирает сдвиг.
+        resetScrub()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
+                newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
                 editingRelaxationModeSettings = RelaxationModeSettings()
@@ -869,7 +1224,7 @@ class BinauralViewModel @Inject constructor(
         curve: FrequencyCurve, 
         relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
     ) {
-        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings, smoothInterval=${relaxationModeSettings.smoothIntervalMinutes}")
+        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings")
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
@@ -914,6 +1269,14 @@ class BinauralViewModel @Inject constructor(
                     beatRange = curve.beatRange
                 )
             }
+            // СКРАБ: сохранение — тоже выход из редактора, сдвиг оси стирается.
+            // Снимаем ДО updateAudioConfig(): его хэндофф и вернёт звук на
+            // реальное «сейчас» (иначе buildSpec() унаследовал бы сдвиг).
+            resetScrub()
+            // Сессия редактирования завершена: возвращаем пользовательский
+            // интервал генерации буфера ДО применения конфига, чтобы
+            // кроссфейд-пересборка после сохранения сразу шла с ним.
+            restoreUserBufferInterval()
             updateAudioConfig()
         }
         viewModelScope.launch {
@@ -977,6 +1340,53 @@ class BinauralViewModel @Inject constructor(
             // пресета.
             playbackService?.pauseWithFade()
         } else {
+            // Проверяем подключение наушников при попытке запуска воспроизведения
+            if (playbackService != null && !BinauralPlaybackService.hasHeadset.value
+                && state.headphoneReminderEnabled) {
+                // Определяем, какой пресет пытаются запустить
+                val pendingId = state.editingPresetId
+                    ?: state.activePreset?.id
+                    ?: lastActivePresetId
+                if (pendingId != null) {
+                    _uiState.update { it.copy(showHeadphoneDialog = true, pendingPresetId = pendingId) }
+                    return
+                }
+            }
+
+            // РЕДАКТОР: «продолжить» внутри редактора — это ПЕРЕКЛЮЧЕНИЕ на
+            // редактируемую предустановку, а не возврат к звучавшей ранее.
+            //
+            // До этой правки кнопка просто возобновляла то, что играло (или
+            // последний активный пресет): пользователь открывает пресет,
+            // правит его, жмёт play — и слышит совсем другой пресет, который
+            // в редакторе даже не показан. Услышать правку можно было только
+            // выйдя из редактора и тапнув пресет в списке. Теперь нажатие
+            // «play» при открытом редакторе всегда приводит прослушивание к
+            // тому, что открыто на экране.
+            //
+            // Условие ровно по [editingPresetId]: он непуст только внутри
+            // сессии редактирования СУЩЕСТВУЮЩЕГО пресета (на выходе из
+            // редактора обнуляется). НОВЫЙ, ещё не сохранённый пресет
+            // ([editingPresetId] == null) переключать некуда — его просто нет
+            // в списке, поэтому там остаётся прежнее поведение.
+            //
+            // Кривую и настройки расслабления берём ИЗ РЕДАКТОРА, а не из
+            // сохранённого пресета: иначе несохранённые правки зазвучали бы
+            // лишь после следующей же правки (которая пушит кривую в движок),
+            // а до неё звук расходился бы с графиком на экране.
+            //
+            // Отдельная проверка «пресет ещё есть в списке»: он мог быть удалён
+            // (или список ещё не догружен после пересоздания ViewModel) — тогда
+            // переключать некуда, и кнопка честно возобновляет прежний звук.
+            val editingId = state.editingPresetId
+            if (editingId != null &&
+                editingId != state.activePreset?.id &&
+                state.presets.any { it.id == editingId }
+            ) {
+                startPreset(editingId, state.editingFrequencyCurve, state.editingRelaxationModeSettings)
+                return
+            }
+
             // Если есть активный пресет - обновляем конфиг и продолжаем воспроизведение
             if (state.activePreset != null) {
                 // Важно: сначала обновляем конфиг, т.к. при запуске приложения
@@ -1055,6 +1465,11 @@ class BinauralViewModel @Inject constructor(
         val points = curve.points.toMutableList()
         if (index in points.indices) {
             val oldPoint = points[index]
+            // Время не изменилось (повторный commit без правки: движение
+            // каретки в заполненном поле триггерит валидацию по каждой
+            // смене выделения) — не перестраиваем кривую и не пушим её
+            // в движок впустую.
+            if (newTime == oldPoint.time) return
             // Память желаемой частоты биений привязана к ВРЕМЕНИ точки,
             // поэтому переезд по оси времени переносит и её — иначе частота
             // «останется» на покинутой секунде, а переехавшая точка потеряет
@@ -1246,13 +1661,21 @@ class BinauralViewModel @Inject constructor(
         pointIntent.rememberCarrier(time, carrierFrequency)
         pointIntent.rememberBeat(time, beatFrequency)
 
-        val points = curve.points.toMutableList()
-        points.add(FrequencyPoint(
+        val newPoint = FrequencyPoint(
             time = time,
             carrierFrequency = clampedCarrier,
             beatFrequency = clampedBeat
-        ))
-        updateEditingCurve(points.sortedBy { it.time.toSecondOfDay() }, curve.carrierRange, curve.beatRange, curve.interpolationType)
+        )
+        val points = curve.points.toMutableList()
+        points.add(newPoint)
+        val sortedPoints = points.sortedBy { it.time.toSecondOfDay() }
+        val newIndex = sortedPoints.indexOfFirst { it === newPoint }.coerceAtLeast(0)
+        updateEditingCurve(sortedPoints, curve.carrierRange, curve.beatRange, curve.interpolationType)
+        // Если попап редактирования точки уже открыт — переключаем его на новую
+        // точку (см. запрос): контекстное окно «переезжает» на свежесозданную.
+        if (state.selectedPointIndex != null) {
+            _uiState.update { it.copy(selectedPointIndex = newIndex) }
+        }
     }
 
     fun removeEditingPoint(index: Int) {
@@ -1260,7 +1683,9 @@ class BinauralViewModel @Inject constructor(
         val curve = state.editingFrequencyCurve ?: return
         
         val points = curve.points.toMutableList()
-        if (points.size > 2 && index in points.indices) {
+        // Редактор позволяет удалить все точки кроме одной (одноточечная
+        // кривая — допустимое состояние, см. FrequencyCurve.require(points.size >= 1)).
+        if (points.size > 1 && index in points.indices) {
             pointIntent.forget(points[index].time)
             points.removeAt(index)
             updateEditingCurve(points, curve.carrierRange, curve.beatRange, curve.interpolationType)
@@ -1310,6 +1735,42 @@ class BinauralViewModel @Inject constructor(
         updateEditingCurve(updatedPoints, newRange, curve.beatRange, curve.interpolationType)
     }
 
+    /**
+     * Редактируется ли именно тот пресет, который сейчас активен
+     * (воспроизводится). Только в этом случае правки из редактора уходят
+     * в движок и пересобирают звучащий поток.
+     */
+    private fun isEditingActivePreset(): Boolean {
+        val state = _uiState.value
+        return state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+    }
+
+    /**
+     * Зафиксировать интервал генерации буфера на 1 минуте
+     * ([EDITOR_PREVIEW_BUFFER_INTERVAL_MS]) для следующего пересобранного потока.
+     *
+     * Вызывается перед КАЖДЫМ пушем правки из редактора: пересборка после
+     * изменения опций должна генерировать дешёвый минутный пакет, а не буфер
+     * на весь пользовательский интервал. Повторные пуши того же значения
+     * отсекает дедупликацией сам менеджер. Пользовательская настройка в базу
+     * не пишется и возвращается при выходе из редактора
+     * ([restoreUserBufferInterval]).
+     */
+    private fun armEditorPreviewBufferInterval() {
+        playbackService?.setFrequencyUpdateInterval(EDITOR_PREVIEW_BUFFER_INTERVAL_MS)
+    }
+
+    /**
+     * Вернуть пользовательский интервал генерации буфера после правки в
+     * редакторе. Вызывается при завершении сессии редактирования (сохранение
+     * или отмена), чтобы поток, пересобранный уже вне редактора, снова
+     * генерировал буфер по настройке пользователя. Значение берётся из
+     * состояния (прочитано из DataStore), в хранилище не пишется.
+     */
+    private fun restoreUserBufferInterval() {
+        playbackService?.setFrequencyUpdateInterval(_uiState.value.bufferGenerationMinutes * 60 * 1000)
+    }
+
     private fun updateEditingCurve(
         points: List<FrequencyPoint>,
         carrierRange: FrequencyRange,
@@ -1323,19 +1784,22 @@ class BinauralViewModel @Inject constructor(
                 carrierRange = carrierRange,
                 beatRange = beatRange,
                 interpolationType = interpolationType,
-                splineTension = currentCurve?.splineTension ?: 0.0f
+                splineTension = currentCurve?.splineTension ?: 0.0f,
+                stepFadeDurationMs = currentCurve?.stepFadeDurationMs ?: 1000L
             )
             _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
-            
-            // Обновляем кривую в сервисе только если редактируется активный пресет
-            val state = _uiState.value
-            val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-            
-            if (isActivePreset) {
+
+            // Обновляем кривую в сервисе только если редактируется активный
+            // пресет: звучащий поток пересобирается кроссфейдом, и правка
+            // слышна сразу.
+            if (isEditingActivePreset()) {
+                armEditorPreviewBufferInterval()
                 playbackService?.updateFrequencyCurve(newCurve)
             }
         } catch (e: IllegalArgumentException) {
-            // Игнорируем ошибки валидации (например, меньше 2 точек)
+            // Игнорируем ошибки валидации (например, несущая/биения вне
+            // допустимых границ). Минимум точек — 1, поэтому удаление до
+            // последней точки исключения больше не бросает.
         }
     }
     
@@ -1346,18 +1810,34 @@ class BinauralViewModel @Inject constructor(
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         
-        val newCurve = FrequencyCurve(
-            points = curve.points,
-            carrierRange = curve.carrierRange,
-            beatRange = curve.beatRange,
-            interpolationType = type,
-            splineTension = curve.splineTension
-        )
+        val newCurve = curve.copy(interpolationType = type)
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        if (isActivePreset) {
+        if (isEditingActivePreset()) {
+            armEditorPreviewBufferInterval()
+            playbackService?.updateFrequencyCurve(newCurve)
+        }
+    }
+
+    /**
+     * Установить длительность затухания на ступеньках STEP-интерполяции.
+     *
+     * Работает только когда выбран тип [InterpolationType.STEP] — для остальных
+     * типов частоты меняются непрерывно и затухать нечего. Значение лежит в
+     * кривой пресета, поэтому уезжает в движок вместе с ней (см.
+     * [com.binaural.core.audio.engine.NativeAudioEngine.updateConfig]).
+     */
+    fun setStepFadeDurationMs(durationMs: Long) {
+        val curve = _uiState.value.editingFrequencyCurve ?: return
+        if (curve.interpolationType != InterpolationType.STEP) return
+        val newCurve = curve.copy(stepFadeDurationMs = durationMs.coerceAtLeast(0L))
+        _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
+
+        // Как и любой опцией редактора, звук пересобирается сразу — но только
+        // если редактируется звучащий пресет.
+        if (isEditingActivePreset()) {
+            armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
     }
@@ -1369,24 +1849,33 @@ class BinauralViewModel @Inject constructor(
         val state = _uiState.value
         val curve = state.editingFrequencyCurve ?: return
         
-        val newCurve = FrequencyCurve(
-            points = curve.points,
-            carrierRange = curve.carrierRange,
-            beatRange = curve.beatRange,
-            interpolationType = curve.interpolationType,
-            splineTension = tension.coerceIn(0f, 1f)
-        )
+        val newCurve = curve.copy(splineTension = tension.coerceIn(0f, 1f))
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        val isActivePreset = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        if (isActivePreset) {
+        if (isEditingActivePreset()) {
+            armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
     }
 
     // ============= Методы для редактирования режима расслабления =============
-    
+
+    /**
+     * Пуш настроек расслабления из редактора в движок.
+     *
+     * Настройки расслабления — такие же опции редактора, как и точки кривой:
+     * пока редактируется именно активный пресет, любое их изменение должно
+     * пересобрать звучащий поток (кроссфейд), иначе слайдеры меняли бы только
+     * сохраняемый пресет, а звук продолжал бы играть по-старому.
+     * Вызывается из каждого setEditing-метода после обновления состояния.
+     */
+    private fun pushEditingRelaxationToService() {
+        if (!isEditingActivePreset()) return
+        armEditorPreviewBufferInterval()
+        playbackService?.updateRelaxationModeSettings(_uiState.value.editingRelaxationModeSettings)
+    }
+
     /**
      * Включить/выключить режим расслабления
      */
@@ -1397,6 +1886,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(enabled = enabled)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1410,6 +1900,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(carrierReductionPercent = clampedPercent)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1426,20 +1917,9 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(beatReductionPercent = clampedPercent)
             )
         }
+        pushEditingRelaxationToService()
     }
     
-    /**
-     * Установить режим расслабления (SIMPLE или ADVANCED)
-     */
-    fun setEditingRelaxationMode(mode: RelaxationMode) {
-        val state = _uiState.value
-        android.util.Log.d("BinauralViewModel", "setEditingRelaxationMode: mode=$mode, current smoothInterval=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
-        _uiState.update { 
-            it.copy(
-                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(mode = mode)
-            )
-        }
-    }
     
     /**
      * Установить паузу между периодами расслабления (в минутах)
@@ -1452,6 +1932,7 @@ class BinauralViewModel @Inject constructor(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(gapBetweenRelaxationMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1459,12 +1940,13 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingRelaxationDurationMinutes(minutes: Int) {
         val state = _uiState.value
-        val clampedMinutes = minutes.coerceIn(5, 60)
+        val clampedMinutes = minutes.coerceIn(0, 60)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(relaxationDurationMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
     
     /**
@@ -1472,26 +1954,35 @@ class BinauralViewModel @Inject constructor(
      */
     fun setEditingTransitionPeriodMinutes(minutes: Int) {
         val state = _uiState.value
-        val clampedMinutes = minutes.coerceIn(1, 15)
+        val clampedMinutes = minutes.coerceIn(0, 60)
         _uiState.update { 
             it.copy(
                 editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(transitionPeriodMinutes = clampedMinutes)
             )
         }
+        pushEditingRelaxationToService()
     }
-    
+
     /**
-     * Установить интервал между точками для SMOOTH режима (в минутах)
+     * Угасание периодов расслабления по положению частот в диапазоне: ВКЛ/ВЫКЛ.
+     *
+     * Смысл слайдеров глубины переключатель ПЕРЕОПРЕДЕЛЯЕТ: при включённом
+     * угасании они задают глубину у верхней границы диапазона, а у нижней
+     * период расслабления плавно вырождается в базовую кривую. Подробно —
+     * docs/design_relaxation_range_fade.md.
      */
-    fun setEditingSmoothIntervalMinutes(minutes: Int) {
-        val clampedMinutes = minutes.coerceIn(5, 120)
-        _uiState.update { state ->
-            android.util.Log.d("BinauralViewModel", "setEditingSmoothIntervalMinutes: minutes=$minutes, clamped=$clampedMinutes, current=${state.editingRelaxationModeSettings.smoothIntervalMinutes}")
-            state.copy(
-                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(smoothIntervalMinutes = clampedMinutes)
+    fun setEditingRelaxationFadeByRangePosition(enabled: Boolean) {
+        val state = _uiState.value
+        _uiState.update {
+            it.copy(
+                editingRelaxationModeSettings = state.editingRelaxationModeSettings.copy(
+                    fadeByRangePosition = enabled
+                )
             )
         }
+        pushEditingRelaxationToService()
     }
+    
 
     // ============= Методы для управления общими настройками приложения =============
     
@@ -1542,6 +2033,22 @@ class BinauralViewModel @Inject constructor(
     }
     
     fun setSampleRate(rate: SampleRate) {
+        // Смена частоты дискретизации меняет и потолок длительности буфера:
+        // тот же бюджет кучи покупает на 48 кГц вдвое меньше секунд, чем на
+        // 16 кГц. Интервал, выбранный на прежней частоте, мог перестать
+        // влезать — усекаем его до максимальной стопы новой частоты сразу
+        // (не дожидаясь кроссфейда), чтобы слайдер, хранилище и движок не
+        // расходились: иначе слайдер показал бы стопы, среди которых нет
+        // выбранного значения, а движок молча урезал бы интервал.
+        val currentMinutes = _uiState.value.bufferGenerationMinutes
+        val clampedMinutes = PacketMemoryBudget.coerceMinutes(rate.value, currentMinutes)
+        if (clampedMinutes != currentMinutes) {
+            _uiState.update { it.copy(bufferGenerationMinutes = clampedMinutes) }
+            playbackService?.setFrequencyUpdateInterval(clampedMinutes * 60 * 1000)
+            viewModelScope.launch {
+                preferencesRepository.saveBufferGenerationMinutes(clampedMinutes)
+            }
+        }
         restartWithFadeIfNeeded {
             _uiState.update { it.copy(sampleRate = rate) }
             playbackService?.setSampleRate(rate)
@@ -1731,6 +2238,16 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.saveResumeOnHeadsetConnect(enabled)
         }
     }
+
+    /**
+     * Включить/выключить напоминание о необходимости подключения наушников.
+     */
+    fun setHeadphoneReminderEnabled(enabled: Boolean) {
+        _uiState.update { it.copy(headphoneReminderEnabled = enabled) }
+        viewModelScope.launch {
+            preferencesRepository.saveHeadphoneReminderEnabled(enabled)
+        }
+    }
     
     /**
      * Включить/выключить автовозобновление воспроизведения при запуске приложения
@@ -1814,19 +2331,97 @@ class BinauralViewModel @Inject constructor(
             null
         }
     }
-    
+
     /**
      * Получить пресет для экспорта
      */
     fun getPresetForExport(presetId: String): BinauralPreset? {
         return _uiState.value.presets.find { it.id == presetId }
     }
+
+    /**
+     * Подготовить экспорт пресета: сериализовать его и сохранить результат
+     * ДО открытия системного пикера.
+     *
+     * ПОЧЕМУ НА ДИСК, А НЕ В ПАМЯТЬ. Пока открыт SAF-пикер, Activity уходит в
+     * фон и уничтожается; вместе с ней очищается `ViewModelStore` — то есть не
+     * выживает НИ `remember`-состояние рядом с лаунчером, НИ поле ViewModel
+     * (проверено на устройстве: переход на SavedStateHandle-независимое поле
+     * ViewModel баг не убрал). Выживает только то, что лежит вне процесса.
+     * Кладём JSON в `cacheDir`, а колбэк лаунчера забирает его оттуда — так
+     * экспорт переживает и пересоздание Activity, и смерть процесса.
+     * См. docs/analysis_preset_export_empty_file.md
+     *
+     * Вызывать с [Dispatchers.IO] — пишет файл.
+     *
+     * @return имя файла для пикера или null, если пресета нет, сериализация
+     * не удалась или не удалось записать временный файл
+     */
+    fun prepareExport(presetId: String): String? {
+        val preset = getPresetForExport(presetId) ?: return null
+        val exportedJson = exportPresetToJson(presetId) ?: return null
+        return try {
+            val payload = json.encodeToString(PendingExport(preset.name, exportedJson))
+            val tmp = File(context.cacheDir, KEY_PENDING_EXPORT + ".tmp")
+            tmp.writeText(payload)
+            val target = pendingExportFile()
+            if (!tmp.renameTo(target)) {
+                // rename может не сработать на некоторых ФС — тогда копируем
+                target.writeText(payload)
+                tmp.delete()
+            }
+            android.util.Log.d(
+                "PresetExport",
+                "prepare: id=$presetId, ${exportedJson.length} симв., vm=${System.identityHashCode(this)}"
+            )
+            "${preset.name.replace(" ", "_")}.json"
+        } catch (e: Exception) {
+            android.util.Log.e("PresetExport", "prepare: не удалось сохранить JSON", e)
+            null
+        }
+    }
+
+    /** Выбросить подготовленный экспорт (пользователь отменил выбор файла). */
+    fun discardPendingExport() {
+        if (pendingExportFile().delete()) {
+            android.util.Log.d("PresetExport", "discard: подготовленный экспорт удалён")
+        }
+    }
+
+    /**
+     * Забрать подготовленный к экспорту пресет (одноразово, файл удаляется).
+     *
+     * Вызывать с [Dispatchers.IO].
+     *
+     * @return имя пресета и его JSON, либо null, если подготовленных данных нет
+     * (экспорт не готовился, уже забран, либо кэш вычищен системой)
+     */
+    fun consumePendingExport(): Pair<String, String>? {
+        val file = pendingExportFile()
+        return try {
+            if (!file.exists()) {
+                android.util.Log.w("PresetExport", "consume: файла нет (кэш вычищен?)")
+                return null
+            }
+            val payload = json.decodeFromString<PendingExport>(file.readText().also { file.delete() })
+            android.util.Log.d(
+                "PresetExport",
+                "consume: ${payload.json.length} симв., vm=${System.identityHashCode(this)}"
+            )
+            payload.presetName to payload.json
+        } catch (e: Exception) {
+            android.util.Log.e("PresetExport", "consume: не удалось прочитать JSON", e)
+            file.delete()
+            null
+        }
+    }
     
     /**
      * Импортировать пресет из JSON
-     * @return ID импортированного пресета или null при ошибке
+     * @return импортированный пресет (уже с новым ID и уникальным именем)
+     * или null при ошибке
      */
-    fun importPresetFromJson(jsonString: String): String? {
+    fun importPresetFromJson(jsonString: String): BinauralPreset? {
         return try {
             val preset = json.decodeFromString<BinauralPreset>(jsonString)
             // Генерируем новый ID для импортированного пресета, чтобы избежать конфликтов
@@ -1839,7 +2434,7 @@ class BinauralViewModel @Inject constructor(
             viewModelScope.launch {
                 preferencesRepository.addPreset(importedPreset)
             }
-            importedPreset.id
+            importedPreset
         } catch (e: Exception) {
             android.util.Log.e("BinauralViewModel", "Failed to import preset", e)
             null
@@ -1848,9 +2443,9 @@ class BinauralViewModel @Inject constructor(
     
     /**
      * Импортировать пресет из Uri файла
-     * @return ID импортированного пресета или null при ошибке
+     * @return импортированный пресет или null при ошибке
      */
-    fun importPresetFromUri(uri: Uri): String? {
+    fun importPresetFromUri(uri: Uri): BinauralPreset? {
         return try {
             val jsonString = context.contentResolver.openInputStream(uri)?.use { inputStream ->
                 inputStream.bufferedReader().readText()
@@ -1948,24 +2543,44 @@ class BinauralViewModel @Inject constructor(
      */
     private fun tryAutoResumeOnAppStart() {
         val state = _uiState.value
-        
-        // Проверяем, что:
+
+        // Условия (ВСЕ должны выполняться):
         // 1. Автовозобновление включено
         // 2. Есть активный пресет
         // 3. Сервис подключен
-        // 4. Воспроизведение не идёт
-        // 5. Мы ещё не обрабатывали автовозобновление
+        // 4. Воспроизведение ещё не идёт
+        // 5. Мы ещё не обрабатывали автовозобновление в этой сессии
+        // 6. Подключены наушники (требование: запускать только при наушниках)
+        //
+        // Функция дёргается из нескольких мест (onServiceConnected, коллектор
+        // пресетов, коллектор самой опции), т.к. эти данные грузятся
+        // асинхронно и в разном порядке. guard autoResumeHandled гарантирует
+        // единый реальный запуск — сработает та попытка, где ВСЕ условия уже
+        // готовы (обычно onServiceConnected, где детекция наушников уже
+        // инициализирована).
         if (state.autoResumeOnAppStart &&
             state.activePreset != null &&
             state.isServiceConnected &&
             !_telemetry.value.isPlaying &&
             !autoResumeHandled) {
-            
+
+            // Помечаем сразу: повторный вход из другого коллектора/колбэка
+            // не запустит воспроизведение дважды.
             autoResumeHandled = true
+
+            // Без наушников на старте — не запускаем и НЕ показываем диалог
+            // (это автоматическое действие, а не ручной тап «воспроизвести»).
+            if (!BinauralPlaybackService.hasHeadset.value) {
+                android.util.Log.d("BinauralViewModel", "Auto-resume skipped: headphones not connected")
+                return
+            }
+
             android.util.Log.d("BinauralViewModel", "Auto-resuming playback on app start for preset: ${state.activePreset.name}")
-            
-            // Запускаем воспроизведение с fade-in
-            playbackService?.resumeWithFade()
+
+            // Реально ЗАПУСКАЕМ воспроизведение активного пресета. Нельзя
+            // resumeWithFade(): на холодном старте активного потока нет, он
+            // ничего не сделает. startPreset строит конфиг и стартует движок.
+            startPreset(state.activePreset.id, curveOverride = null, relaxationOverride = null)
         }
     }
 

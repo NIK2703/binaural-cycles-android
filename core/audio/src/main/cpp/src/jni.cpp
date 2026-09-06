@@ -127,6 +127,10 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     jfloatArray beatFreqs,
     jint interpolationType,
     jfloat splineTension,
+    // Длительность затухания на ступеньках STEP-интерполяции (мс); 0 — ступенька
+    // без затухания. Свойство КРИВОЙ (как splineTension), а не глобальная
+    // настройка: оно описывает, как звучит именно эта предустановка.
+    jlong stepFadeDurationMs,
     jfloat volume,
     jboolean channelSwapEnabled,
     jint channelSwapIntervalSec,
@@ -182,6 +186,11 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetConfig(
     // касательные разворачиваются и сплайн начинает петлять — визуально и на
     // слух это уже не «натяжение», а поломка кривой.
     config.curve.splineTension = std::clamp(splineTension, 0.0f, 1.0f);
+
+    // Отрицательная длительность бессмысленна — считаем её «выключено» (0),
+    // как и у затухания смены каналов. Верхнего предела нет: процедура сама
+    // сожмёт окно до зазора между соседними скачками (см. StepFade.h).
+    config.stepFadeDurationMs = (stepFadeDurationMs > 0) ? stepFadeDurationMs : 0;
 
     // Веса касательных кардинального сплайна (регуляция overshoot).
     // Считает их Kotlin на той же кривой, что рисует график (CardinalTension);

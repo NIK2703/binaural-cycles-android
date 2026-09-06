@@ -551,7 +551,7 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         std::shared_lock<std::shared_mutex> lock(m_configMutex);
         config = m_config;
     }
-    
+
     // НОВАЯ АРХИТЕКТУРА: Используем планировщик пакетов
     // Планируем пакет буферов на основе текущего состояния
     // TREND-режиму перестановки нужны позиция кривой и масштаб времени
@@ -620,7 +620,7 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
         timeScale
     );
 #endif
-    
+
     // Обновляем атомарные значения для Java (relaxed для производительности)
     const float prevBeatFreq = m_currentBeatFreq.exchange(result.currentBeatFreq, std::memory_order_relaxed);
     m_currentCarrierFreq.store(result.currentCarrierFreq, std::memory_order_relaxed);

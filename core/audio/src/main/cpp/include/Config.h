@@ -182,6 +182,24 @@ struct FrequencyCurve {
     // планировщик только ищет по нему. Отсортирован по времени суток.
     std::vector<TrendCrossing> trendCrossings;
     bool trendCrossingsValid = false;
+
+    // Моменты СКАЧКОВ ступенчатой кривой (сек суток, отсортированы по
+    // возрастанию, без дублей).
+    //
+    // Ступенчатая интерполяция удерживает значение ЛЕВОЙ точки интервала:
+    // на [t_i, t_{i+1}) звучит точка i. Значит скачок стоит в момент t_{i+1}
+    // и только если точка i+1 ОТЛИЧАЕТСЯ от точки i (иначе значения слева и
+    // справа от узла совпадают и скачка нет). Строится один раз в
+    // updateCache(); ПУСТОЙ список — корректный результат («скачков нет»:
+    // кривая константна либо точек меньше двух), и тогда затухать нечего.
+    //
+    // Зачем список, а не проход по points на каждый вызов: огибающая
+    // затухания (StepFade.h) ищется на КАЖДОМ кусочке генерации (кусочек ≤
+    // 100 мс), и линейный скан тысяч точек пресета сопоставим по цене с самим
+    // сэмпл-лупом. Здесь — O(n log n) один раз на смену кривой.
+    // Подробности: docs/design_step_interpolation_fade.md.
+    std::vector<float> stepJumpTimes;
+    bool stepJumpTimesValid = false;
     
     /**
      * Таблицы построены и готовы к чтению (обе непустые).
@@ -222,6 +240,12 @@ struct FrequencyCurve {
      * Вызывается из updateCache(); результат — trendCrossings.
      */
     void buildTrendCrossings();
+
+    /**
+     * Предвычислить все моменты скачков ступенчатой кривой за сутки.
+     * Вызывается из updateCache(); результат — stepJumpTimes.
+     */
+    void buildStepJumps();
 
 private:
     /**
@@ -275,6 +299,15 @@ struct BinauralConfig {
     bool channelSwapFadeEnabled = true;
     int64_t channelSwapFadeDurationMs = 1000;
     int64_t channelSwapPauseDurationMs = 0;  // Пауза между fade-out и fade-in (0 = без паузы)
+
+    // Затухание на СТУПЕНЬКАХ STEP-интерполяции — полный аналог процедуры
+    // смены каналов (затухание → тишина → нарастание вокруг момента скачка),
+    // см. StepFade.h и docs/design_step_interpolation_fade.md.
+    // 0 — ступенька звучит на полной громкости (затухание выключено, как
+    // channelSwapFadeEnabled=false у смены каналов). Паузы (P) здесь нет:
+    // P ≡ 0, то есть ровно тот вырожденный случай процедуры, который у смены
+    // каналов стоит по умолчанию.
+    int64_t stepFadeDurationMs = 1000;
     
     // Настройки нормализации
     NormalizationType normalizationType = NormalizationType::TEMPORAL;

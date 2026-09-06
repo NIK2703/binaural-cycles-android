@@ -23,10 +23,10 @@ import com.binaural.core.audio.model.FrequencyPoint
 import com.binaural.core.audio.model.FrequencyRange
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import kotlinx.datetime.LocalTime
 import android.graphics.Paint
+import java.util.Locale
 
 /**
  * Параметры мини-графика
@@ -236,17 +236,10 @@ private fun computeGraphGeometry(
     
     val finalParams = params.copy(maxBeat = maxBeat)
     
-    // Определяем точки для интерполяции
+    // В режиме расслабления кривая идёт ТОЛЬКО по виртуальным точкам,
+    // иначе — по базовым.
     val pointsForInterpolation = when {
-        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.STEP && virtualPoints.isNotEmpty() -> {
-            virtualPoints
-        }
-        relaxationModeSettings.enabled && relaxationModeSettings.mode == RelaxationMode.SMOOTH && virtualPoints.isNotEmpty() -> {
-            virtualPoints
-        }
-        relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> {
-            (sortedPoints + virtualPoints).sortedBy { it.time.toSecondOfDay() }
-        }
+        relaxationModeSettings.enabled && virtualPoints.isNotEmpty() -> virtualPoints
         else -> sortedPoints
     }
     
@@ -266,9 +259,8 @@ private fun computeGraphGeometry(
     val carrierPath = computeCarrierPath(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
     val (upperPath, lowerPath, combinedPath) = computeBeatPaths(pointsForInterpolation, finalParams, interpolationType, splineTension, weights)
     
-    // Вычисляем путь базовой кривой (по основным точкам) для режимов STEP и SMOOTH
-    val baseCarrierPath = if (relaxationModeSettings.enabled && 
-        (relaxationModeSettings.mode == RelaxationMode.STEP || relaxationModeSettings.mode == RelaxationMode.SMOOTH) &&
+    // Путь базовой кривой (по основным точкам) для пунктира
+    val baseCarrierPath = if (relaxationModeSettings.enabled &&
         relaxationModeSettings.carrierReductionPercent > 0 &&
         sortedPoints.size >= 2) {
         computeCarrierPath(sortedPoints, finalParams, interpolationType, splineTension, baseWeights)
@@ -289,12 +281,13 @@ private fun computeGraphGeometry(
         val beatStr = if (point.beatFrequency == point.beatFrequency.toLong().toFloat()) {
             point.beatFrequency.toLong().toString()
         } else {
-            point.beatFrequency.toString()
+            // Локале-зависимый разделитель (запятая в RU/DE и т.п.) вместо жёсткой точки
+            String.format(Locale.getDefault(), "%.1f", point.beatFrequency)
         }
-        labelTexts.add("%.0f(%s)".format(point.carrierFrequency, beatStr))
+        labelTexts.add("%.0f(%s)".format(Locale.getDefault(), point.carrierFrequency, beatStr))
     }
     
-    // Позиции виртуальных точек (не используются в SMOOTH режиме)
+    // Позиции виртуальных точек (мини-график их не отрисовывает)
     val virtualPointPositions = FloatArray(0)
     
     return CachedGraphGeometry(
@@ -461,41 +454,15 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawCachedGeometry(
 
     // Индикатор воспроизведения
     if (isPlaying || drawIndicatorOnly) {
-        val carrierRangeSize = (carrierRange.max - carrierRange.min).coerceAtLeast(50.0f)
         fun timeToX(time: LocalTime): Float = (time.toSecondOfDay() / (24.0f * 3600f) * width)
-        fun carrierToY(carrier: Float): Float = height - ((carrier - carrierRange.min) / carrierRangeSize * height)
-        // Формулы каналов: при beat < 0 «верхний» и «нижний» меняются местами,
-        // поэтому границы полосы ниже берём по координатам, а не по именам.
-        fun beatUpperY(carrier: Float, beat: Float): Float =
-            carrierToY(FrequencyMath.rightChannelFrequency(carrier, beat))
-        fun beatLowerY(carrier: Float, beat: Float): Float =
-            carrierToY(FrequencyMath.leftChannelFrequency(carrier, beat))
-
         val currentX = timeToX(currentTime)
-        val rightChannelY = beatUpperY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val leftChannelY = beatLowerY(currentCarrierFrequency, currentBeatFrequency).coerceIn(0f, height)
-        val currentUpperY = minOf(rightChannelY, leftChannelY)
-        val currentLowerY = maxOf(rightChannelY, leftChannelY)
-        
-        // Вертикальная линия текущего момента: вне области биений — полупрозрачная,
-        // внутри области биений — ярче. Точку пересечения с несущей убираем.
+        // Зону пересечения с графиком (яркий сегмент внутри полосы биений)
+        // больше не рисуем — вертикальная линия однородная на всю высоту.
         val indicatorAlpha = 0.3f
         drawLine(
             color = indicatorColor.copy(alpha = indicatorAlpha),
             start = Offset(currentX, 0f),
-            end = Offset(currentX, currentUpperY),
-            strokeWidth = 2f
-        )
-        drawLine(
-            color = indicatorColor.copy(alpha = indicatorAlpha),
-            start = Offset(currentX, currentLowerY),
             end = Offset(currentX, height),
-            strokeWidth = 2f
-        )
-        drawLine(
-            color = indicatorColor.copy(alpha = 0.5f),
-            start = Offset(currentX, currentUpperY),
-            end = Offset(currentX, currentLowerY),
             strokeWidth = 2f
         )
     }

@@ -9,7 +9,6 @@ import com.binaural.core.audio.model.FrequencyMath
 import com.binaural.core.audio.model.Interpolation
 import com.binaural.core.audio.model.InterpolationType
 import com.binaural.core.audio.model.NormalizationType
-import com.binaural.core.audio.model.RelaxationMode
 import com.binaural.core.audio.model.RelaxationModeSettings
 import java.util.concurrent.atomic.AtomicLong
 
@@ -84,6 +83,8 @@ class NativeAudioEngine {
         beatFreqs: FloatArray,
         interpolationType: Int,
         splineTension: Float,
+        /** Длительность затухания на ступеньках STEP-интерполяции (мс); 0 — без затухания. */
+        stepFadeDurationMs: Long,
         volume: Float,
         channelSwapEnabled: Boolean,
         channelSwapIntervalSec: Int,
@@ -268,6 +269,7 @@ class NativeAudioEngine {
             beatFreqs = beatFreqs,
             interpolationType = interpolationType,
             splineTension = curve.splineTension,
+            stepFadeDurationMs = curve.stepFadeDurationMs,
             volume = 1.0f,  // Фиксированная громкость в нативном движке; мастер-громкость управляется через AudioTrack
             channelSwapEnabled = config.channelSwapEnabled,
             channelSwapIntervalSec = config.channelSwapIntervalSeconds,

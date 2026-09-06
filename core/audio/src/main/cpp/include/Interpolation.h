@@ -3,6 +3,9 @@
 #include "Config.h"
 #include <cmath>
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
 
 namespace binaural {
 
@@ -490,9 +493,80 @@ inline float refineZero(const FrequencyCurve& curve, float lo, float hi) {
  * нуля без смены знака — тоже. Результат отсортирован по времени суток,
  * направления чередуются.
  */
+/**
+ * Трендовые пересечения СТУПЕНЧАТОЙ кривой: по одному на каждый СКАЧОК beat.
+ *
+ * Для STEP beat кусочно-постоянен — плавных экстремумов нет, а детектор нулей
+ * оконной разности beat(t+60)−beat(t−60) вырождается в КРАЯ ±60с окна вокруг
+ * скачка, поэтому смена канала уходила на минуту от самого скачка (см. чат).
+ * Осмысленный «тренд» здесь — САМ СКАЧОК: момент, где удерживаемое значение
+ * beat реально меняется. Это дискретный аналог экстремума, и на нём же стоит
+ * затухание ступеньки (computeStepJumps / nearestStepTimeSec), поэтому обе
+ * процедуры звучат в ОДНОЙ точке — ровно то, что нужно.
+ *
+ * toSwapped задаётся направлением скачка beat, как у сглаженного детектора:
+ * beat ПАДАЕТ после скачка (next.beat < held.beat) → аналог ПИКА тренда
+ * (после T тренд убывает) → toSwapped = true; beat РАСТЁТ → аналог ВПАДИНЫ.
+ * Фильтр channelSwapTrendPoints (PEAKS/TROUGHS/BOTH) работает как есть.
+ */
+inline void computeStepTrendCrossings(const FrequencyCurve& curve,
+                                      std::vector<TrendCrossing>& out) {
+    out.clear();
+    if (curve.points.size() < 2) return;
+
+    // Сортировка и схлопывание дублей по времени — РОВНО как в computeStepJumps,
+    // чтобы список совпадал со скачками затухания ступеньки.
+    std::vector<FrequencyPoint> sortedPoints = curve.points;
+    std::stable_sort(sortedPoints.begin(), sortedPoints.end(),
+        [](const FrequencyPoint& a, const FrequencyPoint& b) {
+            return a.timeSeconds < b.timeSeconds;
+        });
+    {
+        size_t outIndex = 0;
+        for (size_t i = 0; i < sortedPoints.size(); ++i) {
+            if (i + 1 < sortedPoints.size() &&
+                sortedPoints[i].timeSeconds == sortedPoints[i + 1].timeSeconds) {
+                continue;
+            }
+            sortedPoints[outIndex++] = sortedPoints[i];
+        }
+        sortedPoints.resize(outIndex);
+    }
+    const size_t n = sortedPoints.size();
+    if (n < 2) return; // после схлопывания дублей осталась одна точка
+
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const FrequencyPoint& held = sortedPoints[i];
+        const FrequencyPoint& next = sortedPoints[(i + 1) % n];
+        if (held.carrierFrequency != next.carrierFrequency ||
+            held.beatFrequency != next.beatFrequency) {
+            TrendCrossing c;
+            c.timeSec = static_cast<float>(next.timeSeconds);
+            // beat падает → аналог пика (toSwapped=true), растёт → впадина.
+            c.toSwapped = (next.beatFrequency < held.beatFrequency);
+            out.push_back(c);
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const TrendCrossing& a, const TrendCrossing& b) {
+                  return a.timeSec < b.timeSec;
+              });
+    out.erase(std::unique(out.begin(), out.end(),
+               [](const TrendCrossing& a, const TrendCrossing& b) {
+                   return a.timeSec == b.timeSec;
+               }), out.end());
+}
+
 inline void computeTrendCrossings(const FrequencyCurve& curve,
                                   std::vector<TrendCrossing>& out) {
     out.clear();
+
+    // STEP: тренд вырожден в скачки — пересечения = моменты скачков (см. выше).
+    if (curve.interpolationType == InterpolationType::STEP) {
+        computeStepTrendCrossings(curve, out);
+        return;
+    }
 
     if (!curve.hasFreqTables() || curve.points.size() < 2) {
         return; // таблица/точки не заданы — переходов нет
@@ -597,6 +671,151 @@ inline void FrequencyCurve::buildTrendCrossings() {
     trendCrossingsValid = true; // валиден даже при пустом списке (плоская кривая)
 }
 
+// ============================================================================
+// ПРЕДВЫЧИСЛЕНИЕ МОМЕНТОВ СКАЧКОВ СТУПЕНЧАТОЙ КРИВОЙ (InterpolationType::STEP)
+//
+// Ступенька — это СКАЧОК ЗНАЧЕНИЯ, а не просто контрольная точка: на интервале
+// [t_i, t_{i+1}) удерживается точка i, поэтому событие стоит в момент t_{i+1}
+// и только если точка i+1 ОТЛИЧАЕТСЯ от точки i. Точки с одинаковыми частотами
+// (их полным-полно в пресетах режима расслабления и в «плато» ручных кривых)
+// событий не создают — провал громкости там был бы слышен ни на чём.
+//
+// Список нужен затем же, чем trendCrossings: огибающая затухания ищется на
+// КАЖДОМ кусочке генерации (≤100 мс), а скан тысяч точек на кусочек сравним
+// по стоимости с самим сэмпл-лупом.
+//
+// Построение НЕ зависит от lookup-таблицы (нужны только точки), поэтому
+// вызывается из updateCache() рядом с buildTrendCrossings().
+// ============================================================================
+
+/**
+ * Удерживаемая точка ступенчатой кривой в момент времени суток tSec.
+ *
+ * Соглашение то же, что при построении таблицы и в getChannelFrequenciesAt():
+ * STEP удерживает ЛЕВУЮ точку интервала, а участок [0, points[0].time)
+ * принадлежит wrap-интервалу [последняя точка → первая + 86400] и потому
+ * держит ПОСЛЕДНЮЮ точку суток.
+ *
+ * ЕДИНАЯ семантика для частот и для огибающей затухания: и звук, и провал
+ * громкости обязаны стоять на одном и том же месте, иначе тишина придётся
+ * не на скачок. Поэтому getChannelFrequenciesAt() и StepFade.h вызывают
+ * именно эту функцию, а не дублируют поиск.
+ *
+ * Точки могут прийти неотсортированными (порядок в UI произвольный) — ищем
+ * последнюю по времени, не наступающую на tSec. При РАВНЫХ временах побеждает
+ * последняя в массиве — ровно как при схлопывании дублей в
+ * buildLookupTableInternal и computeStepJumps.
+ *
+ * @return указатель внутрь curve.points, либо nullptr если точек нет.
+ */
+inline const FrequencyPoint* stepHeldPointAt(const FrequencyCurve& curve, float tSec) {
+    if (curve.points.empty()) return nullptr;
+
+    constexpr float dayF = static_cast<float>(SECONDS_PER_DAY);
+    float t = std::fmod(tSec, dayF);
+    if (t < 0.0f) t += dayF;
+
+    const FrequencyPoint* held = nullptr;
+    float bestTime = 0.0f;
+    bool found = false;
+    for (const auto& p : curve.points) {
+        const float pt = static_cast<float>(p.timeSeconds);
+        if (pt <= t && (!found || pt > bestTime)) {
+            bestTime = pt;
+            found = true;
+            held = &p;
+        }
+    }
+    if (found) return held;
+
+    // Wrap: время раньше первой точки суток — держим последнюю точку
+    // (то же соглашение, что при построении таблицы).
+    float maxTime = static_cast<float>(curve.points[0].timeSeconds);
+    held = &curve.points[0];
+    for (const auto& p : curve.points) {
+        const float pt = static_cast<float>(p.timeSeconds);
+        if (pt > maxTime) {
+            maxTime = pt;
+            held = &p;
+        }
+    }
+    return held;
+}
+
+/**
+ * Все моменты скачков ступенчатой кривой за сутки (сек суток, отсортированы,
+ * без дублей). Пустой результат — корректный: скачков нет.
+ *
+ * ПРОВЕРКА СКАЧКА — по КОНТРОЛЬНЫМ значениям (carrier, beat), а не по
+ * слышимым частотам каналов и не по разности с эпсилоном:
+ *
+ *   * Отображение (carrier, beat) → (carrier − beat/2, carrier + beat/2)
+ *     — БИЕКЦИЯ, поэтому «пары совпали» равносильно «звук совпал». Нет
+ *     нужды сначала считать частоты каналов и сравнивать их.
+ *
+ *   * Точное сравнение (без эпсилона) выбрано НАМЕРЕННО. Вопрос «меняется ли
+ *     значение» — это вопрос тождества ДАННЫХ, а не численной близости. А
+ *     вычитание двух близких float под -ffast-math на arm64 НЕНАДЁЖНО: знаковые
+ *     пробы в этой кодовой базе уже схлопывались и гасили процедуру на все
+ *     сутки (см. docs/analysis_swap_crossfade_missing.md). Здесь та же ловушка:
+ *     fabs(a − b) > eps компилятор вправе считать «почти всегда истинным».
+ *     Сравнение самих значений такой трансформации не подвержено.
+ *
+ * Следствие: две точки, различающиеся на 1 ULP, формально считаются скачком.
+ * Это безопасно — предельный случай вырождается в еле слышимое изменение
+ * частоты, которое процедура всё равно накроет затуханием.
+ */
+inline void computeStepJumps(const FrequencyCurve& curve, std::vector<float>& out) {
+    out.clear();
+    if (curve.points.size() < 2) return;
+
+    // Сортировка и схлопывание дублей по времени — РОВНО как в
+    // buildLookupTableInternal: иначе список скачков разошёлся бы с таблицей
+    // частот (там при равных временах выживает последняя точка).
+    std::vector<FrequencyPoint> sortedPoints = curve.points;
+    std::stable_sort(sortedPoints.begin(), sortedPoints.end(),
+        [](const FrequencyPoint& a, const FrequencyPoint& b) {
+            return a.timeSeconds < b.timeSeconds;
+        });
+    {
+        size_t outIndex = 0;
+        for (size_t i = 0; i < sortedPoints.size(); ++i) {
+            if (i + 1 < sortedPoints.size() &&
+                sortedPoints[i].timeSeconds == sortedPoints[i + 1].timeSeconds) {
+                continue;
+            }
+            sortedPoints[outIndex++] = sortedPoints[i];
+        }
+        sortedPoints.resize(outIndex);
+    }
+    const size_t n = sortedPoints.size();
+    if (n < 2) return; // после схлопывания дублей осталась одна точка — скачков нет
+
+    out.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const FrequencyPoint& held = sortedPoints[i];
+        const FrequencyPoint& next = sortedPoints[(i + 1) % n];
+        if (held.carrierFrequency != next.carrierFrequency ||
+            held.beatFrequency != next.beatFrequency) {
+            out.push_back(static_cast<float>(next.timeSeconds));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+}
+
+inline void FrequencyCurve::buildStepJumps() {
+    stepJumpTimesValid = false;
+
+    if (points.empty()) {
+        stepJumpTimes.clear();
+        return;
+    }
+
+    computeStepJumps(*this, stepJumpTimes);
+    stepJumpTimesValid = true; // валиден и при пустом списке (кривая константна)
+}
+
 /**
  * Обновить кэш min/max частот и перестроить lookup table
  *
@@ -619,9 +838,174 @@ inline void FrequencyCurve::buildTrendCrossings() {
  * стать отрицательными (и быть обрезаны до 0), что приведёт к неправильному
  * вычислению minChannelFreq = 0 и потере звука при временной нормализации.
  */
+/**
+ * ОТПЕЧАТОК КРИВОЙ: ровно всё, от чего зависит содержимое lookup-таблицы.
+ *
+ * Таблица — функция только от (точки, тип интерполяции, натяжение, веса
+ * касательных). Частота дискретизации, громкость, перестановка каналов и
+ * нормализация в неё НЕ входят и в отпечаток не идут: иначе смена громкости
+ * выглядела бы сменой кривой и выбивала бы кэш на каждом шаге слайдера.
+ */
+inline uint64_t curveFingerprint(const FrequencyCurve& c) {
+    // FNV-1a, 64 бит.
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](const void* p, std::size_t n) {
+        const auto* b = static_cast<const unsigned char*>(p);
+        for (std::size_t i = 0; i < n; ++i) {
+            h ^= static_cast<uint64_t>(b[i]);
+            h *= 1099511628211ull;
+        }
+    };
+    // Поля смешиваются ПО ОДНОМУ, а не целой структурой: в FrequencyPoint
+    // есть выравнивающие пропуски, и их содержимое не определено — смешивание
+    // структуры целиком делало бы отпечаток нестабильным.
+    for (const auto& p : c.points) {
+        mix(&p.timeSeconds, sizeof(p.timeSeconds));
+        mix(&p.carrierFrequency, sizeof(p.carrierFrequency));
+        mix(&p.beatFrequency, sizeof(p.beatFrequency));
+    }
+    const int itype = static_cast<int>(c.interpolationType);
+    mix(&itype, sizeof(itype));
+    mix(&c.splineTension, sizeof(c.splineTension));
+    if (!c.tensionWeights.empty()) {
+        mix(c.tensionWeights.data(), c.tensionWeights.size() * sizeof(float));
+    }
+    // Размеры — последними и отдельно: без них «4 точки (1,2)+(3,4)» и «8
+    // точек» с одинаковым байтовым потоком выглядели бы одной кривой.
+    const uint64_t n = static_cast<uint64_t>(c.points.size());
+    const uint64_t w = static_cast<uint64_t>(c.tensionWeights.size());
+    mix(&n, sizeof(n));
+    mix(&w, sizeof(w));
+    return h;
+}
+
+/**
+ * КЭШ ТАБЛИЦ КРИВОЙ: один слот на процесс, таблицы по СЛАБЫМ ссылкам.
+ *
+ * ЗАЧЕМ. Каждый скраб в редакторе — это полный хэндофф, то есть новый
+ * нативный движок и полная пересборка lookup-таблицы (0.69 МБ и ~4 мс в
+ * типичном случае, до 6.6 МБ и ~37 мс при шаге 100 мс) плюс сканирование
+ * сетки ≥17 280 узлов на нули тренда. И всё это НА НИТИ АКТЁРА ради кривой,
+ * которая НЕ ИЗМЕНИЛАСЬ. docs/analysis_scrub_storm_click_risk.md (R3).
+ *
+ * ПОЧЕМУ СЛАБЫЕ ССЫЛКИ. Держать таблицы сильно — значит навсегда
+ * зарезервировать до 6.6 МБ нативной памяти, а её дефицит здесь не
+ * гипотеза, а documented причина отказа createTrack_l (-12). Слабая ссылка
+ * даёт ровно то, что нужно: в момент скраба УХОДЯЩИЙ поток ещё жив (он
+ * гаснет 250 мс), его таблицы ещё в куче, и свежий движок забирает их
+ * БЕСПЛАТНО. Когда ни одного потока нет — кэш пуст и память свободна.
+ *
+ * ПОЧЕМУ ОДИН СЛОТ. Рабочий сценарий — «предыдущая кривая → та же кривая».
+ * Набор пресетов с несколькими живыми кривыми кэшу не выгоден, а один слот
+ * делает промах детерминированным.
+ *
+ * Таблицы неизменяемы (shared_ptr<const ...>), поэтому отдавать их нескольким
+ * движкам одновременно безопасно: писатель, держащий копию конфига, видит
+ * тот же снимок, что и до пересборки.
+ */
+class CurveTableCache {
+public:
+    struct Entry {
+        uint64_t fingerprint = 0;
+        std::size_t points = 0;
+        std::size_t weights = 0;
+        int32_t tableIntervalMs = 0;
+        std::weak_ptr<const std::vector<float>> lower;
+        std::weak_ptr<const std::vector<float>> upper;
+        std::vector<TrendCrossing> crossings;
+        // Моменты скачков STEP-кривой. Как и crossings, хранится ПО ЗНАЧЕНИЮ:
+        // список крошечный, а вычислять его заново на каждом скрабе незачем.
+        std::vector<float> stepJumps;
+        float minLower = 0.0f, maxLower = 0.0f;
+        float minUpper = 0.0f, maxUpper = 0.0f;
+        float minChannel = 0.0f;
+    };
+
+    static CurveTableCache& instance() {
+        static CurveTableCache c;
+        return c;
+    }
+
+    /**
+     * @param outLower/outUpper сильные ссылки на таблицы (lock внутри):
+     *        пока вызывающий их держит, таблицы гарантированно живы.
+     * @param out метаданные (шаг таблицы, экстремумы, min/max).
+     * @return true — попали: данные сложены в аргументы.
+     *         false — держателя больше нет или кривая другая.
+     */
+    bool lookup(uint64_t fp, std::size_t points, std::size_t weights,
+                std::shared_ptr<const std::vector<float>>& outLower,
+                std::shared_ptr<const std::vector<float>>& outUpper,
+                Entry& out) {
+        std::lock_guard<std::mutex> g(mtx);
+        if (slot.fingerprint != fp || slot.points != points ||
+            slot.weights != weights) return false;
+        outLower = slot.lower.lock();   // nullptr — все держатели умерли
+        outUpper = slot.upper.lock();
+        if (!outLower || !outUpper) return false;
+        out.fingerprint = fp;
+        out.points = points;
+        out.weights = weights;
+        out.tableIntervalMs = slot.tableIntervalMs;
+        out.crossings = slot.crossings;
+        out.stepJumps = slot.stepJumps;
+        out.minLower = slot.minLower;
+        out.maxLower = slot.maxLower;
+        out.minUpper = slot.minUpper;
+        out.maxUpper = slot.maxUpper;
+        out.minChannel = slot.minChannel;
+        return true;
+    }
+
+    void publish(const Entry& e) {
+        // Списки экстремумов и скачков — единственное, что хранится ПО
+        // ЗНАЧЕНИЮ и потому переживает смерть всех держателей. На типовых
+        // кривых их единицы; предел страхует от патологической кривой с
+        // тысячами событий.
+        if (e.crossings.size() > kMaxCachedCrossings) return;
+        if (e.stepJumps.size() > kMaxCachedCrossings) return;
+        std::lock_guard<std::mutex> g(mtx);
+        slot = e;
+    }
+
+private:
+    CurveTableCache() = default;
+    static constexpr std::size_t kMaxCachedCrossings = 4096;
+    std::mutex mtx;
+    Entry slot;
+};
+
 inline void FrequencyCurve::updateCache() {
     if (points.empty()) return;
-    
+
+    // БЫСТРЫЙ ПУТЬ: кривая та же — переиспользуем готовые таблицы.
+    //
+    // Экономит 0.69…6.6 МБ аллокаций и ~4…37 мс на нити актёра на КАЖДОМ
+    // скрабе, а заодно снимает давление на кучу — ту самую, из-за которой
+    // второй трек иногда не создаётся (-12) и скраб уходит в разрыв (R1).
+    // Проверка дешевле сборки на порядки: отпечаток — один проход по точкам,
+    // а сборка — это таблица плюс скан сетки.
+    const uint64_t fp = curveFingerprint(*this);
+    cachedHash = static_cast<int32_t>(fp & 0xFFFFFFFFu);
+    CurveTableCache::Entry hit;
+    // Сильные ссылки живут в lookup() ровно до присваивания в поля — присваиваем
+    // сразу, без промежуточного хранения: двойной lock() не нужен.
+    if (CurveTableCache::instance().lookup(
+            fp, points.size(), tensionWeights.size(),
+            lowerFreqTable, upperFreqTable, hit)) {
+        tableIntervalMs = hit.tableIntervalMs;
+        trendCrossings = std::move(hit.crossings);
+        trendCrossingsValid = true;
+        stepJumpTimes = std::move(hit.stepJumps);
+        stepJumpTimesValid = true;
+        minLowerFreq = hit.minLower;
+        maxLowerFreq = hit.maxLower;
+        minUpperFreq = hit.minUpper;
+        maxUpperFreq = hit.maxUpper;
+        minChannelFreq = hit.minChannel;
+        return;
+    }
+
     // Сначала строим lookup table
     buildLookupTable();
 
@@ -629,6 +1013,10 @@ inline void FrequencyCurve::updateCache() {
     // Один раз на финализацию кривой (сохранение профиля / смена кривой),
     // планировщик TREND дальше только переиспользует список.
     buildTrendCrossings();
+
+    // Моменты скачков STEP-кривой (для затухания на ступеньках, StepFade.h).
+    // От lookup-таблицы не зависит, но тоже переиспользуется из кэша.
+    buildStepJumps();
     
     // Вычисляем min/max по lookup-таблице (учитывает интерполяцию)
     minLowerFreq = std::numeric_limits<float>::max();
@@ -659,6 +1047,24 @@ inline void FrequencyCurve::updateCache() {
         const float minFreqAtPoint = p.carrierFrequency - std::abs(p.beatFrequency) / 2.0f;
         minChannelFreq = std::min(minChannelFreq, minFreqAtPoint);
     }
+
+    // Публикуем результат: следующий движок с той же кривой возьмёт его
+    // бесплатно — если этот к тому моменту ещё жив (отсюда слабые ссылки).
+    CurveTableCache::Entry e;
+    e.fingerprint = fp;
+    e.points = points.size();
+    e.weights = tensionWeights.size();
+    e.tableIntervalMs = tableIntervalMs;
+    e.lower = lowerFreqTable;
+    e.upper = upperFreqTable;
+    e.crossings = trendCrossings;
+    e.stepJumps = stepJumpTimes;
+    e.minLower = minLowerFreq;
+    e.maxLower = maxLowerFreq;
+    e.minUpper = minUpperFreq;
+    e.maxUpper = maxUpperFreq;
+    e.minChannel = minChannelFreq;
+    CurveTableCache::instance().publish(e);
 }
 
 /**
@@ -702,32 +1108,12 @@ inline FrequencyTableResult FrequencyCurve::getChannelFrequenciesAt(float timeSe
     // Interpolation::step). Скачок становится мгновенным и одинаковым во всех
     // фазах, а место скачка — ровно timeSeconds контрольной точки.
     if (interpolationType == InterpolationType::STEP && points.size() >= 2) {
-        const FrequencyPoint* held = &points[0];
-        bool found = false;
-        float bestTime = 0.0f;
-        // Точки могут прийти неотсортированными — ищем последнюю по времени,
-        // не наступающую на timeSeconds (STEP = удержание ЛЕВОЙ точки).
-        for (const auto& p : points) {
-            const float pt = static_cast<float>(p.timeSeconds);
-            if (pt <= timeSeconds && (!found || pt > bestTime)) {
-                bestTime = pt;
-                found = true;
-                held = &p;
-            }
-        }
-        if (!found) {
-            // Wrap: время раньше первой точки суток — держим последнюю точку
-            // (то же соглашение, что при построении таблицы).
-            float maxTime = static_cast<float>(points[0].timeSeconds);
-            held = &points[0];
-            for (const auto& p : points) {
-                const float pt = static_cast<float>(p.timeSeconds);
-                if (pt > maxTime) {
-                    maxTime = pt;
-                    held = &p;
-                }
-            }
-        }
+        // Поиск удерживаемой точки вынесен в stepHeldPointAt(): ту же точку
+        // обязана найти и огибающая затухания (StepFade.h), иначе тишина
+        // придётся не на скачок частоты. Две реализации поиска разошлись бы
+        // при первом же неотсортированном массиве точек.
+        const FrequencyPoint* held = stepHeldPointAt(*this, timeSeconds);
+        if (held == nullptr) return result; // точек нет — значения по умолчанию
         result.lowerFreq = std::max(0.0f, held->carrierFrequency - held->beatFrequency * 0.5f);
         result.upperFreq = std::max(0.0f, held->carrierFrequency + held->beatFrequency * 0.5f);
         return result;

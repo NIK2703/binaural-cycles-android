@@ -59,7 +59,12 @@ data class SerializableFrequencyCurve(
     val carrierRange: SerializableFrequencyRange? = null,
     val beatRange: SerializableFrequencyRange? = null,
     val interpolationType: String? = null,
-    val splineTension: Float? = null
+    val splineTension: Float? = null,
+    /**
+     * Длительность затухания на ступеньках STEP-интерполяции (мс).
+     * null — поле отсутствует в старом JSON, берётся значение по умолчанию.
+     */
+    val stepFadeDurationMs: Long? = null
 )
 
 /**
@@ -72,7 +77,10 @@ data class SerializableVolumeNormalizationSettings(
 )
 
 /**
- * Сериализуемые настройки режима расслабления
+ * Сериализуемые настройки периодов расслабления.
+ *
+ * Поле mode — устаревший выбор UI-режима (STEP/SMOOTH): механизмы объединены,
+ * поле читается из старых JSON, но при маппинге в модель не используется.
  */
 @Serializable
 data class SerializableRelaxationModeSettings(
@@ -83,8 +91,11 @@ data class SerializableRelaxationModeSettings(
     val gapBetweenRelaxationMinutes: Int = 24,
     val transitionPeriodMinutes: Int = 3,
     val relaxationDurationMinutes: Int = 15,
-    // Интервал между точками для SMOOTH режима
-    val smoothIntervalMinutes: Int = 30,
+    /**
+     * Угасание периодов расслабления по положению частот в диапазоне.
+     * Дефолт false обеспечивает чтение старых JSON без миграции версии.
+     */
+    val fadeByRangePosition: Boolean = false,
     // Для обратной совместимости со старыми пресетами
     val relaxationIntervalMinutes: Int? = null
 )
@@ -148,9 +159,16 @@ class BinauralPreferencesRepository @Inject constructor(
         private val RESUME_ON_HEADSET_CONNECT_KEY = booleanPreferencesKey("resume_on_headset_connect")
         // Автовозобновление воспроизведения при запуске приложения
         private val AUTO_RESUME_ON_APP_START_KEY = booleanPreferencesKey("auto_resume_on_app_start")
+        // Напоминание о необходимости подключения наушников при воспроизведении
+        // (включено по умолчанию)
+        private val HEADPHONE_REMINDER_ENABLED_KEY = booleanPreferencesKey("headphone_reminder_enabled")
         // Стартовое напоминание об исключении фонового энергосбережения уже показано
         private val BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY =
             booleanPreferencesKey("battery_optimization_prompt_shown")
+        // Справка по управлению в редакторе уже показана (закрыта по «Понятно»)
+        // — больше не открывать её автоматически при входе в редактор.
+        private val GESTURES_HELP_SHOWN_KEY =
+            booleanPreferencesKey("gestures_help_shown")
         // Пресеты
         private val PRESETS_KEY = stringPreferencesKey("presets")
         private val ACTIVE_PRESET_ID_KEY = stringPreferencesKey("active_preset_id")
@@ -191,7 +209,8 @@ class BinauralPreferencesRepository @Inject constructor(
             carrierRange = SerializableFrequencyRange(curve.carrierRange.min, curve.carrierRange.max),
             beatRange = SerializableFrequencyRange(curve.beatRange.min, curve.beatRange.max),
             interpolationType = curve.interpolationType.name,
-            splineTension = curve.splineTension
+            splineTension = curve.splineTension,
+            stepFadeDurationMs = curve.stepFadeDurationMs
         )
         return json.encodeToString(serializable)
     }
@@ -216,7 +235,8 @@ class BinauralPreferencesRepository @Inject constructor(
                 interpolationType = serializable.interpolationType?.let {
                     try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
                 } ?: InterpolationType.LINEAR,
-                splineTension = serializable.splineTension ?: 0.0f
+                splineTension = serializable.splineTension ?: 0.0f,
+                stepFadeDurationMs = serializable.stepFadeDurationMs ?: 1000L
             )
         } catch (e: Exception) {
             FrequencyCurve.defaultCurve()
@@ -535,6 +555,29 @@ class BinauralPreferencesRepository @Inject constructor(
         }
     }
 
+    // Методы для напоминания о необходимости подключения наушников
+
+    /**
+     * Получить настройку напоминания о подключении наушников.
+     * @return true — при запуске воспроизведения без гарнитуры показывать
+     *         диалог «Подключите наушники» (по умолчанию включено)
+     */
+    fun getHeadphoneReminderEnabled(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[HEADPHONE_REMINDER_ENABLED_KEY] ?: true // По умолчанию включено
+        }
+    }
+
+    /**
+     * Сохранить настройку напоминания о подключении наушников.
+     * @param enabled true — показывать диалог «Подключите наушники»
+     */
+    suspend fun saveHeadphoneReminderEnabled(enabled: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[HEADPHONE_REMINDER_ENABLED_KEY] = enabled
+        }
+    }
+
     // Методы для стартового напоминания об исключении фонового энергосбережения
 
     /**
@@ -559,6 +602,33 @@ class BinauralPreferencesRepository @Inject constructor(
     suspend fun saveBatteryOptimizationPromptShown(shown: Boolean) {
         dataStore.edit { preferences ->
             preferences[BATTERY_OPTIMIZATION_PROMPT_SHOWN_KEY] = shown
+        }
+    }
+
+    // Методы для справки по управлению в редакторе (показ однократный)
+
+    /**
+     * Получить признак того, что справка по управлению в редакторе уже показана.
+     *
+     * Справка открывается автоматически только при первом входе в редактор;
+     * после закрытия по «Понятно» флаг сохраняется и окно больше не появляется
+     * само (пользователь всё ещё может открыть его кнопкой справки).
+     *
+     * @return true — справку больше не открывать автоматически
+     */
+    fun getGesturesHelpShown(): Flow<Boolean> {
+        return dataStore.data.map { preferences ->
+            preferences[GESTURES_HELP_SHOWN_KEY] ?: false
+        }
+    }
+
+    /**
+     * Сохранить признак того, что справка по управлению в редакторе отработала
+     * @param shown true — справку больше не показывать автоматически
+     */
+    suspend fun saveGesturesHelpShown(shown: Boolean) {
+        dataStore.edit { preferences ->
+            preferences[GESTURES_HELP_SHOWN_KEY] = shown
         }
     }
     
@@ -708,17 +778,17 @@ class BinauralPreferencesRepository @Inject constructor(
                         preset.frequencyCurve.beatRange.max
                     ),
                     interpolationType = preset.frequencyCurve.interpolationType.name,
-                    splineTension = preset.frequencyCurve.splineTension
+                    splineTension = preset.frequencyCurve.splineTension,
+                    stepFadeDurationMs = preset.frequencyCurve.stepFadeDurationMs
                 ),
                 relaxationModeSettings = SerializableRelaxationModeSettings(
                     enabled = preset.relaxationModeSettings.enabled,
-                    mode = preset.relaxationModeSettings.mode.name,
                     carrierReductionPercent = preset.relaxationModeSettings.carrierReductionPercent,
                     beatReductionPercent = preset.relaxationModeSettings.beatReductionPercent,
                     gapBetweenRelaxationMinutes = preset.relaxationModeSettings.gapBetweenRelaxationMinutes,
                     transitionPeriodMinutes = preset.relaxationModeSettings.transitionPeriodMinutes,
                     relaxationDurationMinutes = preset.relaxationModeSettings.relaxationDurationMinutes,
-                    smoothIntervalMinutes = preset.relaxationModeSettings.smoothIntervalMinutes
+                    fadeByRangePosition = preset.relaxationModeSettings.fadeByRangePosition
                 ),
                 createdAt = preset.createdAt,
                 updatedAt = preset.updatedAt
@@ -751,7 +821,8 @@ class BinauralPreferencesRepository @Inject constructor(
                         interpolationType = serializable.curve.interpolationType?.let {
                             try { InterpolationType.valueOf(it) } catch (e: Exception) { InterpolationType.LINEAR }
                         } ?: InterpolationType.LINEAR,
-                        splineTension = serializable.curve.splineTension ?: 0.0f
+                        splineTension = serializable.curve.splineTension ?: 0.0f,
+                        stepFadeDurationMs = serializable.curve.stepFadeDurationMs ?: 1000L
                     ),
                     relaxationModeSettings = serializable.relaxationModeSettings?.let {
                         // Обратная совместимость: если есть старый relaxationIntervalMinutes, 
@@ -766,17 +837,12 @@ class BinauralPreferencesRepository @Inject constructor(
                         
                         RelaxationModeSettings(
                             enabled = it.enabled,
-                            mode = try { 
-                                com.binaural.core.audio.model.RelaxationMode.valueOf(it.mode) 
-                            } catch (e: Exception) { 
-                                com.binaural.core.audio.model.RelaxationMode.SMOOTH 
-                            },
                             carrierReductionPercent = it.carrierReductionPercent,
                             beatReductionPercent = it.beatReductionPercent,
                             gapBetweenRelaxationMinutes = gapMinutes,
                             transitionPeriodMinutes = it.transitionPeriodMinutes,
                             relaxationDurationMinutes = it.relaxationDurationMinutes,
-                            smoothIntervalMinutes = it.smoothIntervalMinutes
+                            fadeByRangePosition = it.fadeByRangePosition
                         )
                     } ?: RelaxationModeSettings(),
                     createdAt = serializable.createdAt,

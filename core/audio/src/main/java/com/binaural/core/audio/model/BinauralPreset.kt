@@ -135,7 +135,28 @@ data class FrequencyCurve(
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
     val interpolationType: InterpolationType = InterpolationType.LINEAR,
-    val splineTension: Float = 0.0f  // 0.0 = Catmull-Rom (плавный), 1.0 = почти линейный
+    val splineTension: Float = 0.0f,  // 0.0 = Catmull-Rom (плавный), 1.0 = почти линейный
+    /**
+     * Длительность затухания на ступеньках [InterpolationType.STEP] (мс).
+     *
+     * Полный аналог затухания при смене каналов: вокруг момента скачка
+     * громкость уходит в нуль по приподнятому косинусу и возвращается, поэтому
+     * перепад частоты слышен как пауза, а не как щелчок. Частота при этом
+     * продолжает следовать графику — меняется только громкость.
+     *
+     * Затухание ВСЕГДА симметричное и БЕЗ паузы: F вниз и F вверх вокруг
+     * скачка. Скачок обязан остаться ступенькой, поэтому сглаживать саму
+     * частоту нельзя — это подменило бы выбранный тип интерполяции.
+     *
+     * 0 — ступенька звучит на полной громкости (прежнее поведение).
+     * Верхнего предела нет: нативный движок сам сожмёт окно до зазора между
+     * соседними скачками, чтобы громкость успевала вернуться (иначе звук
+     * замолчал бы навсегда). Подробности — docs/design_step_interpolation_fade.md.
+     *
+     * Участвует в звуке только при [InterpolationType.STEP]; для остальных
+     * типов интерполяции значения нет и оно не меняет звучание.
+     */
+    val stepFadeDurationMs: Long = 1000L
 ) {
     // Предварительно отсортированные точки для оптимизации интерполяции
     private val sortedPoints: List<FrequencyPoint> = points.sortedBy { it.time.toSecondOfDay() }
@@ -171,7 +192,7 @@ data class FrequencyCurve(
     )
 
     init {
-        require(points.size >= 2) { "Кривая должна содержать минимум 2 точки" }
+        require(points.size >= 1) { "Кривая должна содержать минимум 1 точку" }
     }
 
     /**
@@ -432,6 +453,28 @@ data class FrequencyCurve(
 
     companion object {
         /**
+         * Кривая для НОВОГО пресета (пустой шаблон).
+         *
+         * Одна точка в полдень (12:00) с несущей 200 Гц и частотой биений 16 Гц.
+         * Редактор позволяет удалить все точки кроме одной, поэтому одноточечная
+         * кривая — допустимое состояние (см. require(points.size >= 1) выше).
+         * Диапазон несущей по умолчанию: 100…600 Гц.
+         */
+        fun newPresetCurve(): FrequencyCurve {
+            return FrequencyCurve(
+                points = listOf(
+                    FrequencyPoint.fromHours(12, 0, carrierFrequency = 200.0f, beatFrequency = 16.0f)
+                ),
+                carrierRange = FrequencyRange(100.0f, 600.0f),
+                beatRange = FrequencyRange(
+                    -FrequencyMath.MAX_BEAT_MAGNITUDE,
+                    FrequencyMath.MAX_BEAT_MAGNITUDE
+                ),
+                interpolationType = InterpolationType.MONOTONE
+            )
+        }
+
+        /**
          * Создаёт кривую по умолчанию
          * Точки каждые 3 часа (0:00, 3:00, ..., 21:00)
          * Основано на циркадных ритмах: ночь - дельта/тета (сон), день - бета (активность)
@@ -549,7 +592,15 @@ data class ChannelSwapSettings(
 )
 
 /**
- * Режим периодов расслабления
+ * Режим периодов расслабления.
+ *
+ * УСТАРЕВШЕЕ: исторически UI выбирал между STEP (трапецеидальные впадины по
+ * расписанию) и SMOOTH (чередующиеся точки). Оба режима объединены в единый
+ * параметрический механизм [RelaxationModeSettings]: форма впадины задаётся
+ * тремя слайдерами, а SMOOTH стал вырожденным случаем при большом периоде
+ * перехода. Перечисление сохранено только для совместимости со старым JSON
+ * пресетов: поле [RelaxationModeSettings.mode] продолжает сериализоваться,
+ * но логикой больше не используется.
  */
 @Serializable
 enum class RelaxationMode {
@@ -558,7 +609,15 @@ enum class RelaxationMode {
 }
 
 /**
- * Настройки режима расслабления для пресета
+ * Настройки периодов расслабления для пресета.
+ *
+ * Единый параметрический механизм (см. [generateVirtualPoints]): каждый период
+ * — трапеция (переход → плато сниженных частот → переход), периоды идут от
+ * 00:00 с шагом `2 * transition + duration + gap`. Нулевые параметры дают
+ * корректные пределы: duration = 0 — треугольная впадина без плато,
+ * transition = 0 — мгновенный вход/выход, transition = gap = 0 — кривая
+ * снижена везде. Поле [mode] — устаревший выбор UI-режима, хранится ради
+ * совместимости старого JSON и логикой не используется.
  */
 @Serializable
 data class RelaxationModeSettings(
@@ -590,12 +649,41 @@ data class RelaxationModeSettings(
      * Знак имеет смысл только благодаря знаковой семантике beat = right − left.
      */
     val beatReductionPercent: Int = 50,      // 0-200%
-    // Параметры для расширенного режима
-    val gapBetweenRelaxationMinutes: Int = 45,  // Интервал МЕЖДУ периодами расслабления: 0-120 минут
-    val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 1-10 минут
-    val relaxationDurationMinutes: Int = 15,    // Длительность периода расслабления: 10-60 минут
-    // Параметры для плавного режима
-    val smoothIntervalMinutes: Int = 30         // Интервал между точками: 5-60 минут
+    // Параметры формы впадины (единый механизм, см. generateVirtualPoints)
+    val gapBetweenRelaxationMinutes: Int = 45,  // Пауза МЕЖДУ периодами расслабления: 0-120 минут
+    val transitionPeriodMinutes: Int = 3,       // Период перехода (вход/выход): 0-60 минут
+    val relaxationDurationMinutes: Int = 15,    // Длительность периода расслабления: 0-60 минут
+    /**
+     * Угасание периодов расслабления по положению частот в диапазоне.
+     *
+     * ВКЛ: глубина снижения каждой виртуальной точки умножается на вес —
+     * близость частоты к ВЕРХНЕЙ границе СВОЕГО диапазона. Оси считаются
+     * НЕЗАВИСИМО друг от друга:
+     *
+     * ```
+     * w_carrier = clamp((carrier_base − carrierRange.min) / (carrierRange.max − carrierRange.min), 0, 1)
+     * w_beat    = clamp(|beat_base| / max_t |beat_base(t)|,                                         0, 1)
+     * ```
+     *
+     * У верхней границы слайдеры работают в полную силу; у нижней вес равен 0,
+     * и период расслабления вырождается в базовую кривую — при w = 0
+     * преобразование тождественно (правило R6).
+     *
+     * Несущая опирается на ОБЪЯВЛЕННЫЙ диапазон графика: это вертикальная ось,
+     * её видно и можно редактировать. Частота биений — на собственный максимум
+     * модуля кривой, потому что хранимый `beatRange` равен ±1000 Гц и
+     * нормировкой служить не может (см. docs/design_relaxation_range_fade.md
+     * §2.2). Мера — МОДУЛЬ: знак частоты биений задаёт раскладку каналов, а не
+     * уровень возбуждения.
+     *
+     * Вес берётся ТОЛЬКО по базовой кривой (правило R1): иначе возникает петля
+     * «снизили частоту → вес упал → снижение ослабло → частота выросла», и
+     * результат перестаёт быть детерминированным.
+     *
+     * Вырожденная опора (нулевая ширина диапазона, биения тождественно 0)
+     * даёт w = 1: угасание ОТКЛЮЧАЕТСЯ, а не глушит режим (правило R4).
+     */
+    val fadeByRangePosition: Boolean = false
 ) {
     companion object {
         /**
@@ -615,6 +703,15 @@ data class RelaxationModeSettings(
          * чтобы модель, ViewModel и слайдер в UI не расходились.
          */
         const val MAX_BEAT_REDUCTION_PERCENT = 200
+
+        /**
+         * Порог «опора угасания вырождена» (Гц).
+         *
+         * Ниже него ширина диапазона несущей или потолок модуля биений
+         * считаются нулевыми: положение частоты в диапазоне не определено, и
+         * угасание отключается (правило R4 в docs/design_relaxation_range_fade.md).
+         */
+        private const val FADE_SPAN_EPS = 1e-3f
     }
 
     init {
@@ -624,16 +721,14 @@ data class RelaxationModeSettings(
         require(beatReductionPercent in 0..MAX_BEAT_REDUCTION_PERCENT) {
             "Снижение частоты биений должно быть от 0% до $MAX_BEAT_REDUCTION_PERCENT%"
         }
-        require(gapBetweenRelaxationMinutes in 0..120) { "Интервал между периодами расслабления должен быть от 0 до 120 минут" }
-        require(transitionPeriodMinutes in 1..10) { "Период перехода должен быть от 1 до 10 минут" }
-        require(relaxationDurationMinutes in 5..60) { "Длительность периода расслабления должна быть от 5 до 60 минут" }
-        require(smoothIntervalMinutes in 5..120) { "Интервал между точками должен быть от 5 до 120 минут" }
+        require(gapBetweenRelaxationMinutes in 0..120) { "Пауза между периодами расслабления должна быть от 0 до 120 минут" }
+        require(transitionPeriodMinutes in 0..60) { "Период перехода должен быть от 0 до 60 минут" }
+        require(relaxationDurationMinutes in 0..60) { "Длительность периода расслабления должна быть от 0 до 60 минут" }
     }
     
     /**
-     * Генерирует виртуальные точки режима расслабления по кривой.
-     * Для ADVANCED режима: 4 точки на каждый период расслабления, образующие трапецию.
-     * Для SMOOTH режима: чередующиеся точки (базовая → снижающая → базовая → снижающая).
+     * Генерирует виртуальные точки периодов расслабления по кривой.
+     * По 4 точки на период, образующие трапецию (см. перегрузку ниже).
      *
      * @param curve Базовая кривая частот (из основных точек)
      */
@@ -740,7 +835,7 @@ data class RelaxationModeSettings(
         splineTension: Float,
         carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER
     ): List<FrequencyPoint> {
-        if (!enabled || points.size < 2) return emptyList()
+        if (!enabled || points.isEmpty()) return emptyList()
 
         val baseCurve = FrequencyCurve(
             points = points,
@@ -749,146 +844,225 @@ data class RelaxationModeSettings(
             splineTension = splineTension
         )
 
-        return when (mode) {
-            RelaxationMode.STEP -> generateStepVirtualPoints(baseCurve)
-            RelaxationMode.SMOOTH -> generateSmoothVirtualPoints(baseCurve)
-        }
+        return generateRelaxationTrapezoidPoints(baseCurve)
     }
     
     
     /**
-     * Ступенчатый режим: генерация виртуальных точек по расписанию.
-     * Создаётся группа из 4 точек для каждого периода расслабления:
-     * - Точка 1: на базовой кривой (начало периода)
-     * - Точка 2: сниженные частоты (после перехода)
-     * - Точка 3: сниженные частоты (конец расслабления)
-     * - Точка 4: на базовой кривой (после выхода)
-     * 
-     * Между периодами расслабления есть пауза gapBetweenRelaxationMinutes.
-     * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+     * Единый генератор виртуальных точек периодов расслабления.
+     *
+     * Каждый период — трапеция из 4 точек; периоды начинаются от 00:00 и идут
+     * с шагом `2 * transitionSeconds + durationSeconds + gapSeconds`:
+     * - t1: базовая кривая (вход в период);
+     * - t2: сниженные частоты (после перехода);
+     * - t3: сниженные частоты (конец плато расслабления);
+     * - t4: базовая кривая (после выхода).
+     *
+     * ДЕДУПЛИКАЦИЯ «ПОСЛЕДНЯЯ ПОБЕЖДАЕТ»: точки собираются в порядке t1→t4
+     * в LinkedHashMap по времени суток, поздняя запись перезаписывает раннюю.
+     * Это даёт корректные пределы при нулевых параметрах БЕЗ спец-кейсов:
+     * - transition = 0: t1 == t2, побеждает сниженная → мгновенный вход;
+     * - duration = 0: t2 == t3, остаётся одна сниженная → треугольная впадина;
+     * - transition = 0 и gap = 0: t4 периода N совпадает с t1/t2 периода N+1,
+     *   побеждает сниженная → кривая снижена везде (предел «всегда расслаблен»);
+     * - все параметры нулевые: periodStepSeconds = 0 → пустой список, кривая
+     *   откатывается к базовой (fallback есть и в движке, и в графиках).
+     *
+     * Итог отсортирован по времени суток; кривая строится ТОЛЬКО по этим
+     * виртуальным точкам.
      */
-    private fun generateStepVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
-        val virtualPoints = mutableListOf<FrequencyPoint>()
-        
+    private fun generateRelaxationTrapezoidPoints(curve: FrequencyCurve): List<FrequencyPoint> {
         val carrierReduction = carrierReductionPercent / 100.0f
         val beatReduction = beatReductionPercent / 100.0f
-        
+
+        // Опоры угасания считаются ОДИН РАЗ на всю кривую: веса несущей и
+        // биений нормируются на РЕАЛЬНЫЙ размах САМОЙ кривой (carrierMinReal…
+        // carrierMaxReal, beatMinReal…beatMaxReal), а не на объявленный
+        // `carrierRange` графика (R1). Иначе при `carrierRange.min` ниже
+        // реального минимума кривой («с запасом», как обычно ставится ось)
+        // низ кривой давал бы частичное, а не нулевое снижение — период
+        // расслабления не доходил бы до нуля у дна. При выключенном угасании
+        // сэмплирования нет вообще (R8): существующие пресеты не платят ничего.
+        val carrierLo: Float
+        val carrierSpan: Float
+        val beatLo: Float
+        val beatTop: Float
+        if (fadeByRangePosition) {
+            val (cLo, cHi) = CurveSampling.carrierMagnitudeExtremes(curve)
+            val (bLo, bHi) = CurveSampling.beatMagnitudeExtremes(curve)
+            carrierLo = cLo
+            carrierSpan = cHi - cLo
+            beatLo = bLo
+            beatTop = bHi
+        } else {
+            carrierLo = 0.0f
+            carrierSpan = 0.0f
+            beatLo = 0.0f
+            beatTop = 0.0f
+        }
+
         val gapSeconds = gapBetweenRelaxationMinutes * 60L
         val transitionSeconds = transitionPeriodMinutes * 60L
         val durationSeconds = relaxationDurationMinutes * 60L
-        
+
         // Полный период расслабления = 2 * переход + длительность
         val fullPeriodSeconds = 2 * transitionSeconds + durationSeconds
-
-        // Генерируем периоды расслабления от 00:00
         val daySeconds = 24 * 3600L
 
         // Guard от бесконечного цикла при неположительном шаге
         val periodStepSeconds = fullPeriodSeconds + gapSeconds
         if (periodStepSeconds <= 0L) return emptyList()
 
+        // Совпадающие по времени точки: поздняя в порядке генерации
+        // перезаписывает раннюю — см. док-комментарий.
+        val pointsBySecondOfDay = LinkedHashMap<Int, FrequencyPoint>()
+
         var periodStartSeconds = 0L
-        
+
         while (periodStartSeconds < daySeconds) {
             // Точка 1: начало периода (на базовой кривой)
             val t1 = periodStartSeconds
             val time1 = LocalTime.fromSecondOfDay((t1 % daySeconds).toInt())
-            val carrier1 = curve.getCarrierFrequencyAt(time1)
-            val beat1 = curve.getBeatFrequencyAt(time1)
-            virtualPoints.add(FrequencyPoint(time1, carrier1, beat1))
-            
+            pointsBySecondOfDay[time1.toSecondOfDay()] = FrequencyPoint(
+                time1, curve.getCarrierFrequencyAt(time1), curve.getBeatFrequencyAt(time1)
+            )
+
             // Точка 2: после перехода (сниженные частоты)
             val t2 = periodStartSeconds + transitionSeconds
             if (t2 < daySeconds) {
                 val time2 = LocalTime.fromSecondOfDay((t2 % daySeconds).toInt())
+                val carrier = curve.getCarrierFrequencyAt(time2)
+                val beat = curve.getBeatFrequencyAt(time2)
+                val (wc, wb) = fadeWeights(carrier, beat, carrierLo, carrierSpan, beatLo, beatTop)
                 val (carrier2, beat2) = reduceFrequencies(
-                    curve.getCarrierFrequencyAt(time2),
-                    curve.getBeatFrequencyAt(time2),
-                    carrierReduction,
-                    beatReduction,
+                    carrier,
+                    beat,
+                    carrierReduction * wc,
+                    beatReduction * wb,
                     curve.carrierRange.min
                 )
-                virtualPoints.add(FrequencyPoint(time2, carrier2, beat2))
+                pointsBySecondOfDay[time2.toSecondOfDay()] = FrequencyPoint(time2, carrier2, beat2)
             }
-            
+
             // Точка 3: конец расслабления (сниженные частоты)
             val t3 = periodStartSeconds + transitionSeconds + durationSeconds
             if (t3 < daySeconds) {
                 val time3 = LocalTime.fromSecondOfDay((t3 % daySeconds).toInt())
+                val carrier = curve.getCarrierFrequencyAt(time3)
+                val beat = curve.getBeatFrequencyAt(time3)
+                val (wc, wb) = fadeWeights(carrier, beat, carrierLo, carrierSpan, beatLo, beatTop)
                 val (carrier3, beat3) = reduceFrequencies(
-                    curve.getCarrierFrequencyAt(time3),
-                    curve.getBeatFrequencyAt(time3),
-                    carrierReduction,
-                    beatReduction,
+                    carrier,
+                    beat,
+                    carrierReduction * wc,
+                    beatReduction * wb,
                     curve.carrierRange.min
                 )
-                virtualPoints.add(FrequencyPoint(time3, carrier3, beat3))
+                pointsBySecondOfDay[time3.toSecondOfDay()] = FrequencyPoint(time3, carrier3, beat3)
             }
-            
+
             // Точка 4: после выхода (на базовой кривой)
             val t4 = periodStartSeconds + fullPeriodSeconds
             if (t4 < daySeconds) {
                 val time4 = LocalTime.fromSecondOfDay((t4 % daySeconds).toInt())
-                val carrier4 = curve.getCarrierFrequencyAt(time4)
-                val beat4 = curve.getBeatFrequencyAt(time4)
-                virtualPoints.add(FrequencyPoint(time4, carrier4, beat4))
+                pointsBySecondOfDay[time4.toSecondOfDay()] = FrequencyPoint(
+                    time4, curve.getCarrierFrequencyAt(time4), curve.getBeatFrequencyAt(time4)
+                )
             }
-            
+
             // Переходим к следующему периоду: полный период + пауза между периодами
             periodStartSeconds += periodStepSeconds
         }
-        
-        // Сортируем по времени
-        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+
+        return pointsBySecondOfDay.values.sortedBy { it.time.toSecondOfDay() }
     }
-    
+
     /**
-     * Плавный режим: чередующиеся точки (базовая → снижающая → базовая → снижающая).
-     * Интервал между точками регулируется параметром smoothIntervalMinutes.
-     * Итоговая кривая строится ТОЛЬКО по этим виртуальным точкам.
+     * Веса угасания для виртуальной точки с базовыми частотами [carrier]/[beat].
+     *
+     * Оси НЕЗАВИСИМЫ: несущая нормируется на объявленный диапазон графика,
+     * частота биений — на собственный потолок модуля [beatTop]. Оба веса
+     * клампятся в [0; 1]:overshoot кардинального сплайна выше потолка даёт
+     * ровно полную глубину, а не выход за неё.
+     *
+     * Вес берётся в СОБСТВЕННОЕ время точки (правило R2): `t2` и `t3` одного
+     * периода получают разные веса, если базовая кривая за время плато уехала.
+     * Это продолжает текущее поведение — плато и сейчас повторяет дрейф базовой
+     * кривой, угасание добавляет к нему плавную модуляцию глубины.
+     *
+     * Опора берётся ТОЛЬКО из базовой кривой (правило R1): [carrier] и [beat]
+     * здесь — значения ДО снижения. Петля «снизили → вес упал → снижение
+     * ослабло» тем самым исключена, и результат детерминирован.
+     *
+     * Вырожденная опора даёт 1 (правило R4): угасание ОТКЛЮЧАЕТСЯ, а не глушит
+     * режим. Молча выключить расслабление — ровно тот класс багов, который
+     * потом невозможно диагностировать.
+     *
+     * @param carrierSpan ширина диапазона несущей (`max − min`), посчитанная
+     *                    один раз на кривую
+     * @param beatTop     максимум модуля частоты биений по базовой кривой
+     * @return Pair(вес несущей, вес биений)
      */
-    private fun generateSmoothVirtualPoints(curve: FrequencyCurve): List<FrequencyPoint> {
-        val virtualPoints = mutableListOf<FrequencyPoint>()
-        
-        val carrierReduction = carrierReductionPercent / 100.0f
-        val beatReduction = beatReductionPercent / 100.0f
-        val intervalSeconds = smoothIntervalMinutes * 60L
-        // Guard от бесконечного цикла: неположительный интервал → дефолт 5 минут
-        val safeIntervalSeconds = if (intervalSeconds > 0L) intervalSeconds else 5 * 60L
-        val daySeconds = 24 * 3600L
+    /**
+     * Веса угасания для виртуальной точки с базовыми частотами [carrier]/[beat].
+     *
+     * Обе оси нормируются на РЕАЛЬНЫЙ размах САМОЙ кривой, а не на объявленный
+     * `carrierRange` графика:
+     * - несущая — на `[carrierLo; carrierLo + carrierSpan]` (реальный мин/макс
+     *   несущей, см. [CurveSampling.carrierMagnitudeExtremes]);
+     * - биения — на `[beatLo; beatTop]` (реальный мин/макс модуля, см.
+     *   [CurveSampling.beatMagnitudeExtremes]).
+     *
+     * Поэтому в самой НИЗКОЙ точке кривой (по несущей — и независимо по биениям)
+     * вес ровно 0 ⇒ глубина снижения 0, период расслабления сходит на нет. Если
+     * ось графика `carrierRange.min` стоит «с запасом» ниже реального минимума
+     * кривой (как обычно), старый вариант давал бы там частичное, а не нулевое
+     * снижение — именно этот дефект и исправлен.
+     *
+     * Оба веса клампятся в [0; 1]: overshoot кардинального сплайна выше
+     * реального максимума даёт ровно полную глубину, а не выход за неё.
+     *
+     * Вес берётся в СОБСТВЕННОЕ время точки (правило R2): `t2` и `t3` одного
+     * периода получают разные веса, если базовая кривая за время плато уехала.
+     *
+     * Опора берётся ТОЛЬКО из базовой кривой (правило R1): [carrier] и [beat]
+     * здесь — значения ДО снижения. Петля «снизили → вес упал → снижение
+     * ослабло» тем самым исключена, и результат детерминирован.
+     *
+     * Вырожденная опора (размах оси ≈ 0) даёт 1 (правило R4): угасание
+     * инертно, а НЕ «молча выключает режим». Молча выключить расслабление —
+     * ровно тот класс багов, который потом невозможно диагностировать.
+     *
+     * @param carrierLo   реальный минимум несущей на кривой
+     * @param carrierSpan реальная ширина несущей (`max − min`), посчитана раз
+     * @param beatLo      реальный минимум модуля биений на кривой
+     * @param beatTop     реальный максимум модуля биений на кривой
+     * @return Pair(вес несущей, вес биений)
+     */
+    internal fun fadeWeights(
+        carrier: Float,
+        beat: Float,
+        carrierLo: Float,
+        carrierSpan: Float,
+        beatLo: Float,
+        beatTop: Float
+    ): Pair<Float, Float> {
+        if (!fadeByRangePosition) return 1.0f to 1.0f
 
-        // Генерируем точки от 00:00 до 23:59 с заданным интервалом
-        // Чётные индексы (0, 2, 4...) - точки на базовой кривой
-        // Нечётные индексы (1, 3, 5...) - снижающие точки
-
-        var currentSeconds = 0L
-        var index = 0
-
-        while (currentSeconds < daySeconds) {
-            val time = LocalTime.fromSecondOfDay((currentSeconds % daySeconds).toInt())
-
-            if (index % 2 == 0) {
-                // Чётный индекс - точка на базовой кривой
-                val carrier = curve.getCarrierFrequencyAt(time)
-                val beat = curve.getBeatFrequencyAt(time)
-                virtualPoints.add(FrequencyPoint(time, carrier, beat))
-            } else {
-                // Нечётный индекс - снижающая точка (знак beat сохраняется)
-                val (carrier, beat) = reduceFrequencies(
-                    curve.getCarrierFrequencyAt(time),
-                    curve.getBeatFrequencyAt(time),
-                    carrierReduction,
-                    beatReduction,
-                    curve.carrierRange.min
-                )
-                virtualPoints.add(FrequencyPoint(time, carrier, beat))
-            }
-
-            currentSeconds += safeIntervalSeconds
-            index++
+        val wCarrier = if (carrierSpan > FADE_SPAN_EPS) {
+            ((carrier - carrierLo) / carrierSpan).coerceIn(0.0f, 1.0f)
+        } else {
+            1.0f
         }
-        
-        return virtualPoints.sortedBy { it.time.toSecondOfDay() }
+
+        val beatSpan = beatTop - beatLo
+        val wBeat = if (beatSpan > FADE_SPAN_EPS) {
+            ((abs(beat) - beatLo) / beatSpan).coerceIn(0.0f, 1.0f)
+        } else {
+            1.0f
+        }
+
+        return wCarrier to wBeat
     }
 }
 
@@ -920,34 +1094,29 @@ data class BinauralPreset(
     val updatedAt: Long = System.currentTimeMillis()
 ) {
     /**
-     * Кэшированная кривая с виртуальными точками расслабления
+     * Кэшированная кривая с виртуальными точками расслабления.
      * Вычисляется лениво при первом обращении.
-     * 
-     * Для SIMPLE режима: объединяются реальные и виртуальные точки.
-     * Для ADVANCED режима: используются ТОЛЬКО виртуальные точки
-     * (реальные точки нужны только для расчёта базовой кривой).
+     *
+     * При включённых периодах расслабления используются ТОЛЬКО виртуальные
+     * точки (реальные нужны только для расчёта базовой кривой).
      */
     @kotlinx.serialization.Transient
     val curveWithRelaxation: FrequencyCurve by lazy {
         if (relaxationModeSettings.enabled) {
             val virtualPoints = relaxationModeSettings.generateVirtualPoints(frequencyCurve)
-            
-            when (relaxationModeSettings.mode) {
-                RelaxationMode.STEP, RelaxationMode.SMOOTH -> {
-                    // Ступенчатый и плавный режимы: ТОЛЬКО виртуальные точки
-                    // Если виртуальных точек меньше 2, используем базовую кривую
-                    if (virtualPoints.size >= 2) {
-                        FrequencyCurve(
-                            points = virtualPoints,
-                            carrierRange = frequencyCurve.carrierRange,
-                            beatRange = frequencyCurve.beatRange,
-                            interpolationType = frequencyCurve.interpolationType,
-                            splineTension = frequencyCurve.splineTension
-                        )
-                    } else {
-                        frequencyCurve
-                    }
-                }
+
+            // Если виртуальных точек меньше 2, кривая по ним не построится —
+            // используем базовую.
+            if (virtualPoints.size >= 2) {
+                FrequencyCurve(
+                    points = virtualPoints,
+                    carrierRange = frequencyCurve.carrierRange,
+                    beatRange = frequencyCurve.beatRange,
+                    interpolationType = frequencyCurve.interpolationType,
+                    splineTension = frequencyCurve.splineTension
+                )
+            } else {
+                frequencyCurve
             }
         } else {
             frequencyCurve

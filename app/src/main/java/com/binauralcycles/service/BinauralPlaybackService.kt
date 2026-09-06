@@ -82,10 +82,35 @@ class BinauralPlaybackService : Service() {
         // НОВОЕ: текущее время суток (для UI-индикатора), виртуальное в debug
         private val _currentTimeOfDaySeconds = MutableStateFlow(0)
         val currentTimeOfDaySeconds: StateFlow<Int> = _currentTimeOfDaySeconds.asStateFlow()
-        
+
+        // СКРАБ: РЕАЛЬНЫЙ момент времени суток (без сдвига предпросмотра) —
+        // серая линия на графике. Публикуется менеджером в ПАРЕ с осью: иначе
+        // UI пришлось бы вычитать сдвиг из оси, а эти два значения доезжают
+        // разными StateFlow в непредсказуемом порядке — серая линия уезжала
+        // на величину сдвига (docs/plan_playback_scrub_handle.md §14.7).
+        //
+        // `null` — «менеджер ещё ничего не публиковал». Ноль здесь был бы
+        // полночью и ОТРИСОВАЛСЯ бы как настоящее время: ровно та же ловушка,
+        // что с дефолтом 12:00 в телеметрии (серая линия на краю графика в
+        // первую секунду после входа в редактор). У времени суток нет
+        // осмысленного «пустого» числа — только отсутствие значения.
+        private val _unshiftedTimeOfDaySeconds = MutableStateFlow<Int?>(null)
+        val unshiftedTimeOfDaySeconds: StateFlow<Int?> = _unshiftedTimeOfDaySeconds.asStateFlow()
+
+        // СКРАБ: сдвиг оси времени суток (секунды, [0, 86400)). 0 — обычный
+        // режим, звук привязан к реальному «сейчас». Неквантованный: линия на
+        // графике обязана совпадать с осью, на которой стоит поток, а не с
+        // округлённым временем телеметрии.
+        private val _scrubOffsetSeconds = MutableStateFlow(0)
+        val scrubOffsetSeconds: StateFlow<Int> = _scrubOffsetSeconds.asStateFlow()
+
         // НОВОЕ: включён ли debug-режим виртуального времени
         private val _debugTimeEnabled = MutableStateFlow(false)
-        
+
+        // Наушники подключены (для диалога проверки перед воспроизведением)
+        private val _hasHeadset = MutableStateFlow(false)
+        val hasHeadset: StateFlow<Boolean> = _hasHeadset.asStateFlow()
+
         private val _currentPresetName = MutableStateFlow<String?>(null)
         val currentPresetName: StateFlow<String?> = _currentPresetName.asStateFlow()
         
@@ -269,7 +294,40 @@ class BinauralPlaybackService : Service() {
                 _elapsedSeconds.value = elapsed
             }
         }
-        
+
+        // СКРАБ: сдвиг оси — НЕ по ежесекундному опросу, а сразу по факту
+        // изменения. UI обязан показать новую ось в тот же кадр, когда
+        // пользователь отпустил ручку, иначе красная линия секунду висит на
+        // старом месте и выглядит как «не сработало».
+        serviceScope.launch {
+            audioEngine?.scrubOffsetSeconds?.collectLatest { offset ->
+                _scrubOffsetSeconds.value = offset
+            }
+        }
+
+        // СКРАБ: ось времени суток — тоже НЕ по ежесекундному опросу.
+        // Менеджер публикует новую ось в момент применения сдвига (см.
+        // BinauralStreamManager.applyScrub), и ждать следующего тика 1 Гц
+        // нельзя: серая и красная линии обязаны приехать в одном кадре со
+        // сдвигом, иначе до секунды они стоят на старых местах.
+        //
+        // Здесь копируется ТОЛЬКО время: замечание выше про вред collectLatest
+        // относится к частотам, а не к оси.
+        serviceScope.launch {
+            audioEngine?.currentTimeOfDaySeconds?.collectLatest { seconds ->
+                _currentTimeOfDaySeconds.value = seconds
+            }
+        }
+
+        // СКРАБ: реальное «сейчас» — тем же немедленным коллектором, что и
+        // ось. Оба значения обязан видеть UI в одном кадре: серая линия
+        // не имеет права ехать за красной.
+        serviceScope.launch {
+            audioEngine?.unshiftedTimeOfDaySeconds?.collectLatest { seconds ->
+                _unshiftedTimeOfDaySeconds.value = seconds
+            }
+        }
+
         // Периодическое обновление notification НЕ запускается здесь:
         // оно стартует/останавливается вместе с воспроизведением (см. коллектор
         // audioEngine.isPlaying выше), а не крутится вечно от onCreate().
@@ -517,6 +575,11 @@ class BinauralPlaybackService : Service() {
     // AudioDeviceCallback для отслеживания отключения аудиоустройств (API 23+)
     private var audioDeviceCallback: AudioDeviceCallback? = null
     private var hasHeadset = false
+    // Проводная гарнитура (по ACTION_HEADSET_PLUG) — отдельно от BT/USB,
+    // т.к. getDevices(GET_DEVICES_OUTPUTS) ненадёжно отдаёт провод при
+    // отсутствии активного воспроизведения.
+    private var wiredHeadsetConnected = false
+    private var headsetPlugReceiver: BroadcastReceiver? = null
     
     /**
      * Регистрирует приёмник для отключения гарнитуры (AUDIO_BECOMING_NOISY)
@@ -652,60 +715,54 @@ class BinauralPlaybackService : Service() {
                         wasStoppedByHeadsetDisconnect = true
                     }
                 }
-                
-                /**
-                 * Проверяет, является ли устройство гарнитурой/наушниками
-                 */
-                private fun isHeadsetDevice(device: AudioDeviceInfo): Boolean {
-                    return when (device.type) {
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                        AudioDeviceInfo.TYPE_USB_DEVICE,
-                        AudioDeviceInfo.TYPE_USB_ACCESSORY,
-                        AudioDeviceInfo.TYPE_USB_HEADSET,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                        AudioDeviceInfo.TYPE_BLE_HEADSET,
-                        AudioDeviceInfo.TYPE_HEARING_AID -> true
-                        else -> false
-                    }
-                }
-                
-                /**
-                 * Проверяет наличие подключенной гарнитуры
-                 */
-                private fun checkHeadsetDevices() {
-                    audioManager?.let { am ->
-                        val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
-                        hasHeadset = devices.any { isHeadsetDevice(it) }
-                        android.util.Log.d("BinauralPlaybackService", "Headset available: $hasHeadset")
-                    }
-                }
             }
             
             // Регистрируем callback
             audioManager?.registerAudioDeviceCallback(audioDeviceCallback, null)
             
-            // Начальная проверка наличия гарнитуры
-            audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.let { devices ->
-                hasHeadset = devices.any { device ->
-                    when (device.type) {
-                        AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                        AudioDeviceInfo.TYPE_USB_DEVICE,
-                        AudioDeviceInfo.TYPE_USB_ACCESSORY,
-                        AudioDeviceInfo.TYPE_USB_HEADSET,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
-                        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                        AudioDeviceInfo.TYPE_BLE_HEADSET,
-                        AudioDeviceInfo.TYPE_HEARING_AID -> true
-                        else -> false
+            // Начальная проверка наличия гарнитуры.
+            // Проводная гарнитура: читаем ЛИПКИЙ ACTION_HEADSET_PLUG, чтобы
+            // получить реальное состояние ДО начала воспроизведения, когда
+            // getDevices ещё не отдаёт провод. Без этого при запуске приложения
+            // с уже воткнутыми наушниками wiredHeadsetConnected остаётся false,
+            // hasHeadset=false, и диалог «подключите наушники» показывается при
+            // попытке возобновить воспроизведение, пока гарнитуру не переподключат.
+            // BT/USB докидываются внутри checkHeadsetDevices() через getDevices.
+            wiredHeadsetConnected = readWiredHeadsetFromStickyBroadcast()
+            checkHeadsetDevices()
+
+            // Отслеживание ПРОВОДНОЙ гарнитуры через ACTION_HEADSET_PLUG.
+            // getDevices(GET_DEVICES_OUTPUTS) ненадёжно отдаёт провод при
+            // отсутствии активного воспроизведения, а ACTION_HEADSET_PLUG —
+            // липкий системный интент, который надёжно прилетает на втыкание
+            // 3.5mm джек/USB-C и сразу сообщает текущее состояние (state=1/0).
+            // Для Bluetooth он НЕ прилетает — его детекция остаётся в
+            // AudioDeviceCallback/getDevices выше.
+            val plugFilter = IntentFilter(AudioManager.ACTION_HEADSET_PLUG)
+            headsetPlugReceiver = object : BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    if (intent?.action != AudioManager.ACTION_HEADSET_PLUG) return
+                    val plugged = intent.getIntExtra("state", 0) == 1
+                    android.util.Log.d("BinauralPlaybackService", "HEADSET_PLUG plugged=$plugged")
+                    if (plugged) {
+                        wiredHeadsetConnected = true
+                        hasHeadset = true
+                        _hasHeadset.value = true
+                    } else {
+                        wiredHeadsetConnected = false
+                        checkHeadsetDevices()
                     }
                 }
             }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(headsetPlugReceiver, plugFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(headsetPlugReceiver, plugFilter)
+            }
         }
     }
-    
+
     private fun unregisterAudioDeviceCallback() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             audioDeviceCallback?.let {
@@ -713,8 +770,72 @@ class BinauralPlaybackService : Service() {
             }
         }
         audioDeviceCallback = null
+        headsetPlugReceiver?.let { unregisterReceiver(it) }
+        headsetPlugReceiver = null
+        wiredHeadsetConnected = false
     }
-    
+
+    /**
+     * Проверяет, является ли устройство гарнитурой/наушниками (BT/USB/провод).
+     * Функция уровня класса — её вызывают и AudioDeviceCallback, и приёмник
+     * ACTION_HEADSET_PLUG.
+     */
+    private fun isHeadsetDevice(device: AudioDeviceInfo): Boolean {
+        return when (device.type) {
+            AudioDeviceInfo.TYPE_WIRED_HEADSET,
+            AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+            AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_ACCESSORY,
+            AudioDeviceInfo.TYPE_USB_HEADSET,
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+            AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            AudioDeviceInfo.TYPE_BLE_HEADSET,
+            AudioDeviceInfo.TYPE_HEARING_AID -> true
+            else -> false
+        }
+    }
+
+    /**
+     * Пересчитывает наличие гарнитуры: проводная (по ACTION_HEADSET_PLUG) ИЛИ
+     * BT/USB (по getDevices). Обновляет общий StateFlow [hasHeadset].
+     * Функция уровня класса — вызывается из AudioDeviceCallback и приёмника
+     * ACTION_HEADSET_PLUG.
+     */
+    private fun checkHeadsetDevices() {
+        audioManager?.let { am ->
+            val devices = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            hasHeadset = wiredHeadsetConnected || devices.any { isHeadsetDevice(it) }
+            _hasHeadset.value = hasHeadset
+            android.util.Log.d("BinauralPlaybackService", "Headset available: $hasHeadset (wired=$wiredHeadsetConnected)")
+        }
+    }
+
+    /**
+     * Возвращает текущее состояние ПРОВОДНОЙ гарнитуры, читая липкий системный
+     * интент [AudioManager.ACTION_HEADSET_PLUG]. В отличие от
+     * [AudioManager.getDevices], корректно работает ДО начала воспроизведения,
+     * то есть сразу на старте приложения, если наушники уже воткнуты в разъём.
+     * ACTION_HEADSET_PLUG — sticky-интент, поэтому последнее состояние (state=1/0)
+     * доступно без ожидания события подключения/отключения.
+     */
+    private fun readWiredHeadsetFromStickyBroadcast(): Boolean {
+        val plugFilter = IntentFilter(AudioManager.ACTION_HEADSET_PLUG)
+        val sticky = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(null, plugFilter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(null, plugFilter)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("BinauralPlaybackService", "Failed to read sticky HEADSET_PLUG", e)
+            null
+        }
+        val plugged = sticky?.getIntExtra("state", 0) == 1
+        android.util.Log.d("BinauralPlaybackService", "Sticky HEADSET_PLUG wiredHeadsetConnected=$plugged")
+        return plugged
+    }
+
     /**
      * Регистрирует приёмник для отслеживания изменений режима энергосбережения
      */
@@ -824,6 +945,10 @@ class BinauralPlaybackService : Service() {
                 // чтобы указатель времени на экране был актуальным даже без воспроизведения.
                 audioEngine?.updateCurrentFrequencies()
                 audioEngine?.currentTimeOfDaySeconds?.value?.let { _currentTimeOfDaySeconds.value = it }
+                // СКРАБ: реальное «сейчас» копируется той же строкой, что и
+                // ось, даже если немедленный коллектор по какой-то причине не
+                // запустился (движок ещё не создан в onCreate).
+                audioEngine?.unshiftedTimeOfDaySeconds?.value?.let { _unshiftedTimeOfDaySeconds.value = it }
                 // Частоты обновляем только при воспроизведении или включённом debug-режиме времени
                 if (_isPlaying.value || _debugTimeEnabled.value) {
                     // Копируем значения из audioEngine в сервис для UI
@@ -1186,7 +1311,46 @@ class BinauralPlaybackService : Service() {
     }
     
     fun switchPresetWithFade(config: BinauralConfig) {
+        // СКРАБ: другой пресет — другая кривая, а сдвинутая ось была «ложью о
+        // времени» ради прослушивания КОНКРЕТНОЙ правки. Смена пресета её
+        // стирает; пауза и правки настроек — НЕТ (иначе слушать правку в 3 часа
+        // ночи было бы нельзя).
+        audioEngine?.resetScrub()
         audioEngine?.switchPresetWithFade(config)
+    }
+
+    // ============ Скраб: предпросмотр другого времени суток ============
+
+    /**
+     * Сдвинуть ось времени суток так, чтобы звук пошёл от момента
+     * [timeOfDaySeconds] — прослушать, как пресет звучит в другое время суток.
+     *
+     * Это НЕ «позиция трека»: ось остаётся живой и едет вперёд со скоростью 1×,
+     * просто со сдвигом. Кривая продолжает эволюционировать, знаковая
+     * раскладка каналов, scatter биений и режим расслабления считаются на той же
+     * сдвинутой оси — то есть слышно ровно то, что звучало бы в это время.
+     *
+     * Каждый вызов — это полный хэндофф (кроссфейд ~1 с), поэтому вызывать надо
+     * по ОТПУСКАНИИ ручки, а не на каждом шаге перетаскивания.
+     *
+     * docs/plan_playback_scrub_handle.md
+     */
+    fun scrubTo(timeOfDaySeconds: Int) {
+        audioEngine?.scrubTo(timeOfDaySeconds)
+    }
+
+    /** СКРАБ: вернуть прослушивание к реальному текущему моменту суток. */
+    fun scrubReset() {
+        audioEngine?.scrubReset()
+    }
+
+    /**
+     * СКРАБ: снять сдвиг БЕЗ пересборки потока — выход из редактора, смена
+     * пресета, полная остановка. Само состояние редактора уже меняется другими
+     * путями, и лишний хэндофф здесь был бы слышен.
+     */
+    fun resetScrub() {
+        audioEngine?.resetScrub()
     }
 
     /**
@@ -1299,7 +1463,12 @@ class BinauralPlaybackService : Service() {
         _isChannelsSwapped.value = false
         _elapsedSeconds.value = 0
         _currentTimeOfDaySeconds.value = 0
+        _unshiftedTimeOfDaySeconds.value = null
         _debugTimeEnabled.value = false
+        // СКРАБ: статический поток переживает сервис, а сдвиг оси — нет
+        // (он только в памяти менеджера). Без сброса после пересоздания сервиса
+        // редактор показал бы призрачную серую линию и кнопку сброса.
+        _scrubOffsetSeconds.value = 0
         
         super.onDestroy()
     }

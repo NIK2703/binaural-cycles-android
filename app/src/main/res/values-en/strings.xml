@@ -5,11 +5,13 @@
     <!-- Navigation -->
     <string name="back">Back</string>
     <string name="settings">Settings</string>
+    <string name="menu">Menu</string>
     
     <!-- Preset List Screen -->
     <string name="preset_list_title">Binaural Cycles</string>
     <string name="add_preset">Add preset</string>
-    <string name="no_presets_message">No saved presets.\nPress + to create a new one.</string>
+    <string name="create_preset">Create preset</string>
+    <string name="no_presets_message">No saved presets.\nOpen the menu to create a new one.</string>
     
     <!-- Preset Edit Screen -->
     <string name="new_preset">New preset</string>
@@ -26,7 +28,7 @@
     
     <!-- Context Menu -->
     <string name="edit">Edit</string>
-    <string name="duplicate">Duplicate</string>
+    <string name="duplicate">Copy</string>
     <string name="export">Export</string>
     <string name="delete">Delete</string>
     
@@ -46,21 +48,22 @@
     <string name="step">Step</string>
     <string name="spline_tension">Spline tension</string>
     <string name="spline_tension_description">0 = smooth Catmull-Rom, 1 = almost linear</string>
+    <string name="step_fade_duration">Fade duration</string>
 
     <!-- Channel Swap -->
     <string name="auto_channel_swap">Channel swap</string>
     <string name="channel_swap_description">Channels swap for balanced stimulation</string>
     <string name="channel_swap_disabled">Disabled</string>
-    <string name="swap_interval">Swap interval</string>
+    <string name="swap_interval">Channel switch interval</string>
     <string name="swap_mode_off_description">Channels always in normal arrangement</string>
     <string name="swap_mode_timer">Timer</string>
-    <string name="swap_mode_trend">Trend-based</string>
+    <string name="swap_mode_trend">Trend</string>
     <string name="swap_mode_timer_description">Channels swap at a fixed interval</string>
-    <string name="swap_mode_trend_description">Switches occur at the extrema of the curve of the selected types</string>
-    <string name="swap_points">Extremum types</string>
-    <string name="swap_points_both">Peaks and troughs</string>
-    <string name="swap_points_peaks">Peaks</string>
-    <string name="swap_points_troughs">Troughs</string>
+    <string name="swap_mode_trend_description">Switches occur based on the trend of the selected types</string>
+    <string name="swap_points">Trend types</string>
+    <string name="swap_points_both">Both</string>
+    <string name="swap_points_peaks">Decline</string>
+    <string name="swap_points_troughs">Growth</string>
     <string name="smooth_fade">Smooth fade</string>
     <string name="smooth_fade_description">Smooth transition when swapping channels</string>
     <string name="instant_switch">Instant switch</string>
@@ -79,35 +82,28 @@
     <string name="normalization_temporal">Temporal</string>
     <string name="normalization_none_description">Volume is not balanced</string>
     <string name="normalization_channel_description">Balance volume between left and right channels based on their tone frequency ratio</string>
-    <string name="normalization_temporal_description">Balance volume between graph points for consistent sound throughout the day</string>
+    <string name="normalization_temporal_description">Balance channel volume by the lowest channel frequency of the playing preset</string>
     
     <!-- Temporal Normalization (deprecated, kept for compatibility) -->
     <string name="temporal_normalization">Temporal normalization</string>
     <string name="temporal_normalization_description">Balance volume between graph points for consistent sound throughout the rhythm</string>
     
     <!-- Relaxation Mode -->
-    <string name="relaxation_mode">Relaxation period modes</string>
-    <string name="relaxation_mode_description">Periodic frequency reduction for brain rest</string>
-    <string name="relaxation_mode_disabled">Disabled</string>
-    <string name="relaxation_mode_enabled_desc">Frequency reduction in the middle of intervals between points</string>
-    <string name="relaxation_mode_disabled_desc">Frequencies follow the graph without reduction</string>
+    <string name="relaxation_mode">Relaxation periods</string>
+    <string name="relaxation_mode_description">Frequency reduction at set intervals</string>
     <string name="carrier_reduction">Carrier frequency reduction</string>
     <string name="carrier_reduction_description">Percentage of carrier frequency reduction during relaxation periods</string>
     <string name="beat_reduction">Beat frequency reduction</string>
     <string name="beat_reduction_description">Percentage of beat frequency reduction during relaxation periods</string>
     <string name="reduction_percent_format">%d%%</string>
-    <string name="relaxation_mode_type">Mode</string>
-    <string name="relaxation_mode_step">Step</string>
-    <string name="relaxation_mode_smooth">Smooth</string>
-    <string name="relaxation_mode_step_desc">Periodic reduction on schedule with smooth transitions</string>
-    <string name="relaxation_mode_smooth_desc">Alternating base and reduced frequencies with adjustable interval</string>
-    <string name="smooth_interval">Interval between points</string>
-    <string name="gap_between_relaxation">Gap between periods</string>
-    <string name="relaxation_duration">Relaxation duration</string>
-    <string name="transition_period">Transition period</string>
+    <string name="gap_between_relaxation">Interval between periods</string>
+    <string name="relaxation_duration">Period duration</string>
+    <string name="transition_period">Transition duration</string>
     <string name="transition_period_description">Time for smooth transition to reduced frequencies and back</string>
     <string name="minutes_format">%d min</string>
-    
+    <string name="relaxation_range_fade">Range-position fade</string>
+    <string name="relaxation_range_fade_description">Relaxation-period prominence is reduced closer to the minima of the graph carrier and beat frequency ranges</string>
+
     <!-- App Settings -->
     <string name="buffer_generation_minutes">Buffer generation interval</string>
     <string name="buffer_generation_description">How many minutes of audio buffer is generated ahead. Larger interval reduces the frequency of CPU wake-ups and saves battery</string>
@@ -142,6 +138,10 @@
     <!-- Auto Resume on App Start -->
     <string name="auto_resume_on_app_start">Auto-resume on start</string>
     <string name="auto_resume_on_app_start_desc">Automatically resume playback when app starts</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Headphone connection</string>
+    <string name="headphone_reminder_desc">Remind to connect headphones for listening to binaural beats</string>
     
     <!-- Battery optimization exemption -->
     <string name="uninterrupted_background_playback">Uninterrupted background playback</string>
@@ -157,8 +157,8 @@
     
     <!-- Frequency Graph -->
     <string name="frequency_hz">Frequency (Hz)</string>
-    <string name="min_carrier_frequency">Min. carrier frequency</string>
-    <string name="max_carrier_frequency">Max. carrier frequency</string>
+    <string name="min_channel_frequency">Minimum channel frequency</string>
+    <string name="max_channel_frequency">Maximum channel frequency</string>
     <string name="ok">OK</string>
     <string name="minutes_short">min</string>
     <string name="hours_short">h</string>
@@ -179,7 +179,22 @@
     <string name="max_format">max %.1f</string>
     <string name="apply">Apply</string>
     <string name="close">Close</string>
-    
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Gesture help</string>
+    <string name="gestures_help_title">Editor controls</string>
+    <string name="gesture_add_point">Double-tap an empty spot on the graph to add a point.</string>
+    <string name="gesture_select_point">Tap a point to open its editing popup.</string>
+    <string name="gesture_drag_point">Move a point: right-left to change its time, up-down to change the carrier frequency.</string>
+    <string name="gesture_swipe_fields">Swipe up or down across the fields of the point editing popup to increase/decrease their values.</string>
+    <string name="gesture_range_labels">Tap the frequency limit labels (%1$s and %2$s) to change the graph scale.</string>
+    <string name="gesture_scrub_handle">While the preset you are editing is playing, move ◀|▶ left or right to change the playback position.</string>
+    <string name="got_it">Got it</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Preview another time of day</string>
+    <string name="scrub_reset_description">Return playback to the current moment</string>
+
     <!-- Frequencies -->
     <string name="beat_frequency">Beats</string>
     <string name="carrier_frequency">Carrier</string>
@@ -197,4 +212,10 @@
     <string name="action_pause">Pause</string>
     <string name="action_stop">Stop</string>
     <string name="action_exit">Exit</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Connect headphones</string>
+    <string name="headphone_required_message">Binaural beats only work when listening through headphones</string>
+    <string name="headphone_required_play_anyway">Don\'t show again</string>
+    <string name="headphone_required_dismiss">Got it</string>
 </resources>
