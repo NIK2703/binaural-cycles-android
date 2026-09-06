@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">双耳节拍循环</string>
+
+    <!-- Navigation -->
+    <string name="back">返回</string>
+    <string name="settings">设置</string>
+    <string name="menu">菜单</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">双耳节拍循环</string>
+    <string name="add_preset">添加预设</string>
+    <string name="create_preset">创建预设</string>
+    <string name="no_presets_message">暂无已保存的预设。\n打开菜单新建一个。</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">新建预设</string>
+    <string name="draft_preset">草稿</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">昼夜节律</string>
+    <string name="preset_gamma_productivity">伽马波高效</string>
+    <string name="preset_daily_cycle">全天周期</string>
+    <string name="edit_preset">编辑</string>
+    <string name="preset_name">预设名称</string>
+    <string name="import_preset">导入</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">预设 %1$s 已导出</string>
+    <string name="export_failed">导出预设失败：%1$s</string>
+    <string name="import_success">预设 %1$s 已导入</string>
+    <string name="import_failed">导入预设时发生错误</string>
+    <string name="save">保存</string>
+    <string name="do_not_save">不保存</string>
+
+    <!-- Context Menu -->
+    <string name="edit">编辑</string>
+    <string name="duplicate">复制</string>
+    <string name="export">导出</string>
+    <string name="delete">删除</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">删除预设？</string>
+    <string name="delete_preset_message">预设“%s”将被永久删除。</string>
+    <string name="cancel">取消</string>
+    <string name="unsaved_changes_title">未保存的更改</string>
+    <string name="unsaved_changes_message">您有未保存的更改。退出前是否保存？</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">点插值</string>
+    <string name="interpolation_description">计算图表上各点之间数值的方法</string>
+    <string name="linear">线性</string>
+    <string name="cardinal">基数样条</string>
+    <string name="monotone">单调</string>
+    <string name="step">阶梯</string>
+    <string name="spline_tension">样条张力</string>
+    <string name="spline_tension_description">0 = 平滑 Catmull-Rom，1 = 接近线性</string>
+    <string name="step_fade_duration">渐变时长</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">声道交换</string>
+    <string name="channel_swap_description">声道互换位置，使负载更平衡</string>
+    <string name="channel_swap_disabled">关闭</string>
+    <string name="swap_interval">声道交换间隔</string>
+    <string name="swap_mode_off_description">声道始终保持常规位置</string>
+    <string name="swap_mode_timer">定时</string>
+    <string name="swap_mode_trend">趋势</string>
+    <string name="swap_mode_timer_description">声道按固定间隔互换位置</string>
+    <string name="swap_mode_trend_description">在所选类型的节拍频率趋势反转点上进行声道交换</string>
+    <string name="swap_points">触发声道交换的过渡类型</string>
+    <string name="swap_points_both">全部</string>
+    <string name="swap_points_decline">下降</string>
+    <string name="swap_points_growth">上升</string>
+    <string name="smooth_fade">平滑渐变</string>
+    <string name="smooth_fade_description">声道交换时平滑过渡</string>
+    <string name="instant_switch">即时切换</string>
+    <string name="fade_duration">渐变时长</string>
+    <string name="pause_on_switch">切换时暂停</string>
+    <string name="no_pause">无暂停</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">音量归一化</string>
+    <string name="volume_normalization_description">平衡音量，使听感保持一致</string>
+    <string name="normalization_strength">归一化强度</string>
+
+    <!-- Normalization Types -->
+    <string name="normalization_none">禁用</string>
+    <string name="normalization_channel">声道</string>
+    <string name="normalization_temporal">基于时间</string>
+    <string name="normalization_none_description">不调整音量（保持原样）</string>
+    <string name="normalization_channel_description">根据左右声道音调频率之比平衡音量</string>
+    <string name="normalization_temporal_description">按正在播放预设的最低声道频率平衡声道音量</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">基于时间的归一化</string>
+    <string name="temporal_normalization_description">平衡图表各点之间的音量，使听感保持一致</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">放松时段</string>
+    <string name="relaxation_mode_description">按设定周期降低频率</string>
+    <string name="carrier_reduction">载波频率降幅</string>
+    <string name="carrier_reduction_description">放松时段内载波频率降低的百分比</string>
+    <string name="beat_reduction">节拍频率降幅</string>
+    <string name="beat_reduction_description">放松时段内节拍频率降低的百分比</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">时段间隔</string>
+    <string name="relaxation_duration">时段时长</string>
+    <string name="transition_period">过渡时长</string>
+    <string name="transition_period_description">平滑过渡到降低后的频率并恢复所需的时间</string>
+    <string name="minutes_format">%d 分钟</string>
+    <string name="relaxation_range_fade">按范围衰减</string>
+    <string name="relaxation_range_fade_description">越接近图表中载波和节拍频率范围的最小值，放松时段的幅度越小</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">缓冲区生成间隔</string>
+    <string name="buffer_generation_description">提前生成的音频缓冲时长（分钟）。间隔越大，CPU 唤醒频率越低，也越省电</string>
+    <string name="update_interval">频率更新间隔</string>
+    <string name="update_interval_description">重新计算播放频率的间隔</string>
+    <string name="audio_quality">采样率</string>
+    <string name="audio_quality_description">数值越低，功耗越小</string>
+    <string name="quality_ultra_low">8 kHz — 最省电</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz — 省电</string>
+    <string name="quality_standard">44 kHz — 标准</string>
+    <string name="quality_high">48 kHz — 最高质量</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">波表合成</string>
+    <string name="wavetable_optimization_enabled_desc">通过查表合成降低 CPU 负载</string>
+    <string name="wavetable_optimization_disabled_desc">实时直接计算正弦波</string>
+    <string name="wavetable_size">合成精度</string>
+    <string name="wavetable_size_samples">%1$d 个采样点</string>
+    <string name="wavetable_size_description">数值越大，声音越精确，但内存占用略高</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">播放</string>
+    <string name="settings_section_power">功耗</string>
+    <string name="settings_section_interface">界面</string>
+    <string name="settings_section_debug">调试</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">连接耳机时恢复</string>
+    <string name="resume_on_headset_connect_desc">若播放因耳机断开而停止，则在重新连接耳机时自动恢复播放</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">启动时恢复</string>
+    <string name="auto_resume_on_app_start_desc">启动应用时自动恢复播放</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">耳机连接</string>
+    <string name="headphone_reminder_desc">提醒连接耳机以收听双耳节拍</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">后台播放</string>
+    <string name="uninterrupted_background_playback_desc">将本应用加入电池优化白名单，即可在后台不间断地播放节拍</string>
+    <string name="battery_optimization_prompt_title">后台不间断运行</string>
+    <string name="battery_optimization_prompt_message">系统可能会为省电而暂停应用的后台工作，导致节拍播放中断。请将本应用加入电池优化例外，让声音持续播放而不被打断。</string>
+    <string name="battery_optimization_prompt_confirm">确定</string>
+    <string name="battery_optimization_settings_unavailable">无法打开电池设置</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">秒</string>
+    <string name="hz">Hz</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">频率（Hz）</string>
+    <string name="min_channel_frequency">声道最低频率</string>
+    <string name="max_channel_frequency">声道最高频率</string>
+    <string name="ok">确定</string>
+    <string name="minutes_short">分</string>
+    <string name="hours_short">小时</string>
+    <string name="milliseconds_short">毫秒</string>
+    <string name="seconds_full">秒</string>
+
+    <!-- Playback Controls -->
+    <string name="play">播放</string>
+    <string name="stop">停止</string>
+    <string name="volume">音量</string>
+
+    <!-- Point Editor -->
+    <string name="point">点</string>
+    <string name="carrier">载波</string>
+    <string name="beats">节拍</string>
+    <string name="carrier_tone_frequency">载波频率</string>
+    <string name="beat_frequency_full">节拍频率</string>
+    <string name="max_format">最高 %.1f</string>
+    <string name="apply">应用</string>
+    <string name="close">关闭</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">手势帮助</string>
+    <string name="gestures_help_title">编辑器操作</string>
+    <string name="gesture_add_point">双击图表空白处可添加一个点。</string>
+    <string name="gesture_select_point">点击某个点可打开其编辑弹窗。</string>
+    <string name="gesture_drag_point">移动点：左右移动可更改时间，上下移动可更改载波频率。</string>
+    <string name="gesture_swipe_fields">在点编辑弹窗的字段上上下滑动，可增大或减小其数值。</string>
+    <string name="gesture_range_labels">点击频率边界标签（%1$s 和 %2$s）可更改图表范围。</string>
+    <string name="gesture_scrub_handle">播放所编辑的预设时，左右移动 ◀|▶ 可更改播放位置。</string>
+    <string name="got_it">知道了</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">试听一天中的其他时刻</string>
+    <string name="scrub_reset_description">将播放恢复到当前时刻</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">节拍</string>
+    <string name="carrier_frequency">载波</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">播放</string>
+    <string name="notification_channel_description">双耳节拍播放控制</string>
+    <string name="notification_playing">正在播放</string>
+    <string name="notification_paused">已暂停</string>
+    <string name="notification_title">节拍：%.1f Hz | 载波：%.0f Hz</string>
+    <string name="action_play">播放</string>
+    <string name="action_pause">暂停</string>
+    <string name="action_stop">停止</string>
+    <string name="action_exit">退出</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">请连接耳机</string>
+    <string name="headphone_required_message">双耳节拍只能通过耳机收听</string>
+    <string name="headphone_required_dont_show_again">不再显示</string>
+    <string name="headphone_required_dismiss">知道了</string>
+    <string name="debug_virtual_time_title">DEBUG：虚拟时间</string>
+    <string name="debug_unlink_from_real_time">与真实时间脱钩</string>
+    <string name="debug_current_time">当前时间：%1$s</string>
+    <string name="debug_time_of_day_scrub">一天中的时间（拖动）</string>
+    <string name="debug_speed">倍速：%1$dx</string>
+    <string name="debug_time_pause">暂停时间</string>
+    <string name="debug_time_flow">时间流动</string>
+    <string name="debug_to_real_time">回到真实时间</string>
+
+    <string name="export_failed_reason_data_lost">导出数据丢失，请重试</string>
+    <string name="export_failed_reason_preset_not_found">未找到预设</string>
+
+</resources>

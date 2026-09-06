@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+<string name="app_name">बाइनौरल साइकल्स</string>
+<!-- Navigation -->
+<string name="back">वापस</string>
+<string name="settings">सेटिंग्स</string>
+<string name="menu">मेनू</string>
+<!-- Preset List Screen -->
+<string name="preset_list_title">बाइनौरल साइकल्स</string>
+<string name="add_preset">प्रीसेट जोड़ें</string>
+<string name="create_preset">प्रीसेट बनाएं</string>
+<string name="no_presets_message">कोई सहेजा हुआ प्रीसेट नहीं है।\nनया बनाने के लिए मेनू खोलें।</string>
+<!-- Preset Edit Screen -->
+<string name="new_preset">नया प्रीसेट</string>
+<string name="draft_preset">ड्राफ़्ट</string>
+<!-- Default preset names -->
+<string name="preset_circadian_rhythm">सर्केडियन लय</string>
+<string name="preset_gamma_productivity">गामा उत्पादकता</string>
+<string name="preset_daily_cycle">दैनिक चक्र</string>
+<string name="edit_preset">संपादन</string>
+<string name="preset_name">प्रीसेट का नाम</string>
+<string name="import_preset">आयात करें</string>
+<!-- Preset export / import result -->
+<string name="export_success">प्रीसेट %1$s का निर्यात किया गया</string>
+<string name="export_failed">प्रीसेट का निर्यात नहीं किया जा सका: %1$s</string>
+<string name="import_success">प्रीसेट %1$s का आयात किया गया</string>
+<string name="import_failed">प्रीसेट आयात करते समय एक त्रुटि हुई</string>
+<string name="save">सहेजें</string>
+<string name="do_not_save">न सहेजें</string>
+<!-- Context Menu -->
+<string name="edit">संपादित करें</string>
+<string name="duplicate">प्रतिलिपि बनाएं</string>
+<string name="export">निर्यात करें</string>
+<string name="delete">हटाएं</string>
+<!-- Dialogs -->
+<string name="delete_preset_title">प्रीसेट हटाएं?</string>
+<string name="delete_preset_message">प्रीसेट \"%s\" स्थायी रूप से हटा दिया जाएगा।</string>
+<string name="cancel">रद्द करें</string>
+<string name="unsaved_changes_title">सहेजे नहीं गए बदलाव</string>
+<string name="unsaved_changes_message">आपके पास सहेजे नहीं गए बदलाव हैं। बाहर निकलने से पहले उन्हें सहेजें?</string>
+<!-- Interpolation -->
+<string name="point_interpolation">बिंदु अंतर्वेशन</string>
+<string name="interpolation_description">ग्राफ़ बिंदुओं के बीच मानों की गणना की विधि</string>
+<string name="linear">रैखिक</string>
+<string name="cardinal">कार्डिनल</string>
+<string name="monotone">एकदिष्ट</string>
+<string name="step">सोपान</string>
+<string name="spline_tension">स्प्लाइन तनाव</string>
+<string name="spline_tension_description">0 = सुगम Catmull-Rom, 1 = लगभग रैखिक</string>
+<string name="step_fade_duration">फेड अवधि</string>
+<!-- Channel Swap -->
+<string name="auto_channel_swap">चैनल बदलाव</string>
+<string name="channel_swap_description">एकसमान लोड के लिए चैनल आपस में बदले जाते हैं</string>
+<string name="channel_swap_disabled">बंद</string>
+<string name="swap_interval">चैनल बदलाव अंतराल</string>
+<string name="swap_mode_off_description">चैनल हमेशा सामान्य क्रम में रहते हैं</string>
+<string name="swap_mode_timer">टाइमर</string>
+<string name="swap_mode_trend">प्रवृत्ति</string>
+<string name="swap_mode_timer_description">चैनल निर्धारित अंतराल पर आपस में बदले जाते हैं</string>
+<string name="swap_mode_trend_description">चुने गए प्रकारों में बीट आवृत्ति की प्रवृत्ति बदलने वाले बिंदुओं पर चैनल बदले जाते हैं</string>
+<string name="swap_points">चैनल बदलाव वाले संक्रमण प्रकार</string>
+<string name="swap_points_both">सभी</string>
+<string name="swap_points_decline">गिरावट</string>
+<string name="swap_points_growth">वृद्धि</string>
+<string name="smooth_fade">सुगम फेड</string>
+<string name="smooth_fade_description">चैनल बदलने के दौरान सुगम संक्रमण</string>
+<string name="instant_switch">तुरंत बदलाव</string>
+<string name="fade_duration">फेड अवधि</string>
+<string name="pause_on_switch">बदलाव पर विराम</string>
+<string name="no_pause">कोई विराम नहीं</string>
+<!-- Volume Normalization -->
+<string name="volume_normalization">वॉल्यूम सामान्यीकरण</string>
+<string name="volume_normalization_description">एकसमान सुनाई देने के लिए वॉल्यूम संतुलन</string>
+<string name="normalization_strength">सामान्यीकरण तीव्रता</string>
+<!-- Normalization Types -->
+<string name="normalization_none">बंद</string>
+<string name="normalization_channel">चैनल-आधारित</string>
+<string name="normalization_temporal">समय-आधारित</string>
+<string name="normalization_none_description">वॉल्यूम संतुलित नहीं किया जाता</string>
+<string name="normalization_channel_description">टोन आवृत्तियों के अनुपात के आधार पर बाएं और दाएं चैनल के बीच वॉल्यूम संतुलन</string>
+<string name="normalization_temporal_description">बजाए जा रहे प्रीसेट की न्यूनतम चैनल आवृत्ति के आधार पर चैनल वॉल्यूम संतुलन</string>
+<!-- Temporal Normalization (deprecated, kept for compatibility) -->
+<string name="temporal_normalization">कालिक सामान्यीकरण</string>
+<string name="temporal_normalization_description">समान ध्वनि के लिए ग्राफ़ बिंदुओं के बीच वॉल्यूम संतुलन</string>
+<!-- Relaxation Mode -->
+<string name="relaxation_mode">विश्राम काल</string>
+<string name="relaxation_mode_description">निर्धारित अंतराल पर आवृत्तियों में कमी</string>
+<string name="carrier_reduction">वाहक आवृत्ति में कमी</string>
+<string name="carrier_reduction_description">विश्राम काल के दौरान वाहक आवृत्ति में कमी का प्रतिशत</string>
+<string name="beat_reduction">बीट आवृत्ति में कमी</string>
+<string name="beat_reduction_description">विश्राम काल के दौरान बीट आवृत्ति में कमी का प्रतिशत</string>
+<string name="reduction_percent_format">%d%%</string>
+<string name="gap_between_relaxation">कालों के बीच अंतराल</string>
+<string name="relaxation_duration">काल अवधि</string>
+<string name="transition_period">संक्रमण अवधि</string>
+<string name="transition_period_description">कम आवृत्तियों तक जाने और वापस आने के सुगम संक्रमण का समय</string>
+<string name="minutes_format">%d मिनट</string>
+<string name="relaxation_range_fade">रेंज फेड</string>
+<string name="relaxation_range_fade_description">ग्राफ़ की वाहक और बीट आवृत्ति रेंज के न्यूनतम मानों के करीब विश्राम काल की तीव्रता में कमी</string>
+<!-- App Settings -->
+<string name="buffer_generation_minutes">बफ़र जनरेशन अंतराल</string>
+<string name="buffer_generation_description">ऑडियो बफ़र कितने मिनट आगे तक जनरेट किया जाता है। लंबा अंतराल प्रोसेसर वेकअप की दर कम करता है और बैटरी बचाता है</string>
+<string name="update_interval">आवृत्ति अपडेट अंतराल</string>
+<string name="update_interval_description">प्लेबैक आवृत्तियों की पुनर्गणना कितनी बार होती है</string>
+<string name="audio_quality">सैंपल रेट</string>
+<string name="audio_quality_description">कम मान बिजली की खपत कम करते हैं</string>
+<string name="quality_ultra_low">8 kHz — अधिकतम बचत</string>
+<string name="quality_very_low">16 kHz</string>
+<string name="quality_low">22 kHz — बैटरी बचत</string>
+<string name="quality_standard">44 kHz — मानक</string>
+<string name="quality_high">48 kHz — अधिकतम गुणवत्ता</string>
+<!-- Wavetable Optimization -->
+<string name="wavetable_optimization">वेवटेबल सिंथेसिस</string>
+<string name="wavetable_optimization_enabled_desc">वेवटेबल सिंथेसिस के ज़रिए प्रोसेसर पर लोड कम करता है</string>
+<string name="wavetable_optimization_disabled_desc">रियल-टाइम में सीधी साइन वेव गणना</string>
+<string name="wavetable_size">सिंथेसिस सटीकता</string>
+<string name="wavetable_size_samples">%1$d सैंपल्स</string>
+<string name="wavetable_size_description">अधिक मान — बेहतर ध्वनि, लेकिन थोड़ी अधिक मेमोरी खपत</string>
+<!-- Settings Sections -->
+<string name="settings_section_comfort">प्लेबैक</string>
+<string name="settings_section_power">बिजली खपत</string>
+<string name="settings_section_interface">इंटरफ़ेस</string>
+<string name="settings_section_debug">डीबग</string>
+<!-- Resume on Headset Connect -->
+<string name="resume_on_headset_connect">कनेक्ट होने पर फिर से चलाएं</string>
+<string name="resume_on_headset_connect_desc">हेडसेट कनेक्ट होने पर प्लेबैक स्वचालित रूप से फिर से शुरू करें, यदि वह डिस्कनेक्ट होने के कारण रुक गया हो</string>
+<!-- Auto Resume on App Start -->
+<string name="auto_resume_on_app_start">शुरू होने पर फिर से चलाएं</string>
+<string name="auto_resume_on_app_start_desc">ऐप शुरू होने पर प्लेबैक स्वचालित रूप से फिर से शुरू करें</string>
+<!-- Headphone connection reminder -->
+<string name="headphone_reminder">हेडफोन कनेक्शन</string>
+<string name="headphone_reminder_desc">बाइनौरल बीट्स सुनने के लिए हेडफोन कनेक्ट करने की याद दिलाएं</string>
+<!-- Battery optimization exemption -->
+<string name="uninterrupted_background_playback">बैकग्राउंड प्लेबैक</string>
+<string name="uninterrupted_background_playback_desc">बैकग्राउंड में निर्बाध प्लेबैक के लिए ऐप को बैकग्राउंड बैटरी सेविंग अपवादों में जोड़ें</string>
+<string name="battery_optimization_prompt_title">निर्बाध बैकग्राउंड संचालन</string>
+<string name="battery_optimization_prompt_message">बैटरी बचाने के लिए सिस्टम ऐप के बैकग्राउंड संचालन को रोक सकता है — इससे प्लेबैक बाधित होगा। ध्वनि न रुके, इसके लिए ऐप को बैकग्राउंड बैटरी सेविंग अपवादों में जोड़ें।</string>
+<string name="battery_optimization_prompt_confirm">ठीक है</string>
+<string name="battery_optimization_settings_unavailable">बैटरी सेटिंग्स खोली नहीं जा सकीं</string>
+<!-- Time units -->
+<string name="seconds_short">से.</string>
+<string name="hz">Hz</string>
+<!-- Frequency Graph -->
+<string name="frequency_hz">आवृत्ति (Hz)</string>
+<string name="min_channel_frequency">न्यूनतम चैनल आवृत्ति</string>
+<string name="max_channel_frequency">अधिकतम चैनल आवृत्ति</string>
+<string name="ok">ठीक है</string>
+<string name="minutes_short">मि.</string>
+<string name="hours_short">घं.</string>
+<string name="milliseconds_short">ms</string>
+<string name="seconds_full">सेकंड</string>
+<!-- Playback Controls -->
+<string name="play">चलाएं</string>
+<string name="stop">रोकें</string>
+<string name="volume">वॉल्यूम</string>
+<!-- Point Editor -->
+<string name="point">बिंदु</string>
+<string name="carrier">वाहक</string>
+<string name="beats">बीट</string>
+<string name="carrier_tone_frequency">वाहक टोन की आवृत्ति</string>
+<string name="beat_frequency_full">बीट आवृत्ति</string>
+<string name="max_format">अधिकतम %.1f</string>
+<string name="apply">लागू करें</string>
+<string name="close">बंद करें</string>
+<!-- Gesture help (preset editor) -->
+<string name="gestures_help">जेस्चर सहायता</string>
+<string name="gestures_help_title">संपादक में नियंत्रण</string>
+<string name="gesture_add_point">बिंदु जोड़ने के लिए ग्राफ़ पर खाली जगह पर दो बार टैप करें।</string>
+<string name="gesture_select_point">बिंदु संपादन विंडो खोलने के लिए बिंदु पर टैप करें।</string>
+<string name="gesture_drag_point">बिंदु खिसकाएं: दाएं-बाएं — समय बदलने के लिए, ऊपर-नीचे — वाहक आवृत्ति बदलने के लिए।</string>
+<string name="gesture_swipe_fields">बिंदु संपादन विंडो के फ़ील्ड्स पर ऊपर-नीचे स्वाइप करें।</string>
+<string name="gesture_range_labels">आवृत्ति सीमा लेबलों (%1$s और %2$s) पर टैप करें।</string>
+<string name="gesture_scrub_handle">संपादित प्रीसेट बजाते समय ◀|▶ को दाएं-बाएं खिसकाकर प्लेबैक स्थिति बदलें।</string>
+<string name="got_it">ठीक है</string>
+<!-- Scrub (previewing another time of day) -->
+<string name="scrub_handle_description">दिन का अन्य समय सुनें</string>
+<string name="scrub_reset_description">सुनने की स्थिति को वर्तमान समय पर वापस लाएं</string>
+<!-- Frequencies -->
+<string name="beat_frequency">बीट</string>
+<string name="carrier_frequency">वाहक</string>
+<string name="hz_format">%s Hz</string>
+<string name="hz_value_format">%.0f Hz</string>
+<string name="hz_value_format_decimal">%.1f Hz</string>
+<!-- Notification -->
+<string name="notification_channel_name">प्लेबैक</string>
+<string name="notification_channel_description">बाइनौरल बीट्स प्लेबैक नियंत्रण</string>
+<string name="notification_playing">बज रहा है</string>
+<string name="notification_paused">विराम</string>
+<string name="notification_title">बीट: %1$.1f Hz | वाहक: %2$.0f Hz</string>
+<string name="action_play">चलाएं</string>
+<string name="action_pause">विराम</string>
+<string name="action_stop">रोकें</string>
+<string name="action_exit">बाहर निकलें</string>
+<!-- Headphone required dialog -->
+<string name="headphone_required_title">हेडफोन कनेक्ट करें</string>
+<string name="headphone_required_message">बाइनौरल बीट्स केवल हेडफोन से सुनने पर ही काम करते हैं</string>
+<string name="headphone_required_dont_show_again">न दिखाएं</string>
+<string name="headphone_required_dismiss">ठीक है</string>
+<string name="debug_virtual_time_title">DEBUG: वर्चुअल समय</string>
+<string name="debug_unlink_from_real_time">वास्तविक समय से अलग करें</string>
+<string name="debug_current_time">वर्तमान समय: %1$s</string>
+<string name="debug_time_of_day_scrub">दिन का समय (scrub)</string>
+<string name="debug_speed">गति: %1$dx</string>
+<string name="debug_time_pause">समय विराम</string>
+<string name="debug_time_flow">समय प्रवाह</string>
+<string name="debug_to_real_time">वास्तविक समय पर</string>
+<string name="export_failed_reason_data_lost">निर्यात डेटा खो गया, दोबारा कोशिश करें</string>
+<string name="export_failed_reason_preset_not_found">प्रीसेट नहीं मिला</string>
+</resources>

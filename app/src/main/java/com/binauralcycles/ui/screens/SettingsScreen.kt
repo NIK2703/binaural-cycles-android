@@ -92,13 +92,6 @@ fun SettingsScreen(
                 )
 
                 SettingsSwitchRow(
-                    title = stringResource(R.string.headphone_reminder),
-                    description = stringResource(R.string.headphone_reminder_desc),
-                    checked = uiState.headphoneReminderEnabled,
-                    onCheckedChange = { viewModel.setHeadphoneReminderEnabled(it) }
-                )
-
-                SettingsSwitchRow(
                     title = stringResource(R.string.resume_on_headset_connect),
                     description = stringResource(R.string.resume_on_headset_connect_desc),
                     checked = uiState.resumeOnHeadsetConnect,
@@ -110,6 +103,13 @@ fun SettingsScreen(
                     description = stringResource(R.string.auto_resume_on_app_start_desc),
                     checked = uiState.autoResumeOnAppStart,
                     onCheckedChange = { viewModel.setAutoResumeOnAppStart(it) }
+                )
+
+                SettingsSwitchRow(
+                    title = stringResource(R.string.headphone_reminder),
+                    description = stringResource(R.string.headphone_reminder_desc),
+                    checked = uiState.headphoneReminderEnabled,
+                    onCheckedChange = { viewModel.setHeadphoneReminderEnabled(it) }
                 )
             }
 

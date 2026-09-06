@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">일주기 리듬</string>
+    <string name="preset_gamma_productivity">감마 생산성</string>
+    <string name="preset_daily_cycle">일일 주기</string>
+</resources>

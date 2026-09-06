@@ -419,7 +419,7 @@ fun ChannelSwapSettingsCard(
                             onClick = { onChannelSwapTrendPointsChange(ChannelSwapTrendPoints.PEAKS) },
                             label = {
                                 Text(
-                                    text = stringResource(R.string.swap_points_peaks),
+                                    text = stringResource(R.string.swap_points_decline),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -431,7 +431,7 @@ fun ChannelSwapSettingsCard(
                             onClick = { onChannelSwapTrendPointsChange(ChannelSwapTrendPoints.TROUGHS) },
                             label = {
                                 Text(
-                                    text = stringResource(R.string.swap_points_troughs),
+                                    text = stringResource(R.string.swap_points_growth),
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )

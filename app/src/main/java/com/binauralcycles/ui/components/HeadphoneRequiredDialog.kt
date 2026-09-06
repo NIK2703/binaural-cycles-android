@@ -48,7 +48,7 @@ fun HeadphoneRequiredDialog(
         },
         dismissButton = {
             TextButton(onClick = onPlayAnyway) {
-                Text(text = stringResource(R.string.headphone_required_play_anyway))
+                Text(text = stringResource(R.string.headphone_required_dont_show_again))
             }
         }
     )

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">सर्केडियन लय</string>
+    <string name="preset_gamma_productivity">गामा उत्पादकता</string>
+    <string name="preset_daily_cycle">दैनिक चक्र</string>
+</resources>

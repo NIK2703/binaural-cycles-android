@@ -32,8 +32,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.binauralcycles.R
 import com.binauralcycles.viewmodel.BinauralViewModel
 import kotlinx.datetime.LocalTime
 import kotlin.math.roundToInt
@@ -78,7 +80,7 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
         ) {
 
             Text(
-                text = "DEBUG: виртуальное время",
+                text = stringResource(R.string.debug_virtual_time_title),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.error
@@ -91,18 +93,18 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                     onCheckedChange = { viewModel.setDebugVirtualTimeEnabled(it) }
                 )
                 Spacer(Modifier.width(8.dp))
-                Text("Отвязать от реального времени")
+                Text(stringResource(R.string.debug_unlink_from_real_time))
             }
 
             if (uiState.debugVirtualTimeEnabled) {
                 // Текущее виртуальное время
                 Text(
-                    text = "Текущее время: ${formatTime(currentTime.toSecondOfDay())}",
+                    text = stringResource(R.string.debug_current_time, formatTime(currentTime.toSecondOfDay())),
                     style = MaterialTheme.typography.bodyLarge
                 )
 
                 // Scrub времени суток
-                Text("Время суток (scrub)", style = MaterialTheme.typography.labelLarge)
+                Text(stringResource(R.string.debug_time_of_day_scrub), style = MaterialTheme.typography.labelLarge)
                 Slider(
                     value = timeSliderSeconds.toFloat(),
                     onValueChange = { v ->
@@ -127,7 +129,7 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
 
                 // Ускорение
                 Text(
-                    text = "Ускорение: ${uiState.debugTimeScale.roundToInt()}x",
+                    text = stringResource(R.string.debug_speed, uiState.debugTimeScale.roundToInt()),
                     style = MaterialTheme.typography.labelLarge
                 )
                 Slider(
@@ -147,12 +149,12 @@ fun DebugTimeControlPanel(viewModel: BinauralViewModel) {
                     ) {
                         Icon(
                             imageVector = if (uiState.debugVirtualTimeRunning) Icons.Default.Pause else Icons.Default.PlayArrow,
-                            contentDescription = if (uiState.debugVirtualTimeRunning) "Пауза времени" else "Ход времени"
+                            contentDescription = if (uiState.debugVirtualTimeRunning) stringResource(R.string.debug_time_pause) else stringResource(R.string.debug_time_flow)
                         )
                     }
                     Spacer(Modifier.width(8.dp))
                     OutlinedButton(onClick = { viewModel.debugResetToRealTime() }) {
-                        Text("К реальному времени")
+                        Text(stringResource(R.string.debug_to_real_time))
                     }
                 }
             }

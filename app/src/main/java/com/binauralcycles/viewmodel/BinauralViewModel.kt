@@ -118,6 +118,27 @@ data class BinauralUiState(
     val newPresetBaselineCurve: FrequencyCurve? = null,
     // ID редактируемого пресета (null для нового пресета)
     val editingPresetId: String? = null,
+    /**
+     * Звучит НЕСОХРАНЁННАЯ предустановка из редактора (черновик).
+     *
+     * Источник звука отделён от [activePreset]: активный пресет остаётся
+     * реальным сохранённым пресетом (точка возврата при выходе из редактора,
+     * авторезюм, персистентный `activePresetId`), а черновик существует только
+     * в памяти. Возможен только при `editingPresetId == null` — для
+     * существующего пресета ту же роль играет [BinauralViewModel.startPreset]
+     * с подменой кривой.
+     */
+    val draftSounding: Boolean = false,
+    /**
+     * Открыт экран редактора: на экране есть что прослушать, даже когда
+     * активного пресета нет вовсе (панель воспроизведения по нему и решает,
+     * показывать ли кнопку play).
+     *
+     * Флаг обязателен: одной проверки `editingFrequencyCurve != null` мало —
+     * после выхода из редактора кривая намеренно НЕ очищается (нужна для
+     * shared-анимации), и «черновая» логика уехала бы на экран списка.
+     */
+    val editingSessionActive: Boolean = false,
     // Диапазоны частот для редактирования
     val carrierRange: FrequencyRange = FrequencyRange.DEFAULT_CARRIER,
     val beatRange: FrequencyRange = FrequencyRange.DEFAULT_BEAT,
@@ -245,6 +266,29 @@ class BinauralViewModel @Inject constructor(
         private const val KEY_EDITING_TARGET = "editing_target"
         /** Специальное значение цели: создаётся новый пресет (presetId отсутствует). */
         private const val EDITING_TARGET_NEW = "NEW"
+        /**
+         * Метка черновика там, где нужен «идентификатор пресета», которого у
+         * черновика нет: диалог «подключите наушники» (`pendingPresetId`) и
+         * `setCurrentPresetId` для переключения с гарнитуры.
+         *
+         * Настоящего пресета с таким id не существует: `startPreset` по этой
+         * метке не вызывается никогда, её разбирает [startPending].
+         */
+        private const val DRAFT_PRESET_ID = "__draft__"
+        /**
+         * Признак «черновик сейчас источник звука», переживающий пересоздание
+         * ViewModel.
+         *
+         * Зачем: черновик живёт только в [BinauralUiState.editingFrequencyCurve]
+         * и не переживает пересоздание ViewModel, а сервис со своим конфигом
+         * продолжает звучать. Без этой метки свежая ViewModel неотличима от
+         * «пользователь только что открыл редактор» — и первый же пуш конфига
+         * подсунул бы в живой движок дефолтную кривую (см. [stopOrphanSound]).
+         *
+         * Ставится в [startDraft], снимается везде, где гаснет
+         * [BinauralUiState.draftSounding].
+         */
+        private const val KEY_DRAFT_SOUNDING = "draft_sounding"
         /** Имя временного файла (в cacheDir) с JSON, подготовленным к экспорту. */
         private const val KEY_PENDING_EXPORT = "pending_export.json"
     }
@@ -309,6 +353,46 @@ class BinauralViewModel @Inject constructor(
     
     // Job для отмены предыдущего перезапуска при быстром переключении настроек
     private var restartJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Имя черновика «на сейчас» — для панели и уведомления в момент старта
+     * прослушивания.
+     *
+     * Намеренно ОБЫЧНОЕ поле, а не часть [BinauralUiState]: имя меняется на
+     * каждый символ, и StateFlow перекомпоновал бы из-за него весь экран
+     * вместе с тяжёлым графиком. Значение читается ровно один раз — когда
+     * черновик начинает звучать ([startDraft]) — поэтому рассинхронизация
+     * с uiState здесь не страшна.
+     */
+    private var draftNameSnapshot: String? = null
+
+    /**
+     * Запомнить текущее имя редактируемой предустановки (см. [draftNameSnapshot]).
+     *
+     * Вызывается из редактора на каждое изменение поля имени: это просто
+     * запись в поле, без обновления состояния, — перекомпозиции нет.
+     */
+    fun noteDraftName(name: String) {
+        draftNameSnapshot = name
+    }
+
+    /** Подпись черновика для панели и уведомления: имя из редактора или «Черновик». */
+    private fun draftDisplayName(): String =
+        draftNameSnapshot?.takeIf { it.isNotBlank() } ?: context.getString(R.string.draft_preset)
+
+    /**
+     * Подпись звучащего источника для нижней панели: черновик или активный
+     * пресет. `null` — подписи нет (редактор открыт, но ничего не звучит).
+     *
+     * Намеренно функция, а не поле [BinauralUiState]: имя черновика живёт в
+     * [draftNameSnapshot] и в состояние не попадает (см. [noteDraftName]).
+     * Перекомпозиция происходит по изменению `uiState`, а его черновик меняет
+     * всегда — так что значение читается вовремя.
+     */
+    fun soundingPresetName(): String? = when {
+        _uiState.value.draftSounding -> draftDisplayName()
+        else -> _uiState.value.activePreset?.name
+    }
 
     /** Настройка, значение которой уже прочитано из DataStore (см. [loadedSettings]). */
     private enum class Setting {
@@ -682,7 +766,24 @@ class BinauralViewModel @Inject constructor(
         // переключения пресетов во время воспроизведения не должны снова
         // показывать диалог (см. playPreset / headphoneBypassActive).
         headphoneBypassActive = true
-        startPreset(presetId, curveOverride = null, relaxationOverride = null)
+        startPending(presetId)
+    }
+
+    /**
+     * Запустить то, что было отложено диалогом «подключите наушники».
+     *
+     * Единая точка для двух подтверждений (кнопка «Запустить» и автозапуск при
+     * подключении гарнитуры), потому что отложенным может быть НЕ только
+     * пресет: в редакторе нового пресета — черновик, у которого нет id
+     * (см. [DRAFT_PRESET_ID]). Без этой развилки метка ушла бы в `startPreset`,
+     * не нашлась бы в списке и запуск молча пропадал.
+     */
+    private fun startPending(pendingId: String) {
+        if (pendingId == DRAFT_PRESET_ID) {
+            startDraft()
+        } else {
+            startPreset(pendingId, curveOverride = null, relaxationOverride = null)
+        }
     }
 
     /**
@@ -855,7 +956,7 @@ class BinauralViewModel @Inject constructor(
                 if (connected && _uiState.value.showHeadphoneDialog) {
                     val presetId = _uiState.value.pendingPresetId ?: return@collect
                     _uiState.update { it.copy(showHeadphoneDialog = false, pendingPresetId = null) }
-                    startPreset(presetId, curveOverride = null, relaxationOverride = null)
+                    startPending(presetId)
                 }
             }
         }
@@ -959,7 +1060,15 @@ class BinauralViewModel @Inject constructor(
     ) {
         val preset = _uiState.value.presets.find { it.id == presetId } ?: return
         val state = _uiState.value
-        
+
+        // Звучит РЕАЛЬНЫЙ пресет — черновик перестаёт быть источником звука.
+        // Сюда же попадает переключение с гарнитуры и MediaSession: пользователь
+        // листает пресеты, и несохранённая правка молча уходит из эфира.
+        if (state.draftSounding) {
+            _uiState.update { it.copy(draftSounding = false) }
+            clearDraftSoundingMark()
+        }
+
         // Если уже воспроизводится этот пресет - останавливаем с затуханием
         if (state.activePreset?.id == presetId && _telemetry.value.isPlaying) {
             playbackService?.stopWithFade()
@@ -1031,7 +1140,114 @@ class BinauralViewModel @Inject constructor(
             preferencesRepository.saveActivePresetId(presetId)
         }
     }
-    
+
+    // ============= Черновик: прослушивание несохранённой предустановки =============
+
+    /**
+     * Черновик осиротел: до пересоздания ViewModel он был источником звука, а
+     * в новом состоянии звучать нечему (кривая черновика потеряна).
+     *
+     * Разрешается в [updateAudioConfig] — там, где уже прочитаны все настройки
+     * (значит, `activePreset` известен) и уже есть живой биндер сервиса. Раньше
+     * разбирать нельзя: и состояние, и биндер могут быть ещё не готовы.
+     */
+    private var orphanDraftPending = false
+
+    /**
+     * Снять сохранённую метку «черновик — источник звука» (см. [KEY_DRAFT_SOUNDING]).
+     * Вызывается везде, где гаснет [BinauralUiState.draftSounding]: иначе после
+     * следующего пересоздания ViewModel звук был бы признан осиротевшим.
+     */
+    private fun clearDraftSoundingMark() {
+        savedStateHandle.remove<Boolean>(KEY_DRAFT_SOUNDING)
+    }
+
+    /**
+     * Зазвучать несохранённой предустановкой из редактора.
+     *
+     * То же правило, что и для сохранённых пресетов: кнопка play в редакторе
+     * приводит прослушивание к тому, что открыто на экране. Раньше новый
+     * пресет послушать было нельзя вовсе — `startPreset` ищет пресет в списке,
+     * а черновика там нет, — и кнопка play просто возобновляла прежний звук.
+     *
+     * `activePreset` НЕ трогаем: он остаётся точкой возврата (выход из
+     * редактора, авторезюм, персистентный id). Источник звука отмечается
+     * флагом [BinauralUiState.draftSounding], а сам черновик живёт в
+     * `editingFrequencyCurve`.
+     */
+    private fun startDraft() {
+        val state = _uiState.value
+        val curve = state.editingFrequencyCurve ?: return
+
+        // Старт явный, как при переключении пресета: интервал буфера —
+        // пользовательский. Минутный «редакторский» интервал ставится позже,
+        // на первой же правке (armEditorPreviewBufferInterval).
+        restoreUserBufferInterval()
+        // СКРАБ: сдвиг НЕ сбрасываем. К моменту старта он всегда 0: выход из
+        // редактора его стирает (releaseEditorScrub), а внутри сессии нового
+        // пресета ручка скраба скрыта — маркер на графике не показывается.
+
+        _uiState.update {
+            it.copy(
+                draftSounding = true,
+                carrierRange = curve.carrierRange,
+                beatRange = curve.beatRange
+            )
+        }
+        // Метка переживёт пересоздание ViewModel: по ней свежая ViewModel поймёт,
+        // что звук, который она застала, принадлежал черновику (см. stopOrphanSound).
+        savedStateHandle[KEY_DRAFT_SOUNDING] = true
+
+        playbackService?.setCurrentPresetName(draftDisplayName())
+        playbackService?.setCurrentPresetId(DRAFT_PRESET_ID)
+
+        // ПЕРЕКЛЮЧЕНИЕ = КРОССФЕЙД (см. комментарий в startPreset): во время
+        // воспроизведения старт делает сам хэндофф, вне его нужен явный play().
+        playbackService?.updateConfig(
+            buildPlaybackConfig(
+                frequencyCurve = curve,
+                volume = state.volume,
+                channelSwap = state.channelSwapSettings,
+                normalization = state.volumeNormalizationSettings
+            ),
+            state.editingRelaxationModeSettings
+        )
+        if (!_telemetry.value.isPlaying) {
+            playbackService?.play()
+        }
+        android.util.Log.d("BinauralViewModel", "startDraft: звучит «${draftDisplayName()}»")
+    }
+
+    /**
+     * Черновик больше не источник звука: вернуть прослушивание к активному
+     * пресету, а если его нет — остановить (возвращаться некуда).
+     *
+     * Вызывается на каждом выходе из редактора идемпотентно: повторный вызов
+     * ничего не делает, поэтому его можно (и нужно) ставить во все страховки
+     * сразу, как [releaseEditorScrub].
+     */
+    private fun endDraftAudition() {
+        if (!_uiState.value.draftSounding) return
+        _uiState.update { it.copy(draftSounding = false) }
+        clearDraftSoundingMark()
+        restoreUserBufferInterval()
+
+        val activePreset = _uiState.value.activePreset
+        if (activePreset != null) {
+            playbackService?.setCurrentPresetName(activePreset.name)
+            playbackService?.setCurrentPresetId(activePreset.id)
+            // Кроссфейд обратно к сохранённому пресету: updateAudioConfig сам
+            // выберет его кривую, раз флаг черновика уже снят.
+            updateAudioConfig()
+        } else {
+            // До черновика ничего не звучало — звук и не должен продолжаться.
+            playbackService?.stopWithFade()
+            playbackService?.setCurrentPresetName(null)
+            playbackService?.setCurrentPresetId(null)
+        }
+        android.util.Log.d("BinauralViewModel", "endDraftAudition: возврат к «${activePreset?.name}»")
+    }
+
     /**
      * Начать редактирование существующего пресета
      */
@@ -1052,9 +1268,12 @@ class BinauralViewModel @Inject constructor(
                 carrierRange = preset.frequencyCurve.carrierRange,
                 beatRange = preset.frequencyCurve.beatRange,
                 selectedPointIndex = null,  // Сбрасываем выбранную точку при начале редактирования
-                editingRelaxationModeSettings = preset.relaxationModeSettings
+                editingRelaxationModeSettings = preset.relaxationModeSettings,
+                editingSessionActive = true,
+                draftSounding = false
             )
         }
+        clearDraftSoundingMark()
 
         // Желаемой частотой биений становится сохранённая в пресете: пока
         // пользователь не задал её сам, это и есть его намерение.
@@ -1074,6 +1293,13 @@ class BinauralViewModel @Inject constructor(
      */
     fun startNewPreset() {
         savedStateHandle[KEY_EDITING_TARGET] = EDITING_TARGET_NEW
+        // ЧЕРНОВИК-СИРОТА. Метка жива — значит, до пересоздания ViewModel
+        // источником звука был черновик, а в новом состоянии его нет (кривая
+        // ниже заменяется шаблоном). Разбор — в updateAudioConfig: только там
+        // одновременно известен activePreset (настройки прочитаны) и готов
+        // биндер сервиса. Здесь же решение принять нельзя: presets грузятся
+        // асинхронно, и activePreset ещё может быть null просто от недогрузки.
+        orphanDraftPending = savedStateHandle.remove<Boolean>(KEY_DRAFT_SOUNDING) == true
         val defaultCurve = FrequencyCurve.newPresetCurve()
         _uiState.update { 
             it.copy(
@@ -1083,14 +1309,20 @@ class BinauralViewModel @Inject constructor(
                 carrierRange = defaultCurve.carrierRange,
                 beatRange = defaultCurve.beatRange,
                 selectedPointIndex = null,
-                editingRelaxationModeSettings = RelaxationModeSettings()
+                editingRelaxationModeSettings = RelaxationModeSettings(),
+                editingSessionActive = true,
+                // Новая сессия начинается БЕЗ прослушивания: черновик зазвучит
+                // только по кнопке play (или при перезапуске после поворота —
+                // нет, он не переживает ViewModel, см. endDraftAudition).
+                draftSounding = false
             )
         }
         // У нового пресета «пользовательского» значения ещё нет — желаемыми
         // становятся частоты биений кривой по умолчанию.
         pointIntent.seedFrom(defaultCurve.points)
         // Не обновляем кривую в сервисе при создании нового пресета
-        // Воспроизведение продолжает использовать активный пресет
+        // Воспроизведение продолжает использовать активный пресет, пока
+        // пользователь не нажмёт play — тогда зазвучит черновик (startDraft).
         // Цель отработана — для восстановления больше не нужна.
         savedStateHandle.remove<String>(KEY_EDITING_TARGET)
     }
@@ -1108,7 +1340,8 @@ class BinauralViewModel @Inject constructor(
                 newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
-                editingRelaxationModeSettings = RelaxationModeSettings()
+                editingRelaxationModeSettings = RelaxationModeSettings(),
+                editingSessionActive = false
             )
         }
         
@@ -1117,10 +1350,25 @@ class BinauralViewModel @Inject constructor(
         // должна идти уже с ним.
         restoreUserBufferInterval()
 
+        // Черновик существовал только в редакторе: звук возвращается к активному
+        // пресету (или гаснет, если его нет).
+        if (endDraftAuditionIfNeeded()) return
+
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
             playbackService?.updateFrequencyCurve(activePreset.frequencyCurve)
         }
+    }
+
+    /**
+     * Выход из редактора при звучащем черновике: вернуть звук активному
+     * пресету (или остановить). `true` — выход полностью обслужен здесь и
+     * обычное «восстановить кривую активного пресета» больше не нужно.
+     */
+    private fun endDraftAuditionIfNeeded(): Boolean {
+        if (!_uiState.value.draftSounding) return false
+        endDraftAudition()
+        return true
     }
     
     /**
@@ -1139,6 +1387,13 @@ class BinauralViewModel @Inject constructor(
         // должна идти уже с ним.
         restoreUserBufferInterval()
 
+        // Редактор закрывается: сессия больше не активна.
+        _uiState.update { it.copy(editingSessionActive = false) }
+
+        // Черновик существовал только в редакторе: звук возвращается к активному
+        // пресету (или гаснет, если его нет).
+        if (endDraftAuditionIfNeeded()) return
+
         val activePreset = _uiState.value.activePreset
         // Восстанавливаем кривую активного пресета в сервисе
         if (activePreset != null) {
@@ -1154,13 +1409,17 @@ class BinauralViewModel @Inject constructor(
         pointIntent.clear()
         // СКРАБ: см. cancelEditingInService — выход из редактора стирает сдвиг.
         resetScrub()
+        // Черновик не переживает сессию: сначала возвращаем звук, потом чистим
+        // состояние (иначе флаг исчезнет, а звук останется «сиротой»).
+        endDraftAuditionIfNeeded()
         _uiState.update { 
             it.copy(
                 editingFrequencyCurve = null,
                 newPresetBaselineCurve = null,
                 editingPresetId = null,
                 selectedPointIndex = null,
-                editingRelaxationModeSettings = RelaxationModeSettings()
+                editingRelaxationModeSettings = RelaxationModeSettings(),
+                editingSessionActive = false
             )
         }
         // Не восстанавливаем кривую в сервисе - новые данные загрузятся через Flow
@@ -1199,6 +1458,10 @@ class BinauralViewModel @Inject constructor(
             return
         }
         if (target == EDITING_TARGET_NEW) {
+            // ЧЕРНОВИК-СИРОТА разбирается не здесь, а в updateAudioConfig:
+            // startNewPreset поднимает orphanDraftPending по сохранённой метке
+            // KEY_DRAFT_SOUNDING, а гасит звук updateAudioConfig — там уже
+            // прочитаны настройки (известен activePreset) и готов биндер.
             startNewPreset()
             savedStateHandle.remove<String>(KEY_EDITING_TARGET)
             return
@@ -1215,6 +1478,33 @@ class BinauralViewModel @Inject constructor(
             savedStateHandle.remove<String>(KEY_EDITING_TARGET)
         }
     }
+
+    /**
+     * Погасить звук, у которого в состоянии не осталось источника.
+     *
+     * Инвариант: звучать может только то, что есть в состоянии. Если звук идёт,
+     * а источника нет (черновик не пережил пересоздание ViewModel, активного
+     * пресета нет), продолжать нельзя — это звук «ниоткуда», который первый же
+     * пуш конфига превратил бы в дефолтную кривую.
+     *
+     * ПОЧЕМУ НЕ `_telemetry.value.isPlaying` (так было раньше). Телеметрия
+     * приходит от сервиса, а разбор осиротевшего черновика происходит ровно в
+     * момент, когда связь с сервисом только восстановлена: `isPlaying` ещё
+     * false, а движок уже звучит. Ориентируемся на сам факт осиротения
+     * ([orphanDraftPending]) — он точнее любой телеметрии.
+     *
+     * @return `true` — звук погашен, пушить конфиг в движок больше нельзя.
+     */
+    private fun stopOrphanSound(): Boolean {
+        val state = _uiState.value
+        // Источник жив — останавливать нечего.
+        if (state.draftSounding || state.activePreset != null) return false
+        playbackService?.stopWithFade()
+        playbackService?.setCurrentPresetName(null)
+        playbackService?.setCurrentPresetId(null)
+        android.util.Log.d("BinauralViewModel", "stopOrphanSound: источник звука потерян — останавливаем")
+        return true
+    }
     
     /**
      * Создать новый пресет
@@ -1222,16 +1512,49 @@ class BinauralViewModel @Inject constructor(
     fun createPreset(
         name: String, 
         curve: FrequencyCurve, 
-        relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings()
+        relaxationModeSettings: RelaxationModeSettings = RelaxationModeSettings(),
+        /**
+         * Сделать созданный пресет активным — то есть звучащим.
+         *
+         * `true` ровно в одном сценарии: сохраняется черновик, который сейчас
+         * звучит. Тогда звук не должен прерываться — он просто приобретает имя
+         * и id: кривая та же самая, менеджер дедуплицирует конфиг, хэндоффа
+         * нет. Без `activate` черновик бы «погас» по флагу, а звук остался бы
+         * сиротой (или ушёл бы к прежнему активному пресету).
+         */
+        activate: Boolean = false
     ) {
-        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, relaxationModeSettings=$relaxationModeSettings")
+        android.util.Log.d("BinauralViewModel", "createPreset: name=$name, activate=$activate, relaxationModeSettings=$relaxationModeSettings")
         val preset = BinauralPreset(
             name = name,
             frequencyCurve = curve,
             relaxationModeSettings = relaxationModeSettings
         )
+        if (activate) {
+            // ПОРЯДОК: сначала снимаем сессию и черновик, ПОТОМ пушим конфиг —
+            // иначе updateAudioConfig() выбрал бы кривую черновика по
+            // editingPresetId == null и звук остался бы «ничей».
+            _uiState.update {
+                it.copy(
+                    activePreset = preset,
+                    draftSounding = false,
+                    editingSessionActive = false,
+                    carrierRange = curve.carrierRange,
+                    beatRange = curve.beatRange
+                )
+            }
+            // Теперь звучит настоящий пресет, а не черновик: метку снимаем,
+            // иначе после пересоздания ViewModel звук посчитали бы сиротой.
+            clearDraftSoundingMark()
+            playbackService?.setCurrentPresetName(preset.name)
+            playbackService?.setCurrentPresetId(preset.id)
+            restoreUserBufferInterval()
+            updateAudioConfig()
+            lastActivePresetId = preset.id
+        }
         viewModelScope.launch {
             preferencesRepository.addPreset(preset)
+            if (activate) preferencesRepository.saveActivePresetId(preset.id)
         }
     }
     
@@ -1279,6 +1602,8 @@ class BinauralViewModel @Inject constructor(
             restoreUserBufferInterval()
             updateAudioConfig()
         }
+        // Редактор закрывается сохранением: сессия больше не активна.
+        _uiState.update { it.copy(editingSessionActive = false) }
         viewModelScope.launch {
             preferencesRepository.updatePreset(updatedPreset)
         }
@@ -1340,11 +1665,24 @@ class BinauralViewModel @Inject constructor(
             // пресета.
             playbackService?.pauseWithFade()
         } else {
+            // ЧЕРНОВИК: в редакторе нового пресета слушать надо его, а не
+            // прежний звук. Условие — три признака одновременно: редактор
+            // открыт, редактируется именно НОВЫЙ пресет
+            // (editingPresetId == null) и кривая на экране есть. Проверка по
+            // сессии обязательна: кривая после выхода из редактора намеренно
+            // не очищается (нужна для shared-анимации), и без неё «черновик»
+            // зазвучал бы уже с экрана списка.
+            val draftSession = state.editingSessionActive &&
+                state.editingPresetId == null &&
+                state.editingFrequencyCurve != null
+
             // Проверяем подключение наушников при попытке запуска воспроизведения
             if (playbackService != null && !BinauralPlaybackService.hasHeadset.value
                 && state.headphoneReminderEnabled) {
-                // Определяем, какой пресет пытаются запустить
+                // Определяем, какой пресет пытаются запустить. У черновика id
+                // нет — его заменяет метка DRAFT_PRESET_ID (см. startPending).
                 val pendingId = state.editingPresetId
+                    ?: (if (draftSession) DRAFT_PRESET_ID else null)
                     ?: state.activePreset?.id
                     ?: lastActivePresetId
                 if (pendingId != null) {
@@ -1366,9 +1704,7 @@ class BinauralViewModel @Inject constructor(
             //
             // Условие ровно по [editingPresetId]: он непуст только внутри
             // сессии редактирования СУЩЕСТВУЮЩЕГО пресета (на выходе из
-            // редактора обнуляется). НОВЫЙ, ещё не сохранённый пресет
-            // ([editingPresetId] == null) переключать некуда — его просто нет
-            // в списке, поэтому там остаётся прежнее поведение.
+            // редактора обнуляется).
             //
             // Кривую и настройки расслабления берём ИЗ РЕДАКТОРА, а не из
             // сохранённого пресета: иначе несохранённые правки зазвучали бы
@@ -1384,6 +1720,21 @@ class BinauralViewModel @Inject constructor(
                 state.presets.any { it.id == editingId }
             ) {
                 startPreset(editingId, state.editingFrequencyCurve, state.editingRelaxationModeSettings)
+                return
+            }
+
+            // ЧЕРНОВИК: нового пресета нет в списке, поэтому `startPreset` для
+            // него неприменим — звук запускает [startDraft] прямо из
+            // редактируемой кривой. Повторное нажатие (черновик уже источник
+            // звука) — это «продолжить»: перепушиваем конфиг, чтобы в движок
+            // ушли последние правки, и снимаем паузу.
+            if (draftSession) {
+                if (state.draftSounding) {
+                    updateAudioConfig()
+                    playbackService?.resumeWithFade()
+                } else {
+                    startDraft()
+                }
                 return
             }
 
@@ -1736,13 +2087,27 @@ class BinauralViewModel @Inject constructor(
     }
 
     /**
-     * Редактируется ли именно тот пресет, который сейчас активен
-     * (воспроизводится). Только в этом случае правки из редактора уходят
-     * в движок и пересобирают звучащий поток.
+     * Редактируется ли именно то, что сейчас звучит. Только в этом случае
+     * правки из редактора уходят в движок и пересобирают звучащий поток
+     * кроссфейдом — иначе слайдеры меняли бы только сохраняемое, а звук
+     * продолжал бы играть по-старому.
+     *
+     * Два случая, и оба означают «на экране ровно то, что в ушах»:
+     *   • существующий пресет, он же активный (как было и раньше);
+     *   • НОВЫЙ, ещё не сохранённый пресет, который уже звучит черновиком
+     *     ([BinauralUiState.draftSounding]). Раньше второго случая не
+     *     существовало, поэтому править черновик «на слух» было нельзя.
+     *
+     * Единый гейт: через него проходят все пуши правок (кривая, интерполяция,
+     * диапазоны, режим расслабления), так что черновик получает «слышно сразу»
+     * автоматически, без правок в каждом методе.
      */
-    private fun isEditingActivePreset(): Boolean {
+    private fun isEditingSounding(): Boolean {
         val state = _uiState.value
-        return state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
+        if (state.editingPresetId != null) {
+            return state.editingPresetId == state.activePreset?.id
+        }
+        return state.draftSounding && state.editingFrequencyCurve != null
     }
 
     /**
@@ -1792,7 +2157,7 @@ class BinauralViewModel @Inject constructor(
             // Обновляем кривую в сервисе только если редактируется активный
             // пресет: звучащий поток пересобирается кроссфейдом, и правка
             // слышна сразу.
-            if (isEditingActivePreset()) {
+            if (isEditingSounding()) {
                 armEditorPreviewBufferInterval()
                 playbackService?.updateFrequencyCurve(newCurve)
             }
@@ -1814,7 +2179,7 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        if (isEditingActivePreset()) {
+        if (isEditingSounding()) {
             armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
@@ -1836,7 +2201,7 @@ class BinauralViewModel @Inject constructor(
 
         // Как и любой опцией редактора, звук пересобирается сразу — но только
         // если редактируется звучащий пресет.
-        if (isEditingActivePreset()) {
+        if (isEditingSounding()) {
             armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
@@ -1853,7 +2218,7 @@ class BinauralViewModel @Inject constructor(
         _uiState.update { it.copy(editingFrequencyCurve = newCurve) }
         
         // Обновляем кривую в сервисе только если редактируется активный пресет
-        if (isEditingActivePreset()) {
+        if (isEditingSounding()) {
             armEditorPreviewBufferInterval()
             playbackService?.updateFrequencyCurve(newCurve)
         }
@@ -1871,7 +2236,7 @@ class BinauralViewModel @Inject constructor(
      * Вызывается из каждого setEditing-метода после обновления состояния.
      */
     private fun pushEditingRelaxationToService() {
-        if (!isEditingActivePreset()) return
+        if (!isEditingSounding()) return
         armEditorPreviewBufferInterval()
         playbackService?.updateRelaxationModeSettings(_uiState.value.editingRelaxationModeSettings)
     }
@@ -2269,6 +2634,18 @@ class BinauralViewModel @Inject constructor(
             android.util.Log.d("BinauralViewModel", "updateAudioConfig: настройки ещё не прочитаны — пропускаем пуш в движок")
             return
         }
+        // ЧЕРНОВИК-СИРОТА. Здесь метка разбирается, а не в startNewPreset:
+        // только сейчас известен activePreset (прочитаны ВСЕ настройки) и есть
+        // живой биндер. Без биндера признак оставляем висеть — следующий пуш
+        // конфига неизбежен (его делает onServiceConnected).
+        if (orphanDraftPending && playbackService != null) {
+            orphanDraftPending = false
+            // Пушить в живой движок нечего: источник звука пропал вместе с
+            // черновиком. Кроссфейд на дефолтную кривую — худшее, что могло
+            // бы случиться, поэтому звук гасится до всякого пуша.
+            if (stopOrphanSound()) return
+            // Иначе (активный пресет есть) звук вернётся к нему этим же пушем.
+        }
         // Намеренно без guard'а на «переключение пресета идёт»: смены настроек во
         // время воспроизведения — это тоже кроссфейд (updateConfig -> beginHandoff),
         // а не мгновенная подмена частот в звучащем потоке. Дубликаты отсекает сам
@@ -2277,12 +2654,18 @@ class BinauralViewModel @Inject constructor(
         
         // Используем настройки из редактируемого пресета если редактируется активный
         val isActivePresetEditing = state.editingPresetId != null && state.editingPresetId == state.activePreset?.id
-        
+        // ЧЕРНОВИК: звучит несохранённая предустановка — её кривая и её режим
+        // расслабления, а не кривая активного пресета (он остался точкой
+        // возврата, но в эфире не он). Без этой ветки любая смена глобальной
+        // настройки (нормализация, перестановка каналов, частота дискретизации)
+        // молча уводила бы звук с черновика обратно на сохранённый пресет.
+        val isDraftSounding = state.draftSounding && state.editingPresetId == null
+
         // Настройки каналов и нормализации всегда берём из глобального состояния
         val channelSwapSettings = state.channelSwapSettings
         val volumeNormalizationSettings = state.volumeNormalizationSettings
         
-        val (frequencyCurve, relaxationModeSettings) = if (isActivePresetEditing) {
+        val (frequencyCurve, relaxationModeSettings) = if (isDraftSounding || isActivePresetEditing) {
             Pair(
                 state.editingFrequencyCurve ?: state.activePreset?.frequencyCurve ?: FrequencyCurve.defaultCurve(),
                 state.editingRelaxationModeSettings
@@ -2307,7 +2690,8 @@ class BinauralViewModel @Inject constructor(
             "normalizationType=${volumeNormalizationSettings.type}, " +
             "relaxationEnabled=${relaxationModeSettings.enabled}, " +
             "isServiceConnected=${state.isServiceConnected}, " +
-            "isActivePresetEditing=$isActivePresetEditing")
+            "isActivePresetEditing=$isActivePresetEditing, " +
+            "isDraftSounding=$isDraftSounding")
         
         playbackService?.updateConfig(config, relaxationModeSettings)
     }

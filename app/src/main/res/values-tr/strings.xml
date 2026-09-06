@@ -1,0 +1,239 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Binaural Döngüler</string>
+    
+    <!-- Navigation -->
+    <string name="back">Geri</string>
+    <string name="settings">Ayarlar</string>
+    <string name="menu">Menü</string>
+    
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Binaural Döngüler</string>
+    <string name="add_preset">Ön ayar ekle</string>
+    <string name="create_preset">Ön ayar oluştur</string>
+    <string name="no_presets_message">Kaydedilmiş ön ayar yok.\nYeni bir ön ayar oluşturmak için menüyü açın.</string>
+    
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Yeni ön ayar</string>
+    <string name="draft_preset">Taslak</string>
+    
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Sirkadiyen ritim</string>
+    <string name="preset_gamma_productivity">Gama üretkenliği</string>
+    <string name="preset_daily_cycle">Günlük döngü</string>
+    <string name="edit_preset">Düzenleme</string>
+    <string name="preset_name">Ön ayar adı</string>
+    <string name="import_preset">İçe aktar</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">“%1$s” ön ayarı dışa aktarıldı</string>
+    <string name="export_failed">Ön ayar dışa aktarılamadı: %1$s</string>
+    <string name="import_success">“%1$s” ön ayarı içe aktarıldı</string>
+    <string name="import_failed">Ön ayar içe aktarılırken hata oluştu</string>
+    <string name="save">Kaydet</string>
+    <string name="do_not_save">Kaydetme</string>
+    
+    <!-- Context Menu -->
+    <string name="edit">Düzenle</string>
+    <string name="duplicate">Çoğalt</string>
+    <string name="export">Dışa aktar</string>
+    <string name="delete">Sil</string>
+    
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Ön ayar silinsin mi?</string>
+    <string name="delete_preset_message">“%s” ön ayarı kalıcı olarak silinecek.</string>
+    <string name="cancel">İptal</string>
+    <string name="unsaved_changes_title">Kaydedilmemiş değişiklikler</string>
+    <string name="unsaved_changes_message">Kaydedilmemiş değişiklikler var. Çıkmadan önce kaydedilsin mi?</string>
+    
+    <!-- Interpolation -->
+    <string name="point_interpolation">Nokta interpolasyonu</string>
+    <string name="interpolation_description">Grafikteki noktalar arasındaki değerlerin hesaplanma yöntemi</string>
+    <string name="linear">Doğrusal</string>
+    <string name="cardinal">Kardinal</string>
+    <string name="monotone">Monoton</string>
+    <string name="step">Basamaklı</string>
+    <string name="spline_tension">Eğri gerginliği</string>
+    <string name="spline_tension_description">0 = pürüzsüz Catmull-Rom, 1 = neredeyse doğrusal</string>
+    <string name="step_fade_duration">Basamaklı geçiş süresi</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Otomatik kanal değişimi</string>
+    <string name="channel_swap_description">Kanallar, eşit yük dağılımı için yer değiştirir</string>
+    <string name="channel_swap_disabled">Kapalı</string>
+    <string name="swap_interval">Kanal değişim aralığı</string>
+    <string name="swap_mode_off_description">Kanallar her zaman normal konumda kalır</string>
+    <string name="swap_mode_timer">Zamanlayıcı</string>
+    <string name="swap_mode_trend">Eğilim</string>
+    <string name="swap_mode_timer_description">Kanallar belirlenen aralıklarla yer değiştirir</string>
+    <string name="swap_mode_trend_description">Kanal değişimi, seçilen türlerde vuruş frekansı değişim eğiliminin değiştiği noktalarda gerçekleşir</string>
+    <string name="swap_points">Kanal değişimli geçiş türleri</string>
+    <string name="swap_points_both">Tümü</string>
+    <string name="swap_points_decline">Düşüş</string>
+    <string name="swap_points_growth">Yükseliş</string>
+    <string name="smooth_fade">Yumuşak geçiş</string>
+    <string name="smooth_fade_description">Kanal değişiminde yumuşak geçiş uygular</string>
+    <string name="instant_switch">Anında geçiş</string>
+    <string name="fade_duration">Geçiş süresi</string>
+    <string name="pause_on_switch">Geçiş sırasında duraklat</string>
+    <string name="no_pause">Duraklatma yok</string>
+    
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Ses normalizasyonu</string>
+    <string name="volume_normalization_description">Dengeli ses için ses seviyesini eşitler</string>
+    <string name="normalization_strength">Normalizasyon gücü</string>
+    
+    <!-- Normalization Types -->
+    <string name="normalization_none">Kapalı</string>
+    <string name="normalization_channel">Kanal</string>
+    <string name="normalization_temporal">Zamansal</string>
+    <string name="normalization_none_description">Ses seviyesi eşitlenmez</string>
+    <string name="normalization_channel_description">Sol ve sağ kanal arasındaki ses seviyesini, ton frekanslarının oranına göre eşitler</string>
+    <string name="normalization_temporal_description">Çalınan ön ayarın en düşük kanal frekansına göre kanal ses seviyelerini eşitler</string>
+    
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Zamansal normalizasyon</string>
+    <string name="temporal_normalization_description">Dengeli ses için grafik noktaları arasındaki ses seviyesini eşitler</string>
+    
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Rahatlama dönemleri</string>
+    <string name="relaxation_mode_description">Belirli aralıklarla frekansları düşürür</string>
+    <string name="carrier_reduction">Taşıyıcı frekans azaltma</string>
+    <string name="carrier_reduction_description">Rahatlama dönemlerinde taşıyıcı frekansın düşürülme yüzdesi</string>
+    <string name="beat_reduction">Vuruş frekansı azaltma</string>
+    <string name="beat_reduction_description">Rahatlama dönemlerinde vuruş frekansının düşürülme yüzdesi</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">Dönemler arası aralık</string>
+    <string name="relaxation_duration">Rahatlama dönemi süresi</string>
+    <string name="transition_period">Geçiş süresi</string>
+    <string name="transition_period_description">Düşürülmüş frekanslara ve geri dönüşe yapılan yumuşak geçişin süresi</string>
+    <string name="minutes_format">%d dk</string>
+    <string name="relaxation_range_fade">Aralığa göre sönümleme</string>
+    <string name="relaxation_range_fade_description">Grafikteki taşıyıcı ve vuruş frekansı aralıklarının en düşük değerlerine yaklaştıkça rahatlama dönemlerinin belirginliğini azaltır</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">Tampon oluşturma aralığı</string>
+    <string name="buffer_generation_description">Ses tamponunun kaç dakika önceden oluşturulacağı. Daha uzun aralık, işlemcinin uyanma sıklığını azaltır ve pil tasarrufu sağlar</string>
+    <string name="update_interval">Frekans güncelleme aralığı</string>
+    <string name="update_interval_description">Çalma frekanslarının ne sıklıkla yeniden hesaplanacağı</string>
+    <string name="audio_quality">Örnekleme hızı</string>
+    <string name="audio_quality_description">Düşük değerler güç tüketimini azaltır</string>
+    <string name="quality_ultra_low">8 kHz — maksimum tasarruf</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz — pil tasarrufu</string>
+    <string name="quality_standard">44 kHz — standart</string>
+    <string name="quality_high">48 kHz — maksimum kalite</string>
+    
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Dalga tablosu sentezi</string>
+    <string name="wavetable_optimization_enabled_desc">Dalga tablosu sentezi ile işlemci yükünü azaltır</string>
+    <string name="wavetable_optimization_disabled_desc">Sinüs dalgasının gerçek zamanlı doğrudan hesaplanması</string>
+    <string name="wavetable_size">Sentez hassasiyeti</string>
+    <string name="wavetable_size_samples">%1$d örnek</string>
+    <string name="wavetable_size_description">Daha yüksek değer daha doğru ses sağlar, ancak bellek kullanımını biraz artırır</string>
+    
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Oynatma</string>
+    <string name="settings_section_power">Güç tüketimi</string>
+    <string name="settings_section_interface">Arayüz</string>
+    <string name="settings_section_debug">Hata ayıklama</string>
+    
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Kulaklık bağlandığında devam et</string>
+    <string name="resume_on_headset_connect_desc">Kulaklık bağlantısı kesildiği için duran oynatmayı, kulaklık bağlandığında otomatik olarak devam ettirir</string>
+    
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Uygulama başlatıldığında devam et</string>
+    <string name="auto_resume_on_app_start_desc">Uygulama başlatıldığında oynatmayı otomatik olarak devam ettirir</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Kulaklık bağlantısı</string>
+    <string name="headphone_reminder_desc">Binaural ritimleri dinlemek için kulaklık bağlanması gerektiğini hatırlatır</string>
+    
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Arka planda oynatma</string>
+    <string name="uninterrupted_background_playback_desc">Ritimlerin arka planda kesintisiz oynatılması için uygulamayı arka plan güç tasarrufu istisnalarına ekleyin</string>
+    <string name="battery_optimization_prompt_title">Arka planda kesintisiz çalışma</string>
+    <string name="battery_optimization_prompt_message">Sistem, pil tasarrufu için uygulamanın arka planda çalışmasını duraklatabilir; bu nedenle ritimlerin oynatımı kesilebilir. Sesin durmaması için uygulamayı arka plan güç tasarrufu istisnalarına ekleyin.</string>
+    <string name="battery_optimization_prompt_confirm">Tamam</string>
+    <string name="battery_optimization_settings_unavailable">Güç tüketimi ayarları açılamadı</string>
+    
+    <!-- Time units -->
+    <string name="seconds_short">sn</string>
+    <string name="hz">Hz</string>
+    
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Frekans (Hz)</string>
+    <string name="min_channel_frequency">Minimum kanal frekansı</string>
+    <string name="max_channel_frequency">Maksimum kanal frekansı</string>
+    <string name="ok">Tamam</string>
+    <string name="minutes_short">dk</string>
+    <string name="hours_short">sa</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">saniye</string>
+    
+    <!-- Playback Controls -->
+    <string name="play">Oynat</string>
+    <string name="stop">Durdur</string>
+    <string name="volume">Ses seviyesi</string>
+    
+    <!-- Point Editor -->
+    <string name="point">Nokta</string>
+    <string name="carrier">Taşıyıcı</string>
+    <string name="beats">Vuruş</string>
+    <string name="carrier_tone_frequency">Taşıyıcı ton frekansı</string>
+    <string name="beat_frequency_full">Vuruş frekansı</string>
+    <string name="max_format">maks. %1$.1f</string>
+    <string name="apply">Uygula</string>
+    <string name="close">Kapat</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Hareket yardımı</string>
+    <string name="gestures_help_title">Düzenleyici kontrolleri</string>
+    <string name="gesture_add_point">Nokta eklemek için grafiğin boş bir alanına iki kez dokunun.</string>
+    <string name="gesture_select_point">Düzenleme penceresini açmak için bir noktaya dokunun.</string>
+    <string name="gesture_drag_point">Noktayı taşıyın: sağa-sola hareket zamanı, yukarı-aşağı hareket taşıyıcı frekansını değiştirir.</string>
+    <string name="gesture_swipe_fields">Değerlerini artırmak veya azaltmak için nokta düzenleme penceresindeki alanlar üzerinde yukarı-aşağı kaydırın.</string>
+    <string name="gesture_range_labels">Grafiğin sınırlarını değiştirmek için sınır frekansı etiketlerine (%1$s ve %2$s) dokunun.</string>
+    <string name="gesture_scrub_handle">Düzenlenen ön ayar oynatılırken ◀|▶ tutamacını sağa-sola taşıyarak oynatma konumunu değiştirin.</string>
+    <string name="got_it">Anladım</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Günün başka bir saatini dinleyin</string>
+    <string name="scrub_reset_description">Dinlemeyi geçerli zamana geri döndürün</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">Vuruş</string>
+    <string name="carrier_frequency">Taşıyıcı</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%1$.0f Hz</string>
+    <string name="hz_value_format_decimal">%1$.1f Hz</string>
+    
+    <!-- Notification -->
+    <string name="notification_channel_name">Oynatma</string>
+    <string name="notification_channel_description">Binaural ritim oynatmayı yönetme</string>
+    <string name="notification_playing">Oynatılıyor</string>
+    <string name="notification_paused">Duraklatıldı</string>
+    <string name="notification_title">Vuruş: %1$.1f Hz | Taşıyıcı: %2$.0f Hz</string>
+    <string name="action_play">Oynat</string>
+    <string name="action_pause">Duraklat</string>
+    <string name="action_stop">Durdur</string>
+    <string name="action_exit">Çıkış</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Kulaklık bağlayın</string>
+    <string name="headphone_required_message">Binaural ritimler yalnızca kulaklık takılıyken çalışır</string>
+    <string name="headphone_required_dont_show_again">Tekrar gösterme</string>
+    <string name="headphone_required_dismiss">Anladım</string>
+    <string name="debug_virtual_time_title">HATA AYIKLAMA: sanal zaman</string>
+    <string name="debug_unlink_from_real_time">Gerçek zamandan ayır</string>
+    <string name="debug_current_time">Geçerli zaman: %1$s</string>
+    <string name="debug_time_of_day_scrub">Günün saati (scrub)</string>
+    <string name="debug_speed">Hızlandırma: %1$dx</string>
+    <string name="debug_time_pause">Zamanı duraklat</string>
+    <string name="debug_time_flow">Zaman akışı</string>
+    <string name="debug_to_real_time">Gerçek zamana dön</string>
+
+    <string name="export_failed_reason_data_lost">dışa aktarma verileri kayboldu, lütfen tekrar deneyin</string>
+    <string name="export_failed_reason_preset_not_found">ön ayar bulunamadı</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="preset_circadian_rhythm">Ritmo circadiano</string>
+    <string name="preset_gamma_productivity">Productividad gamma</string>
+    <string name="preset_daily_cycle">Ciclo diario</string>
+</resources>

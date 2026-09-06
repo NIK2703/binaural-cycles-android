@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">바이노럴 사이클</string>
+
+    <!-- Navigation -->
+    <string name="back">뒤로</string>
+    <string name="settings">설정</string>
+    <string name="menu">메뉴</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">바이노럴 사이클</string>
+    <string name="add_preset">프리셋 추가</string>
+    <string name="create_preset">프리셋 만들기</string>
+    <string name="no_presets_message">저장된 프리셋이 없습니다.\n메뉴를 열어 새 프리셋을 만드세요.</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">새 프리셋</string>
+    <string name="draft_preset">초안</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">일주기 리듬</string>
+    <string name="preset_gamma_productivity">감마 생산성</string>
+    <string name="preset_daily_cycle">일일 주기</string>
+
+    <string name="edit_preset">편집</string>
+    <string name="preset_name">프리셋 이름</string>
+    <string name="import_preset">가져오기</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">%1$s 프리셋을 내보냈습니다.</string>
+    <string name="export_failed">프리셋을 내보내지 못했습니다: %1$s</string>
+    <string name="import_success">%1$s 프리셋을 가져왔습니다.</string>
+    <string name="import_failed">프리셋을 가져오는 중 오류가 발생했습니다.</string>
+
+    <string name="save">저장</string>
+    <string name="do_not_save">저장하지 않음</string>
+
+    <!-- Context Menu -->
+    <string name="edit">편집</string>
+    <string name="duplicate">복제</string>
+    <string name="export">내보내기</string>
+    <string name="delete">삭제</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">프리셋을 삭제할까요?</string>
+    <string name="delete_preset_message">\"%s\" 프리셋이 영구적으로 삭제됩니다.</string>
+    <string name="cancel">취소</string>
+    <string name="unsaved_changes_title">저장하지 않은 변경사항</string>
+    <string name="unsaved_changes_message">저장되지 않은 변경사항이 있습니다. 나가기 전에 저장할까요?</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">포인트 보간</string>
+    <string name="interpolation_description">그래프 포인트 사이의 값을 계산하는 방법입니다.</string>
+    <string name="linear">선형</string>
+    <string name="cardinal">카디널</string>
+    <string name="monotone">단조형</string>
+    <string name="step">계단형</string>
+    <string name="spline_tension">스플라인 텐션</string>
+    <string name="spline_tension_description">0 = 부드러운 Catmull-Rom, 1 = 거의 선형</string>
+    <string name="step_fade_duration">스텝 페이드 지속 시간</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">채널 전환</string>
+    <string name="channel_swap_description">좌우 채널을 서로 바꿔 재생 균형을 유지합니다.</string>
+    <string name="channel_swap_disabled">꺼짐</string>
+    <string name="swap_interval">채널 전환 간격</string>
+    <string name="swap_mode_off_description">채널을 항상 기본 상태로 유지합니다.</string>
+    <string name="swap_mode_timer">타이머</string>
+    <string name="swap_mode_trend">추세</string>
+    <string name="swap_mode_timer_description">설정한 간격마다 좌우 채널을 서로 바꿉니다.</string>
+    <string name="swap_mode_trend_description">선택한 유형의 비트 주파수 변화 추세가 바뀌는 지점에서 채널을 전환합니다.</string>
+    <string name="swap_points">채널 전환 대상 추세 유형</string>
+    <string name="swap_points_both">모두</string>
+    <string name="swap_points_decline">감소</string>
+    <string name="swap_points_growth">증가</string>
+    <string name="smooth_fade">부드러운 페이드</string>
+    <string name="smooth_fade_description">채널 전환 시 부드럽게 페이드합니다.</string>
+    <string name="instant_switch">즉시 전환</string>
+    <string name="fade_duration">페이드 지속 시간</string>
+    <string name="pause_on_switch">전환 시 일시정지</string>
+    <string name="no_pause">일시정지 없음</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">볼륨 정규화</string>
+    <string name="volume_normalization_description">균일한 소리를 위해 볼륨을 맞춥니다.</string>
+    <string name="normalization_strength">정규화 강도</string>
+
+    <!-- Normalization Types -->
+    <string name="normalization_none">사용 안 함</string>
+    <string name="normalization_channel">채널별</string>
+    <string name="normalization_temporal">시간별</string>
+    <string name="normalization_none_description">볼륨을 조정하지 않습니다.</string>
+    <string name="normalization_channel_description">좌우 채널의 톤 주파수 비율에 따라 볼륨을 맞춥니다.</string>
+    <string name="normalization_temporal_description">재생 중인 프리셋에서 가장 낮은 채널 주파수를 기준으로 채널 볼륨을 맞춥니다.</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">시간 정규화</string>
+    <string name="temporal_normalization_description">균일한 소리를 위해 그래프 포인트 간 볼륨을 맞춥니다.</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">이완 구간</string>
+    <string name="relaxation_mode_description">설정한 주기마다 주파수를 낮춥니다.</string>
+    <string name="carrier_reduction">캐리어 주파수 감소</string>
+    <string name="carrier_reduction_description">이완 구간에서 캐리어 주파수를 낮추는 비율입니다.</string>
+    <string name="beat_reduction">비트 주파수 감소</string>
+    <string name="beat_reduction_description">이완 구간에서 비트 주파수를 낮추는 비율입니다.</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">이완 구간 간격</string>
+    <string name="relaxation_duration">이완 구간 길이</string>
+    <string name="transition_period">전환 시간</string>
+    <string name="transition_period_description">낮아진 주파수로 부드럽게 전환했다가 다시 복귀하는 시간입니다.</string>
+    <string name="minutes_format">%d분</string>
+    <string name="relaxation_range_fade">범위별 감쇠</string>
+    <string name="relaxation_range_fade_description">그래프의 캐리어 및 비트 주파수가 최소값에 가까울수록 이완 구간 효과를 줄입니다.</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">버퍼 생성 간격</string>
+    <string name="buffer_generation_description">오디오 버퍼를 몇 분 앞까지 생성할지 설정합니다. 간격을 크게 하면 프로세서가 깨어나는 횟수가 줄어 배터리가 절약됩니다.</string>
+    <string name="update_interval">주파수 업데이트 간격</string>
+    <string name="update_interval_description">재생 주파수를 다시 계산하는 간격입니다.</string>
+    <string name="audio_quality">샘플링 주파수</string>
+    <string name="audio_quality_description">낮은 값을 선택하면 배터리 소모가 줄어듭니다.</string>
+    <string name="quality_ultra_low">8kHz — 최대 배터리 절약</string>
+    <string name="quality_very_low">16kHz</string>
+    <string name="quality_low">22kHz — 배터리 절약</string>
+    <string name="quality_standard">44kHz — 표준</string>
+    <string name="quality_high">48kHz — 최고 음질</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">웨이브테이블 합성</string>
+    <string name="wavetable_optimization_enabled_desc">웨이브테이블 합성으로 프로세서 부하를 줄입니다.</string>
+    <string name="wavetable_optimization_disabled_desc">사인파를 실시간으로 직접 계산합니다.</string>
+    <string name="wavetable_size">합성 정밀도</string>
+    <string name="wavetable_size_samples">%1$d샘플</string>
+    <string name="wavetable_size_description">값이 클수록 소리가 더 정확해지지만 메모리를 조금 더 사용합니다.</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">재생</string>
+    <string name="settings_section_power">배터리</string>
+    <string name="settings_section_interface">인터페이스</string>
+    <string name="settings_section_debug">디버그</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">헤드셋 연결 시 다시 재생</string>
+    <string name="resume_on_headset_connect_desc">헤드셋이 분리되어 재생이 멈춘 경우, 헤드셋을 다시 연결하면 자동으로 재생을 재개합니다.</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">앱 시작 시 다시 재생</string>
+    <string name="auto_resume_on_app_start_desc">앱을 시작할 때 자동으로 재생을 다시 시작합니다.</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">헤드폰 연결</string>
+    <string name="headphone_reminder_desc">바이노럴 비트를 들으려면 헤드폰을 연결해야 한다는 알림을 표시합니다.</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">백그라운드 재생</string>
+    <string name="uninterrupted_background_playback_desc">백그라운드에서 비트가 끊기지 않도록 앱을 배터리 최적화 제외 목록에 추가하세요.</string>
+    <string name="battery_optimization_prompt_title">백그라운드 중단 방지</string>
+    <string name="battery_optimization_prompt_message">배터리 절약을 위해 시스템이 앱의 백그라운드 작업을 일시 중지할 수 있으며, 이로 인해 비트 재생이 끊길 수 있습니다. 소리가 멈추지 않도록 앱을 배터리 최적화 제외 목록에 추가하세요.</string>
+    <string name="battery_optimization_prompt_confirm">확인</string>
+    <string name="battery_optimization_settings_unavailable">배터리 설정을 열 수 없습니다.</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">초</string>
+    <string name="hz">Hz</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">주파수(Hz)</string>
+    <string name="min_channel_frequency">채널 최저 주파수</string>
+    <string name="max_channel_frequency">채널 최고 주파수</string>
+    <string name="ok">확인</string>
+    <string name="minutes_short">분</string>
+    <string name="hours_short">시간</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">초</string>
+
+    <!-- Playback Controls -->
+    <string name="play">재생</string>
+    <string name="stop">정지</string>
+    <string name="volume">볼륨</string>
+
+    <!-- Point Editor -->
+    <string name="point">포인트</string>
+    <string name="carrier">캐리어</string>
+    <string name="beats">비트</string>
+    <string name="carrier_tone_frequency">캐리어 톤 주파수</string>
+    <string name="beat_frequency_full">비트 주파수</string>
+    <string name="max_format">최대 %.1f</string>
+    <string name="apply">적용</string>
+    <string name="close">닫기</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">제스처 도움말</string>
+    <string name="gestures_help_title">편집기 조작 방법</string>
+    <string name="gesture_add_point">그래프의 빈 곳을 두 번 탭하면 포인트가 추가됩니다.</string>
+    <string name="gesture_select_point">포인트를 탭하면 편집 창이 열립니다.</string>
+    <string name="gesture_drag_point">포인트를 드래그하세요. 좌우로 움직이면 시간이 변경되고, 위아래로 움직이면 캐리어 주파수가 변경됩니다.</string>
+    <string name="gesture_swipe_fields">포인트 편집 창의 필드를 위아래로 스와이프하면 값을 높이거나 낮출 수 있습니다.</string>
+    <string name="gesture_range_labels">주파수 경계값(%1$s 및 %2$s)을 탭하면 그래프 범위를 변경할 수 있습니다.</string>
+    <string name="gesture_scrub_handle">편집 중인 프리셋을 재생하는 동안 ◀|▶ 핸들을 좌우로 드래그하여 재생 위치를 변경할 수 있습니다.</string>
+    <string name="got_it">확인</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">다른 시간대 들어 보기</string>
+    <string name="scrub_reset_description">현재 시간으로 돌아가기</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">비트</string>
+    <string name="carrier_frequency">캐리어</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">재생</string>
+    <string name="notification_channel_description">바이노럴 비트 재생을 제어합니다.</string>
+    <string name="notification_playing">재생 중</string>
+    <string name="notification_paused">일시정지됨</string>
+    <string name="notification_title">비트: %.1f Hz | 캐리어: %.0f Hz</string>
+    <string name="action_play">재생</string>
+    <string name="action_pause">일시정지</string>
+    <string name="action_stop">정지</string>
+    <string name="action_exit">종료</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">헤드폰을 연결하세요</string>
+    <string name="headphone_required_message">바이노럴 비트는 헤드폰으로 들어야 작동합니다.</string>
+    <string name="headphone_required_dont_show_again">다시 표시하지 않음</string>
+    <string name="headphone_required_dismiss">확인</string>
+
+    <!-- Debug -->
+    <string name="debug_virtual_time_title">디버그: 가상 시간</string>
+    <string name="debug_unlink_from_real_time">실제 시간과 분리</string>
+    <string name="debug_current_time">현재 시간: %1$s</string>
+    <string name="debug_time_of_day_scrub">시간대(스크럽)</string>
+    <string name="debug_speed">배속: %1$dx</string>
+    <string name="debug_time_pause">시간 일시정지</string>
+    <string name="debug_time_flow">시간 흐름</string>
+    <string name="debug_to_real_time">실제 시간으로 이동</string>
+
+    <!-- Export failure reasons -->
+    <string name="export_failed_reason_data_lost">내보내기 데이터가 유실되었습니다. 다시 시도하세요.</string>
+    <string name="export_failed_reason_preset_not_found">대상 프리셋을 찾을 수 없습니다.</string>
+</resources>

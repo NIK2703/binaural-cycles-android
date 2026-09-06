@@ -107,8 +107,16 @@ fun BinauralNavigation(
         }
     }
 
-    // Панель отображается только когда есть активный пресет
-    val showBottomPanel = uiState.activePreset != null
+    // Панель отображается, когда есть чем управлять: звучит пресет, звучит
+    // черновик из редактора (draftSounding) или редактор просто открыт —
+    // иначе в нём некуда нажать play, если раньше ничего не звучало.
+    //
+    // editingSessionActive обязателен отдельным флагом: editingFrequencyCurve
+    // после выхода из редактора намеренно не очищается (нужна для shared-
+    // анимации), поэтому по одной лишь кривой панель «уехала» бы на список.
+    val showBottomPanel = uiState.activePreset != null ||
+        uiState.draftSounding ||
+        uiState.editingSessionActive
     
     // Любой сбой экспорта/импорта раньше был полностью тихим: файл создавался
     // и оставался пустым без единого признака ошибки. Теперь результат всегда
@@ -118,6 +126,11 @@ fun BinauralNavigation(
     val exportFailedMessage = stringResource(R.string.export_failed)
     val importSuccessMessage = stringResource(R.string.import_success)
     val importFailedMessage = stringResource(R.string.import_failed)
+    // Причины отказа читаются ЗДЕСЬ, в композиции: ниже они подставляются в
+    // сообщения из корутин (launch/withContext), где stringResource вызывать
+    // нельзя — он композируемый.
+    val exportFailedReasonDataLost = stringResource(R.string.export_failed_reason_data_lost)
+    val exportFailedReasonPresetNotFound = stringResource(R.string.export_failed_reason_preset_not_found)
 
     // Лаунчер для экспорта пресета (создание файла).
     //
@@ -141,7 +154,7 @@ fun BinauralNavigation(
                 // Раньше эта ветка молча пропускалась — и файл оставался пустым
                 android.util.Log.e("PresetExport", "callback: данные экспорта потеряны")
                 snackbarHostState.showSnackbar(
-                    String.format(exportFailedMessage, "данные экспорта потеряны, повторите")
+                    String.format(exportFailedMessage, exportFailedReasonDataLost)
                 )
                 return@launch
             }
@@ -261,7 +274,7 @@ fun BinauralNavigation(
                                         exportLauncher.launch(fileName)
                                     } else {
                                         snackbarHostState.showSnackbar(
-                                            String.format(exportFailedMessage, "пресет не найден")
+                                            String.format(exportFailedMessage, exportFailedReasonPresetNotFound)
                                         )
                                     }
                                 }
@@ -325,7 +338,9 @@ fun BinauralNavigation(
         // чтобы фон Surface заходил под navigation bar
         if (showBottomPanel) {
             BottomPlaybackPanel(
-                presetName = uiState.activePreset?.name,
+                // Черновик звучит под своей подписью («Черновик» или имя из
+                // редактора), а не под именем прежнего активного пресета.
+                presetName = viewModel.soundingPresetName(),
                 beatFrequency = telemetry.currentBeatFrequency,
                 carrierFrequency = telemetry.currentCarrierFrequency,
                 isPlaying = telemetry.isPlaying,

@@ -74,6 +74,9 @@ fun PresetEditScreen(
             viewModel.startEditingPreset(presetId)
         } else {
             viewModel.startNewPreset()
+            // Стартовое имя черновика (поле уже предзаполнено «Новая
+            // предустановка»): дальше его обновляет onValueChange.
+            viewModel.noteDraftName(presetName)
         }
     }
 
@@ -125,11 +128,18 @@ fun PresetEditScreen(
         // вместо двух), а вызов добирает только случай, когда работа выхода
         // не породила хэндоффа вовсе.
         if (presetId == null) {
-            // Создаём новый пресет
+            // Создаём новый пресет.
+            //
+            // activate = звучит ли сейчас черновик. Если да, сохранение не
+            // должно рвать звук: пресет просто приобретает имя и id, кривая
+            // та же самая, менеджер дедуплицирует конфиг и хэндоффа не будет. Если
+            // черновик не звучал, поведение прежнее — пресет просто появляется
+            // в списке и активным не становится.
             viewModel.createPreset(
                 name = presetName,
                 curve = curve,
-                relaxationModeSettings = uiState.editingRelaxationModeSettings
+                relaxationModeSettings = uiState.editingRelaxationModeSettings,
+                activate = uiState.draftSounding
             )
         } else {
             // Обновляем существующий
@@ -310,7 +320,15 @@ fun PresetEditScreen(
                 // Название пресета
                 OutlinedTextField(
                     value = presetName,
-                    onValueChange = { presetName = it },
+                    onValueChange = {
+                        presetName = it
+                        // Имя черновика запоминается без перекомпозиции (обычное
+                        // поле ViewModel): оно читается один раз — когда черновик
+                        // начинает звучать, — и уходит в панель и уведомление.
+                        // Держать его в uiState нельзя: тогда каждый символ
+                        // перекомпоновал бы весь экран вместе с графиком.
+                        if (presetId == null) viewModel.noteDraftName(it)
+                    },
                     label = { Text(stringResource(R.string.preset_name)) },
                     modifier = Modifier
                         .fillMaxWidth()
@@ -320,8 +338,13 @@ fun PresetEditScreen(
                 
                 // График частот (используем редактируемую кривую)
                 val editingCurve = uiState.editingFrequencyCurve
-                // Показываем указатель текущей частоты только если редактируется активный пресет
-                val isEditingActivePreset = presetId != null && uiState.activePreset?.id == presetId
+                // Показываем указатель текущей частоты, только если звучит то,
+                // что открыто в редакторе: для сохранённого пресета — совпадение
+                // с активным, для нового (черновика) — флаг draftSounding.
+                // Черновик звучит под своим флагом: activePreset он не затирает
+                // (это точка возврата), поэтому сравнивать id здесь нечего.
+                val isEditingSounding = if (presetId == null) uiState.draftSounding
+                                        else uiState.activePreset?.id == presetId
 
                 if (editingCurve != null) {
                     FrequencyGraph(
@@ -333,13 +356,15 @@ fun PresetEditScreen(
                         beatRange = editingCurve.beatRange,
                         interpolationType = editingCurve.interpolationType,
                         splineTension = editingCurve.splineTension,
-                        // Показываем указатель только если редактируется активный пресет
-                        isPlaying = isEditingActivePreset && telemetry.isPlaying,
+                        // Показываем указатель только если звучит редактируемое
+                        // (пресет или черновик)
+                        isPlaying = isEditingSounding && telemetry.isPlaying,
                         relaxationModeSettings = uiState.editingRelaxationModeSettings,
                         // НОВОЕ: единое время (реальное/виртуальное) для указателя на графике
                         externalCurrentTime = telemetry.currentTime,
                         // СКРАБ: ручка прослушивания другого времени суток.
-                        // Появляется только для АКТИВНОГО пресета — это уже
+                        // Появляется только для звучащего редактируемого
+                        // (пресет или черновик) — это уже
                         // заложено в [isPlaying] выше: сдвинутая ось —
                         // осознанная ложь о времени ради прослушивания правки,
                         // и для чужого пресета она бессмысленна.

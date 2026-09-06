@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Siklus Binaural</string>
+
+    <!-- Navigation -->
+    <string name="back">Kembali</string>
+    <string name="settings">Pengaturan</string>
+    <string name="menu">Menu</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Siklus Binaural</string>
+    <string name="add_preset">Tambah prasetel</string>
+    <string name="create_preset">Buat prasetel</string>
+    <string name="no_presets_message">Tidak ada prasetel tersimpan.\nBuka menu untuk membuat yang baru.</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Prasetel baru</string>
+    <string name="draft_preset">Draf</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Irama sirkadian</string>
+    <string name="preset_gamma_productivity">Produktivitas gamma</string>
+    <string name="preset_daily_cycle">Siklus harian</string>
+
+    <string name="edit_preset">Edit prasetel</string>
+    <string name="preset_name">Nama prasetel</string>
+    <string name="import_preset">Impor</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">Prasetel %1$s berhasil diekspor</string>
+    <string name="export_failed">Gagal mengekspor prasetel: %1$s</string>
+    <string name="import_success">Prasetel %1$s berhasil diimpor</string>
+    <string name="import_failed">Terjadi kesalahan saat mengimpor prasetel</string>
+
+    <string name="save">Simpan</string>
+    <string name="do_not_save">Jangan simpan</string>
+
+    <!-- Context Menu -->
+    <string name="edit">Edit</string>
+    <string name="duplicate">Gandakan</string>
+    <string name="export">Ekspor</string>
+    <string name="delete">Hapus</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Hapus prasetel?</string>
+    <string name="delete_preset_message">Prasetel \"%s\" akan dihapus secara permanen.</string>
+    <string name="cancel">Batal</string>
+    <string name="unsaved_changes_title">Perubahan belum disimpan</string>
+    <string name="unsaved_changes_message">Ada perubahan yang belum disimpan. Simpan sebelum keluar?</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">Interpolasi titik</string>
+    <string name="interpolation_description">Metode perhitungan nilai di antara titik-titik grafik</string>
+    <string name="linear">Linear</string>
+    <string name="cardinal">Kardinal</string>
+    <string name="monotone">Monoton</string>
+    <string name="step">Langkah</string>
+    <string name="spline_tension">Tegangan spline</string>
+    <string name="spline_tension_description">0 = Catmull-Rom halus, 1 = hampir linear</string>
+    <string name="step_fade_duration">Durasi fade langkah</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Pergantian kanal</string>
+    <string name="channel_swap_description">Kanal ditukar agar beban lebih merata</string>
+    <string name="channel_swap_disabled">Nonaktif</string>
+    <string name="swap_interval">Interval pergantian kanal</string>
+    <string name="swap_mode_off_description">Kanal selalu pada posisi normal</string>
+    <string name="swap_mode_timer">Timer</string>
+    <string name="swap_mode_trend">Tren</string>
+    <string name="swap_mode_timer_description">Kanal ditukar setelah interval yang ditentukan</string>
+    <string name="swap_mode_trend_description">Pergantian kanal terjadi pada titik perubahan tren frekuensi beat untuk jenis yang dipilih</string>
+    <string name="swap_points">Jenis transisi dengan pergantian kanal</string>
+    <string name="swap_points_both">Semua</string>
+    <string name="swap_points_decline">Penurunan</string>
+    <string name="swap_points_growth">Kenaikan</string>
+    <string name="smooth_fade">Fade halus</string>
+    <string name="smooth_fade_description">Transisi halus saat pergantian kanal</string>
+    <string name="instant_switch">Pergantian instan</string>
+    <string name="fade_duration">Durasi fade</string>
+    <string name="pause_on_switch">Jeda saat pergantian</string>
+    <string name="no_pause">Tanpa jeda</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Normalisasi volume</string>
+    <string name="volume_normalization_description">Menyamakan volume agar suara lebih merata</string>
+    <string name="normalization_strength">Kekuatan normalisasi</string>
+
+    <!-- Normalization Types -->
+    <string name="normalization_none">Nonaktif</string>
+    <string name="normalization_channel">Kanal</string>
+    <string name="normalization_temporal">Temporal</string>
+    <string name="normalization_none_description">Volume tidak disamakan</string>
+    <string name="normalization_channel_description">Menyamakan volume antara kanal kiri dan kanan berdasarkan perbandingan frekuensi nada masing-masing kanal</string>
+    <string name="normalization_temporal_description">Menyamakan volume kanal berdasarkan frekuensi kanal terendah dari prasetel yang sedang diputar</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Normalisasi temporal</string>
+    <string name="temporal_normalization_description">Menyamakan volume antara titik-titik grafik agar suara lebih merata</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Periode relaksasi</string>
+    <string name="relaxation_mode_description">Penurunan frekuensi secara berkala</string>
+    <string name="carrier_reduction">Penurunan frekuensi carrier</string>
+    <string name="carrier_reduction_description">Persentase penurunan frekuensi carrier selama periode relaksasi</string>
+    <string name="beat_reduction">Penurunan frekuensi beat</string>
+    <string name="beat_reduction_description">Persentase penurunan frekuensi beat selama periode relaksasi</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">Jeda antara periode</string>
+    <string name="relaxation_duration">Durasi periode</string>
+    <string name="transition_period">Durasi transisi</string>
+    <string name="transition_period_description">Waktu transisi halus ke frekuensi yang dikurangi dan kembali</string>
+    <string name="minutes_format">%d mnt</string>
+    <string name="relaxation_range_fade">Pengurangan berdasarkan rentang</string>
+    <string name="relaxation_range_fade_description">Mengurangi intensitas periode relaksasi saat mendekati nilai minimum rentang frekuensi carrier dan beat pada grafik</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">Interval pembuatan buffer</string>
+    <string name="buffer_generation_description">Berapa menit buffer audio dibuat terlebih dahulu. Interval yang lebih besar membuat prosesor lebih jarang aktif dan menghemat baterai</string>
+    <string name="update_interval">Interval pembaruan frekuensi</string>
+    <string name="update_interval_description">Seberapa sering frekuensi pemutaran dihitung ulang</string>
+    <string name="audio_quality">Frekuensi sampling</string>
+    <string name="audio_quality_description">Nilai rendah mengurangi konsumsi daya</string>
+    <string name="quality_ultra_low">8 kHz — penghematan maksimal</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz — hemat baterai</string>
+    <string name="quality_standard">44 kHz — standar</string>
+    <string name="quality_high">48 kHz — kualitas maksimal</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Sintesis wavetable</string>
+    <string name="wavetable_optimization_enabled_desc">Mengurangi beban prosesor melalui sintesis wavetable</string>
+    <string name="wavetable_optimization_disabled_desc">Menghitung sinusoida langsung secara real-time</string>
+    <string name="wavetable_size">Presisi sintesis</string>
+    <string name="wavetable_size_samples">%1$d sampel</string>
+    <string name="wavetable_size_description">Nilai lebih besar menghasilkan suara lebih akurat, tetapi sedikit meningkatkan penggunaan memori</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Pemutaran</string>
+    <string name="settings_section_power">Konsumsi daya</string>
+    <string name="settings_section_interface">Antarmuka</string>
+    <string name="settings_section_debug">Debug</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Lanjutkan saat headset terhubung</string>
+    <string name="resume_on_headset_connect_desc">Otomatis melanjutkan pemutaran saat headset terhubung jika sebelumnya dihentikan karena headset dicabut</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Lanjutkan saat aplikasi dimulai</string>
+    <string name="auto_resume_on_app_start_desc">Otomatis melanjutkan pemutaran saat aplikasi dibuka</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Koneksi headphone</string>
+    <string name="headphone_reminder_desc">Mengingatkan untuk menghubungkan headphone sebelum mendengarkan binaural beats</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Pemutaran di latar belakang</string>
+    <string name="uninterrupted_background_playback_desc">Tambahkan aplikasi ke pengecualian penghematan daya latar belakang agar pemutaran binaural beats di latar belakang tidak terputus</string>
+    <string name="battery_optimization_prompt_title">Operasi latar belakang tanpa gangguan</string>
+    <string name="battery_optimization_prompt_message">Sistem dapat menangguhkan aplikasi saat berjalan di latar belakang untuk menghemat baterai — akibatnya pemutaran beat dapat terputus. Tambahkan aplikasi ke pengecualian penghematan daya latar belakang agar suara tidak berhenti.</string>
+    <string name="battery_optimization_prompt_confirm">OK</string>
+    <string name="battery_optimization_settings_unavailable">Tidak dapat membuka pengaturan konsumsi daya</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">dtk</string>
+    <string name="hz">Hz</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Frekuensi (Hz)</string>
+    <string name="min_channel_frequency">Frekuensi kanal minimum</string>
+    <string name="max_channel_frequency">Frekuensi kanal maksimum</string>
+    <string name="ok">OK</string>
+    <string name="minutes_short">mnt</string>
+    <string name="hours_short">jam</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">detik</string>
+
+    <!-- Playback Controls -->
+    <string name="play">Putar</string>
+    <string name="stop">Stop</string>
+    <string name="volume">Volume</string>
+
+    <!-- Point Editor -->
+    <string name="point">Titik</string>
+    <string name="carrier">Carrier</string>
+    <string name="beats">Beat</string>
+    <string name="carrier_tone_frequency">Frekuensi nada carrier</string>
+    <string name="beat_frequency_full">Frekuensi beat</string>
+    <string name="max_format">maks %.1f</string>
+    <string name="apply">Terapkan</string>
+    <string name="close">Tutup</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Bantuan gestur</string>
+    <string name="gestures_help_title">Kontrol di editor</string>
+    <string name="gesture_add_point">Ketuk dua kali pada area kosong grafik untuk menambahkan titik.</string>
+    <string name="gesture_select_point">Ketuk titik untuk membuka jendela edit titik.</string>
+    <string name="gesture_drag_point">Geser titik: ke kanan/kiri untuk mengubah waktu, ke atas/bawah untuk mengubah frekuensi carrier.</string>
+    <string name="gesture_swipe_fields">Geser ke atas/bawah pada kolom di jendela edit titik untuk menambah atau mengurangi nilainya.</string>
+    <string name="gesture_range_labels">Ketuk label batas frekuensi (%1$s dan %2$s) untuk mengubah batas grafik.</string>
+    <string name="gesture_scrub_handle">Saat prasetel yang sedang diedit diputar, geser ◀|▶ ke kanan/kiri untuk mengubah posisi pemutaran.</string>
+    <string name="got_it">Mengerti</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Dengarkan waktu lain dalam sehari</string>
+    <string name="scrub_reset_description">Kembalikan pemutaran ke waktu saat ini</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">Beat</string>
+    <string name="carrier_frequency">Carrier</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">Pemutaran</string>
+    <string name="notification_channel_description">Kontrol pemutaran binaural beats</string>
+    <string name="notification_playing">Sedang diputar</string>
+    <string name="notification_paused">Dijeda</string>
+    <string name="notification_title">Beat: %.1f Hz | Carrier: %.0f Hz</string>
+    <string name="action_play">Putar</string>
+    <string name="action_pause">Jeda</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_exit">Keluar</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Hubungkan headphone</string>
+    <string name="headphone_required_message">Binaural beats hanya berfungsi saat didengarkan melalui headphone</string>
+    <string name="headphone_required_dont_show_again">Jangan tampilkan lagi</string>
+    <string name="headphone_required_dismiss">Mengerti</string>
+
+    <string name="debug_virtual_time_title">DEBUG: Waktu virtual</string>
+    <string name="debug_unlink_from_real_time">Lepaskan dari waktu nyata</string>
+    <string name="debug_current_time">Waktu saat ini: %1$s</string>
+    <string name="debug_time_of_day_scrub">Waktu dalam sehari (scrub)</string>
+    <string name="debug_speed">Percepatan: %1$dx</string>
+    <string name="debug_time_pause">Jeda waktu</string>
+    <string name="debug_time_flow">Waktu berjalan</string>
+    <string name="debug_to_real_time">Ke waktu nyata</string>
+
+    <string name="export_failed_reason_data_lost">data ekspor hilang, coba lagi</string>
+    <string name="export_failed_reason_preset_not_found">prasetel tidak ditemukan</string>
+</resources>

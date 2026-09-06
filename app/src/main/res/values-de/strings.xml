@@ -1,0 +1,242 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Binaurale Zyklen</string>
+
+    <!-- Navigation -->
+    <string name="back">Zurück</string>
+    <string name="settings">Einstellungen</string>
+    <string name="menu">Menü</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Binaurale Zyklen</string>
+    <string name="add_preset">Voreinstellung hinzufügen</string>
+    <string name="create_preset">Voreinstellung erstellen</string>
+    <string name="no_presets_message">Keine gespeicherten Voreinstellungen.\nÖffnen Sie das Menü, um eine neue Voreinstellung zu erstellen.</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Neue Voreinstellung</string>
+    <string name="draft_preset">Entwurf</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Zirkadianer Rhythmus</string>
+    <string name="preset_gamma_productivity">Gamma-Produktivität</string>
+    <string name="preset_daily_cycle">Tageszyklus</string>
+
+    <string name="edit_preset">Voreinstellung bearbeiten</string>
+    <string name="preset_name">Name der Voreinstellung</string>
+    <string name="import_preset">Importieren</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">Voreinstellung %1$s wurde exportiert</string>
+    <string name="export_failed">Die Voreinstellung konnte nicht exportiert werden: %1$s</string>
+    <string name="import_success">Voreinstellung %1$s wurde importiert</string>
+    <string name="import_failed">Beim Importieren der Voreinstellung ist ein Fehler aufgetreten</string>
+
+    <string name="save">Speichern</string>
+    <string name="do_not_save">Nicht speichern</string>
+
+    <!-- Context Menu -->
+    <string name="edit">Bearbeiten</string>
+    <string name="duplicate">Duplizieren</string>
+    <string name="export">Exportieren</string>
+    <string name="delete">Löschen</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Voreinstellung löschen?</string>
+    <string name="delete_preset_message">Die Voreinstellung &quot;%s&quot; wird unwiderruflich gelöscht.</string>
+    <string name="cancel">Abbrechen</string>
+    <string name="unsaved_changes_title">Nicht gespeicherte Änderungen</string>
+    <string name="unsaved_changes_message">Sie haben nicht gespeicherte Änderungen. Vor dem Verlassen speichern?</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">Interpolation zwischen Punkten</string>
+    <string name="interpolation_description">Methode zur Berechnung von Werten zwischen Diagrammpunkten</string>
+    <string name="linear">Linear</string>
+    <string name="cardinal">Kardinal</string>
+    <string name="monotone">Monoton</string>
+    <string name="step">Stufenförmig</string>
+    <string name="spline_tension">Spline-Spannung</string>
+    <string name="spline_tension_description">0 = weicher Catmull-Rom, 1 = nahezu linear</string>
+    <string name="step_fade_duration">Dauer der Stufenüberblendung</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Automatischer Kanalwechsel</string>
+    <string name="channel_swap_description">Kanäle werden zur gleichmäßigen Beanspruchung getauscht</string>
+    <string name="channel_swap_disabled">Aus</string>
+    <string name="swap_interval">Intervall für Kanalwechsel</string>
+    <string name="swap_mode_off_description">Kanäle bleiben immer in der Standardanordnung</string>
+    <string name="swap_mode_timer">Timer</string>
+    <string name="swap_mode_trend">Trend</string>
+    <string name="swap_mode_timer_description">Kanäle werden nach einem festen Intervall getauscht</string>
+    <string name="swap_mode_trend_description">Der Kanalwechsel erfolgt an Punkten der ausgewählten Punkttypen, an denen sich der Trend der Beat-Frequenzänderung ändert</string>
+    <string name="swap_points">Übergangstypen mit Kanalwechsel</string>
+    <string name="swap_points_both">Alle</string>
+    <string name="swap_points_decline">Abfall</string>
+    <string name="swap_points_growth">Anstieg</string>
+    <string name="smooth_fade">Sanfte Überblendung</string>
+    <string name="smooth_fade_description">Sanfter Übergang beim Kanalwechsel</string>
+    <string name="instant_switch">Sofortiges Umschalten</string>
+    <string name="fade_duration">Überblendungsdauer</string>
+    <string name="pause_on_switch">Pause beim Umschalten</string>
+    <string name="no_pause">Ohne Pause</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Lautstärkenormalisierung</string>
+    <string name="volume_normalization_description">Lautstärkeangleichung für gleichmäßigen Klang</string>
+    <string name="normalization_strength">Stärke der Normalisierung</string>
+
+    <!-- Normalization Types -->
+    <string name="normalization_none">Keine</string>
+    <string name="normalization_channel">Kanalbezogen</string>
+    <string name="normalization_temporal">Zeitlich</string>
+    <string name="normalization_none_description">Die Lautstärke wird nicht angeglichen</string>
+    <string name="normalization_channel_description">Lautstärke zwischen linkem und rechtem Kanal anhand des Frequenzverhältnisses der Töne beider Kanäle angleichen</string>
+    <string name="normalization_temporal_description">Lautstärke der Kanäle anhand der niedrigsten Kanalfrequenz der wiedergegebenen Voreinstellung angleichen</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Zeitliche Normalisierung</string>
+    <string name="temporal_normalization_description">Lautstärke zwischen Diagrammpunkten für gleichmäßigen Klang angleichen</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Entspannungsphasen</string>
+    <string name="relaxation_mode_description">Periodische Absenkung der Frequenzen</string>
+    <string name="carrier_reduction">Absenkung der Trägerfrequenz</string>
+    <string name="carrier_reduction_description">Prozentuale Absenkung der Trägerfrequenz während der Entspannungsphasen</string>
+    <string name="beat_reduction">Absenkung der Beat-Frequenz</string>
+    <string name="beat_reduction_description">Prozentuale Absenkung der Beat-Frequenz während der Entspannungsphasen</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">Abstand zwischen den Entspannungsphasen</string>
+    <string name="relaxation_duration">Dauer der Entspannungsphase</string>
+    <string name="transition_period">Übergangsdauer</string>
+    <string name="transition_period_description">Zeit für den sanften Übergang zu reduzierten Frequenzen und zurück</string>
+    <string name="minutes_format">%d Min.</string>
+    <string name="relaxation_range_fade">Bereichsabhängige Abschwächung</string>
+    <string name="relaxation_range_fade_description">Verringert die Intensität der Entspannungsphasen nahe den Minimalwerten der Träger- und Beat-Frequenzbereiche des Diagramms</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">Puffer-Generierungsintervall</string>
+    <string name="buffer_generation_description">Legt fest, wie viele Minuten im Voraus der Audiopuffer generiert wird. Ein größeres Intervall reduziert die Anzahl der Aufwachvorgänge des Prozessors und schont den Akku</string>
+    <string name="update_interval">Aktualisierungsintervall für Frequenzen</string>
+    <string name="update_interval_description">Wie oft die Wiedergabefrequenzen neu berechnet werden</string>
+    <string name="audio_quality">Abtastrate</string>
+    <string name="audio_quality_description">Niedrige Werte senken den Energieverbrauch</string>
+    <string name="quality_ultra_low">8 kHz – maximale Energieersparnis</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz – energiesparend</string>
+    <string name="quality_standard">44 kHz – Standard</string>
+    <string name="quality_high">48 kHz – höchste Qualität</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Wavetable-Synthese</string>
+    <string name="wavetable_optimization_enabled_desc">Senkt die Prozessorlast durch Wavetable-Synthese</string>
+    <string name="wavetable_optimization_disabled_desc">Direkte Sinusberechnung in Echtzeit</string>
+    <string name="wavetable_size">Synthesegenauigkeit</string>
+    <string name="wavetable_size_samples">%1$d Samples</string>
+    <string name="wavetable_size_description">Ein höherer Wert bedeutet genaueren Klang und etwas höheren Speicherverbrauch</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Wiedergabe</string>
+    <string name="settings_section_power">Energieverbrauch</string>
+    <string name="settings_section_interface">Oberfläche</string>
+    <string name="settings_section_debug">Debug</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Fortsetzen beim Verbinden</string>
+    <string name="resume_on_headset_connect_desc">Wiedergabe automatisch fortsetzen, wenn ein Headset verbunden wird und sie zuvor wegen einer Trennung gestoppt wurde</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Fortsetzen beim App-Start</string>
+    <string name="auto_resume_on_app_start_desc">Wiedergabe beim Start der App automatisch fortsetzen</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Kopfhörer-Hinweis</string>
+    <string name="headphone_reminder_desc">Erinnert daran, dass zum Hören von binauralen Beats Kopfhörer benötigt werden</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Hintergrundwiedergabe</string>
+    <string name="uninterrupted_background_playback_desc">Nehmen Sie die App von der Hintergrund-Akkuoptimierung aus, damit binaurale Beats im Hintergrund ununterbrochen weiterlaufen</string>
+    <string name="battery_optimization_prompt_title">Unterbrechungsfreie Hintergrundwiedergabe</string>
+    <string name="battery_optimization_prompt_message">Das System kann die App im Hintergrund anhalten, um Akku zu sparen. Dadurch kann die Wiedergabe unterbrochen werden. Nehmen Sie die App von der Hintergrund-Akkuoptimierung aus, damit der Ton nicht stoppt.</string>
+    <string name="battery_optimization_prompt_confirm">OK</string>
+    <string name="battery_optimization_settings_unavailable">Die Energieeinstellungen konnten nicht geöffnet werden</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">Sek.</string>
+    <string name="hz">Hz</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Frequenz (Hz)</string>
+    <string name="min_channel_frequency">Minimale Kanalfrequenz</string>
+    <string name="max_channel_frequency">Maximale Kanalfrequenz</string>
+    <string name="ok">OK</string>
+    <string name="minutes_short">Min.</string>
+    <string name="hours_short">Std.</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">Sekunden</string>
+
+    <!-- Playback Controls -->
+    <string name="play">Wiedergabe</string>
+    <string name="stop">Stopp</string>
+    <string name="volume">Lautstärke</string>
+
+    <!-- Point Editor -->
+    <string name="point">Punkt</string>
+    <string name="carrier">Träger</string>
+    <string name="beats">Beat</string>
+    <string name="carrier_tone_frequency">Trägerfrequenz</string>
+    <string name="beat_frequency_full">Beat-Frequenz</string>
+    <string name="max_format">max. %.1f</string>
+    <string name="apply">Übernehmen</string>
+    <string name="close">Schließen</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Hilfe zu Gesten</string>
+    <string name="gestures_help_title">Steuerung im Editor</string>
+    <string name="gesture_add_point">Tippen Sie doppelt auf eine freie Stelle im Diagramm, um einen Punkt hinzuzufügen.</string>
+    <string name="gesture_select_point">Tippen Sie auf einen Punkt, um das Bearbeitungsfenster zu öffnen.</string>
+    <string name="gesture_drag_point">Verschieben Sie einen Punkt: nach rechts/links, um die Zeit zu ändern, nach oben/unten, um die Trägerfrequenz zu ändern.</string>
+    <string name="gesture_swipe_fields">Streichen Sie über die Felder des Bearbeitungsfensters nach oben oder unten, um Werte zu erhöhen oder zu verringern.</string>
+    <string name="gesture_range_labels">Tippen Sie auf die Frequenzgrenzwerte (%1$s und %2$s), um die Diagrammgrenzen zu ändern.</string>
+    <string name="gesture_scrub_handle">Verschieben Sie während der Wiedergabe der bearbeiteten Voreinstellung den Regler ◀|▶ nach rechts oder links, um die Wiedergabeposition zu ändern.</string>
+    <string name="got_it">Verstanden</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Eine andere Tageszeit anhören</string>
+    <string name="scrub_reset_description">Wiedergabe auf den aktuellen Zeitpunkt zurücksetzen</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">Beat</string>
+    <string name="carrier_frequency">Träger</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">Wiedergabe</string>
+    <string name="notification_channel_description">Steuerung der Wiedergabe binauraler Beats</string>
+    <string name="notification_playing">Wiedergabe</string>
+    <string name="notification_paused">Pausiert</string>
+    <string name="notification_title">Beat: %1$.1f Hz | Träger: %2$.0f Hz</string>
+    <string name="action_play">Wiedergeben</string>
+    <string name="action_pause">Pause</string>
+    <string name="action_stop">Stopp</string>
+    <string name="action_exit">Beenden</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Kopfhörer erforderlich</string>
+    <string name="headphone_required_message">Binaurale Beats funktionieren nur mit Kopfhörern</string>
+    <string name="headphone_required_dont_show_again">Nicht mehr anzeigen</string>
+    <string name="headphone_required_dismiss">Verstanden</string>
+
+    <string name="debug_virtual_time_title">DEBUG: Virtuelle Zeit</string>
+    <string name="debug_unlink_from_real_time">Von der Echtzeit entkoppeln</string>
+    <string name="debug_current_time">Aktuelle Zeit: %1$s</string>
+    <string name="debug_time_of_day_scrub">Tageszeit (Scrub)</string>
+    <string name="debug_speed">Beschleunigung: %1$dx</string>
+    <string name="debug_time_pause">Zeit anhalten</string>
+    <string name="debug_time_flow">Zeitablauf</string>
+    <string name="debug_to_real_time">Zurück zur Echtzeit</string>
+
+    <string name="export_failed_reason_data_lost">Exportdaten sind verloren gegangen – bitte erneut versuchen</string>
+    <string name="export_failed_reason_preset_not_found">Voreinstellung nicht gefunden</string>
+</resources>

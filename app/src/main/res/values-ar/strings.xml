@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">الدورات ثنائية الأذن</string>
+
+    <!-- Navigation -->
+    <string name="back">رجوع</string>
+    <string name="settings">الإعدادات</string>
+    <string name="menu">القائمة</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">الدورات ثنائية الأذن</string>
+    <string name="add_preset">إضافة إعداد مسبق</string>
+    <string name="create_preset">إنشاء إعداد مسبق</string>
+    <string name="no_presets_message">لا توجد إعدادات مسبقة محفوظة.\nافتح القائمة لإنشاء إعداد جديد.</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">إعداد مسبق جديد</string>
+    <string name="draft_preset">مسودة</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">الإيقاع اليومي</string>
+    <string name="preset_gamma_productivity">إنتاجية غاما</string>
+    <string name="preset_daily_cycle">الدورة اليومية</string>
+
+    <string name="edit_preset">تحرير الإعداد المسبق</string>
+    <string name="preset_name">اسم الإعداد المسبق</string>
+    <string name="import_preset">استيراد</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">تم تصدير الإعداد المسبق %1$s</string>
+    <string name="export_failed">تعذّر تصدير الإعداد المسبق: %1$s</string>
+    <string name="import_success">تم استيراد الإعداد المسبق %1$s</string>
+    <string name="import_failed">حدث خطأ أثناء استيراد الإعداد المسبق</string>
+
+    <string name="save">حفظ</string>
+    <string name="do_not_save">عدم الحفظ</string>
+
+    <!-- Context Menu -->
+    <string name="edit">تحرير</string>
+    <string name="duplicate">تكرار</string>
+    <string name="export">تصدير</string>
+    <string name="delete">حذف</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">هل تريد حذف الإعداد المسبق؟</string>
+    <string name="delete_preset_message">سيتم حذف الإعداد المسبق \"%s\" نهائيًا.</string>
+    <string name="cancel">إلغاء</string>
+    <string name="unsaved_changes_title">تغييرات غير محفوظة</string>
+    <string name="unsaved_changes_message">لديك تغييرات غير محفوظة. هل تريد حفظها قبل الخروج؟</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">الاستيفاء بين النقاط</string>
+    <string name="interpolation_description">طريقة حساب القيم بين نقاط المخطط</string>
+    <string name="linear">خطي</string>
+    <string name="cardinal">كاردينال</string>
+    <string name="monotone">رتيب</string>
+    <string name="step">متدرّج</string>
+    <string name="spline_tension">شدّ المنحنى</string>
+    <string name="spline_tension_description">0 = منحنى Catmull-Rom سلس، 1 = شبه خطي</string>
+    <string name="step_fade_duration">مدة التلاشي</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">تبديل القنوات</string>
+    <string name="channel_swap_description">يتم تبديل القنوات لتوزيع الحمل بالتساوي</string>
+    <string name="channel_swap_disabled">معطّل</string>
+    <string name="swap_interval">فاصل تبديل القنوات</string>
+    <string name="swap_mode_off_description">القنوات دائمًا بالترتيب العادي</string>
+    <string name="swap_mode_timer">مؤقّت</string>
+    <string name="swap_mode_trend">الاتجاه</string>
+    <string name="swap_mode_timer_description">يتم تبديل القنوات بعد فاصل زمني محدد</string>
+    <string name="swap_mode_trend_description">يتم تبديل القنوات عند نقاط تغيّر اتجاه تردد النبض للأنواع المحددة</string>
+    <string name="swap_points">أنواع الانتقالات التي تتضمن تبديل القنوات</string>
+    <string name="swap_points_both">الكل</string>
+    <string name="swap_points_decline">الانخفاض</string>
+    <string name="swap_points_growth">الارتفاع</string>
+    <string name="smooth_fade">تلاشٍ سلس</string>
+    <string name="smooth_fade_description">انتقال سلس عند تبديل القنوات</string>
+    <string name="instant_switch">تبديل فوري</string>
+    <string name="fade_duration">مدة التلاشي</string>
+    <string name="pause_on_switch">إيقاف مؤقت عند التبديل</string>
+    <string name="no_pause">بدون إيقاف مؤقت</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">تسوية مستوى الصوت</string>
+    <string name="volume_normalization_description">موازنة مستوى الصوت للحصول على صوت متوازن</string>
+    <string name="normalization_strength">قوة التسوية</string>
+
+    <!-- Normalization Types -->
+    <string name="normalization_none">معطّلة</string>
+    <string name="normalization_channel">تسوية القنوات</string>
+    <string name="normalization_temporal">تسوية زمنية</string>
+    <string name="normalization_none_description">لا تتم موازنة مستوى الصوت</string>
+    <string name="normalization_channel_description">موازنة مستوى الصوت بين القناتين اليسرى واليمنى حسب نسبة ترددَي النغمتين فيهما</string>
+    <string name="normalization_temporal_description">موازنة مستوى صوت القناتين حسب أدنى تردد قناة في الإعداد المسبق قيد التشغيل</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">التسوية الزمنية</string>
+    <string name="temporal_normalization_description">موازنة مستوى الصوت بين نقاط المخطط للحصول على صوت متوازن</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">فترات الاسترخاء</string>
+    <string name="relaxation_mode_description">خفض الترددات على فترات محددة</string>
+    <string name="carrier_reduction">خفض التردد الحامل</string>
+    <string name="carrier_reduction_description">نسبة خفض التردد الحامل أثناء فترات الاسترخاء</string>
+    <string name="beat_reduction">خفض تردد النبض</string>
+    <string name="beat_reduction_description">نسبة خفض تردد النبض أثناء فترات الاسترخاء</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">الفاصل بين الفترات</string>
+    <string name="relaxation_duration">مدة الفترة</string>
+    <string name="transition_period">مدة الانتقال</string>
+    <string name="transition_period_description">وقت الانتقال السلس إلى الترددات المخفّضة والعودة</string>
+    <string name="minutes_format">%d د</string>
+    <string name="relaxation_range_fade">تلاشي النطاق</string>
+    <string name="relaxation_range_fade_description">تقليل وضوح فترات الاسترخاء عند الاقتراب من الحدود الدنيا لنطاقَي تردد الحامل وتردد النبض في المخطط</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">فاصل توليد الذاكرة المؤقتة</string>
+    <string name="buffer_generation_description">عدد الدقائق التي يتم إنشاء الصوت لها مسبقًا. يقلل الفاصل الكبير من مرات تنشيط المعالج ويوفر البطارية</string>
+    <string name="update_interval">فاصل تحديث التردد</string>
+    <string name="update_interval_description">عدد مرات إعادة حساب ترددات التشغيل</string>
+    <string name="audio_quality">معدل أخذ العينات</string>
+    <string name="audio_quality_description">القيم المنخفضة تقلل استهلاك الطاقة</string>
+    <string name="quality_ultra_low">8 كيلوهرتز — أقصى توفير</string>
+    <string name="quality_very_low">16 كيلوهرتز</string>
+    <string name="quality_low">22 كيلوهرتز — توفير البطارية</string>
+    <string name="quality_standard">44 كيلوهرتز — قياسي</string>
+    <string name="quality_high">48 كيلوهرتز — أعلى جودة</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">التوليف الجدولي للموجات</string>
+    <string name="wavetable_optimization_enabled_desc">يقلل الحمل على المعالج من خلال التوليف الجدولي</string>
+    <string name="wavetable_optimization_disabled_desc">حساب الموجة الجيبية مباشرة في الوقت الحقيقي</string>
+    <string name="wavetable_size">دقة التوليف</string>
+    <string name="wavetable_size_samples">%1$d عينة</string>
+    <string name="wavetable_size_description">قيمة أعلى تعني دقة صوت أعلى، مع استهلاك ذاكرة أكبر قليلًا</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">التشغيل</string>
+    <string name="settings_section_power">استهلاك الطاقة</string>
+    <string name="settings_section_interface">الواجهة</string>
+    <string name="settings_section_debug">تصحيح الأخطاء</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">الاستئناف عند التوصيل</string>
+    <string name="resume_on_headset_connect_desc">استئناف التشغيل تلقائيًا عند توصيل السماعات إذا توقف بسبب فصلها</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">الاستئناف عند بدء التشغيل</string>
+    <string name="auto_resume_on_app_start_desc">استئناف التشغيل تلقائيًا عند فتح التطبيق</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">توصيل سماعات الرأس</string>
+    <string name="headphone_reminder_desc">التذكير بضرورة توصيل سماعات الرأس للاستماع إلى النبضات ثنائية الأذن</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">التشغيل في الخلفية</string>
+    <string name="uninterrupted_background_playback_desc">أضف التطبيق إلى استثناءات توفير الطاقة في الخلفية لتشغيل النبضات دون انقطاع في الخلفية</string>
+    <string name="battery_optimization_prompt_title">تشغيل مستمر في الخلفية</string>
+    <string name="battery_optimization_prompt_message">قد يوقف النظام عمل التطبيق في الخلفية لتوفير البطارية، ما قد يؤدي إلى انقطاع النبضات. أضف التطبيق إلى استثناءات توفير الطاقة في الخلفية حتى لا يتوقف الصوت.</string>
+    <string name="battery_optimization_prompt_confirm">حسنًا</string>
+    <string name="battery_optimization_settings_unavailable">تعذّر فتح إعدادات استهلاك الطاقة</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">ث</string>
+    <string name="hz">هرتز</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">التردد (هرتز)</string>
+    <string name="min_channel_frequency">أدنى تردد للقناة</string>
+    <string name="max_channel_frequency">أقصى تردد للقناة</string>
+    <string name="ok">موافق</string>
+    <string name="minutes_short">د</string>
+    <string name="hours_short">س</string>
+    <string name="milliseconds_short">مللي ث</string>
+    <string name="seconds_full">ثانية</string>
+
+    <!-- Playback Controls -->
+    <string name="play">تشغيل</string>
+    <string name="stop">إيقاف</string>
+    <string name="volume">مستوى الصوت</string>
+
+    <!-- Point Editor -->
+    <string name="point">نقطة</string>
+    <string name="carrier">الحامل</string>
+    <string name="beats">النبض</string>
+    <string name="carrier_tone_frequency">تردد النغمة الحاملة</string>
+    <string name="beat_frequency_full">تردد النبض</string>
+    <string name="max_format">الحد الأقصى %.1f</string>
+    <string name="apply">تطبيق</string>
+    <string name="close">إغلاق</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">مساعدة الإيماءات</string>
+    <string name="gestures_help_title">التحكم في المحرر</string>
+    <string name="gesture_add_point">انقر مرتين على مكان فارغ في المخطط لإضافة نقطة.</string>
+    <string name="gesture_select_point">انقر على نقطة لفتح نافذة تحريرها.</string>
+    <string name="gesture_drag_point">اسحب النقطة: يمينًا ويسارًا لتغيير الوقت، وأعلى وأسفل لتغيير التردد الحامل.</string>
+    <string name="gesture_swipe_fields">اسحب حقول نافذة تحرير النقطة لأعلى أو لأسفل لزيادة قيمها أو إنقاصها.</string>
+    <string name="gesture_range_labels">انقر على علامتَي حدود التردد (%1$s و%2$s) لتغيير حدود المخطط.</string>
+    <string name="gesture_scrub_handle">أثناء تشغيل الإعداد المسبق قيد التحرير، اسحب ◀|▶ يمينًا ويسارًا لتغيير موضع التشغيل.</string>
+    <string name="got_it">فهمت</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">الاستماع إلى وقت آخر من اليوم</string>
+    <string name="scrub_reset_description">إعادة الاستماع إلى اللحظة الحالية</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">النبض</string>
+    <string name="carrier_frequency">الحامل</string>
+    <string name="hz_format">%s هرتز</string>
+    <string name="hz_value_format">%.0f هرتز</string>
+    <string name="hz_value_format_decimal">%.1f هرتز</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">التشغيل</string>
+    <string name="notification_channel_description">التحكم في تشغيل النبضات ثنائية الأذن</string>
+    <string name="notification_playing">قيد التشغيل</string>
+    <string name="notification_paused">متوقف مؤقتًا</string>
+    <string name="notification_title">النبض: %.1f هرتز | الحامل: %.0f هرتز</string>
+    <string name="action_play">تشغيل</string>
+    <string name="action_pause">إيقاف مؤقت</string>
+    <string name="action_stop">إيقاف</string>
+    <string name="action_exit">خروج</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">وصّل سماعات الرأس</string>
+    <string name="headphone_required_message">النبضات ثنائية الأذن تعمل فقط عند الاستماع عبر سماعات الرأس</string>
+    <string name="headphone_required_dont_show_again">عدم الإظهار</string>
+    <string name="headphone_required_dismiss">فهمت</string>
+
+    <!-- Debug -->
+    <string name="debug_virtual_time_title">تصحيح: الوقت الافتراضي</string>
+    <string name="debug_unlink_from_real_time">فصل عن الوقت الحقيقي</string>
+    <string name="debug_current_time">الوقت الحالي: %1$s</string>
+    <string name="debug_time_of_day_scrub">الوقت من اليوم (التمرير الزمني)</string>
+    <string name="debug_speed">التسريع: %1$dx</string>
+    <string name="debug_time_pause">إيقاف الوقت مؤقتًا</string>
+    <string name="debug_time_flow">مرور الوقت</string>
+    <string name="debug_to_real_time">العودة إلى الوقت الحقيقي</string>
+
+    <!-- Export failures -->
+    <string name="export_failed_reason_data_lost">فُقدت بيانات التصدير، حاول مرة أخرى</string>
+    <string name="export_failed_reason_preset_not_found">لم يتم العثور على الإعداد المسبق</string>
+</resources>

@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Ciclos binaurales</string>
+
+    <!-- Navigation -->
+    <string name="back">Atrás</string>
+    <string name="settings">Ajustes</string>
+    <string name="menu">Menú</string>
+
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Ciclos binaurales</string>
+    <string name="add_preset">Añadir preajuste</string>
+    <string name="create_preset">Crear preajuste</string>
+    <string name="no_presets_message">No hay preajustes guardados.\nAbre el menú para crear uno nuevo.</string>
+
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Nuevo preajuste</string>
+    <string name="draft_preset">Borrador</string>
+
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Ritmo circadiano</string>
+    <string name="preset_gamma_productivity">Productividad gamma</string>
+    <string name="preset_daily_cycle">Ciclo diario</string>
+    <string name="edit_preset">Edición</string>
+    <string name="preset_name">Nombre del preajuste</string>
+    <string name="import_preset">Importar</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">Preajuste %1$s exportado</string>
+    <string name="export_failed">No se pudo exportar el preajuste: %1$s</string>
+    <string name="import_success">Preajuste %1$s importado</string>
+    <string name="import_failed">Se ha producido un error al importar el preajuste</string>
+    <string name="save">Guardar</string>
+    <string name="do_not_save">No guardar</string>
+
+    <!-- Context Menu -->
+    <string name="edit">Editar</string>
+    <string name="duplicate">Copiar</string>
+    <string name="export">Exportar</string>
+    <string name="delete">Eliminar</string>
+
+    <!-- Dialogs -->
+    <string name="delete_preset_title">¿Eliminar el preajuste?</string>
+    <string name="delete_preset_message">El preajuste «%s» se eliminará definitivamente.</string>
+    <string name="cancel">Cancelar</string>
+    <string name="unsaved_changes_title">Cambios sin guardar</string>
+    <string name="unsaved_changes_message">Tienes cambios sin guardar. ¿Guardar antes de salir?</string>
+
+    <!-- Interpolation -->
+    <string name="point_interpolation">Interpolación por puntos</string>
+    <string name="interpolation_description">Método de cálculo de los valores entre los puntos del gráfico</string>
+    <string name="linear">Lineal</string>
+    <string name="cardinal">Cardinal</string>
+    <string name="monotone">Monótona</string>
+    <string name="step">Escalonada</string>
+    <string name="spline_tension">Tensión de la spline</string>
+    <string name="spline_tension_description">0 = Catmull-Rom suave, 1 = casi lineal</string>
+    <string name="step_fade_duration">Duración del fundido</string>
+
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Intercambio de canales</string>
+    <string name="channel_swap_description">Los canales se intercambian para equilibrar la carga</string>
+    <string name="channel_swap_disabled">Desactivado</string>
+    <string name="swap_interval">Intervalo de intercambio de canales</string>
+    <string name="swap_mode_off_description">Los canales siempre se mantienen en su posición normal</string>
+    <string name="swap_mode_timer">Temporizador</string>
+    <string name="swap_mode_trend">Tendencia</string>
+    <string name="swap_mode_timer_description">Los canales se intercambian a intervalos establecidos</string>
+    <string name="swap_mode_trend_description">Los canales se intercambian en los puntos donde se invierte la tendencia de la frecuencia de batido, según los tipos seleccionados</string>
+    <string name="swap_points">Tipos de transición con intercambio de canales</string>
+    <string name="swap_points_both">Todos</string>
+    <string name="swap_points_decline">Descenso</string>
+    <string name="swap_points_growth">Crecimiento</string>
+    <string name="smooth_fade">Fundido suave</string>
+    <string name="smooth_fade_description">Transición suave al intercambiar los canales</string>
+    <string name="instant_switch">Cambio instantáneo</string>
+    <string name="fade_duration">Duración del fundido</string>
+    <string name="pause_on_switch">Pausa al cambiar</string>
+    <string name="no_pause">Sin pausa</string>
+
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Normalización de volumen</string>
+    <string name="volume_normalization_description">Equilibra el volumen para un sonido uniforme</string>
+    <string name="normalization_strength">Intensidad de normalización</string>
+
+    <!-- Normalization Types
+         NOTE: "Временная" is deliberately rendered as "Tiempo" and NOT "Temporal":
+         in Spanish "temporal" means "provisional/temporary", which would invert the
+         meaning. The axis being normalised is time (across graph points). -->
+    <string name="normalization_none">Desactivada</string>
+    <string name="normalization_channel">Canal</string>
+    <string name="normalization_temporal">Tiempo</string>
+    <string name="normalization_none_description">El volumen no se equilibra</string>
+    <string name="normalization_channel_description">Equilibra el volumen entre los canales izquierdo y derecho según la proporción de las frecuencias de sus tonos</string>
+    <string name="normalization_temporal_description">Equilibra el volumen de los canales según la frecuencia de canal más baja del preajuste en reproducción</string>
+
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Normalización por tiempo</string>
+    <string name="temporal_normalization_description">Equilibra el volumen entre los puntos del gráfico para un sonido uniforme</string>
+
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Períodos de relajación</string>
+    <string name="relaxation_mode_description">Reducción de frecuencias con la periodicidad establecida</string>
+    <string name="carrier_reduction">Reducción de la frecuencia portadora</string>
+    <string name="carrier_reduction_description">Porcentaje de reducción de la frecuencia portadora en los períodos de relajación</string>
+    <string name="beat_reduction">Reducción de la frecuencia de batido</string>
+    <string name="beat_reduction_description">Porcentaje de reducción de la frecuencia de batido en los períodos de relajación</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">Intervalo entre períodos</string>
+    <string name="relaxation_duration">Duración del período</string>
+    <string name="transition_period">Duración de las transiciones</string>
+    <string name="transition_period_description">Tiempo de transición suave a las frecuencias reducidas y de vuelta</string>
+    <string name="minutes_format">%d min</string>
+    <string name="relaxation_range_fade">Atenuación por rango</string>
+    <string name="relaxation_range_fade_description">La intensidad de los períodos de relajación se reduce cerca de los mínimos de los rangos de frecuencia portadora y de batido del gráfico</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">Intervalo de generación del búfer</string>
+    <string name="buffer_generation_description">Minutos de búfer de audio que se generan por adelantado. Un intervalo mayor reduce la frecuencia de activación del procesador y ahorra batería</string>
+    <string name="update_interval">Intervalo de actualización de frecuencia</string>
+    <string name="update_interval_description">Con qué frecuencia se recalculan las frecuencias de reproducción</string>
+    <string name="audio_quality">Frecuencia de muestreo</string>
+    <string name="audio_quality_description">Los valores bajos reducen el consumo de energía</string>
+    <string name="quality_ultra_low">8 kHz — máximo ahorro de batería</string>
+    <string name="quality_very_low">16 kHz</string>
+    <string name="quality_low">22 kHz — ahorro de batería</string>
+    <string name="quality_standard">44 kHz — estándar</string>
+    <string name="quality_high">48 kHz — máxima calidad</string>
+
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Síntesis por tabla de ondas</string>
+    <string name="wavetable_optimization_enabled_desc">Reduce la carga del procesador mediante la síntesis por tabla</string>
+    <string name="wavetable_optimization_disabled_desc">Cálculo directo de la onda sinusoidal en tiempo real</string>
+    <string name="wavetable_size">Precisión de síntesis</string>
+    <string name="wavetable_size_samples">%1$d muestras</string>
+    <string name="wavetable_size_description">Un valor mayor da un sonido más preciso, pero consume algo más de memoria</string>
+
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Reproducción</string>
+    <string name="settings_section_power">Consumo de energía</string>
+    <string name="settings_section_interface">Interfaz</string>
+    <string name="settings_section_debug">Depuración</string>
+
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Reanudar al conectar</string>
+    <string name="resume_on_headset_connect_desc">Reanudar automáticamente la reproducción al conectar los auriculares, si se detuvo porque se desconectaron</string>
+
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Reanudar al iniciar</string>
+    <string name="auto_resume_on_app_start_desc">Reanudar automáticamente la reproducción al iniciar la aplicación</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Conexión de auriculares</string>
+    <string name="headphone_reminder_desc">Recordar que hay que conectar los auriculares para escuchar los ritmos binaurales</string>
+
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Reproducción en segundo plano</string>
+    <string name="uninterrupted_background_playback_desc">Añade la aplicación a las excepciones de ahorro de batería en segundo plano para reproducir los ritmos sin interrupciones</string>
+    <string name="battery_optimization_prompt_title">Funcionamiento ininterrumpido en segundo plano</string>
+    <string name="battery_optimization_prompt_message">El sistema puede suspender el trabajo en segundo plano para ahorrar batería, lo que interrumpirá los ritmos. Añade la aplicación a las excepciones de optimización de batería para que el sonido no se detenga.</string>
+    <string name="battery_optimization_prompt_confirm">Aceptar</string>
+    <string name="battery_optimization_settings_unavailable">No se pudo abrir la configuración de batería</string>
+
+    <!-- Time units -->
+    <string name="seconds_short">s</string>
+    <string name="hz">Hz</string>
+
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Frecuencia (Hz)</string>
+    <string name="min_channel_frequency">Frecuencia mínima del canal</string>
+    <string name="max_channel_frequency">Frecuencia máxima del canal</string>
+    <string name="ok">Aceptar</string>
+    <string name="minutes_short">min</string>
+    <string name="hours_short">h</string>
+    <string name="milliseconds_short">ms</string>
+    <string name="seconds_full">s</string>
+
+    <!-- Playback Controls -->
+    <string name="play">Reproducir</string>
+    <string name="stop">Detener</string>
+    <string name="volume">Volumen</string>
+
+    <!-- Point Editor -->
+    <string name="point">Punto</string>
+    <string name="carrier">Portadora</string>
+    <string name="beats">Batidos</string>
+    <string name="carrier_tone_frequency">Frecuencia del tono portador</string>
+    <string name="beat_frequency_full">Frecuencia de batido</string>
+    <string name="max_format">máx. %.1f</string>
+    <string name="apply">Aplicar</string>
+    <string name="close">Cerrar</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Ayuda de gestos</string>
+    <string name="gestures_help_title">Controles del editor</string>
+    <string name="gesture_add_point">Toca dos veces un espacio vacío del gráfico para añadir un punto.</string>
+    <string name="gesture_select_point">Toca un punto para abrir su ventana de edición.</string>
+    <string name="gesture_drag_point">Mueve un punto: horizontalmente para cambiar el tiempo, verticalmente para cambiar la frecuencia portadora.</string>
+    <string name="gesture_swipe_fields">Desliza arriba o abajo sobre los campos de la ventana de edición del punto para aumentar o disminuir sus valores.</string>
+    <string name="gesture_range_labels">Toca las etiquetas de los límites de frecuencia (%1$s y %2$s) para cambiar los límites del gráfico.</string>
+    <string name="gesture_scrub_handle">Mientras se reproduce el preajuste que estás editando, mueve ◀|▶ hacia la izquierda o la derecha para cambiar la posición de reproducción.</string>
+    <string name="got_it">Entendido</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Escuchar en otro momento del día</string>
+    <string name="scrub_reset_description">Volver la reproducción al momento actual</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">Batidos</string>
+    <string name="carrier_frequency">Portadora</string>
+    <string name="hz_format">%s Hz</string>
+    <string name="hz_value_format">%.0f Hz</string>
+    <string name="hz_value_format_decimal">%.1f Hz</string>
+
+    <!-- Notification -->
+    <string name="notification_channel_name">Reproducción</string>
+    <string name="notification_channel_description">Control de la reproducción de ritmos binaurales</string>
+    <string name="notification_playing">Reproduciendo</string>
+    <string name="notification_paused">En pausa</string>
+    <string name="notification_title">Batidos: %.1f Hz | Portadora: %.0f Hz</string>
+    <string name="action_play">Reproducir</string>
+    <string name="action_pause">Pausa</string>
+    <string name="action_stop">Detener</string>
+    <string name="action_exit">Salir</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Conecta los auriculares</string>
+    <string name="headphone_required_message">Los ritmos binaurales solo funcionan al escucharlos con auriculares</string>
+    <string name="headphone_required_dont_show_again">No mostrar de nuevo</string>
+    <string name="headphone_required_dismiss">Entendido</string>
+    <string name="debug_virtual_time_title">DEBUG: tiempo virtual</string>
+    <string name="debug_unlink_from_real_time">Desvincular de la hora real</string>
+    <string name="debug_current_time">Hora actual: %1$s</string>
+    <string name="debug_time_of_day_scrub">Hora del día (scrub)</string>
+    <string name="debug_speed">Aceleración: %1$dx</string>
+    <string name="debug_time_pause">Pausar tiempo</string>
+    <string name="debug_time_flow">Reanudar el tiempo</string>
+    <string name="debug_to_real_time">A la hora real</string>
+
+    <string name="export_failed_reason_data_lost">datos de exportación perdidos, reintente</string>
+    <string name="export_failed_reason_preset_not_found">preajuste no encontrado</string>
+
+</resources>

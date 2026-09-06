@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="preset_circadian_rhythm">昼夜节律</string>
+    <string name="preset_gamma_productivity">伽马波高效</string>
+    <string name="preset_daily_cycle">全天周期</string>
+</resources>

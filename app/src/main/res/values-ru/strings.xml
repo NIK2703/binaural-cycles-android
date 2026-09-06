@@ -1,0 +1,240 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Бинауральные циклы</string>
+    
+    <!-- Navigation -->
+    <string name="back">Назад</string>
+    <string name="settings">Настройки</string>
+    <string name="menu">Меню</string>
+    
+    <!-- Preset List Screen -->
+    <string name="preset_list_title">Бинауральные циклы</string>
+    <string name="add_preset">Добавить предустановку</string>
+    <string name="create_preset">Создать предустановку</string>
+    <string name="no_presets_message">Нет сохранённых предустановок.\nОткройте меню, чтобы создать новую.</string>
+    
+    <!-- Preset Edit Screen -->
+    <string name="new_preset">Новая предустановка</string>
+    <string name="draft_preset">Черновик</string>
+    
+    <!-- Default preset names -->
+    <string name="preset_circadian_rhythm">Циркадный ритм</string>
+    <string name="preset_gamma_productivity">Гамма-продуктивность</string>
+    <string name="preset_daily_cycle">Суточный цикл</string>
+    <string name="edit_preset">Редактирование</string>
+    <string name="preset_name">Название предустановки</string>
+    <string name="import_preset">Импортировать</string>
+
+    <!-- Preset export / import result -->
+    <string name="export_success">Предустановка %1$s экспортирована</string>
+    <string name="export_failed">Не удалось экспортировать предустановку: %1$s</string>
+    <string name="import_success">Предустановка %1$s импортирована</string>
+    <string name="import_failed">При импорте предустановки произошла ошибка</string>
+    <string name="save">Сохранить</string>
+    <string name="do_not_save">Не сохранять</string>
+    
+    <!-- Context Menu -->
+    <string name="edit">Редактировать</string>
+    <string name="duplicate">Копировать</string>
+    <string name="export">Экспортировать</string>
+    <string name="delete">Удалить</string>
+    
+    <!-- Dialogs -->
+    <string name="delete_preset_title">Удалить предустановку?</string>
+    <string name="delete_preset_message">Пресет \"%s\" будет удалён безвозвратно.</string>
+    <string name="cancel">Отмена</string>
+    <string name="unsaved_changes_title">Несохранённые изменения</string>
+    <string name="unsaved_changes_message">У вас есть несохранённые изменения. Сохранить перед выходом?</string>
+    
+    <!-- Interpolation -->
+    <string name="point_interpolation">Интерполяция по точкам</string>
+    <string name="interpolation_description">Метод расчёта значений между точками графика</string>
+    <string name="linear">Линейная</string>
+    <string name="cardinal">Кардинальная</string>
+    <string name="monotone">Монотонная</string>
+    <string name="step">Ступенчатая</string>
+    <string name="spline_tension">Натяжение сплайна</string>
+    <string name="spline_tension_description">0 = плавный Catmull-Rom, 1 = почти линейный</string>
+    <string name="step_fade_duration">Длительность затухания</string>
+    
+    <!-- Channel Swap -->
+    <string name="auto_channel_swap">Смена каналов</string>
+    <string name="channel_swap_description">Каналы меняются местами для равномерной нагрузки</string>
+    <string name="channel_swap_disabled">Выключено</string>
+    <string name="swap_interval">Интервал смены каналов</string>
+    <string name="swap_mode_off_description">Каналы всегда в обычном расположении</string>
+    <string name="swap_mode_timer">Таймер</string>
+    <string name="swap_mode_trend">Тенденция</string>
+    <string name="swap_mode_timer_description">Каналы меняются местами через заданный интервал</string>
+    <string name="swap_mode_trend_description">Смена каналов происходит в точках смены тенденции изменения частоты биения выбранных типов</string>
+    <string name="swap_points">Типы переходов со сменой каналов</string>
+    <string name="swap_points_both">Все</string>
+    <string name="swap_points_decline">Спад</string>
+    <string name="swap_points_growth">Рост</string>
+    <string name="smooth_fade">Плавное затухание</string>
+    <string name="smooth_fade_description">Плавный переход при смене каналов</string>
+    <string name="instant_switch">Мгновенное переключение</string>
+    <string name="fade_duration">Длительность затухания</string>
+    <string name="pause_on_switch">Пауза при переключении</string>
+    <string name="no_pause">Без паузы</string>
+    
+    <!-- Volume Normalization -->
+    <string name="volume_normalization">Нормализация громкости</string>
+    <string name="volume_normalization_description">Выравнивание громкости для равномерного звучания</string>
+    <string name="normalization_strength">Сила нормализации</string>
+    
+    <!-- Normalization Types -->
+    <string name="normalization_none">Отключена</string>
+    <string name="normalization_channel">Канальная</string>
+    <string name="normalization_temporal">Временная</string>
+    <string name="normalization_none_description">Громкость не выравнивается</string>
+    <string name="normalization_channel_description">Выравнивание громкости между левым и правым каналом по соотношению частот их тонов</string>
+    <string name="normalization_temporal_description">Выравнивание громкости каналов по наименьшей частоте канала воспроизводимой предустановки</string>
+    
+    <!-- Temporal Normalization (deprecated, kept for compatibility) -->
+    <string name="temporal_normalization">Временная нормализация</string>
+    <string name="temporal_normalization_description">Выравнивание громкости между точками графика для равномерного звучания</string>
+    
+    <!-- Relaxation Mode -->
+    <string name="relaxation_mode">Периоды расслабления</string>
+    <string name="relaxation_mode_description">Снижение частот с заданной периодичностью</string>
+    <string name="carrier_reduction">Снижение несущей частоты</string>
+    <string name="carrier_reduction_description">Процент снижения несущей частоты в периоды расслабления</string>
+    <string name="beat_reduction">Снижение частоты биений</string>
+    <string name="beat_reduction_description">Процент снижения частоты биений в периоды расслабления</string>
+    <string name="reduction_percent_format">%d%%</string>
+    <string name="gap_between_relaxation">Интервал между периодами</string>
+    <string name="relaxation_duration">Длительность периода</string>
+    <string name="transition_period">Длительность переходов</string>
+    <string name="transition_period_description">Время плавного перехода к сниженным частотам и обратно</string>
+    <string name="minutes_format">%d мин</string>
+    <string name="relaxation_range_fade">Угасание по диапазону</string>
+    <string name="relaxation_range_fade_description">Снижение выраженности периодов расслабления ближе к минимумам диапазонов частот несущей и биения графика</string>
+
+    <!-- App Settings -->
+    <string name="buffer_generation_minutes">Интервал генерации буфера</string>
+    <string name="buffer_generation_description">На сколько минут вперёд генерируется аудиобуфер. Большой интервал снижает частоту пробуждений процессора и экономит батарею</string>
+    <string name="update_interval">Интервал обновления частоты</string>
+    <string name="update_interval_description">Как часто пересчитываются частоты воспроизведения</string>
+    <string name="audio_quality">Частота дискретизации</string>
+    <string name="audio_quality_description">Низкие значения снижают энергопотребление</string>
+    <string name="quality_ultra_low">8 кГц — максимальная экономия</string>
+    <string name="quality_very_low">16 кГц</string>
+    <string name="quality_low">22 кГц — экономия батареи</string>
+    <string name="quality_standard">44 кГц — стандарт</string>
+    <string name="quality_high">48 кГц — максимальное качество</string>
+    
+    <!-- Wavetable Optimization -->
+    <string name="wavetable_optimization">Табличный синтез волн</string>
+    <string name="wavetable_optimization_enabled_desc">Снижает нагрузку на процессор через табличный синтез</string>
+    <string name="wavetable_optimization_disabled_desc">Прямой расчёт синусоиды в реальном времени</string>
+    <string name="wavetable_size">Точность синтеза</string>
+    <string name="wavetable_size_samples">%1$d сэмплов</string>
+    <string name="wavetable_size_description">Больше значение — точнее звук, но чуть больше потребление памяти</string>
+    
+    <!-- Settings Sections -->
+    <string name="settings_section_comfort">Воспроизведение</string>
+    <string name="settings_section_power">Энергопотребление</string>
+    <string name="settings_section_interface">Интерфейс</string>
+    <string name="settings_section_debug">Отладка</string>
+    
+    <!-- Resume on Headset Connect -->
+    <string name="resume_on_headset_connect">Возобновление при подключении</string>
+    <string name="resume_on_headset_connect_desc">Автоматически возобновлять воспроизведение при подключении гарнитуры, если оно было остановлено из-за её отключения</string>
+    
+    <!-- Auto Resume on App Start -->
+    <string name="auto_resume_on_app_start">Возобновление при запуске</string>
+    <string name="auto_resume_on_app_start_desc">Автоматически возобновлять воспроизведение при запуске приложения</string>
+
+    <!-- Headphone connection reminder -->
+    <string name="headphone_reminder">Подключение наушников</string>
+    <string name="headphone_reminder_desc">Напоминать о необходимости подключения наушников для прослушивания бинауральных ритмов</string>
+    
+    <!-- Battery optimization exemption -->
+    <string name="uninterrupted_background_playback">Воспроизведение в фоне</string>
+    <string name="uninterrupted_background_playback_desc">Добавьте приложение в исключения фонового энергосбережения для бесперебойного воспроизведения ритмов в фоне</string>
+    <string name="battery_optimization_prompt_title">Бесперебойная работа в фоне</string>
+    <string name="battery_optimization_prompt_message">Система может приостанавливать фоновую работу приложения для экономии заряда — из-за этого воспроизведение ритмов будет прерываться. Добавьте приложение в исключения фонового энергосбережения, чтобы звук не останавливался.</string>
+    <string name="battery_optimization_prompt_confirm">Ок</string>
+    <string name="battery_optimization_settings_unavailable">Не удалось открыть настройки энергопотребления</string>
+    
+    <!-- Time units -->
+    <string name="seconds_short">сек</string>
+    <string name="hz">Гц</string>
+    
+    <!-- Frequency Graph -->
+    <string name="frequency_hz">Частота (Гц)</string>
+    <string name="min_channel_frequency">Минимальная частота канала</string>
+    <string name="max_channel_frequency">Максимальная частота канала</string>
+    <string name="ok">OK</string>
+    <string name="minutes_short">мин</string>
+    <string name="hours_short">ч</string>
+    <string name="milliseconds_short">мс</string>
+    <string name="seconds_full">с</string>
+    
+    <!-- Playback Controls -->
+    <string name="play">Воспроизведение</string>
+    <string name="stop">Стоп</string>
+    <string name="volume">Громкость</string>
+    
+    <!-- Point Editor -->
+    <string name="point">Точка</string>
+    <string name="carrier">Несущая</string>
+    <string name="beats">Биение</string>
+    <string name="carrier_tone_frequency">Частота тона несущей</string>
+    <string name="beat_frequency_full">Частота биения</string>
+    <string name="max_format">макс %.1f</string>
+    <string name="apply">Применить</string>
+    <string name="close">Закрыть</string>
+
+    <!-- Gesture help (preset editor) -->
+    <string name="gestures_help">Справка по жестам</string>
+    <string name="gestures_help_title">Управление в редакторе</string>
+    <string name="gesture_add_point">Дважды нажмите на пустом месте графика, чтобы добавить точку.</string>
+    <string name="gesture_select_point">Нажмите на точку, чтобы открыть окно её редактирования.</string>
+    <string name="gesture_drag_point">Переместите точку: вправо-влево — для изменения времени, вверх-вниз — для изменения частоты несущей.</string>
+    <string name="gesture_swipe_fields">Проведите вверх-вниз по полям окна редактирования точки, чтобы увеличить/уменьшить их значения.</string>
+    <string name="gesture_range_labels">Нажмите на граничные метки частот (%1$s и %2$s), чтобы изменить границы графика.</string>
+    <string name="gesture_scrub_handle">Во время воспроизведения редактируемой предустановки переместите ◀|▶ вправо-влево, чтобы изменить позицию воспроизведения.</string>
+    <string name="got_it">Понятно</string>
+
+    <!-- Scrub (previewing another time of day) -->
+    <string name="scrub_handle_description">Прослушать другое время суток</string>
+    <string name="scrub_reset_description">Вернуть прослушивание к текущему моменту</string>
+
+    <!-- Frequencies -->
+    <string name="beat_frequency">Биения</string>
+    <string name="carrier_frequency">Несущая</string>
+    <string name="hz_format">%s Гц</string>
+    <string name="hz_value_format">%.0f Гц</string>
+    <string name="hz_value_format_decimal">%.1f Гц</string>
+    
+    <!-- Notification -->
+    <string name="notification_channel_name">Воспроизведение</string>
+    <string name="notification_channel_description">Управление воспроизведением бинауральных ритмов</string>
+    <string name="notification_playing">Воспроизведение</string>
+    <string name="notification_paused">Пауза</string>
+    <string name="notification_title">Биения: %.1f Гц | Несущая: %.0f Гц</string>
+    <string name="action_play">Воспроизвести</string>
+    <string name="action_pause">Пауза</string>
+    <string name="action_stop">Стоп</string>
+    <string name="action_exit">Выход</string>
+
+    <!-- Headphone required dialog -->
+    <string name="headphone_required_title">Подключите наушники</string>
+    <string name="headphone_required_message">Бинауральные ритмы работают только при прослушивании через наушники</string>
+    <string name="headphone_required_dont_show_again">Не показывать</string>
+    <string name="headphone_required_dismiss">Понятно</string>
+    <string name="debug_virtual_time_title">DEBUG: виртуальное время</string>
+    <string name="debug_unlink_from_real_time">Отвязать от реального времени</string>
+    <string name="debug_current_time">Текущее время: %1$s</string>
+    <string name="debug_time_of_day_scrub">Время суток (scrub)</string>
+    <string name="debug_speed">Ускорение: %1$dx</string>
+    <string name="debug_time_pause">Пауза времени</string>
+    <string name="debug_time_flow">Ход времени</string>
+    <string name="debug_to_real_time">К реальному времени</string>
+
+    <string name="export_failed_reason_data_lost">данные экспорта потеряны, повторите</string>
+    <string name="export_failed_reason_preset_not_found">предустановка не найдена</string>
+
+</resources>
