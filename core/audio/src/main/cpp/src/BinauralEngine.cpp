@@ -439,18 +439,6 @@ bool BinauralEngine::isChannelsSwapped() const {
     // удаляется на шаге 4 вместе с телеметрией.
     return m_currentBeatFreq.load(std::memory_order_relaxed) < 0.0f;
 }
-std::pair<float, float> BinauralEngine::getCurrentPhases() const {
-    // best-effort чтение живой фазы OLD (см. комментарий в заголовке):
-    // на ARM выровненное 32-битное чтение атомарно, отклонение — доли мкс.
-    return { m_state.leftPhase, m_state.rightPhase };
-}
-
-void BinauralEngine::setPhases(float leftPhase, float rightPhase) {
-    // Зовётся до старта писателя (prepare) — гонки с аудио-потоком нет.
-    m_state.leftPhase = leftPhase;
-    m_state.rightPhase = rightPhase;
-}
-
 bool BinauralEngine::isCurveConfigured() const {
     std::shared_lock<std::shared_mutex> lock(m_configMutex);
     return m_config.curve.hasFreqTables();

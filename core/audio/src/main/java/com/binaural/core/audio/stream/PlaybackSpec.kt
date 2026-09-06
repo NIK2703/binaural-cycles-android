@@ -41,13 +41,12 @@ data class PlaybackSpec(
      * [CurveAnchor.NONE], а 0 — обычное время суток.
      *
      * Хэндофф (SETTINGS/PRESET_SWITCH/SAMPLE_RATE) якорь НЕ несёт: новый поток
-     * встаёт на «сейчас» в `prepare()`, от уходящего наследуются только фазы
-     * несущих и часы сессии (см. docs/handoff_anchor_zero_analysis_plan.md, P1).
+     * встаёт на «сейчас» в `prepare()`, от уходящего наследуются только часы
+     * сессии ([resumeElapsedMs]) — фазы больше не переносятся вовсе (перекрытия
+     * нет, docs/plan_handoff_single_track.md; см. также
+     * docs/handoff_anchor_zero_analysis_plan.md, P1).
      */
     val resumeAnchor: CurveAnchor = CurveAnchor.NONE,
-    /** ФИКС RC-2: фаза несущих для бесшовного кроссфейда (null = свежий старт, фаза 0). */
-    val resumeLeftPhase: Float? = null,
-    val resumeRightPhase: Float? = null,
     /**
      * СКРАБ: сдвиг ОСИ времени суток в секундах, [0, 86400).
      *
