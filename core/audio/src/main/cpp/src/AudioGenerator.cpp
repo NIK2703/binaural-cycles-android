@@ -233,7 +233,6 @@ void AudioGenerator::generateSolidBuffer(
     float endRightAmp,
     GeneratorState& state
 ) {
-    constexpr float baseVolumeFactor = 0.5f;
 
     const float ampStepLeft = (endLeftAmp - startLeftAmp) / samples;
     const float ampStepRight = (endRightAmp - startRightAmp) / samples;
@@ -272,8 +271,8 @@ void AudioGenerator::generateSolidBuffer(
             state.rightPhase += TWO_PI;
         }
 
-        buffer[i * 2] = leftSample * (baseVolumeFactor * leftNormAmp);
-        buffer[i * 2 + 1] = rightSample * (baseVolumeFactor * rightNormAmp);
+        buffer[i * 2] = leftSample * leftNormAmp;
+        buffer[i * 2 + 1] = rightSample * rightNormAmp;
 
         leftNormAmp += ampStepLeft;
         rightNormAmp += ampStepRight;
@@ -299,7 +298,6 @@ void AudioGenerator::generateSolidBufferNeon(
     float endRightAmp,
     GeneratorState& state
 ) {
-    constexpr float baseVolumeFactor = 0.5f;
     const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
     
     // КРИТИЧНО: omegaStep вычисляется с делением на (samples - 1), чтобы
@@ -315,7 +313,6 @@ void AudioGenerator::generateSolidBufferNeon(
     float rightAmplitude = startRightAmp;
     
     const float32x4_t vScaleFactor = vdupq_n_f32(scaleFactor);
-    const float32x4_t vBaseVol = vdupq_n_f32(baseVolumeFactor);
     const float32x4_t vIndices = {0.0f, 1.0f, 2.0f, 3.0f};
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
     const float32x4_t vPhaseAccum = {0.0f, 0.0f, 1.0f, 3.0f};
@@ -357,8 +354,8 @@ void AudioGenerator::generateSolidBufferNeon(
         float32x4_t vLeftSamples = Wavetable::fastSinNeon(vLeftPhasesScaled);
         float32x4_t vRightSamples = Wavetable::fastSinNeon(vRightPhasesScaled);
 
-        float32x4_t vLeftAmps = vmulq_f32(vBaseVol, vAmpL);
-        float32x4_t vRightAmps = vmulq_f32(vBaseVol, vAmpR);
+        float32x4_t vLeftAmps = vAmpL;
+        float32x4_t vRightAmps = vAmpR;
 
         #ifdef __ARM_FEATURE_FMA
             vLeftSamples = vfmaq_f32(vdupq_n_f32(0.0f), vLeftSamples, vLeftAmps);
@@ -406,8 +403,8 @@ void AudioGenerator::generateSolidBufferNeon(
         if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
-        const float leftAmp = baseVolumeFactor * leftAmplitude;
-        const float rightAmp = baseVolumeFactor * rightAmplitude;
+        const float leftAmp = leftAmplitude;
+        const float rightAmp = rightAmplitude;
         
         buffer[i * 2] = leftSample * leftAmp;
         buffer[i * 2 + 1] = rightSample * rightAmp;
@@ -439,7 +436,6 @@ void AudioGenerator::generateSolidBufferSse(
     float endRightAmp,
     GeneratorState& state
 ) {
-    constexpr float baseVolumeFactor = 0.5f;
     const float scaleFactor = static_cast<float>(Wavetable::getScaleFactor());
     
     // КРИТИЧНО: omegaStep вычисляется с делением на (samples - 1), чтобы
@@ -455,7 +451,6 @@ void AudioGenerator::generateSolidBufferSse(
     float rightAmplitude = startRightAmp;
     
     const __m128 vScaleFactor = _mm_set1_ps(scaleFactor);
-    const __m128 vBaseVol = _mm_set1_ps(baseVolumeFactor);
     const __m128 vIndices = _mm_set_ps(3.0f, 2.0f, 1.0f, 0.0f);
     // i*(i-1)/2 для i=0,1,2,3 = 0,0,1,3
     const __m128 vPhaseAccum = _mm_set_ps(3.0f, 1.0f, 0.0f, 0.0f);
@@ -497,8 +492,8 @@ void AudioGenerator::generateSolidBufferSse(
         __m128 vLeftSamples = Wavetable::fastSinSseNonNeg(vLeftPhasesScaled);
         __m128 vRightSamples = Wavetable::fastSinSseNonNeg(vRightPhasesScaled);
 
-        __m128 vLeftAmps = _mm_mul_ps(vBaseVol, vAmpL);
-        __m128 vRightAmps = _mm_mul_ps(vBaseVol, vAmpR);
+        __m128 vLeftAmps = vAmpL;
+        __m128 vRightAmps = vAmpR;
 
         vLeftSamples = _mm_mul_ps(vLeftSamples, vLeftAmps);
         vRightSamples = _mm_mul_ps(vRightSamples, vRightAmps);
@@ -548,8 +543,8 @@ void AudioGenerator::generateSolidBufferSse(
         if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         if (state.rightPhase >= TWO_PI) state.rightPhase -= TWO_PI;
         
-        const float leftAmp = baseVolumeFactor * leftAmplitude;
-        const float rightAmp = baseVolumeFactor * rightAmplitude;
+        const float leftAmp = leftAmplitude;
+        const float rightAmp = rightAmplitude;
         
         buffer[i * 2] = leftSample * leftAmp;
         buffer[i * 2 + 1] = rightSample * rightAmp;
@@ -931,12 +926,11 @@ GenerateResult AudioGenerator::generatePackageNeon(
             const float lastRightSample = buffer[(currentSample + samples - 1) * 2 + 1];
 
             // Вычисляем ожидаемый первый сэмпл СЛЕДУЮЩЕГО сегмента через фазу.
-            // Фикс (Qwen, P2): учитываем амплитуду (baseVolumeFactor × endAmp),
+            // Фикс (Qwen, P2): учитываем амплитуду (endAmp),
             // иначе сравнение с фактическим first вводит в заблуждение:
-            // сырой sin(phase) больше реального сэмпла в 1/(0.5·amp) раз.
-            constexpr float baseVolumeFactor = 0.5f;
-            float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * baseVolumeFactor * endLeftAmp;
-            float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * baseVolumeFactor * endRightAmp;
+            // сырой sin(phase) больше реального сэмпла в 1/amp раз.
+                    float expectedFirstLeft = Wavetable::fastSin(state.leftPhase) * endLeftAmp;
+            float expectedFirstRight = Wavetable::fastSin(state.rightPhase) * endRightAmp;
 
             // Логируем фазу ПОСЛЕ генерации сегмента
             LOG_SEG("SEG_END_NEON: type=%d, leftPhase=%.4f, rightPhase=%.4f, first=[%.4f, %.4f], last=[%.4f, %.4f], expectedFirst=[%.4f, %.4f]",
