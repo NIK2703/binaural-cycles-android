@@ -212,12 +212,15 @@ class BinauralStreamImpl(
         private const val STARTUP_PACKET_SECONDS = 2
 
         /**
-         * Плечо «приседания» при перенастройке живого потока ([retune]), мс.
-         *
-         * Ровно половина прежнего [ManagerState]-перехода: уход 125 мс + приход
-         * 125 мс = те же 250 мс суммарной ямы, но БЕЗ второго трека.
+         * «Приседание» при перенастройке живого потока ([retune]) идёт ШТАТНЫМИ
+         * фейдами: вниз на [fadeOutMs] (без сокращения), вверх на [fadeInMs].
+         * Оба равны [DEFAULT_FADE_MS] = 250 мс — одно число на все фейды потока,
+         * как и требовалось. Отдельной константы плеча больше нет: ретюн не
+         * отличается от старта/стопа формой рампы, только тем, что между
+         * рампой вниз и вверх трек паузится и пакет пересобирается в яме.
+         * Спекулятивная предгенерация (фаза 2) выносит сборку пакета из ямы,
+         * поэтому длительность ямы не зависит от скорости устройства.
          */
-        private const val RETUNE_RAMP_MS = 125L
 
         /**
          * Длина пакета, генерируемого ВНУТРИ провала ([doRetuneOnWriter]).
@@ -738,6 +741,53 @@ class BinauralStreamImpl(
     /** Страховка провала: писатель не отозвался — отдаём управление менеджеру. */
     @Volatile private var retuneDeadlineRunnable: Runnable? = null
 
+    // ------------------------------------------------- спекулятивная предгенерация (фаза 2)
+    /**
+     * Результат спекулятивной предгенерации: НОВЫЙ движок + НОВЫЙ пакет,
+     * собранные параллельно рампе вниз.
+     *
+     * Ключевой инвариант: этот движок после коммита СТАНОВИТСЯ живым
+     * ([doRetuneOnWriter], быстрый путь). Поэтому непрерывность фаз и времени
+     * кривой выполняется ПО ПОСТРОЕНИЮ — не нужен перенос состояния через JNI:
+     * движок, сгенерировавший звучащий пакет, и есть тот, кто генерирует следующий.
+     */
+    private class PreGenResult(
+        val serial: Long,
+        val engine: NativeAudioEngine,
+        val buffer: ByteBuffer,
+        val packetBytes: Int,
+        val frames: Int
+    )
+
+    /** Единственный слот результата; latest-wins: шторм перезапускает задачу. */
+    private val preGenSlot = AtomicReference<PreGenResult?>(null)
+    private var preGenThread: HandlerThread? = null
+    private var preGenHandler: Handler? = null
+
+    /**
+     * Короткий мост синхронизации публикации результата и релиза потока.
+     * Задача предгенерации может положить результат в слот микросекунду ПОСЛЕ
+     * того, как releaseInternal() его вычистил. Под мостом публикация видит
+     * RELEASED и уничтожает результат на месте.
+     */
+    private val preGenLock = Any()
+
+    /**
+     * Wall-якорь сессионных часов: куда привязан нативный elapsed живого
+     * движка. Нужен, чтобы временный движок предгенерации унаследовал часы
+     * сессии (иначе после свапа таймер в уведомлении скакнул бы к 0).
+     * Пишется только на нити актёра (все setPlaybackStartTime и prepare приходят
+     * оттуда); читается один раз при запуске задачи.
+     */
+    private var playbackStartAnchorMs = 0L
+
+    /** Момент старта провала — для телеметрии ямы (VALLEY_MS). */
+    private var tRetuneStartMs = 0L
+    /** Момент входа в яму (finishRetune) — для телеметрии. */
+    private var tValleyStartMs = 0L
+    /** Диагностический флаг для строки подъёма. */
+    private var lastRetuneUsedPreGen = false
+
     // ------------------------------------------------- состояние цикла писателя
     /**
      * Курсор записи в пакете и длина текущего пакета (байты).
@@ -874,9 +924,11 @@ class BinauralStreamImpl(
                 // elapsed-часы наследуем, если они уже накоплены (пауза на
                 // сдвинутой оси — легальный сценарий V8).
                 engine.setPlaybackStartTime(System.currentTimeMillis() - spec.resumeElapsedMs)
+                playbackStartAnchorMs = System.currentTimeMillis() - spec.resumeElapsedMs
                 engine.play(preserveTimeline = true)
             } else if (spec.resumeAnchorMs > 0) {
                 engine.setPlaybackStartTime(spec.resumeAnchorMs)
+                playbackStartAnchorMs = spec.resumeAnchorMs
                 engine.play(preserveTimeline = true)     // не переякоряет таймлайн
             } else if (spec.resumeElapsedMs > 0) {
                 // ФИКС 3. Продолжение БЕЗ явного wall-якоря (сквозное переключение
@@ -885,8 +937,10 @@ class BinauralStreamImpl(
                 // частота/фаза прыгнут (слышимый щелчок/шаг). Держим позицию кривой,
                 // заданную выше, и продолжаем elapsed-часы с resumeElapsedMs.
                 engine.setPlaybackStartTime(System.currentTimeMillis() - spec.resumeElapsedMs)
+                playbackStartAnchorMs = System.currentTimeMillis() - spec.resumeElapsedMs
                 engine.play(preserveTimeline = true)
             } else {
+                playbackStartAnchorMs = System.currentTimeMillis()
                 engine.play()   // якорь уже задан выше: текущее время суток
             }
             nativeEngine = engine
@@ -1366,6 +1420,7 @@ class BinauralStreamImpl(
             pendingRetune.set(null)
             retuneCallback = null
             cancelRetuneTimers()
+            preGenSlot.getAndSet(null)?.let { discardPreGen(it) }   // НОВОЕ
             fadeMode = FadeMode.NONE
         }
         if (fadeMode == FadeMode.OUT) {
@@ -1543,13 +1598,15 @@ class BinauralStreamImpl(
         }
         userVolume = newSpec.volume
 
-        // ШТОРМ: пока провал в полёте, новый жест ТОЛЬКО перезаписывает цель.
-        // Таймер не перезапускается и шейпер не трогается — иначе серия жестов
-        // растянула бы «приседание» на свою длину и превратила его в заикание.
+        // ШТОРМ во время провала: цель перезаписывается, таймеры и рампа НЕ
+        // трогаются (серия жестов = одно приседание), а предгенерация
+        // ПЕРЕЗАПУСКАЕТСЯ под новейшую спеку — к моменту коммита готовый
+        // пакет будет именно для неё.
         if (retuning) {
             pendingRetune.set(newSpec)
+            launchPreGen(newSpec)
             StreamLogger.d(TAG, "retune spec#${spec.serial}: провал уже идёт — цель " +
-                "перезаписана на spec#${newSpec.serial} (${newSpec.reason})")
+                "перезаписана на spec#${newSpec.serial} (${newSpec.reason}), предгенерация перезапущена")
             return true
         }
 
@@ -1557,8 +1614,9 @@ class BinauralStreamImpl(
         pendingRetune.set(newSpec)
 
         if (paused) {
-            // ПАУЗА: провал не нужен, тишина уже есть. Писатель припаркован —
-            // будим, он применит конфиг и снова встанет в парковку.
+            // ПАУЗА: провал не нужен. Предгенерацию НЕ запускаем: припаркованный
+            // писатель не ограничен во времени и регенерирует сам (или подберёт
+            // готовый результат от ретюна в игре, если совпадёт serial).
             cancelFadeCallbacks()
             wakeWriter()
             StreamLogger.d(TAG, "retune spec#${spec.serial}: на паузе — применяется " +
@@ -1568,24 +1626,35 @@ class BinauralStreamImpl(
 
         cancelFadeCallbacks()
         fadeMode = FadeMode.OUT
+        tRetuneStartMs = System.currentTimeMillis()
         val cur = currentMultiplier()
-        val dur = if (cur <= 0.001f) 0L else (RETUNE_RAMP_MS * cur).toLong().coerceAtLeast(20L)
+        // Приседаем ШТАТНЫМ фейд-аутом (fadeOutMs = 250 мс), а не половинным:
+        // длинные плечи мягче на слух и дают предгенерации больший бюджет.
+        // Если множитель уже ~0 (например, ретюн сразу после резюма) — рампа
+        // не нужна: фиксированная маржа подтвердит дно и без неё.
+        val dur = if (cur <= 0.001f) 0L else (fadeOutMs * cur).toLong().coerceAtLeast(40L)
         if (dur > 0) {
             applyShaper(from = cur, to = 0f, durationMs = dur, shape = FadeShape.EQUAL_POWER)
         } else {
-            // Уже в нуле: гасим базу и снимаем шейпер (тишина без рампы).
+            // Уже в нуле: гасим базу (шейпер НЕ снимаем — он удержит 0 в яме).
             try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
-            closeShaper()
         }
         retuning = true
         retuneGo = false
+
+        // СПЕКУЛЯТИВНАЯ ПРЕДГЕНЕРАЦИЯ: пока рампа идёт вниз, отдельная нить
+        // собирает новый движок и новый пакет (~8.5 мс CPU на 48 кГц). В яме
+        // писатель только меняет движок/буфер — генерация из ямы исключена.
+        launchPreGen(newSpec)
+
         StreamLogger.d(TAG, "retune spec#${spec.serial} -> spec#${newSpec.serial} " +
-            "(${newSpec.reason}): приседание, рампа вниз ${dur}мс")
+            "(${newSpec.reason}): приседание, рампа вниз ${dur}мс, предгенерация запущена")
         val finish = Runnable { finishRetune() }
         retuneFinish = finish
-        // Маржа — ГАРАНТИЯ, а не измерение: см. [RAMP_SETTLE_MARGIN_MS]. До
-        // этого момента писатель обязан продолжать питать трек: пауза на
-        // середине рампы заморозила бы шейпер на ненулевом множителе.
+        // Маржа — ГАРАНТИЯ, а не измерение (см. [RAMP_SETTLE_MARGIN_MS]): покрывает
+        // лаг старта рампы (квант микшера). До этого момента писатель обязан
+        // продолжать питать трек: пауза на середине рампы заморозила бы шейпер
+        // на ненулевом множителе.
         controlHandler.postDelayed(finish, dur + RAMP_SETTLE_MARGIN_MS)
         return true
     }
@@ -1598,14 +1667,23 @@ class BinauralStreamImpl(
             abortRetune(false)
             return
         }
-        // Тишина фиксируется БАЗОЙ, а не шейпером: во внутреннем кольце трека
-        // ещё до TRACK_BUFFER_MS полноамплитудного PCM, и закрытие шейпера
-        // вернуло бы их на полную (тот же мотив, что в [finalizeStop]).
+        tValleyStartMs = System.currentTimeMillis()
+
+        // База в ноль ДО любых манипуляций. Шейпер держит множитель 0, но:
+        //  (1) реализация может авто-закрыть шейпер после конца кривой и
+        //      вернуть усиление к базе — база 0 делает сюрприз беззвучным;
+        //  (2) остаётся до одного кванта микшера, пока последнее значение
+        //      базы применится, — под множителем ~0 это тоже беззвучно.
+        // В кольце до 10 с полноамплитудного PCM — защита обязательна.
         try { audioTrack?.setVolume(0f) } catch (_: Exception) {}
-        closeShaper()
-        // pause() и здесь нужен: он прерывает заблокированный
-        // write(WRITE_BLOCKING), иначе писатель вышел бы из записи только через
-        // весь чанк (до нескольких секунд).
+
+        // ШЕЙПЕР НЕ ЗАКРЫВАЕТСЯ (один долгоживущий шейпер): он удерживает
+        // множитель 0 и будет переиспользован на подъёме через replace(join) —
+        // без пары close/create в яме (вариант «один шейпер через весь переход»).
+
+        // pause() прерывает заблокированный write(WRITE_BLOCKING) писателя и
+        // морозит микшер — благодаря этому рампа вверх стартует ровно с первым
+        // кадром (paused-трек не микширует кадры, позиция шейпера не двигается).
         try { audioTrack?.pause() } catch (_: Exception) {}
         retuneGo = true
         wakeWriter()
@@ -1635,9 +1713,18 @@ class BinauralStreamImpl(
             return
         }
         fadeMode = FadeMode.IN
-        // Шейпера нет (снят в [finishRetune]), поэтому эта рампа поднимает и
-        // базу трека до userVolume, и множитель — ровно как при [resume].
-        val dur = applyShaper(from = 0f, to = 1f, durationMs = RETUNE_RAMP_MS, shape = FadeShape.EQUAL_POWER)
+
+        // База возвращается под потолок: в яме она была нулём (защита от
+        // авто-закрытия шейпера). ТРЕК НА ПАУЗЕ — микшер заморожен, поэтому
+        // восстановление базы бесшумно при любом порядке с рампой.
+        try { audioTrack?.setVolume(userVolume) } catch (_: Exception) {}
+
+        // ШЕЙПЕР ЖИВ (не закрыт в finishRetune): подъём идёт через
+        // replace(join=true) от удержанного нуля — без createVolumeShaper в яме.
+        // ЛАГА СТАРТА РАМПЫ ВВЕРХ НЕТ: позиция шейпера двигается только
+        // смикшированными кадрами, а приостановленный трек их не микширует —
+        // рампа стартует ровно с первым кадром после play().
+        val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = FadeShape.EQUAL_POWER)
         try {
             audioTrack?.play()
         } catch (e: Exception) {
@@ -1647,16 +1734,16 @@ class BinauralStreamImpl(
             return
         }
         wakeWriter()
+
+        val valleyMs = System.currentTimeMillis() - tValleyStartMs
+        val totalMs = System.currentTimeMillis() - tRetuneStartMs
         StreamLogger.d(TAG, "retune spec#${spec.serial}: ПОДНЯТ на spec#${spec.serial} " +
-            "(рампа вверх ${dur}мс, причина=${spec.reason}) — второго трека не было")
+            "(рампа вверх ${dur}мс, причина=${spec.reason}, VALLEY_MS=$valleyMs, " +
+            "RETUNE_TOTAL_MS=$totalMs, preGen=$lastRetuneUsedPreGen) — второго трека не было")
+
         val completion = Runnable {
             if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
-                // Провал ретюна: подъём завершён. Шейпер НЕ закрывается —
-                // см. комментарий в start() (M1). Это закрывает стык «конец
-                // подъёма → полный звук нового пакета»: пакет перестроен в
-                // провале тем же движком (фаза непрерывна), кольцо наполнено
-                // до play() (writeOneChunk), множитель доигрывает до 1.0 сам,
-                // и никто не обрывает его закрытием.
+                // Шейпер наверху НЕ закрывается — фикс M1.
                 logShaperSettle("retune-up")
                 fadeMode = FadeMode.NONE
             }
@@ -1689,83 +1776,208 @@ class BinauralStreamImpl(
         retuneGo = false
     }
 
+    // ------------------------------------------------- спекулятивная предгенерация
+
+    private fun ensurePreGenHandler(): Handler? = try {
+        preGenHandler ?: run {
+            val t = HandlerThread("RetunePreGen-${spec.serial}",
+                android.os.Process.THREAD_PRIORITY_AUDIO)
+            t.start()
+            preGenThread = t
+            Handler(t.looper).also { preGenHandler = it }
+        }
+    } catch (t: Throwable) {
+        StreamLogger.w(TAG, "предгенерация: нить недоступна (${t.message}) — будет синхронный путь")
+        null
+    }
+
+    /** Запустить предгенерацию под спеку (снимок якоря часов — на актёре). */
+    private fun launchPreGen(newSpec: PlaybackSpec) {
+        val h = ensurePreGenHandler() ?: return
+        val anchorMs = playbackStartAnchorMs
+        val launchedAtMs = System.currentTimeMillis()
+        h.post { doPreGen(newSpec, anchorMs, launchedAtMs) }
+    }
+
+    /**
+     * Исполнение предгенерации. ТОЛЬКО на нити предгенерации — она является
+     * единоличным владельцем временного движка на всё время работы. Владение
+     * передаётся писателю через [preGenSlot] + Handler.post (happens-before).
+     *
+     * ЯКОРЬ КРИВОЙ ставится в момент предгенерации, а не коммита: PCM уже
+     * запечён, пересчёт невозможен. Звук окажется «моложе» эфира на длительность
+     * ямы (~0.27 с) — в 7 раз меньше WATCHDOG_TOL_SEC и неразличимо на слух.
+     */
+    private fun doPreGen(newSpec: PlaybackSpec, anchorMs: Long, launchedAtMs: Long) {
+        // Результат перезаписанной штормом задачи — в утиль ДО работы.
+        preGenSlot.getAndSet(null)?.let { discardPreGen(it) }
+        if (lifecycleRef.get() != StreamLifecycle.PLAYING) return
+
+        var engine: NativeAudioEngine? = null
+        try {
+            val rate = newSpec.sampleRate.value
+            val wantFrames = rate * RETUNE_PACKET_SECONDS
+            // OOM-уполовинивание и нижняя граница — та же бухгалтерия, что
+            // у основного буфера. Неудача = фолбэк на синхронную генерацию.
+            val buf = allocateDirect(wantFrames * 2 * 4, rate)
+                ?: throw OutOfMemoryError("pre-gen buffer unavailable")
+
+            val e = NativeAudioEngine()
+            engine = e
+            e.initialize()
+            e.setSampleRate(rate)
+            e.updateConfig(newSpec.config, newSpec.relaxation)
+            nativeCustomizer?.invoke(e)
+            e.resetState()
+            val anchor = normalizeTimeOfDay(
+                realTimeOfDaySeconds() + newSpec.scrubOffsetSec.toFloat())
+            e.setCurveTime(anchor.toInt())
+            // Часы сессии продолжаются: тот же wall-якорь, что у живого движка.
+            if (anchorMs > 0L) e.setPlaybackStartTime(anchorMs)
+            // preserveTimeline: play() не должен переякоривать только что
+            // поставленное setCurveTime.
+            e.play(preserveTimeline = true)
+
+            buf.clear()
+            val generated = e.generateBufferDirect(buf, wantFrames)
+            if (generated <= 0) throw IllegalStateException("pre-gen generate=$generated")
+
+            val result = PreGenResult(newSpec.serial, e, buf,
+                generated * 2 * 4, generated)
+            engine = null   // владение ушло в слот
+
+            // Публикация под мостом: если поток уже релизится, результат
+            // уничтожается на месте.
+            synchronized(preGenLock) {
+                if (lifecycleRef.get() != StreamLifecycle.PLAYING) {
+                    try { result.engine.release() } catch (_: Exception) {}
+                    return
+                }
+                preGenSlot.set(result)
+            }
+            StreamLogger.d(TAG, "pre-gen spec#${newSpec.serial}: готов за " +
+                "PREGEN_MS=${System.currentTimeMillis() - launchedAtMs} " +
+                "($generated кадров, якорь=${anchor.toInt()})")
+        } catch (t: Throwable) {
+            StreamLogger.w(TAG, "pre-gen spec#${newSpec.serial}: не удалась " +
+                "(${t.message}) — в яме будет синхронная генерация")
+            try { engine?.release() } catch (_: Exception) {}
+        }
+    }
+
+    /** Утилизация результата предгенерации (движок + прямой буфер). */
+    private fun discardPreGen(pre: PreGenResult) {
+        try { pre.engine.release() } catch (_: Exception) {}
+        // Прямой буфер отдаётся GC. Он сознательно НЕ учтён в commitPacketBudget:
+        // транзит ≤ 11.5 МБ (30 с @ 48 кГц) живёт доли секунды, одновременно
+        // возможен максимум один (инвариант одной нити предгенерации).
+    }
+
     /**
      * Исполнить перенастройку. ТОЛЬКО с нити писателя.
      *
-     * Писатель — это и есть аудио-нить, то есть ровно та, которой инвариант
-     * (`BinauralEngine.h:264-279`) разрешает трогать движок. Никакой новой
-     * синхронизации не нужно: актёр лишь оставляет задание в атомарном слоте.
+     * Два пути:
+     *  - БЫСТРЫЙ: предгенерация готова и совпадает по serial — писатель
+     *    МЕНЯЕТ ДВИЖОК И БУФЕР (непрерывность фаз по построению) и пишет
+     *    готовый пакет. Генерации в яме нет.
+     *  - ФОЛБЭК: предгенерации нет/устарела/упала — синхронная генерация на
+     *    живом движке, как до этой оптимизации (+8.5 мс в яму на 48 кГц).
      */
     private fun doRetuneOnWriter() {
         val wasPaused = paused
         // В игре ждём флага: он означает, что актёр уже погасил трек.
         if (!retuneGo && !wasPaused) return
         val newSpec = pendingRetune.getAndSet(null) ?: return
-        // Прежний сдвиг оси — только для лога: новый якорь считается от
-        // [realTimeOfDaySeconds()] (см. ниже), поэтому вычитать oldScrub не
-        // нужно.
-        val oldScrub = specState.scrubOffsetSec
-        val engine = nativeEngine
+        val tCommit = System.currentTimeMillis()
+
+        val oldEngine = nativeEngine
         val track = audioTrack
         var applied = false
-        if (engine != null && track != null) {
+        var usedPreGen = false
+        var engineToRelease: NativeAudioEngine? = null
+
+        if (oldEngine != null && track != null) {
             try {
-                // Кольцо выбрасываем ДО смены конфига: иначе старый PCM (до
-                // TRACK_BUFFER_MS) доиграл бы уже после снятия провала.
+                // Кольцо выбрасываем первым: старый PCM не должен доиграть
+                // после ямы. Трек к этому моменту на паузе (finishRetune).
                 track.flush()
-                engine.updateConfig(newSpec.config, newSpec.relaxation)
-                // Ось времени суток: «сейчас» плюс сдвиг скраба НОВОЙ спеки.
-                //
-                // Базис — [realTimeOfDaySeconds()] (Kotlin), а НЕ
-                // `engine.getCurrentTimeOfDay()`: нативный движок считает своё
-                // время от `System.currentTimeMillis()` и не знает про debug-
-                // часы (`totime`). При `totime` эти двое расходятся на весь
-                // сдвиг, и якорь, посчитанный от движка, уводил бы звук на
-                // реальное «сейчас» вместо виртуального (поймано V5/V9
-                // tools/dbgscrub.sh: INVARIANT НАРУШЕН на величину сдвига).
-                // `realTimeOfDaySeconds()` — тот же базис, что у инварианта
-                // менеджера `normalizeTimeOfDay(realTimeOfDaySeconds()+scrub)`,
-                // поэтому совмещение гарантировано при любом debug-часах.
-                val base = realTimeOfDaySeconds()
-                val anchor = normalizeTimeOfDay(base + newSpec.scrubOffsetSec.toFloat())
-                engine.setCurveTime(anchor.toInt())
-                val head = try { track.playbackHeadPosition } catch (_: Exception) { -1 }
-                frameBias.set(if (head > 0) -head.toLong() else 0L)
-                generatedFrames = 0
-                val buf = directBuffer
-                val rate = newSpec.sampleRate.value
-                // ОГРАНИЧЕННЫЙ пакет, а не весь интервал: стоимость генерации
-                // 1.02 с CPU на час звука, и полная регенерация растянула бы
-                // провал до секунды. Полный интервал дорастит следующий виток.
-                val want = minOf(samplesPerChannel, rate * RETUNE_PACKET_SECONDS)
-                if (buf != null && want > 0) {
-                    buf.clear()
-                    val generated = engine.generateBufferDirect(buf, want)
-                    if (generated > 0) {
-                        writerPacketBytes = generated * 2 * 4
-                        writerOffset = 0
-                        generatedFrames = generated.toLong()
-                        // Пакет теперь короткий: разрешаем дорастить заново.
-                        packetBufferGrown = false
-                        growAttempts = 0
-                        applied = true
-                        specState = newSpec
-                        StreamLogger.d(TAG, "doRetuneOnWriter spec#${newSpec.serial}: пакет " +
-                            "перестроен (${generated} кадров, якорь=${anchor.toInt()}, " +
-                            "сдвиг скраба=${newSpec.scrubOffsetSec} (было $oldScrub)), " +
-                            "кольцо сброшено (${if (wasPaused) "на паузе" else "в провале"})")
+
+                val pre = preGenSlot.getAndSet(null)
+                if (pre != null && pre.serial == newSpec.serial) {
+                    // ------------- БЫСТРЫЙ ПУТЬ: свап движка -------------
+                    // Время кривой НЕ трогаем: оно запечено в предгенерации
+                    // (якорь её старта), и этот же движок продолжит генерацию
+                    // после пакета — кривая и фазы непрерывны по построению.
+                    nativeEngine = pre.engine
+                    directBuffer = pre.buffer
+                    samplesPerChannel = pre.buffer.capacity() / 8
+                    writerPacketBytes = pre.packetBytes
+                    writerOffset = 0
+                    generatedFrames = pre.frames.toLong()
+                    packetBufferGrown = false   // полный интервал дорастит писатель
+                    growAttempts = 0
+                    specState = newSpec
+                    engineToRelease = oldEngine
+                    usedPreGen = true
+                    applied = true
+                    // Бюджет: старый пакет (учтён в prepare/grow) сменяется
+                    // новым. Вызов с нити писателя — гонок с подготовкой нет.
+                    commitPacketBudget(pre.buffer.capacity().toLong())
+                } else {
+                    // ------------- ФОЛБЭК: синхронная генерация -------------
+                    if (pre != null) discardPreGen(pre)   // застаревший результат
+                    oldEngine.updateConfig(newSpec.config, newSpec.relaxation)
+                    val base = realTimeOfDaySeconds()
+                    val anchor = normalizeTimeOfDay(base + newSpec.scrubOffsetSec.toFloat())
+                    oldEngine.setCurveTime(anchor.toInt())
+                    generatedFrames = 0
+                    val buf = directBuffer
+                    val rate = newSpec.sampleRate.value
+                    val want = minOf(samplesPerChannel, rate * RETUNE_PACKET_SECONDS)
+                    if (buf != null && want > 0) {
+                        buf.clear()
+                        val generated = oldEngine.generateBufferDirect(buf, want)
+                        if (generated > 0) {
+                            writerPacketBytes = generated * 2 * 4
+                            writerOffset = 0
+                            generatedFrames = generated.toLong()
+                            packetBufferGrown = false
+                            growAttempts = 0
+                            applied = true
+                            specState = newSpec
+                        }
                     }
                 }
-                if (applied && !wasPaused) {
-                    // Кольцо пусто после flush — наполняем ДО play(), иначе
-                    // микшер подставит тишину (underrun) на самом старте.
-                    writeOneChunk(track)
+
+                if (applied) {
+                    // Переякорка оси пакета ПОСЛЕ flush: часть реализаций
+                    // обнуляет голову, часть нет.
+                    val head = try { track.playbackHeadPosition } catch (_: Exception) { -1 }
+                    frameBias.set(if (head > 0) -head.toLong() else 0L)
+
+                    if (!wasPaused) {
+                        // Кольцо пусто после flush — наполняем ДО play(),
+                        // иначе микшер подставит тишину (underrun) на старте.
+                        writeOneChunk(track)
+                    }
+                    // Старый движок утилизируем ПОСЛЕ наполнения кольца:
+                    // релиз стоит единиц мс, а с наполненным кольцом звук уже
+                    // гарантированно продолжается.
+                    engineToRelease?.let { doomed ->
+                        try { doomed.stop() } catch (_: Exception) {}
+                        try { doomed.release() } catch (_: Exception) {}
+                    }
                 }
             } catch (e: Exception) {
                 StreamLogger.e(TAG, "doRetuneOnWriter spec#${newSpec.serial}: ${e.message}")
             }
         }
+
         val ok = applied
+        lastRetuneUsedPreGen = usedPreGen
+        StreamLogger.d(TAG, "doRetuneOnWriter spec#${newSpec.serial}: коммит за " +
+            "COMMIT_MS=${System.currentTimeMillis() - tCommit} (preGen=$usedPreGen, ok=$ok)")
+
         controlHandler.post {
             if (!ok) {
                 abortRetune(false)
@@ -2170,6 +2382,7 @@ class BinauralStreamImpl(
     }
 
     override fun setPlaybackStartTime(anchorMs: Long) {
+        playbackStartAnchorMs = anchorMs          // запомнить якорь для предгенерации
         nativeEngine?.setPlaybackStartTime(anchorMs)
     }
 
@@ -2484,6 +2697,19 @@ class BinauralStreamImpl(
         // доращивал бы пакет.
         commitPacketBudget(0)
         lifecycleRef.set(StreamLifecycle.RELEASED)
+
+        // ПРЕДГЕНЕРАЦИЯ: вторая (окончательная) чистка под мостом. Задача,
+        // исполнявшаяся в момент релиза, может опубликовать результат через
+        // микросекунду после первой чистки; под мостом публикация видит
+        // RELEASED и уничтожает результат на месте, так что после этой точки
+        // слот гарантированно пуст навсегда.
+        synchronized(preGenLock) {
+            preGenSlot.getAndSet(null)?.let { discardPreGen(it) }
+        }
+        preGenHandler?.removeCallbacksAndMessages(null)
+        preGenThread?.quitSafely()
+        preGenThread = null
+        preGenHandler = null
     }
 
     // ------------------------------------------------------------------ writer
@@ -2516,7 +2742,10 @@ class BinauralStreamImpl(
         try {
             try {
                 val track = audioTrack ?: return
-                val engine = nativeEngine ?: return
+                // nativeEngine намеренно НЕ захватывается локально на весь цикл:
+                // его подменяет свап в [doRetuneOnWriter], и цикл обязан видеть
+                // замену на каждой итерации пополнения (см. ниже).
+                if (nativeEngine == null) return
                 // Курсор пакета и его длина — ПОЛЯ, а не локальные: их подменяет
                 // [doRetuneOnWriter], который живёт отдельным методом (см.
                 // комментарий к полям выше). Владелец по-прежнему одна нить —
@@ -2653,6 +2882,7 @@ class BinauralStreamImpl(
                         // поток уже в тишине и утилизируется): тогда выходим,
                         // а не генерируем в освобождённую память.
                         val buf = directBuffer ?: break
+                        val engine = nativeEngine ?: break        // перечитывание после свапа в doRetuneOnWriter
                         val want = samplesPerChannel
                         if (want <= 0) break
                         buf.clear()
