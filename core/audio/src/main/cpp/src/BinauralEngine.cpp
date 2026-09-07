@@ -428,6 +428,57 @@ void BinauralEngine::resetState() {
     // UI-таймлайн больше не валиден: после stop показываем реальное время суток
     m_uiAnchorWallMs.store(0, std::memory_order_relaxed);
     m_uiLastUiTimeSec.store(0.0f, std::memory_order_relaxed);
+
+    // Свежий поток — отложенная огибающая fade-in не переживает сброс:
+    // она ставится владельцем ПОСЛЕ resetState/play и ДО первой генерации.
+    m_pendingFadeInSamples.store(0, std::memory_order_relaxed);
+    m_fadeInTotalSamples = 0;
+    m_fadeInConsumed = 0;
+}
+
+// ============ Data-baked fade-in ============
+
+void BinauralEngine::setPendingFadeIn(int durationMs) {
+    if (durationMs <= 0) {
+        m_pendingFadeInSamples.store(0, std::memory_order_release);
+        return;
+    }
+    const int sr = m_generator.getSampleRate();
+    if (sr <= 0) return;
+    const int n = static_cast<int>(static_cast<int64_t>(durationMs) * sr / 1000);
+    m_fadeInTotalSamples = std::max(n, 2);   // N ≥ 2: знаменатель N−1 ненулевой
+    m_fadeInConsumed = 0;
+    m_pendingFadeInSamples.store(m_fadeInTotalSamples, std::memory_order_release);
+}
+
+void BinauralEngine::applyPendingFadeIn(float* buffer, int frames) {
+    const int remain = m_pendingFadeInSamples.load(std::memory_order_relaxed);
+    if (remain <= 0 || frames <= 0) return;
+    const int n = std::min(frames, remain);
+    const int denom = m_fadeInTotalSamples - 1;
+    constexpr float kHalfPi = 3.14159265358979323846f * 0.5f;
+    for (int i = 0; i < n; ++i) {
+        const int k = m_fadeInConsumed + i;
+        float g;
+        if (denom <= 0 || k >= denom) {
+            // ПОСЛЕДНЯЯ ТОЧКА РОВНО 1.0: никакой ε-ступеньки на стыке
+            // огибающей и полноамплитудного продолжения (требование
+            // «g(N−1) = 1» из постановки).
+            g = 1.0f;
+        } else {
+            // sin² (приподнятый косинус): нулевая производная на ОБОИХ
+            // концах — стык безопасен при любом тайминге записи.
+            const float x = static_cast<float>(k) / static_cast<float>(denom);
+            const float s = std::sin(x * kHalfPi);
+            g = s * s;
+        }
+        buffer[2 * i]     *= g;
+        buffer[2 * i + 1] *= g;
+    }
+    m_fadeInConsumed += n;
+    const int left = remain - n;
+    m_pendingFadeInSamples.store(left, std::memory_order_release);
+    if (left == 0) m_fadeInConsumed = 0;   // one-shot потреблён
 }
 
 bool BinauralEngine::isChannelsSwapped() const {
@@ -738,6 +789,14 @@ int BinauralEngine::generateAudioBuffer(float* buffer, int samplesPerChannel) {
 
     // ШАГ 3: коррекция дрейфа swap-цикла удалена — раскладка теперь чистая
     // функция (конфиг, t), состояния фазы свопа больше нет.
+
+    // Data-baked fade-in: домножаем хвост генерации, пока счётчик жив.
+    // Применяется ПОСЛЕ всей частотной/канальной обработки — огибающая
+    // не взаимодействует с фазой и раскладкой, только с амплитудой.
+    if (result.samplesGenerated > 0 &&
+        m_pendingFadeInSamples.load(std::memory_order_acquire) > 0) {
+        applyPendingFadeIn(buffer, result.samplesGenerated);
+    }
 
     // Возвращаем РЕАЛЬНОЕ число сэмплов: вызывающая сторона обязана записать в
     // AudioTrack ровно его, иначе на стыке пакетов звучит мусорный "хвост"

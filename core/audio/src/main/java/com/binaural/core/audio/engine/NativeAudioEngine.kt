@@ -103,6 +103,7 @@ class NativeAudioEngine {
     private external fun nativeSetPlaying(handle: Long, playing: Boolean, preserveTimeline: Boolean)
     private external fun nativeSetPlaybackStartTime(handle: Long, startTimeMs: Long)
     private external fun nativeSetCurveTime(handle: Long, timeSeconds: Int)
+    private external fun nativeSetPendingFadeInMs(handle: Long, durationMs: Int)
 
     // === Слышимая позиция кривой (мягкая пауза / возобновление) ===
     private external fun nativeGetCurveTimeSeconds(handle: Long): Float
@@ -376,6 +377,21 @@ class NativeAudioEngine {
             val hh = h()
             if (hh == 0L) return
             nativeSetCurveTime(hh, timeSeconds)
+        }
+    }
+
+    /**
+     * DATA-BAKED FADE-IN: sin²-огибающая на первые [durationMs] аудио,
+     * применяется нативным генератором к выходному PCM (см.
+     * BinauralEngine::setPendingFadeIn). Вызывать ДО первого пакета:
+     * после старта писателя счётчик потребляет только аудио-нить.
+     */
+    fun setPendingFadeIn(durationMs: Int) {
+        if (nativeUnavailable()) return
+        synchronized(playbackLock) {
+            val hh = h()
+            if (hh == 0L) return
+            nativeSetPendingFadeInMs(hh, durationMs)
         }
     }
 

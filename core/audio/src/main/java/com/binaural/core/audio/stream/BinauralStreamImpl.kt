@@ -51,6 +51,14 @@ class BinauralStreamImpl(
         private const val TAG = "BinauralStream"
         const val DEFAULT_FADE_MS = 250L
         /**
+         * Режим фейд-ина старта: false = Решение A (VolumeShaper, наверху не
+         * закрываем), true = Решение B (огибающая запечена в PCM первого
+         * пакета, шейпер на старте не создаётся). Отладочный переключатель;
+         * оба режима закрывают стык, B — страховка для патологических
+         * реализаций шейпера.
+         */
+        private const val DATA_BAKED_FADE_IN = false
+        /**
          * ГАРАНТИЯ, А НЕ ИЗМЕРЕНИЕ.
          *
          * Рампа VolumeShaper идёт в масштабе реального времени микшера, поэтому
@@ -584,6 +592,47 @@ class BinauralStreamImpl(
         return try { shaper.volume.coerceIn(0f, 1f) } catch (_: Exception) { null }
     }
 
+    /**
+     * ТЕЛЕМЕТРИЯ СТЫКА: живой множитель шейпера в момент срабатывания
+     * completion фейд-ина. Норма — 1.0000. Значимо меньше — лаг данного
+     * устройства превышает RAMP_SETTLE_MARGIN_MS; с правилом «наверху не
+     * закрываем» это безвредно (рампа доиграет сама), но полезно видеть.
+     *
+     * Значение читается ТОЛЬКО для лога: никакое решение от него не зависит —
+     * опрос завершения не возвращается.
+     */
+    private fun logShaperSettle(where: String) {
+        val live = liveShaperVolume()
+        StreamLogger.d(TAG, "$where spec#${spec.serial}: fade-in completion, " +
+            "shaper live=${live?.let { "%.4f".format(it) } ?: "нет"} (цель 1.0)")
+    }
+
+    /**
+     * КРАЙНИЙ резерв огибающей без VolumeShaper: база маленькими ступенями.
+     *
+     * Вызывается только когда шейпер недоступен ВОВСЕ (ветка API < 26 — на
+     * minSdk 26 мёртва — либо двойной отказ create/replace в [applyShaper]).
+     * Прежде здесь стоял одиночный `setVolume(userVolume)` — полноценная
+     * ступень, т.е. гарантированный щелчок аварийного пути. Теперь 10
+     * ступеней по ≤10 % амплитуды: грубый, но фейд, а не клик.
+     *
+     * Каждый шаг охраняется lifecycle: утилизация/пауза гасят хвост своей
+     * базой 0 (finalizeStop/finalizePause), и посты просто становятся пустыми.
+     */
+    private fun manualBaseRamp(from: Float, to: Float, durationMs: Long) {
+        val steps = 10
+        val stepMs = (durationMs.coerceAtLeast(50L) / steps).coerceAtLeast(5L)
+        for (i in 0..steps) {
+            val p = i.toFloat() / steps
+            val target = ((from + (to - from) * p).coerceIn(0f, 1f)) * userVolume
+            controlHandler.postDelayed({
+                if (lifecycleRef.get() == StreamLifecycle.PLAYING) {
+                    try { audioTrack?.setVolume(target) } catch (_: Exception) {}
+                }
+            }, i * stepMs)
+        }
+    }
+
     // -------------------------------------------------- мягкая пауза (состояние)
     /**
      * true — поток заморожен: трек на паузе, писатель припаркован, пакет и
@@ -704,6 +753,30 @@ class BinauralStreamImpl(
     private var writerPrefillLatch: CountDownLatch? = null
     /** Верхняя граница одной записи, байты (см. [UNDERRUN_HEADROOM_MS]). */
     private var writerMaxChunkBytes = 0L
+
+    /**
+     * DEBUG: дамп записываемого PCM в файл (float32 interleaved stereo).
+     * Пишется в [writerLoop] сразу после успешного write(). Верификация стыков
+     * пакетов/ретюна численным анализом (tools/analyze_pcm_seams.py);
+     * микшерные фейды в дампе НЕ видны — огибающая применяется в микшере.
+     */
+    @Volatile private var debugPcmDump: java.io.FileOutputStream? = null
+
+    /** Включить дамп записываемого PCM (debug-верификация стыков). */
+    fun debugStartPcmDump(file: java.io.File) {
+        debugPcmDump = try {
+            java.io.FileOutputStream(file)
+        } catch (e: Exception) {
+            StreamLogger.e(TAG, "debugStartPcmDump: ${e.message}")
+            null
+        }
+    }
+
+    /** Остановить и закрыть дамп PCM. */
+    fun debugStopPcmDump() {
+        try { debugPcmDump?.flush(); debugPcmDump?.close() } catch (_: Exception) {}
+        debugPcmDump = null
+    }
 
     /** Монитор парковки писателя: parkWriter/wakeWriter. */
     private val parkLock = Object()
@@ -907,7 +980,13 @@ class BinauralStreamImpl(
             // десятки мегабайт на prepare(). См. maybeGrowPacketBuffer().
 
             // 6. Первый пакет — КОРОТКИЙ (до 2 с): подготовка быстрая и не блокирует
-            // актёр надолго; полный интервал сгенерирует писатель, пока трек уже играет.
+            // актёра надолго; полный интервал сгенерирует писатель, пока трек уже играет.
+            // 5.5. Режим B: огибающая фейд-ина будет домножена на первые кадры
+            // самим генератором. Ставится ДО первой генерации и ДО старта писателя —
+            // владелец счётчика с этого момента только аудио-нить.
+            if (DATA_BAKED_FADE_IN) {
+                engine.setPendingFadeIn(fadeInMs.toInt())
+            }
             val prepareSamples = minOf(samplesPerChannel, rate * STARTUP_PACKET_SECONDS)
             val buf = directBuffer!!
             buf.clear()
@@ -1152,7 +1231,7 @@ class BinauralStreamImpl(
         }
         val track = audioTrack ?: return false
         fadeMode = FadeMode.IN
-        StreamLogger.d(TAG, "start spec#${spec.serial}: shaper($shape) -> play -> writer (именно в этом порядке)")
+        StreamLogger.d(TAG, "start spec#${spec.serial}: shaper -> play -> writer (именно в этом порядке)")
         return try {
             // ФИКС RC-1. Новый порядок (устраняет стартовый щелчок на 44.1/48 кГц):
             // 1) праймим трек УЖЕ СГЕНЕРИРОВАННЫМ пакетом ДО старта — микшеру
@@ -1175,7 +1254,44 @@ class BinauralStreamImpl(
             preparedPrefilled = true
 
             val fadeMs = if (fadeInMsOverride > 0L) fadeInMsOverride else fadeInMs
-            val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeMs, shape = shape)
+
+            if (DATA_BAKED_FADE_IN) {
+                // Режим B: в кольце уже лежит пакет с запечённой sin²-огибающей
+                // (0 … ровно 1.0 на последнем кадре). Микшеру нечего рамповать и
+                // нечего закрывать: «стык фейд-ина с полным звуком» — это сэмпл,
+                // где g стало 1.0, и дальше идёт чистый PCM с усилением 1.0.
+                // Непрерывность — по построению, лаг шейпера не участвует вообще.
+                try { track.setVolume(userVolume) } catch (_: Exception) {}
+                track.play()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    val du = track.underrunCount - underrunBefore
+                    val head = track.playbackHeadPosition
+                    StreamLogger.d(TAG, "start spec#${spec.serial}: B-mode underrunDelta=$du " +
+                        "headPos=$head applyToPlayUs=${(System.nanoTime() - tApply) / 1000}")
+                }
+                writerStarted = true
+                writerHandler?.post(::writerLoop)
+                val completion = Runnable {
+                    if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
+                        fadeMode = FadeMode.NONE
+                        onFullyStarted()
+                    }
+                }
+                fadeCompletion = completion
+                controlHandler.postDelayed(completion, fadeMs)   // только колбэк, не звук
+                return true
+            }
+
+            // ФИКС M2: форма фейд-ина ВСЕГДА EQUAL_POWER (sin-рампа),
+            // независимо от переданной [shape]. Её терминальный наклон при 1.0
+            // РАВЕН НУЛЮ: даже если какое-то устройство задержит рампу,
+            // амплитудный недоход квадратичен по задержке, а не линеен.
+            // LINEAR с наклоном 1.0 превращал 30 мс лага шейпера в ступень
+            // −18 дБ — слышимый щелчок стыка. (Направление вниз остаётся
+            // линейным там, где вызов уже передаёт LINEAR: нижний конец
+            // защищён порядком «база 0 до close».)
+            val dur = applyShaper(from = 0f, to = 1f, durationMs = fadeMs,
+                                  shape = FadeShape.EQUAL_POWER)
             track.play()
             // §E: верификация RC-1 без осциллографа (underrun-окно + позиция).
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -1189,8 +1305,26 @@ class BinauralStreamImpl(
 
             val completion = Runnable {
                 if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
-                    StreamLogger.d(TAG, "start spec#${spec.serial}: fade-in завершён, поток играет")
-                    closeShaper()   // кривая на 1.0; возврат к базе userVolume непрерывен
+                    // ФИКС M1 — ГЛАВНЫЙ. Здесь БЫЛО closeShaper().
+                    //
+                    // Почему закрыть ≠ безопасно: момент, когда фактический
+                    // множитель микшера дошёл до 1.0, узнать нельзя (колбэка
+                    // завершения нет, getVolume() с лагом). close() при живом
+                    // множителе < 1.0 мгновенно возвращает громкость к базе —
+                    // ступень (1 − live)·userVolume. Это и есть щелчок
+                    // «конец фейд-ина → полный звук».
+                    //
+                    // Почему оставить шейпер живым = безопасно: при множителе
+                    // 1.0 он аудиально тождественен своему отсутствию. Оба
+                    // поведения реализаций после конца кривой (держать 1.0;
+                    // само-закрыться к базе) дают ОДИН и тот же звук. Дальнейшая
+                    // судьба шейпера:
+                    //   * следующая рампа заберёт его через replace(join=true),
+                    //     стартуя от живого значения (разрыва нет по построению);
+                    //   * closeShaper() вызовется на нижнем конце фейда, где база
+                    //     уже принудительно 0 (finalize*/finishRetune) — там
+                    //     закрытие ничего не меняет.
+                    logShaperSettle("start")
                     fadeMode = FadeMode.NONE
                     onFullyStarted()
                 }
@@ -1349,8 +1483,10 @@ class BinauralStreamImpl(
         applyShaper(from = cur, to = 1f, durationMs = dur)
         val completion = Runnable {
             if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
-                StreamLogger.d(TAG, "reverseFadeToPlaying spec#${spec.serial}: возобновлено")
-                closeShaper(); fadeMode = FadeMode.NONE; onFullyStarted()
+                // наверху шейпер не закрывается — см. комментарий в start() (M1)
+                logShaperSettle("reverse")
+                fadeMode = FadeMode.NONE
+                onFullyStarted()
             }
         }
         fadeCompletion = completion
@@ -1515,7 +1651,13 @@ class BinauralStreamImpl(
             "(рампа вверх ${dur}мс, причина=${spec.reason}) — второго трека не было")
         val completion = Runnable {
             if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
-                closeShaper()
+                // Провал ретюна: подъём завершён. Шейпер НЕ закрывается —
+                // см. комментарий в start() (M1). Это закрывает стык «конец
+                // подъёма → полный звук нового пакета»: пакет перестроен в
+                // провале тем же движком (фаза непрерывна), кольцо наполнено
+                // до play() (writeOneChunk), множитель доигрывает до 1.0 сам,
+                // и никто не обрывает его закрытием.
+                logShaperSettle("retune-up")
                 fadeMode = FadeMode.NONE
             }
         }
@@ -1915,8 +2057,9 @@ class BinauralStreamImpl(
         }
 
         // Первый кадр после play() уходит под нулевым множителем — сохранённый
-        // полноамплитудный остаток не даёт щелчка (фикс RC-1).
-        applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = shape)
+        // полноамплитудный остаток не даёт щелчка (фикс RC-1). Форма фейд-ина
+        // ВСЕГДА EQUAL_POWER — нулевой терминальный наклон (фикс M2, см. start).
+        applyShaper(from = 0f, to = 1f, durationMs = fadeInMs, shape = FadeShape.EQUAL_POWER)
         try {
             audioTrack?.play()
         } catch (e: Exception) {
@@ -1936,7 +2079,8 @@ class BinauralStreamImpl(
             "цель=$seekFrame generatedFrames=$generatedFrames")
         val completion = Runnable {
             if (lifecycleRef.get() == StreamLifecycle.PLAYING && fadeMode == FadeMode.IN) {
-                closeShaper()
+                // не закрываем шейпер наверху — см. комментарий в start() (M1)
+                logShaperSettle("resume")
                 fadeMode = FadeMode.NONE
                 onFullyStarted()
             }
@@ -2078,8 +2222,9 @@ class BinauralStreamImpl(
      */
     private fun applyShaper(from: Float, to: Float, durationMs: Long, shape: FadeShape = FadeShape.LINEAR): Long {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
-            return 0L
+            // minSdk 26: ветка мёртвая, но даже здесь не ступенька, а рампа (M3).
+            manualBaseRamp(from, to, durationMs)
+            return durationMs
         }
         // ОДНО чтение текущего множителя — чтобы начать новую кривую ровно там,
         // где звучит сейчас. Это не «мониторинг тишины»: значение не определяет
@@ -2123,10 +2268,14 @@ class BinauralStreamImpl(
                 StreamLogger.w(TAG, "VolumeShaper: аварийная линейная рампа $f->$t за ${dur}мс")
                 dur
             } else {
-                Log.e(TAG, "VolumeShaper: fallback тоже отказал — жёсткая установка громкости")
-                StreamLogger.e(TAG, "VolumeShaper: fallback отказал — жёсткая установка громкости (скачок неизбежен)")
-                audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
-                0L
+                // БЫЛО: audioTrack?.setVolume(if (to > 0f) userVolume else 0f)
+                // — скачок на всю базу, гарантированный щелчок (M3). СТАЛО:
+                // ступенчатая рампа базы. Не сэмпл-точно, но каждая ступень
+                // ≤ 10 % амплитуды — стык полного звука остаётся мягким.
+                Log.e(TAG, "VolumeShaper: fallback тоже отказал — ступенчатая рампа базы")
+                StreamLogger.e(TAG, "VolumeShaper: fallback отказал — ступенчатая рампа базы")
+                manualBaseRamp(f, t, dur)
+                dur
             }
         }
     }
@@ -2567,6 +2716,16 @@ class BinauralStreamImpl(
                         break
                     }
                     writerOffset += written
+                    debugPcmDump?.let { out ->
+                        try {
+                            val d = buf.duplicate()
+                            d.position(writerOffset - written)     // байты: буфер в байтовой позиции
+                            d.limit(writerOffset)
+                            val chunk = ByteArray(d.remaining())
+                            d.get(chunk)
+                            out.write(chunk)
+                        } catch (_: Exception) {}
+                    }
 
                     // Готовность перемотки: кольцо наполнено — можно звать
                     // play() без разрыва. Трек ещё на паузе, голова стоит,

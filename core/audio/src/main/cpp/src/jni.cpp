@@ -268,6 +268,23 @@ Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPlaying(
 }
 
 /**
+ * DATA-BAKED FADE-IN: огибающая sin² на первые durationMs аудио,
+ * применяется нативным генератором (см. BinauralEngine::setPendingFadeIn).
+ */
+JNIEXPORT void JNICALL
+Java_com_binaural_core_audio_engine_NativeAudioEngine_nativeSetPendingFadeInMs(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jint durationMs
+) {
+    auto* engine = engineFromHandle(handle);
+    if (engine) {
+        engine->setPendingFadeIn(durationMs);
+    }
+}
+
+/**
  * Установка времени начала воспроизведения
  */
 JNIEXPORT void JNICALL
